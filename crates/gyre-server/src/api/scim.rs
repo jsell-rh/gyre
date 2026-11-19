@@ -2,11 +2,16 @@
 //!
 //! Base path: `/scim/v2`
 //! Authentication: `GYRE_SCIM_TOKEN` env var (separate Bearer token from main API token).
+//! The global `require_auth_middleware` (lib.rs) passes `/scim/v2/*` through
+//! to these handlers; every handler enforces `check_scim_auth` itself
+//! (fail-closed 403 when the token is unset, constant-time compare otherwise).
 //!
 //! Implements a subset sufficient for enterprise IdP (Okta, Entra ID, Keycloak) integration:
-//! - Users CRUD (create, read, update, delete/deactivate)
-//! - ServiceProviderConfig
-//! - Schemas + ResourceTypes discovery
+//! - Users CRUD (create, read, update, patch, delete/deactivate)
+//! - Deactivation lifecycle (active:false / DELETE → revoke sessions,
+//!   clear spawned_by attribution, ownerless-workspace cascade)
+//! - Enterprise extension (RFC 7643 §4.3: organization, manager)
+//! - ServiceProviderConfig, Schemas, ResourceTypes discovery
 
 use axum::{
     extract::{Path, Query, State},
@@ -37,7 +42,10 @@ fn check_scim_auth(headers: &HeaderMap) -> Result<(), ApiError> {
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
         .unwrap_or("");
-    if token != expected {
+    // Constant-time compare (same primitive as the global token ladder in
+    // lib.rs): a plain `!=` on bearer secrets leaks an early-exit timing
+    // signal an attacker can use to recover the configured token prefix.
+    if !crate::auth::tokens_equal(token, &expected) {
         return Err(ApiError::Forbidden("invalid SCIM token".to_string()));
     }
     Ok(())
@@ -64,7 +72,23 @@ pub struct ScimEmail {
     pub email_type: String,
 }
 
-/// SCIM User resource (RFC 7643 §4.1).
+/// SCIM enterprise extension (RFC 7643 §4.3) — serialized under the
+/// extension schema URN as a sibling of the core attributes.
+/// `organization` carries the Gyre tenant id; `manager.value` the
+/// manager's Gyre user id (identity-security.md §SCIM User Schema).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ScimEnterprise {
+    pub organization: Option<String>,
+    pub manager: Option<ScimManagerRef>,
+}
+
+/// RFC 7643 manager reference: `value` holds the referenced user's id.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ScimManagerRef {
+    pub value: Option<String>,
+}
+
+/// SCIM User resource (RFC 7643 §4.1 + §4.3 enterprise extension).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScimUser {
@@ -77,6 +101,11 @@ pub struct ScimUser {
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub emails: Vec<ScimEmail>,
     pub meta: ScimMeta,
+    #[serde(
+        rename = "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User",
+        default
+    )]
+    pub enterprise: ScimEnterprise,
 }
 
 /// SCIM ListResponse wrapper (RFC 7644 §3.4.2).
@@ -100,6 +129,33 @@ pub struct ScimUserRequest {
     pub active: Option<bool>,
     #[serde(default)]
     pub emails: Vec<ScimEmail>,
+    #[serde(
+        rename = "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User",
+        default
+    )]
+    pub enterprise: ScimEnterprise,
+}
+
+/// RFC 7644 §3.5.2 PATCH request body. The spec's member name is
+/// `Operations` (capital O); serde must accept that exact key, not only the
+/// camelCase form — with `#[serde(default)]` a missed key silently
+/// deserializes an empty operation list and every PatchOp body becomes a
+/// no-op that still returns 200.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ScimPatchRequest {
+    #[serde(default, alias = "Operations")]
+    operations: Vec<ScimPatchOp>,
+}
+
+/// One PATCH operation. `op` defaults to "replace" when absent (some IdPs
+/// omit it); unknown ops are rejected by the applier.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ScimPatchOp {
+    op: Option<String>,
+    path: Option<String>,
+    value: Option<serde_json::Value>,
 }
 
 /// Query params for GET /scim/v2/Users.
@@ -131,7 +187,10 @@ fn user_to_scim(user: &User) -> ScimUser {
         .unwrap_or_default();
 
     ScimUser {
-        schemas: vec!["urn:ietf:params:scim:schemas:core:2.0:User".to_string()],
+        schemas: vec![
+            "urn:ietf:params:scim:schemas:core:2.0:User".to_string(),
+            "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User".to_string(),
+        ],
         id: user.id.to_string(),
         external_id: if user.external_id.is_empty() {
             None
@@ -140,13 +199,24 @@ fn user_to_scim(user: &User) -> ScimUser {
         },
         user_name: user.username.clone(),
         display_name: Some(user.display_name.clone()),
-        active: true, // deactivation tracked via future `active` field on User
+        // The serialized `active` flag mirrors the stored lifecycle state
+        // (deactivated_at) — identity-security.md §Gyre-specific SCIM
+        // behavior: SCIM `active: false` deactivates the user, so the
+        // resource must report the deactivation back instead of a
+        // hardcoded `true`.
+        active: !user.is_deactivated(),
         emails,
         meta: ScimMeta {
             resource_type: "User".to_string(),
             location,
             created: Some(created),
             last_modified: Some(last_modified),
+        },
+        enterprise: ScimEnterprise {
+            organization: user.tenant_id.as_ref().map(|t| t.to_string()),
+            manager: Some(ScimManagerRef {
+                value: user.manager_id.as_ref().map(|m| m.to_string()),
+            }),
         },
     }
 }
@@ -201,6 +271,109 @@ fn days_to_ymd(days: u64) -> (u64, u64, u64) {
         month += 1;
     }
     (y as u64, month, remaining as u64 + 1)
+}
+
+// ── Lifecycle helpers ─────────────────────────────────────────────────────────
+
+/// Apply the SCIM enterprise extension (RFC 7643 §4.3) to a user record:
+/// `organization` → tenant scope, `manager.value` → manager user id.
+/// `None` fields leave the stored value untouched (PATCH partial update);
+/// an explicit JSON `null` clears it.
+fn apply_enterprise(user: &mut User, enterprise: &ScimEnterprise) {
+    if let Some(org) = &enterprise.organization {
+        user.tenant_id = if org.is_empty() {
+            None
+        } else {
+            Some(Id::new(org.clone()))
+        };
+    }
+    if let Some(manager) = &enterprise.manager {
+        user.manager_id = manager
+            .value
+            .as_ref()
+            .filter(|v| !v.is_empty())
+            .map(|v| Id::new(v.clone()));
+    }
+}
+
+/// Deactivate a user via the SCIM lifecycle (identity-security.md
+/// §Gyre-specific SCIM behavior: `active: false` / DELETE deprovision) and
+/// cascade the deactivation so it is a lifecycle event, not a flag flip:
+///
+/// - the stored record is deactivated (`User::deactivate`, soft — the row
+///   remains resolvable for audit and attribution, mirroring the admin
+///   PUT /api/v1/users/:id/deactivate semantics);
+/// - every active session for the user is revoked
+///   (`sessions.revoke_all_for_user`) — a pre-deactivation session token
+///   fails authentication on its next replay;
+/// - active impersonation sessions the user participates in are ended
+///   (same cascade as the admin deactivation path);
+/// - the user is removed from agents' `spawned_by` tracking, so agent
+///   escalations/notifications no longer attribute to (or route to) the
+///   deactivated user. Cleared for every attributed agent, including
+///   non-active ones: dead agents can auto-restart
+///   (restart_on_failure / stale-agent detector), and a resurrected agent
+///   must not resume attributing to a departed user;
+/// - workspaces the user owned are re-tracked for the ownerless flow
+///   (`workspace_ownership::on_user_removed`), same as the admin path.
+async fn deactivate_via_scim(state: &Arc<AppState>, user: &mut User) -> Result<(), ApiError> {
+    let already = user.is_deactivated();
+    let now = now_secs();
+    user.deactivate(now);
+    state.users.update(user).await?;
+
+    // Audit trail: the provisioning token is a server-to-server credential
+    // with no agent/user identity, so the event records the SCIM source in
+    // its detail instead of an actor id (same event type as the admin
+    // deactivation path — one trail for one lifecycle event).
+    use gyre_domain::audit::{AuditEvent, AuditEventType, AuditOutcome};
+    let event = AuditEvent::new(
+        Id::new(uuid::Uuid::new_v4().to_string()),
+        AuditEventType::Custom("user_deactivated".to_string()),
+        None,
+        Some(user.id.clone()),
+        None,
+        None,
+        None,
+        "user".to_string(),
+        Some(user.id.to_string()),
+        AuditOutcome::Success,
+        serde_json::json!({
+            "user_id": user.id.to_string(),
+            "username": user.username,
+            "tenant_id": user.tenant_id.as_ref().map(|t| t.to_string()),
+            "source": "scim",
+            "already_deactivated": already,
+        }),
+        None,
+        None,
+        now,
+    );
+    if let Err(e) = state.audit.record(&event).await {
+        tracing::warn!(user_id = %user.id, "user_deactivated audit event recording failed: {e}");
+    }
+
+    // Session revocation: sign the user out everywhere.
+    state.sessions.revoke_all_for_user(&user.id).await?;
+
+    // Impersonation cascade (same as the admin deactivation path).
+    crate::impersonation::end_active_sessions_for_user(state, user.id.as_str(), "user_deactivated")
+        .await;
+
+    // spawned_by de-attribution: no agent continues attributing to the
+    // deactivated user.
+    let user_id_str = user.id.as_str().to_string();
+    for mut agent in state.agents.list().await? {
+        if agent.spawned_by.as_deref() == Some(user_id_str.as_str()) {
+            agent.spawned_by = None;
+            state.agents.update(&agent).await?;
+        }
+    }
+
+    // Ownerless cascade: re-track every workspace the user belonged to.
+    crate::workspace_ownership::on_user_removed(state, &user.id).await;
+
+    Ok(())
 }
 
 // ── Handlers ──────────────────────────────────────────────────────────────────
@@ -325,6 +498,9 @@ pub async fn scim_create_user(
     if let Some(email) = req.emails.into_iter().find(|e| e.primary).map(|e| e.value) {
         user.email = Some(email);
     }
+    // Enterprise extension (RFC 7643 §4.3): organization binds the tenant
+    // scope, manager.value records the manager's user id.
+    apply_enterprise(&mut user, &req.enterprise);
 
     state.users.create(&user).await?;
     Ok((StatusCode::CREATED, Json(user_to_scim(&user))))
@@ -385,13 +561,270 @@ pub async fn scim_update_user(
     if let Some(email) = req.emails.into_iter().find(|e| e.primary).map(|e| e.value) {
         user.email = Some(email);
     }
-    user.updated_at = now_secs();
+    // Enterprise extension (RFC 7643 §4.3): accepted and persisted on PUT.
+    apply_enterprise(&mut user, &req.enterprise);
 
-    state.users.update(&user).await?;
+    // SCIM `active: false` on PUT is the IdP deactivation push
+    // (identity-security.md §Gyre-specific SCIM behavior) — the same
+    // lifecycle event PATCH and DELETE drive. An omitted `active` (or
+    // `true`) never deactivates: deactivation is terminal and destructive
+    // (sessions revoked, attribution cleared), so it must be an explicit
+    // statement, not a PUT side effect of an attribute the IdP left out.
+    // Re-activating an already-deactivated account is not supported
+    // (deactivation is terminal, user-management.md) — the request is
+    // accepted and the stored (inactive) state is reported back.
+    if req.active == Some(false) && !user.is_deactivated() {
+        deactivate_via_scim(&state, &mut user).await?;
+    } else {
+        user.updated_at = now_secs();
+        state.users.update(&user).await?;
+    }
     Ok(Json(user_to_scim(&user)))
 }
 
-/// DELETE /scim/v2/Users/{id} — deactivate user (soft delete per SCIM spec).
+/// PATCH /scim/v2/Users/{id} — partial update (RFC 7644 §3.5.2).
+///
+/// Accepts the standard PatchOp body (`Operations` array with
+/// `op`/`path`/`value`) and, for IdPs that send a bare resource fragment,
+/// a simplified direct body (`{"active": false}`) treated as one
+/// path-less `replace`. Supported targets: `active` (the deactivation
+/// path), `displayName`, `emails`, and the enterprise extension
+/// attributes (`organization`, `manager` / `manager.value`). `userName`
+/// and `externalId` are immutable after creation — attempts to patch them
+/// are ignored (not 409), keeping IdP sync loops working, exactly as PUT.
+///
+/// ABAC-exempt route: authorization is the SCIM bearer token itself
+/// (`check_scim_auth`, fail-closed when GYRE_SCIM_TOKEN is unset).
+pub async fn scim_patch_user(
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    State(state): State<Arc<AppState>>,
+    body: axum::body::Bytes,
+) -> Result<Json<ScimUser>, ApiError> {
+    check_scim_auth(&headers)?;
+
+    let mut user = state
+        .users
+        .find_by_id(&Id::new(&id))
+        .await?
+        .ok_or_else(|| ApiError::NotFound(format!("user {id} not found")))?;
+
+    // Parse leniently: a body without an `Operations` member is treated as
+    // a single path-less replace of its present attributes (the simplified
+    // form `{{"active": false}}` some provisioning integrations send).
+    let raw: serde_json::Value = serde_json::from_slice(&body)
+        .map_err(|e| ApiError::InvalidInput(format!("invalid JSON: {e}")))?;
+    let ops: Vec<ScimPatchOp> = if raw.get("Operations").is_some() {
+        serde_json::from_value::<ScimPatchRequest>(raw)
+            .map_err(|e| ApiError::InvalidInput(format!("invalid PatchOp request: {e}")))?
+            .operations
+    } else {
+        vec![ScimPatchOp {
+            op: Some("replace".to_string()),
+            path: None,
+            value: Some(raw),
+        }]
+    };
+
+    let mut deactivate = false;
+    for op in ops {
+        let kind = op.op.as_deref().unwrap_or("replace").to_ascii_lowercase();
+        let kind = kind.as_str();
+        if !matches!(kind, "add" | "replace" | "remove") {
+            return Err(ApiError::InvalidInput(format!(
+                "unsupported PATCH op: {kind}"
+            )));
+        }
+        // Normalize the target: path-less operations carry the attributes
+        // in `value`; a path may be a core attribute, an enterprise
+        // extension attribute (`<urn>:manager`), or a sub-attribute
+        // (`<urn>:manager.value`). A trailing filter
+        // (`emails[value eq "..."]`) is not supported — the whole
+        // attribute is replaced.
+        let path = op.path.as_deref().map(|p| {
+            p.split('[')
+                .next()
+                .unwrap_or(p)
+                .trim_end_matches("]")
+                .to_string()
+        });
+        let value = op.value.unwrap_or(serde_json::Value::Null);
+
+        match path.as_deref() {
+            // Immutable identity attributes: ignored on any op (same
+            // rationale as PUT — a 409 would break IdP sync loops).
+            Some("userName") | Some("externalId") | Some("name") => {}
+            Some("active") => {
+                let want = value.as_bool().ok_or_else(|| {
+                    ApiError::InvalidInput("active requires a boolean value".to_string())
+                })?;
+                if want {
+                    // Reactivation is not supported (deactivation is
+                    // terminal): report the stored state back honestly.
+                } else if !user.is_deactivated() {
+                    deactivate = true;
+                }
+            }
+            Some("displayName") => {
+                if let Some(dn) = value.as_str() {
+                    if dn == gyre_domain::SYSTEM_ABAC_IDENTITY {
+                        return Err(ApiError::InvalidInput(format!(
+                            "displayName '{}' is reserved for the system principal",
+                            gyre_domain::SYSTEM_ABAC_IDENTITY
+                        )));
+                    }
+                    user.display_name = dn.to_string();
+                }
+            }
+            Some("emails") => {
+                if let Some(email) = patch_emails(&value) {
+                    user.email = Some(email);
+                }
+            }
+            Some("urn:ietf:params:scim:schemas:extension:enterprise:2.0:User")
+            | Some("urn:ietf:params:scim:schemas:extension:enterprise:2.0:User:manager")
+            | Some("urn:ietf:params:scim:schemas:extension:enterprise:2.0:User:manager.value")
+            | Some("urn:ietf:params:scim:schemas:extension:enterprise:2.0:User:organization") => {
+                patch_enterprise(&mut user, kind, path.as_deref().unwrap_or(""), &value)?;
+            }
+            None => {
+                // Path-less replace: apply every recognized attribute in
+                // the value object.
+                let obj = value.as_object().ok_or_else(|| {
+                    ApiError::InvalidInput(
+                        "path-less PATCH operation requires an object value".to_string(),
+                    )
+                })?;
+                for (key, val) in obj {
+                    match key.as_str() {
+                        "userName" | "externalId" | "schemas" | "id" | "name" => {}
+                        "active" => {
+                            if val == &serde_json::Value::Bool(false) && !user.is_deactivated() {
+                                deactivate = true;
+                            }
+                        }
+                        "displayName" => {
+                            if let Some(dn) = val.as_str() {
+                                if dn == gyre_domain::SYSTEM_ABAC_IDENTITY {
+                                    return Err(ApiError::InvalidInput(format!(
+                                        "displayName '{}' is reserved for the system principal",
+                                        gyre_domain::SYSTEM_ABAC_IDENTITY
+                                    )));
+                                }
+                                user.display_name = dn.to_string();
+                            }
+                        }
+                        "emails" => {
+                            if let Some(email) = patch_emails(val) {
+                                user.email = Some(email);
+                            }
+                        }
+                        "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User" => {
+                            patch_enterprise(
+                                &mut user,
+                                kind,
+                                "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User",
+                                val,
+                            )?;
+                        }
+                        _ => {
+                            // Unknown attributes are ignored per RFC 7644
+                            // §3.5.2 leniency for unrecognized extensions.
+                        }
+                    }
+                }
+            }
+            Some(other) => {
+                // Unknown path: ignore (RFC 7644 leniency) rather than
+                // fail the whole PATCH — IdPs routinely send attributes
+                // outside the implemented subset.
+                let _ = other;
+            }
+        }
+    }
+
+    if deactivate {
+        deactivate_via_scim(&state, &mut user).await?;
+    } else {
+        user.updated_at = now_secs();
+        state.users.update(&user).await?;
+    }
+    Ok(Json(user_to_scim(&user)))
+}
+
+/// Extract the primary email from a PATCH `emails` value (single object or
+/// array); `None` leaves the stored email untouched.
+fn patch_emails(value: &serde_json::Value) -> Option<String> {
+    let items: Vec<&serde_json::Value> = match value {
+        serde_json::Value::Array(a) => a.iter().collect(),
+        serde_json::Value::Object(_) => vec![value],
+        _ => return None,
+    };
+    let primary = items
+        .iter()
+        .find(|e| e.get("primary").and_then(|p| p.as_bool()).unwrap_or(false))
+        .copied()
+        .or_else(|| items.first().copied());
+    primary
+        .and_then(|e| e.get("value").and_then(|v| v.as_str()))
+        .map(str::to_string)
+}
+
+/// Apply an enterprise-extension PATCH target to the user record.
+fn patch_enterprise(
+    user: &mut User,
+    kind: &str,
+    path: &str,
+    value: &serde_json::Value,
+) -> Result<(), ApiError> {
+    const URN: &str = "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User";
+    if path == URN {
+        // Whole-extension replace: value is the extension object.
+        let ext: ScimEnterprise = serde_json::from_value(value.clone()).map_err(|e| {
+            ApiError::InvalidInput(format!("invalid enterprise extension value: {e}"))
+        })?;
+        if kind == "remove" {
+            user.tenant_id = None;
+            user.manager_id = None;
+        } else {
+            apply_enterprise(user, &ext);
+        }
+        return Ok(());
+    }
+    let attr = path.strip_prefix(URN).and_then(|r| r.strip_prefix(':'));
+    match (kind, attr) {
+        ("remove", Some("organization")) => user.tenant_id = None,
+        ("remove", Some("manager")) | ("remove", Some("manager.value")) => user.manager_id = None,
+        (_, Some("organization")) => {
+            if let Some(org) = value.as_str() {
+                user.tenant_id = if org.is_empty() {
+                    None
+                } else {
+                    Some(Id::new(org.to_string()))
+                };
+            }
+        }
+        (_, Some("manager")) | (_, Some("manager.value")) => {
+            let mid = match &value {
+                serde_json::Value::String(s) => Some(s.clone()),
+                serde_json::Value::Object(o) => {
+                    o.get("value").and_then(|v| v.as_str()).map(str::to_string)
+                }
+                _ => None,
+            };
+            user.manager_id = mid.filter(|v| !v.is_empty()).map(Id::new);
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// DELETE /scim/v2/Users/{id} — deprovision: mark the user inactive
+/// (identity-security.md: "Deprovision (marks user inactive, does not
+/// delete)"). Soft deactivation with the full lifecycle cascade (sessions
+/// revoked, spawned_by attribution cleared, ownerless-workspace flow) —
+/// the row remains resolvable so audit history and lingering memberships
+/// survive, mirroring the admin deactivation semantics.
 pub async fn scim_delete_user(
     headers: HeaderMap,
     Path(id): Path<String>,
@@ -399,21 +832,17 @@ pub async fn scim_delete_user(
 ) -> Result<StatusCode, ApiError> {
     check_scim_auth(&headers)?;
 
-    let user = state
+    let mut user = state
         .users
         .find_by_id(&Id::new(&id))
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("user {id} not found")))?;
 
-    // SCIM DELETE = deactivate, not hard delete. We delete from store here;
-    // production deployments with SSO should soft-delete via `active=false`.
-    state.users.delete(&user.id).await?;
-
-    // user-management.md §Ownership Transfer & Reclamation: when a workspace
-    // Owner leaves (account deactivated/removed), TenantAdmins are notified
-    // and the workspace is tracked as ownerless. Runs inline for immediacy;
-    // the daily orphaned_workspace_check job is the backstop.
-    crate::workspace_ownership::on_user_removed(&state, &user.id).await;
+    // SCIM DELETE = deprovision = deactivate, never a hard store delete:
+    // the user row must remain resolvable (GET /scim/v2/Users/{id} still
+    // returns it with active:false) so the audit trail, attribution, and
+    // lingering workspace memberships survive the departure.
+    deactivate_via_scim(&state, &mut user).await?;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -427,7 +856,7 @@ pub async fn scim_service_provider_config(
     Ok(Json(serde_json::json!({
         "schemas": ["urn:ietf:params:scim:schemas:core:2.0:ServiceProviderConfig"],
         "documentationUri": "",
-        "patch": { "supported": false },
+        "patch": { "supported": true },
         "bulk": { "supported": false, "maxOperations": 0, "maxPayloadSize": 0 },
         "filter": { "supported": true, "maxResults": 200 },
         "changePassword": { "supported": false },
@@ -451,7 +880,7 @@ pub async fn scim_schemas(headers: HeaderMap) -> Result<Json<serde_json::Value>,
 
     Ok(Json(serde_json::json!({
         "schemas": ["urn:ietf:params:scim:api:messages:2.0:ListResponse"],
-        "totalResults": 1,
+        "totalResults": 2,
         "Resources": [{
             "id": "urn:ietf:params:scim:schemas:core:2.0:User",
             "name": "User",
@@ -462,6 +891,16 @@ pub async fn scim_schemas(headers: HeaderMap) -> Result<Json<serde_json::Value>,
                 { "name": "emails", "type": "complex", "multiValued": true },
                 { "name": "active", "type": "boolean" },
                 { "name": "externalId", "type": "string" }
+            ]
+        }, {
+            "id": "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User",
+            "name": "EnterpriseUser",
+            "description": "Enterprise user extension (RFC 7643 §4.3)",
+            "attributes": [
+                { "name": "organization", "type": "string", "required": false,
+                  "description": "Gyre tenant id" },
+                { "name": "manager", "type": "complex", "required": false,
+                  "subAttributes": [ { "name": "value", "type": "string" } ] }
             ]
         }]
     })))
@@ -480,6 +919,10 @@ pub async fn scim_resource_types(headers: HeaderMap) -> Result<Json<serde_json::
             "name": "User",
             "endpoint": "/Users",
             "schema": "urn:ietf:params:scim:schemas:core:2.0:User",
+            "schemaExtensions": [{
+                "schema": "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User",
+                "required": false
+            }],
             "meta": {
                 "resourceType": "ResourceType",
                 "location": "/scim/v2/ResourceTypes/User"
@@ -801,6 +1244,10 @@ mod tests {
 
     #[tokio::test]
     async fn scim_delete_user() {
+        // SCIM DELETE deprovisions (marks the user inactive) — never a hard
+        // store delete: the row remains resolvable and reports active:false
+        // (identity-security.md §SCIM Endpoints: "Deprovision (marks user
+        // inactive, does not delete)").
         let app = api_router().with_state(make_state());
         let payload = serde_json::json!({ "userName": "carol" });
         let create_resp = app
@@ -826,7 +1273,13 @@ mod tests {
             .oneshot(scim_request("GET", &format!("/scim/v2/Users/{id}"), None))
             .await
             .unwrap();
-        assert_eq!(get_resp.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            get_resp.status(),
+            StatusCode::OK,
+            "deprovisioned user row must remain resolvable (soft deactivation)"
+        );
+        let got = body_json(get_resp).await;
+        assert_eq!(got["active"], serde_json::Value::Bool(false));
     }
 
     #[tokio::test]
@@ -838,6 +1291,10 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let json = body_json(resp).await;
         assert!(json["filter"]["supported"].as_bool().unwrap());
+        assert!(
+            json["patch"]["supported"].as_bool().unwrap_or_default(),
+            "PATCH /scim/v2/Users/{{id}} is implemented — ServiceProviderConfig must advertise it"
+        );
     }
 
     #[tokio::test]
