@@ -2968,30 +2968,40 @@ async fn handle_message_send(state: &AppState, args: &Value, auth: &Authenticate
         // REST send path: ALL Agent-directed messages validate tenant
         // isolation — the target agent's tenant (resolved from its workspace
         // record) must match the message's tenant (the caller's verified
-        // tenant), regardless of origin. Skip-and-log when the workspace
-        // record cannot be resolved — never fabricate a scope identity.
-        match state.workspaces.find_by_id(&target.workspace_id).await {
-            Ok(Some(target_ws)) => {
-                if target_ws.tenant_id.as_str() != auth.tenant_id {
-                    return tool_error(format!(
-                        "target agent {} belongs to a different tenant",
-                        target_id
-                    ));
-                }
-            }
+        // tenant), regardless of origin. Fail-closed when the workspace
+        // record cannot be resolved (deleted workspace, dangling agent):
+        // an indeterminable tenant scope rejects the send, never allows it
+        // through — the same inconsistent-state leak class rule 1 exists to
+        // prevent.
+        let target_ws = match state.workspaces.find_by_id(&target.workspace_id).await {
+            Ok(Some(ws)) => ws,
             Ok(None) => {
                 tracing::warn!(
                     workspace_id = %target.workspace_id,
-                    "message.send: target agent's workspace not found; tenant isolation check skipped"
+                    "message.send: target agent's workspace not found; tenant isolation cannot be verified"
                 );
+                return tool_error(format!(
+                    "target agent {} workspace {} cannot be resolved; tenant isolation cannot be verified",
+                    target_id, target.workspace_id
+                ));
             }
             Err(e) => {
                 tracing::warn!(
                     workspace_id = %target.workspace_id,
                     error = %e,
-                    "message.send: failed to resolve target workspace; tenant isolation check skipped"
+                    "message.send: failed to resolve target workspace"
                 );
+                return tool_error(format!(
+                    "failed to resolve target workspace {}: {e}",
+                    target.workspace_id
+                ));
             }
+        };
+        if target_ws.tenant_id.as_str() != auth.tenant_id {
+            return tool_error(format!(
+                "target agent {} belongs to a different tenant",
+                target_id
+            ));
         }
 
         // Queue depth check for Directed tier.
@@ -7473,6 +7483,11 @@ mod tests {
     #[tokio::test]
     async fn mcp_message_send_directed_succeeds() {
         let state = test_state();
+        // Scoping rule 1 resolves the target's tenant from its workspace
+        // record — seed one (tenant "default", the global token's tenant).
+        let ws_mcp =
+            gyre_domain::Workspace::new(Id::new("ws-mcp"), Id::new("default"), "mcp", "mcp", 0);
+        state.workspaces.create(&ws_mcp).await.unwrap();
         // Create sender agent (test-token maps to agent_id "system")
         let mut sender = gyre_domain::Agent::new(Id::new("system"), "system", 0);
         sender.workspace_id = Id::new("ws-mcp");
@@ -7621,6 +7636,67 @@ mod tests {
         );
     }
 
+    /// Mirrored fail-closed behavior (review round-4 repair): a target whose
+    /// workspace record is unresolvable (dangling agent after a workspace
+    /// delete) is a tool error, never a skip-and-send — the tenant scope
+    /// being indeterminable must reject the send. With the skip-and-log
+    /// behavior restored, this call succeeds and the message is persisted.
+    #[tokio::test]
+    async fn mcp_message_send_unresolvable_target_workspace_rejected() {
+        let state = test_state();
+        // Sender ("system" — the global token's agent identity) and target
+        // share a workspace whose record is deliberately NOT created.
+        let mut sender = gyre_domain::Agent::new(Id::new("system"), "system", 0);
+        sender.workspace_id = Id::new("ws-mcp-gone");
+        state.agents.create(&sender).await.unwrap();
+        let mut target = gyre_domain::Agent::new(Id::new("agent-mcp-gone"), "t", 0);
+        target.workspace_id = Id::new("ws-mcp-gone");
+        state.agents.create(&target).await.unwrap();
+
+        let app = crate::build_router(state.clone());
+        let (status, json) = mcp_post(
+            app,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 83,
+                "method": "tools/call",
+                "params": {
+                    "name": "gyre_message_send",
+                    "arguments": {
+                        "to": {"agent": "agent-mcp-gone"},
+                        "kind": "task_assignment",
+                        "payload": {"task_id": "TASK-GONE"}
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "JSON-RPC envelope is 200");
+        assert!(
+            json["result"]["isError"].as_bool().unwrap(),
+            "a send with an unresolvable target tenant scope must be a tool error: {json}"
+        );
+        let text = json["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(
+            text.contains("cannot be resolved"),
+            "error must name the unresolvable tenant scope, got: {text}"
+        );
+        assert_eq!(
+            gyre_ports::MessageRepository::list_unacked(
+                &*state.messages,
+                &Id::new("agent-mcp-gone"),
+                10
+            )
+            .await
+            .unwrap()
+            .len(),
+            0,
+            "a send with an unresolvable target tenant scope must not be persisted"
+        );
+    }
+
     #[tokio::test]
     async fn mcp_message_send_rejects_payload_missing_required_field() {
         // message-bus.md §Payload Schemas: the MCP receipt path enforces the same
@@ -7628,6 +7704,16 @@ mod tests {
         // `task_id`; a payload carrying only `spec_ref` must be a tool error and
         // must NOT reach the message store.
         let state = test_state();
+        // Scoping rule 1 resolves the target's tenant from its workspace
+        // record — seed one (tenant "default", the global token's tenant).
+        let ws_schema = gyre_domain::Workspace::new(
+            Id::new("ws-schema"),
+            Id::new("default"),
+            "mcp-schema",
+            "mcp-schema",
+            0,
+        );
+        state.workspaces.create(&ws_schema).await.unwrap();
         let mut sender = gyre_domain::Agent::new(Id::new("system"), "system", 0);
         sender.workspace_id = Id::new("ws-schema");
         state.agents.create(&sender).await.unwrap();
@@ -7723,6 +7809,11 @@ mod tests {
     #[tokio::test]
     async fn mcp_message_send_broadcasts_to_websocket_channel() {
         let state = test_state();
+        // Scoping rule 1 resolves the target's tenant from its workspace
+        // record — seed one (tenant "default", the global token's tenant).
+        let ws_bc =
+            gyre_domain::Workspace::new(Id::new("ws-bc"), Id::new("default"), "bc", "bc", 0);
+        state.workspaces.create(&ws_bc).await.unwrap();
         let mut sender = gyre_domain::Agent::new(Id::new("system"), "system", 0);
         sender.workspace_id = Id::new("ws-bc");
         state.agents.create(&sender).await.unwrap();

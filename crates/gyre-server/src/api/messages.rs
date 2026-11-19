@@ -201,41 +201,42 @@ pub async fn send_message(
         // exists to prevent: a global-token caller whose tenant is T1 must
         // not be able to store a T1-tenant message pointed at a T2 agent.
         // If the target's workspace record cannot be resolved, the tenant
-        // scope is indeterminable — skip-and-log (the established
-        // unresolvable-scope pattern), never fabricate a scope identity.
-        match state
+        // scope is indeterminable — the send is REJECTED (fail-closed),
+        // never allowed through: workspace deletes do not cascade agents,
+        // so a dangling agent in a deleted workspace is a real
+        // inconsistent-state leak vector, not a theoretical one. There is
+        // no valid tenant to compare against, so allowing the send would be
+        // exactly the fail-open ref-resolution class this repo prohibits.
+        let target_ws = state
             .workspaces
             .find_by_id(&target_agent.workspace_id)
             .await
-        {
-            Ok(Some(target_ws)) => {
-                if target_ws.tenant_id.as_str() != auth.tenant_id {
-                    crate::rbac::record_rbac_denied(
-                        &state,
-                        &auth,
-                        "same-tenant target",
-                        "POST /api/v1/workspaces/:workspace_id/messages",
-                    )
-                    .await;
-                    return Err(ApiError::Forbidden(format!(
-                        "target agent {} belongs to a different tenant",
-                        target_agent_id
-                    )));
-                }
-            }
-            Ok(None) => {
+            .map_err(ApiError::Internal)?;
+        let target_ws = match target_ws {
+            Some(ws) => ws,
+            None => {
                 tracing::warn!(
                     workspace_id = %target_agent.workspace_id,
-                    "send: target agent's workspace not found; tenant isolation check skipped"
+                    "send: target agent's workspace not found; tenant isolation cannot be verified"
                 );
+                return Err(ApiError::Forbidden(format!(
+                    "target agent {} workspace {} cannot be resolved; tenant isolation cannot be verified",
+                    target_agent_id, target_agent.workspace_id
+                )));
             }
-            Err(e) => {
-                tracing::warn!(
-                    workspace_id = %target_agent.workspace_id,
-                    error = %e,
-                    "send: failed to resolve target workspace; tenant isolation check skipped"
-                );
-            }
+        };
+        if target_ws.tenant_id.as_str() != auth.tenant_id {
+            crate::rbac::record_rbac_denied(
+                &state,
+                &auth,
+                "same-tenant target",
+                "POST /api/v1/workspaces/:workspace_id/messages",
+            )
+            .await;
+            return Err(ApiError::Forbidden(format!(
+                "target agent {} belongs to a different tenant",
+                target_agent_id
+            )));
         }
 
         // Agent-to-agent: sender must be in the same workspace.
@@ -598,8 +599,25 @@ mod tests {
         agent_id: &str,
         workspace_id: &str,
     ) {
+        // The send path resolves the target agent's tenant from its workspace
+        // record (scoping rule 1) and REJECTS Agent-directed sends whose
+        // scope cannot be resolved — so tests exercising the send path need
+        // a real workspace row. Tenant "default" matches the global test
+        // token's system principal tenant. Tests that seed a
+        // different-tenant workspace first keep it (idempotent).
+        let ws_id = Id::new(workspace_id);
+        if state.workspaces.find_by_id(&ws_id).await.unwrap().is_none() {
+            let ws = gyre_domain::Workspace::new(
+                ws_id.clone(),
+                Id::new("default"),
+                format!("Workspace {workspace_id}"),
+                workspace_id,
+                0,
+            );
+            state.workspaces.create(&ws).await.unwrap();
+        }
         let mut agent = Agent::new(Id::new(agent_id), agent_id, 0);
-        agent.workspace_id = Id::new(workspace_id);
+        agent.workspace_id = ws_id;
         state.agents.create(&agent).await.unwrap();
     }
 
@@ -1603,6 +1621,61 @@ mod tests {
         assert_eq!(
             bus_msg.to,
             gyre_common::message::Destination::Agent(Id::new("agent-t1"))
+        );
+    }
+
+    /// Scoping rule 1 is fail-closed on an unresolvable target workspace
+    /// (review round-4 repair): workspace deletes do not cascade agents, so
+    /// a dangling agent whose workspace record is gone is a real
+    /// inconsistent-state leak vector. The old code logged a warning and
+    /// proceeded with the send; the tenant scope being indeterminable must
+    /// REJECT the send (403), not allow it through — with the skip-and-log
+    /// behavior restored, this request returns 201 and the message reaches
+    /// the dangling agent's inbox.
+    #[tokio::test]
+    async fn unresolvable_target_workspace_rejects_send() {
+        let state = test_state();
+        // Dangling agent: its workspace record is deliberately NOT created
+        // (the state after DELETE /api/v1/workspaces/W — mem deletes only
+        // the workspace row, leaving the agent).
+        let mut agent = Agent::new(Id::new("agent-dangling"), "agent-dangling", 0);
+        agent.workspace_id = Id::new("ws-gone");
+        state.agents.create(&agent).await.unwrap();
+
+        let mut bus_rx = state.message_broadcast_tx.subscribe();
+        let app = crate::api::api_router().with_state(state.clone());
+
+        let (status, json) = post_message(
+            app,
+            "test-token",
+            "ws-gone",
+            serde_json::json!({
+                "to": {"agent": "agent-dangling"},
+                "kind": "task_assignment",
+                "payload": {"task_id": "TASK-DANGLING"}
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "body: {json}");
+        assert!(
+            json["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("cannot be resolved"),
+            "403 must name the unresolvable tenant scope, got: {json}"
+        );
+        assert!(
+            state
+                .messages
+                .list_unacked(&Id::new("agent-dangling"), 10)
+                .await
+                .unwrap()
+                .is_empty(),
+            "a send with an unresolvable target tenant scope must not be persisted"
+        );
+        assert!(
+            bus_rx.try_recv().is_err(),
+            "a send with an unresolvable target tenant scope must not be broadcast"
         );
     }
 
