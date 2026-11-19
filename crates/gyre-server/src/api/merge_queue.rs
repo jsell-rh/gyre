@@ -129,6 +129,11 @@ pub(crate) async fn enqueue_core(
     let entry = MergeQueueEntry::new(new_id(), mr_id.clone(), priority, now_secs());
     state.merge_queue.enqueue(&entry).await?;
 
+    // Broadcast-only QueueUpdated (message-bus.md §Broadcast-only kinds):
+    // the enqueue transition — an MR entering the merge queue. Storage-exempt
+    // broadcast-channel delivery only.
+    crate::merge_processor::emit_queue_updated(state, &mr.workspace_id).await;
+
     // Trigger quality gate execution if this MR has an associated repo with gates.
     crate::gate_executor::trigger_gates_for_mr(state.clone(), mr_id.clone(), mr.repository_id)
         .await;
@@ -163,6 +168,18 @@ pub async fn cancel_entry(
     }
 
     state.merge_queue.cancel(&Id::new(&id)).await?;
+
+    // Broadcast-only QueueUpdated (message-bus.md §Broadcast-only kinds):
+    // the cancel transition — the MR leaving the merge queue. The workspace
+    // is resolved from the entry's MR; if the MR no longer resolves the
+    // emission is skipped (the queue mutation itself already succeeded).
+    if let Ok(Some(mr)) = state
+        .merge_requests
+        .find_by_id(&entry.merge_request_id)
+        .await
+    {
+        crate::merge_processor::emit_queue_updated(&state, &mr.workspace_id).await;
+    }
 
     // merge_queue.processed analytics event (analytics.md §Auto-Emitted
     // Events: "Queue entry processed") — an operator cancellation is a
@@ -445,6 +462,100 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    }
+
+    /// message-bus.md §Broadcast-only kinds: a merge-queue state transition
+    /// (an MR entering the queue, then leaving it via operator cancel) must
+    /// emit a server-originated `QueueUpdated` broadcast observable by a
+    /// subscribed client — `Destination::Broadcast`, `workspace_id: None`,
+    /// payload none — and the kind's storage exemption means no row is ever
+    /// persisted. Before task-249 the kind had zero production emitters, so
+    /// this assertion could never pass.
+    #[tokio::test]
+    async fn enqueue_and_cancel_broadcast_queue_updated() {
+        use gyre_common::message::{Destination, MessageKind, MessageOrigin};
+
+        let (app, state) = make_app().await;
+        // The QueueUpdated emitter resolves the tenant from the MR's
+        // workspace record (skip-and-log when unresolvable), so the seeded
+        // MR's workspace must exist for the broadcast to fire.
+        crate::mem::ensure_test_workspace(&state, "default").await;
+        seed_mr(&state, "mr-qu").await;
+        let mut rx = state.message_broadcast_tx.subscribe();
+
+        // Drain helper: the channel is shared with other emissions (e.g.
+        // gate triggers), so scan for the QueueUpdated broadcast. try_recv is
+        // synchronous — the handler sends before the HTTP response returns.
+        fn next_queue_updated(
+            rx: &mut tokio::sync::broadcast::Receiver<gyre_common::message::Message>,
+        ) -> Option<gyre_common::message::Message> {
+            for _ in 0..32 {
+                match rx.try_recv() {
+                    Ok(m) if m.kind == MessageKind::QueueUpdated => return Some(m),
+                    Ok(_) => continue,
+                    Err(_) => return None,
+                }
+            }
+            None
+        }
+
+        // Enqueue: the MR entering the queue.
+        let body = serde_json::json!({ "merge_request_id": "mr-qu" });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/merge-queue/enqueue")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let json = body_json(resp).await;
+        let entry_id = json["id"].as_str().unwrap().to_string();
+
+        let msg = next_queue_updated(&mut rx)
+            .expect("enqueue transition must broadcast QueueUpdated to subscribers");
+        assert!(matches!(msg.from, MessageOrigin::Server));
+        assert_eq!(msg.to, Destination::Broadcast);
+        assert_eq!(
+            msg.workspace_id, None,
+            "broadcast-only kinds carry no workspace scope"
+        );
+        assert!(
+            msg.payload.is_none(),
+            "QueueUpdated payload is (none) per spec"
+        );
+        assert!(
+            state.messages.find_by_id(&msg.id).await.unwrap().is_none(),
+            "QueueUpdated is storage-exempt: it must never hit MessageRepository::store()"
+        );
+
+        // Cancel: the MR leaving the queue.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/v1/merge-queue/{entry_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+        let msg = next_queue_updated(&mut rx)
+            .expect("cancel transition must broadcast QueueUpdated to subscribers");
+        assert!(matches!(msg.from, MessageOrigin::Server));
+        assert_eq!(msg.to, Destination::Broadcast);
+        assert_eq!(msg.workspace_id, None);
+        assert!(
+            state.messages.find_by_id(&msg.id).await.unwrap().is_none(),
+            "QueueUpdated is storage-exempt: it must never hit MessageRepository::store()"
+        );
     }
 
     /// analytics.md §Auto-Emitted Events: `merge_queue.processed` (trigger
