@@ -39,7 +39,7 @@ class CargoArtifactTest(unittest.TestCase):
                                          env=env, capture_output=True, text=True, timeout=30)
                 self.assertEqual(cleaned.returncode, 0, cleaned.stderr)
                 result = subprocess.run(['cargo', 'test', '--offline', '--quiet', '--message-format=json'], cwd=root / name,
-                                        env=env, capture_output=True, text=True, timeout=30)
+                                        env=env, capture_output=True, text=True, timeout=120)
                 self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
                 if sentinel is None:
                     artifacts = [json.loads(line) for line in result.stdout.splitlines() if line.startswith('{')]

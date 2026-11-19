@@ -266,6 +266,11 @@ def recover_setup_handoff(execution,task,receipt,observation):
         execution.store.db.execute('INSERT INTO task_history(task,generation,body,data,at) VALUES(?,?,?,?,?)',
             (task['name'],task['generation'],task['body'],json.dumps(data),time.time()))
         restored=data|{'candidate':receipt['candidate'],'candidate_base':receipt['base'],'repair':None,'review':review,'verified':receipt}
+        if observation['status']=='environment_refresh':
+            restored.update(verified=None,ci_refresh={
+                'candidate':receipt['candidate'],'published_head':receipt['head'],
+                'generation':task['generation'],'target_base':observation['target_base'],
+                'failure_signature':observation['failure_signature']})
         execution.store.db.execute('UPDATE tasks SET data=? WHERE name=?',(json.dumps(restored),task['name']))
         execution.store.db.execute("UPDATE work SET state='obsolete',token=token+1,updated=? WHERE task=? AND stage='implement' AND state IN ('ready','retry')",(time.time(),task['name']))
         execution.store.event('ci_setup_handoff_recovered',{'head':receipt['head'],'review_work':review['recovered_from']},task['name'],execution.claim['id'])
