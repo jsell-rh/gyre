@@ -94,7 +94,12 @@ async fn messages_survive_restart_on_sqlite() {
 
     let agent = Id::new("msg-persist-agent");
     let ws = Id::new("msg-persist-ws");
-    let directed = make_directed("msg-persist-directed-1", agent.as_str(), ws.as_str(), 1_700_000_000);
+    let directed = make_directed(
+        "msg-persist-directed-1",
+        agent.as_str(),
+        ws.as_str(),
+        1_700_000_000,
+    );
     let event = make_workspace_event(
         "msg-persist-event-1",
         ws.as_str(),
@@ -114,7 +119,11 @@ async fn messages_survive_restart_on_sqlite() {
             .list_after(&agent, 0, None, 100)
             .await
             .unwrap();
-        assert_eq!(polled.len(), 1, "directed message must be pollable in-instance");
+        assert_eq!(
+            polled.len(),
+            1,
+            "directed message must be pollable in-instance"
+        );
         assert_eq!(polled[0].id, directed.id);
 
         assert_eq!(
@@ -130,9 +139,16 @@ async fn messages_survive_restart_on_sqlite() {
 
     // Directed tier: poll paths after restart.
     let unacked = state2.messages.list_unacked(&agent, 100).await.unwrap();
-    assert_eq!(unacked.len(), 1, "unacked directed message must survive restart");
+    assert_eq!(
+        unacked.len(),
+        1,
+        "unacked directed message must survive restart"
+    );
     assert_eq!(unacked[0].id, directed.id);
-    assert!(!unacked[0].acknowledged, "stored message must be unacknowledged");
+    assert!(
+        !unacked[0].acknowledged,
+        "stored message must be unacknowledged"
+    );
     assert_eq!(unacked[0].kind, MessageKind::TaskAssignment);
     assert_eq!(unacked[0].signature.as_deref(), Some("sig"));
     assert_eq!(unacked[0].key_id.as_deref(), Some("kid-1"));
@@ -203,7 +219,12 @@ async fn messages_survive_restart_on_sqlite() {
     // lost message would silently vanish).
     let state3 = build_state("msg-persist-token", "http://127.0.0.1:1", None);
     assert!(
-        state3.messages.list_unacked(&agent, 100).await.unwrap().is_empty(),
+        state3
+            .messages
+            .list_unacked(&agent, 100)
+            .await
+            .unwrap()
+            .is_empty(),
         "acknowledged state must survive restart"
     );
     let reloaded = state3
@@ -212,7 +233,10 @@ async fn messages_survive_restart_on_sqlite() {
         .await
         .unwrap()
         .expect("acknowledged directed message must still exist after restart");
-    assert!(reloaded.acknowledged, "ack flag must persist across restart");
+    assert!(
+        reloaded.acknowledged,
+        "ack flag must persist across restart"
+    );
     drop(state3);
 
     unsafe { std::env::remove_var("GYRE_DATABASE_URL") };
