@@ -3,7 +3,7 @@ title: "SPIFFE workload attestation: X.509-SVIDs replace the G10 local scheme"
 spec_ref: "Spec gap spec-31d3ae72e12e22c52442e309 / spiffe-workload-attestation / b60edce5bc49"
 depends_on: []
 progress: ready-for-review
-commits: ["2934153b307ad6f2cca32db758e134a375b8de90", "0c37ba3c1972849406c4c233579c4c2cd9ef8230", "14c63ffbd16a48b386fde1c63b18ff1af1e1e464", "ea0f207339d7f231560338d0e64b62302231de8a", "354a5e7a653431c98784ef3cb8326697b7998909", "c9a4d0337ef3aac273be09561d7548f82b2b51b8"]
+commits: ["c9a4d0337ef3aac273be09561d7548f82b2b51b8", "354a5e7a653431c98784ef3cb8326697b7998909", "ea0f207339d7f231560338d0e64b62302231de8a", "14c63ffbd16a48b386fde1c63b18ff1af1e1e464", "0c37ba3c1972849406c4c233579c4c2cd9ef8230", "2934153b307ad6f2cca32db758e134a375b8de90", "d9d97d4ee3f6d023997c3df053f89c0073484f6b"]
 ---
 
 ## Required behavior
@@ -64,86 +64,86 @@ Canonical spec: `specs/system/identity-security.md`. Source: `fb1424fbac55cd23cb
 
 ## Shipped
 
-Layer 1 of the identity stack is implemented with the specced existing protocol:
-X.509-SVIDs per the SPIFFE X.509-SVID specification, replacing the G10 local
-scheme (`/proc/{pid}` probe and skip-on-empty stack compare are deleted from
-the verification path).
+Layer 1 of the identity stack is implemented with the specced existing
+protocol: X.509-SVIDs per the SPIFFE X.509-SVID specification, replacing
+the G10 local scheme (the `/proc/{pid}` probe and skip-on-empty stack
+compare are deleted from the verification path).
 
 ### Implementation
 
 - `crates/gyre-spiffe` (c9a4d033): `SpiffeId` (fail-closed parse/build of
   `spiffe://{trust-domain}/agent/{role}/session/{id}`), `TrustDomainCa`
-  (ECDSA P-256 via rcgen; leaf carries the SPIFFE ID as its single URI SAN;
-  serializable for operator provisioning/backup), `verify_svid` (chain
-  validation via x509-parser `verify_signature` against the trust bundle's
-  anchors, validity windows on leaf and signer, exactly-one-URI-SAN
-  extraction, session binding), trust-bundle encode/parse (SPIFFE bundle
-  format: JWK Set, `use: "svid"`, `x5c` chains), and a latency-bounded
-  SPIFFE Workload API gRPC-over-UDS client (external SPIRE mode).
+  (ECDSA P-256 via rcgen; leaf carries the SPIFFE ID as its single URI
+  SAN; serializable for operator provisioning/backup), `verify_svid`
+  (chain validation via x509-parser `verify_signature` against the trust
+  bundle's anchors, validity windows on leaf and signer, exactly-one
+  URI SAN extraction, session binding), trust-bundle encode/parse
+  (SPIFFE bundle format: JWK Set, `use: "svid"`, `x5c` chains), and a
+  latency-bounded SPIFFE Workload API gRPC-over-UDS client (external
+  SPIRE mode).
 - `crates/gyre-server/src/spiffe.rs` (354a5e7a): `SpiffeService` (local
   trust-domain CA mode persisted in the durable KV store, or external
-  Workload API mode anchored by `GYRE_SPIFFE_TRUST_BUNDLE_URL`, fail-closed
-  on non-bundle documents); `issue_session_svid` (called only from the
-  authorized spawn paths, gated on spawn-time authorization evidence);
-  `verify_workload_identity` / `attest_session` — the single fail-closed
-  verification surface (SVID record must exist, SVID must be presented,
-  chain + validity + session + serial checks against the published bundle,
-  stack fingerprint bound to the SVID-backed record); trust bundle served at
-  `/.well-known/spiffe/keys.json`. `wl_*` JWT claims preserved and bound to
-  the SVID-backed record. Verification wiring: REST heartbeat +
-  `POST /agents/{id}/attest` + MCP `gyre_agent_heartbeat` (one surface, no
-  bypass variant); spawn paths inject `GYRE_SVID_PEM`/`GYRE_SVID_KEY`/
+  Workload API mode anchored by `GYRE_SPIFFE_TRUST_BUNDLE_URL`,
+  fail-closed on non-bundle documents); `issue_session_svid` (called
+  only from the authorized spawn paths, gated on spawn-time
+  authorization evidence); `verify_workload_identity` /
+  `attest_session` — the single fail-closed verification surface (SVID
+  record must exist, SVID must be presented, chain + validity + session
+  + serial checks against the published bundle, stack fingerprint bound
+  to the SVID-backed record); trust bundle served at
+  `/.well-known/spiffe/keys.json`. `wl_*` JWT claims preserved and bound
+  to the SVID-backed record. Verification wiring: REST heartbeat +
+  `POST /agents/{id}/attest` + MCP `gyre_agent_heartbeat` (one surface,
+  no bypass variant); spawn paths inject `GYRE_SVID_PEM`/`GYRE_SVID_KEY`/
   `GYRE_SPIFFE_ID`/`GYRE_STACK_HASH` into the workload environment.
 
-### Review repair round (0c37ba3c, finding ca00525f)
+### Review repair round 1 (0c37ba3c, finding ca00525f)
 
-- Serial-format mismatch (intermittent rejection of genuine SVIDs): issuance
-  stamped fixed-width `hex::encode(serial_bytes)` while verification
-  extracted big-integer `{:x}` from the parsed leaf, so serials with top byte
-  `0x01..=0x0F` (~12% of local-CA sessions) mismatched and the agent
-  permanently failed heartbeat/attest. All three serial sites (issuance,
-  verification extraction, external Workload API leaf parse) now format
-  through `gyre_spiffe::canonical_serial_hex` (minimal big-endian hex,
-  leading zero nibbles stripped). New deterministic worst-case regression
-  test `issued_and_verified_serials_agree_on_leading_zero_nibbles` forces a
-  top byte of `0x01`.
-- `mcp_scope_worker_cannot_heartbeat_foreign_agent` was broken
-  deterministically by the now-mandatory `svid` field: it now seeds the
-  worker's SVID-backed record via `issue_session_svid` and presents the
-  issued chain PEM + bound stack fingerprint on the self-heartbeat leg; the
-  foreign-agent leg still proves the pre-dispatch scope denial. Assertion
-  strength unchanged (self leg must record; foreign leg must be
-  PERMISSION_DENIED naming the target repo and must not touch
-  `last_heartbeat`).
-- `GYRE_SPIFFE_CA` doc now shows the actual `SerializedCa` JSON shape
-  (`{key_pkcs8_b64, cert_pem}`); duplicated
-  `#[allow(clippy::too_many_arguments)]` on `auth.rs mint_worker_scoped`
-  removed.
-- rustfmt drift left by the task's earlier commits in seven server files
-  cleaned (formatting-only, `cargo fmt --check` clean; check + tests
-  re-verified after).
+- Serial-format mismatch (intermittent rejection of genuine SVIDs):
+  issuance, verification, and Workload API leaf parse now all format
+  serials through `gyre_spiffe::canonical_serial_hex`; deterministic
+  worst-case regression test forces a top byte of `0x01`.
+- `mcp_scope_worker_cannot_heartbeat_foreign_agent` updated to seed the
+  worker's SVID-backed record and present the issued chain on the
+  self-heartbeat leg (foreign-agent scope denial unchanged).
+- `GYRE_SPIFFE_CA` doc now shows the actual `SerializedCa` JSON shape;
+  duplicated clippy allow removed.
+
+### Review repair round 2 (d9d97d4e, finding a619ffb4)
+
+- `crates/gyre-server/tests/api_integration.rs` `agent_heartbeat` was
+  broken deterministically by the now-mandatory SVID presentation (agent
+  created via plain POST, no spawn, empty heartbeat body → 403 before
+  liveness is recorded). The test now seeds the agent's SVID-backed
+  record via `gyre_server::spiffe::issue_session_svid` and presents the
+  issued chain PEM plus the bound stack fingerprint, exactly as a
+  spawned workload does via `GYRE_SVID_PEM`/`GYRE_STACK_HASH`. Same
+  repair shape as the earlier mcp.rs fix; assertion strength unchanged.
+- `scripts/e2e-agent.sh` and `scripts/e2e-agent-claude.sh` heartbeat
+  curls now present the spawn-injected `GYRE_SVID_PEM`/`GYRE_STACK_HASH`
+  (JSON body built with jq/node for the multi-line PEM, same pattern as
+  `docker/gyre-agent/entrypoint.sh`), so agents driven by these dev
+  helpers no longer silently fail every heartbeat.
 
 ### Test evidence
 
-- `cargo test -p gyre-spiffe --lib`: 27/27 pass (includes every rejection
-  probe of the verification intent: unknown signer, expired, not-yet-valid,
-  foreign trust domain, wrong session/role, tampered leaf, no SVID, and the
-  new serial-format regression).
-- Flakiness probe on the previously failing test
-  (`ca::tests::issues_svid_that_verifies_against_its_bundle`): 0 FAILED /
-  20 runs post-fix (reviewer measured 3/20 pre-fix); evidence:
-  `/tmp/stage/review-evidence/serial-stability-20-runs.txt`.
-- `cargo check -p gyre-server --all-targets`: clean (includes the repaired
-  mcp.rs test).
-
-### Deferred to the independent verifier
-
-gyre-server test compilation exceeds the sandbox 4 GiB budget. Required
-probes:
-
-- `cargo test -p gyre-server --lib mcp_scope_worker_cannot_heartbeat_foreign_agent`
-  (the repaired test — was deterministically red pre-repair).
-- `cargo test -p gyre-server --lib api::agents::tests` (heartbeat accept +
-  rejection paths, audit events).
-- `cargo test -p gyre-server --lib api::workload::tests` (attest happy path,
-  rejections, trust-bundle endpoint).
+- This round (sandbox limits: gyre-server test compilation belongs to
+  the independent verifier): `cargo check -p gyre-server --test
+  api_integration` passes with the updated test — an error probe
+  (deliberate syntax error in the same file) confirmed the check
+  command genuinely covers the test target and fails on it (log:
+  /tmp/stage/review-evidence/api-integration-check.log). `bash -n` on
+  both scripts; jq/node payload builders verified against a multi-line
+  PEM fixture; `rustfmt --check`, `check-arch.sh`,
+  `check-byte-slice-truncation.sh`, and (after the frontmatter update)
+  `check-task-commit-attribution.sh` all pass.
+- Prior rounds (reviewer-run evidence, durable findings ca00525f and
+  a619ffb4): gyre-spiffe serial-flakiness measured 0 FAILED / 20 runs
+  after 0c37ba3c; the mcp.rs heartbeat test regression was confirmed
+  fixed by the a619ffb4 review (it re-flagged only the api_integration
+  and e2e-script siblings).
+- Verifier must run: `cargo test -p gyre-server --test api_integration`
+  (in particular `agent_heartbeat`), `cargo test -p gyre-server --lib`
+  (heartbeat/SVID tests, including
+  `mcp_scope_worker_cannot_heartbeat_foreign_agent`), and
+  `cargo test -p gyre-spiffe`.
