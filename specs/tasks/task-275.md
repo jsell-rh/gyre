@@ -2,7 +2,7 @@
 title: "Apply operator decision for spec-44383e89f5c1275953582cde: Amend the stale table list to match shipped reality"
 spec_ref: "GOAL.md — real implementations and meaningful verification"
 depends_on: []
-progress: ready-for-review
+progress: complete
 commits: []
 ---
 
