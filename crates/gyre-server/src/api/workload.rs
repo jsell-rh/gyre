@@ -167,8 +167,7 @@ mod tests {
         let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
             .await
             .unwrap();
-        serde_json::from_slice::<serde_json::Value>(&bytes)
-            .unwrap()["id"]
+        serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["id"]
             .as_str()
             .unwrap()
             .to_string()

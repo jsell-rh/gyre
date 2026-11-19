@@ -66,7 +66,16 @@ pub fn attest_agent(
     compute_target: &str,
     stack_hash: &str,
 ) -> WorkloadAttestation {
-    attest_agent_with_container(agent_id, pid, compute_target, stack_hash, None, None, None, None)
+    attest_agent_with_container(
+        agent_id,
+        pid,
+        compute_target,
+        stack_hash,
+        None,
+        None,
+        None,
+        None,
+    )
 }
 
 /// Create a workload attestation with optional container metadata (M19.4)

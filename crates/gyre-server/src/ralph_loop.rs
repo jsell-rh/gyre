@@ -860,7 +860,10 @@ pub(crate) async fn relaunch_agent_session(
     )
     .await
     .map_err(|e| {
-        anyhow::anyhow!("re-spawn launch (incl. SVID issuance) failed for agent {}: {e:#}", agent.id)
+        anyhow::anyhow!(
+            "re-spawn launch (incl. SVID issuance) failed for agent {}: {e:#}",
+            agent.id
+        )
     })?;
 
     if !launch.launched {

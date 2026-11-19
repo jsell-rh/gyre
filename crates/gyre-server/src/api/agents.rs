@@ -400,8 +400,7 @@ async fn attestation_pid_and_status(
         .flatten()
         .and_then(|json| {
             serde_json::from_str::<crate::workload_attestation::WorkloadAttestation>(&json).ok()
-        })
-    {
+        }) {
         Some(att) => (att.pid, Some(att.alive)),
         None => (None, None),
     }
@@ -766,7 +765,10 @@ mod tests {
         )
         .await
         .expect("test SVID issuance must succeed");
-        (svid.record.chain_pem.clone(), svid.record.stack_fingerprint.clone())
+        (
+            svid.record.chain_pem.clone(),
+            svid.record.stack_fingerprint.clone(),
+        )
     }
 
     async fn send_heartbeat(
@@ -794,10 +796,14 @@ mod tests {
         let (app, id) = create_test_agent(app, "hb-agent").await;
         let (svid_pem, stack) = issue_test_svid(&state, &id).await;
 
-        let resp = send_heartbeat(&app, &id, serde_json::json!({
-            "svid": svid_pem,
-            "stack_fingerprint": stack,
-        }))
+        let resp = send_heartbeat(
+            &app,
+            &id,
+            serde_json::json!({
+                "svid": svid_pem,
+                "stack_fingerprint": stack,
+            }),
+        )
         .await;
         assert_eq!(resp.status(), StatusCode::NO_CONTENT);
     }
@@ -932,7 +938,10 @@ mod tests {
         assert_eq!(events.len(), 1, "exactly one agent_heartbeat event");
         let ev = &events[0];
         assert_eq!(ev.resource_id.as_deref(), Some(id.as_str()));
-        assert!(ev.detail["pid"].is_null(), "no pid metadata recorded → pid unknown");
+        assert!(
+            ev.detail["pid"].is_null(),
+            "no pid metadata recorded → pid unknown"
+        );
         assert_eq!(
             ev.detail["pid_alive"], true,
             "verified SVID → pid_alive carries the verification result"
@@ -1023,8 +1032,7 @@ mod tests {
             .collect();
         assert_eq!(mine.len(), 2, "one success + one rejection event");
         assert_eq!(
-            mine
-                .iter()
+            mine.iter()
                 .filter(|e| e.outcome == gyre_domain::AuditOutcome::Failure)
                 .count(),
             1,

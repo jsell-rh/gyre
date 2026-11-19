@@ -67,6 +67,7 @@ pub mod otlp_receiver;
 pub mod policy_cache;
 pub mod policy_engine;
 pub mod signal_chain;
+pub mod spiffe;
 pub mod stale_agents;
 pub mod stale_peers;
 pub mod telemetry;
@@ -74,7 +75,6 @@ pub mod trust_suggestion;
 pub mod trusted_proxy;
 pub(crate) mod tty;
 pub mod version_compute;
-pub mod spiffe;
 pub mod workload_attestation;
 pub mod workspace_ownership;
 pub(crate) mod ws;
@@ -983,7 +983,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         // domain's X.509-SVID anchors in SPIFFE bundle format, at the
         // standard well-known location. Public like the JWKS endpoint —
         // any verifier must be able to check SVIDs.
-        .route(spiffe::TRUST_BUNDLE_PATH, get(spiffe::trust_bundle_endpoint))
+        .route(
+            spiffe::TRUST_BUNDLE_PATH,
+            get(spiffe::trust_bundle_endpoint),
+        )
         .route("/ws", get(ws::ws_handler))
         .route("/ws/agents/:id/tty", get(tty::tty_handler))
         // WebSocket ticket endpoint: issues short-lived, single-use tokens.
@@ -1265,9 +1268,7 @@ fn load_spiffe_service(
         .unwrap_or_else(|| spiffe::DEFAULT_TRUST_DOMAIN.to_string());
     // Validate: the trust domain must be usable in a SPIFFE ID.
     if gyre_spiffe::SpiffeId::agent(&trust_domain, "worker", "probe").is_err() {
-        panic!(
-            "GYRE_SPIFFE_TRUST_DOMAIN {trust_domain:?} is not a valid SPIFFE trust domain"
-        );
+        panic!("GYRE_SPIFFE_TRUST_DOMAIN {trust_domain:?} is not a valid SPIFFE trust domain");
     }
     let svid_ttl_secs = std::env::var("GYRE_SPIFFE_SVID_TTL")
         .ok()
@@ -1282,13 +1283,9 @@ fn load_spiffe_service(
                  (the trust domain's SPIFFE bundle in SPIFFE bundle format)"
             );
         };
-        let service = spiffe::SpiffeService::external(
-            trust_domain,
-            socket,
-            bundle_url,
-            svid_ttl_secs,
-        )
-        .expect("external SPIFFE service construction must succeed");
+        let service =
+            spiffe::SpiffeService::external(trust_domain, socket, bundle_url, svid_ttl_secs)
+                .expect("external SPIFFE service construction must succeed");
         tracing::info!(
             trust_domain = %service.trust_domain(),
             "SPIFFE workload attestation: external SPIRE Workload API mode"
@@ -1370,9 +1367,17 @@ fn load_spiffe_service(
         gyre_spiffe::TrustDomainCa::generate(&trust_domain).expect("CA generation must succeed");
     let serialized = serde_json::to_string(&ca.serialize()).expect("CA serialization");
     let store_result = if let Some(pg) = pg_db {
-        pg.kv_set_sync(AGENT_SIGNING_KEY_KV_NAMESPACE, SPIFFE_CA_KV_KEY, &serialized)
+        pg.kv_set_sync(
+            AGENT_SIGNING_KEY_KV_NAMESPACE,
+            SPIFFE_CA_KV_KEY,
+            &serialized,
+        )
     } else if let Some(sqlite) = sqlite_db {
-        sqlite.kv_set_sync(AGENT_SIGNING_KEY_KV_NAMESPACE, SPIFFE_CA_KV_KEY, &serialized)
+        sqlite.kv_set_sync(
+            AGENT_SIGNING_KEY_KV_NAMESPACE,
+            SPIFFE_CA_KV_KEY,
+            &serialized,
+        )
     } else {
         Ok(())
     };

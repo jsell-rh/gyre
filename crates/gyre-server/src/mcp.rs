@@ -2151,11 +2151,12 @@ async fn handle_agent_heartbeat(state: &AppState, args: &Value) -> Value {
             )
         }
     };
-    let stack_fingerprint = get_str(args, "stack_fingerprint").unwrap_or_default().to_string();
+    let stack_fingerprint = get_str(args, "stack_fingerprint")
+        .unwrap_or_default()
+        .to_string();
     match state.agents.find_by_id(&Id::new(&agent_id)).await {
         Ok(Some(mut agent)) => {
-            match crate::spiffe::attest_session(state, &agent_id, &svid, &stack_fingerprint).await
-            {
+            match crate::spiffe::attest_session(state, &agent_id, &svid, &stack_fingerprint).await {
                 Ok(_) => {
                     agent.heartbeat(now_secs());
                     match state.agents.update(&agent).await {
@@ -2165,9 +2166,9 @@ async fn handle_agent_heartbeat(state: &AppState, args: &Value) -> Value {
                         Err(e) => tool_error(format!("Failed to update agent: {e}")),
                     }
                 }
-                Err(reason) => tool_error(format!(
-                    "Workload-identity verification failed: {reason}"
-                )),
+                Err(reason) => {
+                    tool_error(format!("Workload-identity verification failed: {reason}"))
+                }
             }
         }
         Ok(None) => tool_error(format!("Agent not found: {agent_id}")),

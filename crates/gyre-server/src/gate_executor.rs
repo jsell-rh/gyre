@@ -337,10 +337,8 @@ async fn launch_gate_agent_runtime(
 
     // Layer 1 (identity-security.md): the gate agent's SVID role segment
     // is the gate persona (manifest-declared, e.g. "security").
-    let spiffe_role = crate::spiffe::agent_role(
-        Some(&mg.persona),
-        &gyre_domain::OrchestratorType::Worker,
-    );
+    let spiffe_role =
+        crate::spiffe::agent_role(Some(&mg.persona), &gyre_domain::OrchestratorType::Worker);
     match crate::api::spawn::launch_agent_workload(
         state,
         agent,
