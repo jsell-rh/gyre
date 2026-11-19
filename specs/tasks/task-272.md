@@ -2,8 +2,8 @@
 title: "Publish reviewed spec backlog for specs/development/agent-workflow.md"
 spec_ref: "GOAL.md — real implementations and meaningful verification"
 depends_on: []
-progress: complete
-commits: []
+progress: ready-for-review
+commits: ["d100344e548964aa0bb854003894ffc7b3fa886a"]
 ---
 
 ## Required behavior
@@ -360,3 +360,34 @@ Publish exactly the independently reviewed missing-work plan below. Only create 
 ## Shipped
 
 Task definitions and explicit bindings only; no product implementation claimed.
+
+### Backlog publication (commits 4cc2415e, d38994de, reconciled at 3ce004e3)
+
+Published the reviewed plan for specs/development/agent-workflow.md exactly as
+independently approved: created specs/tasks/task-268.md (pre-PR local
+verification), task-269.md (terminal worktree cleanup, depends on task-258),
+task-270.md (PR protection and hygiene), task-271.md (interrupt ledger and
+hardening gate), registered specs/spec-inputs.json bindings, and left every
+new task not-started. No existing task, spec, coverage status, product file or
+gate was changed; task creation is not implementation.
+
+### CI repair (commit d100344e)
+
+The Development controller job failed at candidate head 3ce004e3 (run
+44511400952, PR 878): test_dev_cargo_clean's
+`test_rebuilds_current_checkout_and_retains_dependency_artifacts` lost its
+sentinel because it sat next to the member's own test executable, which the CI
+toolchain reports under `target/debug/build/gyre_cache_probe/<hash>/out/` — a
+tree `cargo clean -p` legitimately removes. The probe now tracks a real path
+dependency (`gyre_cache_dep`) instead of a sentinel: its artifacts must stay on
+disk and be reported fresh on every helper cycle (retention), and the member's
+previously built rlib must be gone after each helper run (invalidation).
+Evidence: /tmp/stage/review-evidence (suite exit 0 locally; no-op helper and
+full-clean helper both fail the repaired test). Exact-head GitHub CI re-run is
+deferred to remote verification.
+
+### Verification required from the independent verifier
+
+- GitHub checks on the new head (Development controller in particular:
+  `python3 -m unittest discover -s scripts -p 'test_dev*.py'`), run IDs from
+  the durable finding, not historical baselines.
