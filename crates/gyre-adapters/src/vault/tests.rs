@@ -61,83 +61,140 @@ async fn spawn_vault() -> (String, VaultStore, Observed) {
         // fail-closed probe relies on the error surfacing).
         .route(
             "/v1/secret/data/*path",
-            axum::routing::get(move |axum::extract::Path(path): axum::extract::Path<String>, headers: axum::http::HeaderMap| {
-                let reads = Arc::clone(&reads);
-                let store = Arc::clone(&store_reads);
-                async move {
-                    let token = headers.get("X-Vault-Token").and_then(|t| t.to_str().ok()).unwrap_or_default().to_string();
-                    if token != "test-server-token" && token != "test-agent-token" && token != "static-token" {
-                        return (axum::http::StatusCode::FORBIDDEN, axum::Json(serde_json::json!({"errors": ["permission denied"]})));
+            axum::routing::get(
+                move |axum::extract::Path(path): axum::extract::Path<String>,
+                      headers: axum::http::HeaderMap| {
+                    let reads = Arc::clone(&reads);
+                    let store = Arc::clone(&store_reads);
+                    async move {
+                        let token = headers
+                            .get("X-Vault-Token")
+                            .and_then(|t| t.to_str().ok())
+                            .unwrap_or_default()
+                            .to_string();
+                        if token != "test-server-token"
+                            && token != "test-agent-token"
+                            && token != "static-token"
+                        {
+                            return (
+                                axum::http::StatusCode::FORBIDDEN,
+                                axum::Json(serde_json::json!({"errors": ["permission denied"]})),
+                            );
+                        }
+                        reads
+                            .lock()
+                            .await
+                            .push((format!("secret/data/{path}"), token));
+                        let store = store.lock().await;
+                        match store.get(&format!("secret/data/{path}")) {
+                            Some(data) => (
+                                axum::http::StatusCode::OK,
+                                axum::Json(serde_json::json!({ "data": { "data": data } })),
+                            ),
+                            None => (
+                                axum::http::StatusCode::NOT_FOUND,
+                                axum::Json(serde_json::json!({})),
+                            ),
+                        }
                     }
-                    reads.lock().await.push((format!("secret/data/{path}"), token));
-                    let store = store.lock().await;
-                    match store.get(&format!("secret/data/{path}")) {
-                        Some(data) => (
+                },
+            )
+            .post(
+                move |axum::extract::Path(path): axum::extract::Path<String>,
+                      headers: axum::http::HeaderMap,
+                      body: String| {
+                    let store = Arc::clone(&store_writes);
+                    async move {
+                        let token = headers
+                            .get("X-Vault-Token")
+                            .and_then(|t| t.to_str().ok())
+                            .unwrap_or_default()
+                            .to_string();
+                        if token != "test-server-token" && token != "static-token" {
+                            return (
+                                axum::http::StatusCode::FORBIDDEN,
+                                axum::Json(serde_json::json!({"errors": ["permission denied"]})),
+                            );
+                        }
+                        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+                        let data = v["data"].clone();
+                        store
+                            .lock()
+                            .await
+                            .insert(format!("secret/data/{path}"), data);
+                        (
                             axum::http::StatusCode::OK,
-                            axum::Json(serde_json::json!({ "data": { "data": data } })),
-                        ),
-                        None => (
-                            axum::http::StatusCode::NOT_FOUND,
                             axum::Json(serde_json::json!({})),
-                        ),
+                        )
                     }
-                }
-            })
-            .post(move |axum::extract::Path(path): axum::extract::Path<String>, headers: axum::http::HeaderMap, body: String| {
-                let store = Arc::clone(&store_writes);
-                async move {
-                    let token = headers.get("X-Vault-Token").and_then(|t| t.to_str().ok()).unwrap_or_default().to_string();
-                    if token != "test-server-token" && token != "static-token" {
-                        return (axum::http::StatusCode::FORBIDDEN, axum::Json(serde_json::json!({"errors": ["permission denied"]})));
-                    }
-                    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
-                    let data = v["data"].clone();
-                    store.lock().await.insert(format!("secret/data/{path}"), data);
-                    (axum::http::StatusCode::OK, axum::Json(serde_json::json!({})))
-                }
-            }),
+                },
+            ),
         )
         // KV v2 metadata LIST + DELETE.
         .route(
             "/v1/secret/metadata/*path",
-            axum::routing::get(move |axum::extract::Path(path): axum::extract::Path<String>, headers: axum::http::HeaderMap| {
-                let store = Arc::clone(&store_list);
-                async move {
-                    let token = headers.get("X-Vault-Token").and_then(|t| t.to_str().ok()).unwrap_or_default().to_string();
-                    if token != "test-server-token" && token != "test-agent-token" && token != "static-token" {
-                        return (axum::http::StatusCode::FORBIDDEN, axum::Json(serde_json::json!({"errors": ["permission denied"]})));
+            axum::routing::get(
+                move |axum::extract::Path(path): axum::extract::Path<String>,
+                      headers: axum::http::HeaderMap| {
+                    let store = Arc::clone(&store_list);
+                    async move {
+                        let token = headers
+                            .get("X-Vault-Token")
+                            .and_then(|t| t.to_str().ok())
+                            .unwrap_or_default()
+                            .to_string();
+                        if token != "test-server-token"
+                            && token != "test-agent-token"
+                            && token != "static-token"
+                        {
+                            return (
+                                axum::http::StatusCode::FORBIDDEN,
+                                axum::Json(serde_json::json!({"errors": ["permission denied"]})),
+                            );
+                        }
+                        // Return the immediate children (one path component).
+                        let prefix = format!("secret/data/{path}/");
+                        let store = store.lock().await;
+                        let mut keys: Vec<String> = store
+                            .keys()
+                            .filter_map(|k| k.strip_prefix(&prefix))
+                            .map(|rest| rest.split('/').next().unwrap_or(rest).to_string())
+                            .collect();
+                        keys.sort();
+                        keys.dedup();
+                        (
+                            axum::http::StatusCode::OK,
+                            axum::Json(serde_json::json!({ "data": { "keys": keys } })),
+                        )
                     }
-                    // Return the immediate children (one path component).
-                    let prefix = format!("secret/data/{path}/");
-                    let store = store.lock().await;
-                    let mut keys: Vec<String> = store
-                        .keys()
-                        .filter_map(|k| k.strip_prefix(&prefix))
-                        .map(|rest| {
-                            rest.split('/').next().unwrap_or(rest).to_string()
-                        })
-                        .collect();
-                    keys.sort();
-                    keys.dedup();
-                    (
-                        axum::http::StatusCode::OK,
-                        axum::Json(serde_json::json!({ "data": { "keys": keys } })),
-                    )
-                }
-            })
-            .delete(move |axum::extract::Path(path): axum::extract::Path<String>, headers: axum::http::HeaderMap| {
-                let store = Arc::clone(&store_delete);
-                async move {
-                    let token = headers.get("X-Vault-Token").and_then(|t| t.to_str().ok()).unwrap_or_default().to_string();
-                    if token != "test-server-token" && token != "static-token" {
-                        return (axum::http::StatusCode::FORBIDDEN, axum::Json(serde_json::json!({"errors": ["permission denied"]})));
+                },
+            )
+            .delete(
+                move |axum::extract::Path(path): axum::extract::Path<String>,
+                      headers: axum::http::HeaderMap| {
+                    let store = Arc::clone(&store_delete);
+                    async move {
+                        let token = headers
+                            .get("X-Vault-Token")
+                            .and_then(|t| t.to_str().ok())
+                            .unwrap_or_default()
+                            .to_string();
+                        if token != "test-server-token" && token != "static-token" {
+                            return (
+                                axum::http::StatusCode::FORBIDDEN,
+                                axum::Json(serde_json::json!({"errors": ["permission denied"]})),
+                            );
+                        }
+                        let prefix = format!("secret/data/{path}");
+                        let mut store = store.lock().await;
+                        store.retain(|k, _| !k.starts_with(&prefix));
+                        (
+                            axum::http::StatusCode::OK,
+                            axum::Json(serde_json::json!({})),
+                        )
                     }
-                    let prefix = format!("secret/data/{path}");
-                    let mut store = store.lock().await;
-                    store.retain(|k, _| !k.starts_with(&prefix));
-                    (axum::http::StatusCode::OK, axum::Json(serde_json::json!({})))
-                }
-            }),
+                },
+            ),
         )
         .fallback(|| async { (axum::http::StatusCode::NOT_FOUND, "no such route") });
 
@@ -192,9 +249,7 @@ async fn crud_is_served_from_vault_kv_v2() {
         let key = "secret/data/gyre-secrets/t1/repo/repo-1/DATABASE_URL".to_string();
         let payload = s.get(&key).expect("secret stored in Vault");
         assert_eq!(payload["name"], "DATABASE_URL");
-        let value = B64
-            .decode(payload["value_b64"].as_str().unwrap())
-            .unwrap();
+        let value = B64.decode(payload["value_b64"].as_str().unwrap()).unwrap();
         assert_eq!(value, b"postgres://u:p@h/db");
         assert!(s.contains_key("secret/data/gyre-secrets/t1/_idx/id-DATABASE_URL-repo-1"));
     }
@@ -325,9 +380,7 @@ async fn agent_resolution_authenticates_with_agent_jwt() {
         "agent resolution must read with the JWT-derived token, saw {agent_reads:?}"
     );
     assert!(
-        !agent_reads
-            .iter()
-            .any(|(_, t)| t == "static-token"),
+        !agent_reads.iter().any(|(_, t)| t == "static-token"),
         "the server token must not be used for agent-scoped reads"
     );
 }

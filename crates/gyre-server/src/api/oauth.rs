@@ -35,8 +35,8 @@ use std::sync::Arc;
 use crate::auth::AuthenticatedAgent;
 use crate::AppState;
 
-use super::now_secs;
 use super::error::ApiError;
+use super::now_secs;
 
 /// Lifetime of an authorization-request state row (seconds). The provider
 /// round-trip must complete within it; afterwards the row is expired and
@@ -181,10 +181,15 @@ pub async fn enroll_claude_max(
         created_at: now,
         expires_at: now + STATE_TTL_SECS,
         consumed: false,
-        provider_config: serde_json::to_string(&provider)
-            .map_err(|e| ApiError::Internal(anyhow::anyhow!("serializing provider config: {e}").into()))?,
+        provider_config: serde_json::to_string(&provider).map_err(|e| {
+            ApiError::Internal(anyhow::anyhow!("serializing provider config: {e}").into())
+        })?,
     };
-    state.oauth_states.create(&record).await.map_err(ApiError::Internal)?;
+    state
+        .oauth_states
+        .create(&record)
+        .await
+        .map_err(ApiError::Internal)?;
 
     // Authorization request (OAuth 2.0 + PKCE S256), query-encoded by
     // the url crate (reqwest dependency) rather than string interpolation.
@@ -275,10 +280,9 @@ pub async fn claude_max_callback(
         .await
         .map_err(ApiError::Internal)?;
 
-    let provider: ProviderConfig = serde_json::from_str(&record.provider_config)
-        .map_err(|e| {
-            ApiError::Internal(anyhow::anyhow!("stored provider config is unreadable: {e}").into())
-        })?;
+    let provider: ProviderConfig = serde_json::from_str(&record.provider_config).map_err(|e| {
+        ApiError::Internal(anyhow::anyhow!("stored provider config is unreadable: {e}").into())
+    })?;
 
     // Authorization-code + PKCE exchange at the provider token endpoint.
     // state.http_client is built with a 30 s total timeout, so a hung
@@ -316,15 +320,16 @@ pub async fn claude_max_callback(
     let refresh_token = tokens
         .get("refresh_token")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| {
-            ApiError::BadGateway("token response missing refresh_token".to_string())
-        })?
+        .ok_or_else(|| ApiError::BadGateway("token response missing refresh_token".to_string()))?
         .to_string();
     let access_token = tokens
         .get("access_token")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
-    let expires_in = tokens.get("expires_in").and_then(|v| v.as_u64()).unwrap_or(3600);
+    let expires_in = tokens
+        .get("expires_in")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(3600);
 
     // Store the OAuth credential document (the refresh job's RFC 6749
     // handler keeps it fresh) as the scoped secret. Scope and tenant come
@@ -402,7 +407,7 @@ pub async fn claude_max_callback(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::body::{Body, to_bytes};
+    use axum::body::{to_bytes, Body};
     use axum::http::{Request, StatusCode};
     use tower::ServiceExt;
 
@@ -438,10 +443,7 @@ mod tests {
         let seen = Arc::new(tokio::sync::Mutex::new(Vec::new()));
         let seen_token = Arc::clone(&seen);
         let app = axum::Router::new()
-            .route(
-                "/auth",
-                axum::routing::get(|| async { "authorize-ok" }),
-            )
+            .route("/auth", axum::routing::get(|| async { "authorize-ok" }))
             .route(
                 "/token",
                 axum::routing::post(move |body: String| {

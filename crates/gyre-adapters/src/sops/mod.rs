@@ -106,18 +106,15 @@ impl AgeIdentity {
 /// Wrap `data_key` for `recipient` as an ASCII-armored age file — the exact
 /// artifact sops stores in `sops.age[].enc`.
 fn age_wrap(data_key: &[u8; 32], recipient: &age::x25519::Recipient) -> Result<String> {
-    let encryptor = age::Encryptor::with_recipients(std::iter::once(
-        recipient as &dyn age::Recipient,
-    ))
-    .map_err(|e| anyhow::anyhow!("age encryptor construction failed: {e}"))?;
+    let encryptor =
+        age::Encryptor::with_recipients(std::iter::once(recipient as &dyn age::Recipient))
+            .map_err(|e| anyhow::anyhow!("age encryptor construction failed: {e}"))?;
 
     let mut armored = Vec::new();
     {
-        let mut armor = age::armor::ArmoredWriter::wrap_output(
-            &mut armored,
-            age::armor::Format::AsciiArmor,
-        )
-        .map_err(|e| anyhow::anyhow!("age armor writer failed: {e}"))?;
+        let mut armor =
+            age::armor::ArmoredWriter::wrap_output(&mut armored, age::armor::Format::AsciiArmor)
+                .map_err(|e| anyhow::anyhow!("age armor writer failed: {e}"))?;
         let mut writer = encryptor
             .wrap_output(&mut armor)
             .map_err(|e| anyhow::anyhow!("age wrap failed: {e}"))?;
@@ -279,10 +276,7 @@ fn gcm_open(
     let mut sealed = data.to_vec();
     sealed.extend_from_slice(tag);
     cipher
-        .decrypt(
-            Nonce32::from_slice(&iv_arr),
-            Payload { msg: &sealed, aad },
-        )
+        .decrypt(Nonce32::from_slice(&iv_arr), Payload { msg: &sealed, aad })
         .map_err(|_| {
             anyhow::anyhow!("AES-256-GCM decryption failed (wrong key or tampered ciphertext)")
         })
@@ -424,8 +418,8 @@ pub fn sops_decrypt(document: &[u8], identity: &AgeIdentity) -> Result<Vec<u8>> 
         lastmodified.as_bytes(),
     )?;
     let computed_mac = format!("{:X}", Sha512::digest(&plaintext));
-    let stored_mac_str = String::from_utf8(stored_mac)
-        .context("stored SOPS MAC is not UTF-8 (corrupt document)")?;
+    let stored_mac_str =
+        String::from_utf8(stored_mac).context("stored SOPS MAC is not UTF-8 (corrupt document)")?;
     anyhow::ensure!(
         constant_time_eq(computed_mac.as_bytes(), stored_mac_str.as_bytes()),
         "SOPS MAC mismatch: stored document has been tampered with"

@@ -104,12 +104,11 @@ impl OAuthStateRepository for SqliteStorage {
         let state = state.to_string();
         tokio::task::spawn_blocking(move || -> Result<()> {
             let mut conn = pool.get().context("get db connection")?;
-            let n = diesel::update(
-                oauth_states::table.filter(oauth_states::state.eq(state.clone())),
-            )
-                .set(oauth_states::consumed.eq(1))
-                .execute(&mut conn)
-                .context("mark oauth state consumed")?;
+            let n =
+                diesel::update(oauth_states::table.filter(oauth_states::state.eq(state.clone())))
+                    .set(oauth_states::consumed.eq(1))
+                    .execute(&mut conn)
+                    .context("mark oauth state consumed")?;
             anyhow::ensure!(n > 0, "oauth state '{state}' not found");
             Ok(())
         })

@@ -71,10 +71,15 @@ impl VaultConfig {
     pub fn from_env() -> Result<Self> {
         let addr = std::env::var("GYRE_VAULT_ADDR")
             .context("GYRE_SECRET_BACKEND=vault requires GYRE_VAULT_ADDR")?;
-        let token = std::env::var("GYRE_VAULT_TOKEN").ok().filter(|t| !t.is_empty());
-        let role_id = std::env::var("GYRE_VAULT_ROLE_ID").ok().filter(|t| !t.is_empty());
-        let secret_id =
-            std::env::var("GYRE_VAULT_SECRET_ID").ok().filter(|t| !t.is_empty());
+        let token = std::env::var("GYRE_VAULT_TOKEN")
+            .ok()
+            .filter(|t| !t.is_empty());
+        let role_id = std::env::var("GYRE_VAULT_ROLE_ID")
+            .ok()
+            .filter(|t| !t.is_empty());
+        let secret_id = std::env::var("GYRE_VAULT_SECRET_ID")
+            .ok()
+            .filter(|t| !t.is_empty());
         anyhow::ensure!(
             token.is_some() || (role_id.is_some() && secret_id.is_some()),
             "GYRE_SECRET_BACKEND=vault requires GYRE_VAULT_TOKEN or GYRE_VAULT_ROLE_ID + \
@@ -97,7 +102,9 @@ impl VaultConfig {
                 .ok()
                 .filter(|v| !v.is_empty())
                 .unwrap_or_else(|| "gyre-agent".to_string()),
-            namespace: std::env::var("GYRE_VAULT_NAMESPACE").ok().filter(|v| !v.is_empty()),
+            namespace: std::env::var("GYRE_VAULT_NAMESPACE")
+                .ok()
+                .filter(|v| !v.is_empty()),
         })
     }
 }
@@ -152,7 +159,8 @@ impl VaultSecretPayload {
     }
 
     fn decode_value(&self) -> Result<Vec<u8>> {
-        B64.decode(&self.value_b64).context("stored Vault value is not valid base64")
+        B64.decode(&self.value_b64)
+            .context("stored Vault value is not valid base64")
     }
 }
 
@@ -297,7 +305,10 @@ impl VaultSecretRepository {
     }
 
     fn index_path(&self, tenant_id: &str, id: &str) -> String {
-        format!("{}/data/gyre-secrets/{tenant_id}/_idx/{id}", self.config.kv_mount)
+        format!(
+            "{}/data/gyre-secrets/{tenant_id}/_idx/{id}",
+            self.config.kv_mount
+        )
     }
 
     fn index_metadata_path(&self, tenant_id: &str, id: &str) -> String {
@@ -669,7 +680,10 @@ impl VaultSecretRepository {
     ) -> Result<Vec<(String, Vec<u8>)>> {
         let now = now_secs();
         let mut scope_targets: Vec<(String, String)> = vec![
-            (SecretScope::Tenant.as_str().to_string(), tenant_id.to_string()),
+            (
+                SecretScope::Tenant.as_str().to_string(),
+                tenant_id.to_string(),
+            ),
             (
                 SecretScope::Workspace.as_str().to_string(),
                 workspace_id.to_string(),

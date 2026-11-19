@@ -49,7 +49,10 @@ fn sops_roundtrip() {
     // (age key entry with recipient + armored enc, lastmodified, mac,
     // version) and the data value in ENC[...] form.
     let v: serde_json::Value = serde_json::from_slice(&doc).unwrap();
-    assert!(v["data"].as_str().unwrap().starts_with("ENC[AES256_GCM,data:"));
+    assert!(v["data"]
+        .as_str()
+        .unwrap()
+        .starts_with("ENC[AES256_GCM,data:"));
     let sops = &v["sops"];
     assert_eq!(sops["lastmodified"], "2026-11-19T00:25:55Z");
     assert_eq!(sops["version"], "3.9.4");
