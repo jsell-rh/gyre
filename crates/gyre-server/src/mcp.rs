@@ -2346,6 +2346,16 @@ async fn handle_agent_complete(state: &std::sync::Arc<AppState>, args: &Value) -
                     // agent's task and logs `secret.revoked` per secret.
                     crate::secret_rotation::revoke_agent_task_secrets(state, &agent).await;
 
+                    // message-bus.md §Delivery Guarantees (Agent completion
+                    // cleanup): MCP parity with the REST
+                    // POST /agents/:id/complete surface — all unacked
+                    // Directed messages in the completing agent's inbox are
+                    // bulk-acked with reason "agent_completed" (retained for
+                    // audit, never redelivered, reclaimable by the
+                    // dead-inbox retention job).
+                    crate::api::spawn::acknowledge_agent_inbox(state, &agent.id, "agent_completed")
+                        .await;
+
                     // agent-runtime.md §1 Phase 5→6: `agent.complete` ends
                     // the implementation phase — the server creates the MR
                     // from the agent's branch and the gates run
@@ -7168,6 +7178,101 @@ mod tests {
                 .unwrap()
                 .is_some(),
             "workspace-scoped secrets must survive agent completion"
+        );
+    }
+
+    /// message-bus.md §Delivery Guarantees (Agent completion cleanup): the
+    /// MCP gyre_agent_complete tool must perform the same Directed-inbox
+    /// bulk-ack as the REST POST /agents/:id/complete surface —
+    /// count_unacked drops to zero while the rows remain stored for audit
+    /// (acknowledged: true). Fails on the old behavior where the MCP path
+    /// never called acknowledge_all.
+    #[tokio::test]
+    async fn agent_complete_bulk_acks_directed_inbox() {
+        use gyre_common::message::{Destination, Message, MessageKind, MessageOrigin};
+        use gyre_domain::{Agent, Workspace};
+
+        let state = test_state();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        let ws = Workspace::new(
+            Id::new("ws-inbox-ack"),
+            Id::new("default"),
+            "Inbox Ack WS",
+            "inbox-ack-ws",
+            now,
+        );
+        state.workspaces.create(&ws).await.unwrap();
+
+        let mut agent = Agent::new(Id::new("agent-inbox-ack"), "inbox-ack-agent", now);
+        agent.workspace_id = Id::new("ws-inbox-ack");
+        agent
+            .transition_status(gyre_domain::AgentStatus::Active)
+            .unwrap();
+        state.agents.create(&agent).await.unwrap();
+
+        let msg = Message {
+            id: Id::new("mcp-cleanup-msg"),
+            tenant_id: Id::new("default"),
+            from: MessageOrigin::Server,
+            workspace_id: Some(Id::new("ws-inbox-ack")),
+            to: Destination::Agent(Id::new("agent-inbox-ack")),
+            kind: MessageKind::TaskAssignment,
+            payload: None,
+            created_at: now * 1000,
+            signature: None,
+            key_id: None,
+            acknowledged: false,
+        };
+        state.messages.store(&msg).await.unwrap();
+        assert_eq!(
+            state
+                .messages
+                .count_unacked(&Id::new("agent-inbox-ack"))
+                .await
+                .unwrap(),
+            1,
+            "precondition: one unacked Directed message before completion"
+        );
+
+        let app = crate::build_router(state.clone());
+        let (status, json) = mcp_post(
+            app,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 53,
+                "method": "tools/call",
+                "params": {
+                    "name": "gyre_agent_complete",
+                    "arguments": { "agent_id": "agent-inbox-ack" }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(!json["result"]["isError"].as_bool().unwrap());
+
+        assert_eq!(
+            state
+                .messages
+                .count_unacked(&Id::new("agent-inbox-ack"))
+                .await
+                .unwrap(),
+            0,
+            "MCP agent completion must bulk-ack the Directed inbox"
+        );
+        let stored = state
+            .messages
+            .find_by_id(&Id::new("mcp-cleanup-msg"))
+            .await
+            .unwrap()
+            .expect("message must remain stored for audit");
+        assert!(
+            stored.acknowledged,
+            "audit-retained row must be acknowledged"
         );
     }
 
