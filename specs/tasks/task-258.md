@@ -3,7 +3,7 @@ title: "Agent-to-commit tracking at session granularity: session persistence, br
 spec_ref: "Spec gap spec-36fad8fcafe7b73a2b6f2d0e / agent-session-commit-tracking / b580b93c564f"
 depends_on: []
 progress: ready-for-review
-commits: ["fff11b71fb5e9a7f3a113c61bbcccfbd79e1b295", "eff02cffb16bbc5ad1026478ff46d2062b5c6ceb", "50452ac5318beaf98f0ff6a5b63557f02c0543b3"]
+commits: ["50452ac5318beaf98f0ff6a5b63557f02c0543b3", "eff02cffb16bbc5ad1026478ff46d2062b5c6ceb", "fff11b71fb5e9a7f3a113c61bbcccfbd79e1b295", "2da3d0b137f26ef84cafddd7e7d725193cd7155b"]
 ---
 
 ## Required behavior
@@ -62,79 +62,80 @@ Canonical spec: `specs/system/source-control.md`. Source: `fb1424fbac55cd23cb086
 
 ## Shipped
 
-Production source implemented in 50452ac5 (session persistence via
-`AgentSessionRepository` port + SQLite/PostgreSQL/mem adapters, shared
-portable migration `000067_agent_sessions`, `store!` wiring; session rows
-at spawn and Ralph-loop fresh-context respawn; termination on
-complete_agent, fail_agent, and the stale-agent Dead transition;
-session-stamped AgentCommits with NULL-when-no-open-session; chronological
-commits-by-session, per-agent branch-lifecycle, dirty-state,
-by-file/by-commit session queries with `files_changed` recorded at push
-time; time-travel session-state view over real git state and
-`refs/agents/{agent-id}/snapshots/{n}`), with eff02cff a clippy-only
-repair round. All five source-control.md §Agent-to-Commit Tracking
-bullets are real, persisted, queryable behavior.
+Production source implemented in 50452ac5: session persistence via the
+`AgentSessionRepository` port (crates/gyre-ports/src/agent_tracking.rs)
+with SQLite and PostgreSQL adapters (sqlite/session.rs, postgres/
+session.rs) over the shared portable migration `2026-11-14-000067_
+agent_sessions`, a mem adapter with identical duplicate/not-exists
+guards, and `store!` wiring into `AppState.agent_sessions` (lib.rs).
+Sessions are created at spawn (spawn_agent_core) and at each Ralph-loop
+fresh-context respawn (ralph_loop.rs relaunch_agent_session), and ended
+with real worktree observations on every termination path: complete_
+agent, fail_agent, the stale-agent Dead transition, MCP
+`gyre_agent_complete` (fff11b71), and the admin kill path (fff11b71,
+ended before worktree cleanup so `git status --porcelain` still sees
+the tree). All five source-control.md §Agent-to-Commit Tracking
+bullets are real, persisted, queryable behavior:
 
-### This round — review repair (fff11b71)
+- **Session-to-commit mapping**: `AgentCommit.session_id` stamped from
+  the pushing agent's open session in record_pushed_commits and
+  POST /repos/:id/commits/record (NULL when no open session — never a
+  fabricated id); chronological GET /repos/:id/agent-sessions/:sid/
+  commits (find_by_session, timestamp ASC).
+- **Branch lifecycle**: GET /repos/:id/agents/:aid/branch-lifecycle —
+  spawn-time branch, final branch resolved at termination via real
+  `git rev-parse --abbrev-ref HEAD`, all observed commits.
+- **Dirty state**: real `git status --porcelain` in the agent's
+  worktree at termination; a missing/inaccessible worktree records
+  dirty=NULL plus dirty_detail, never a silent clean.
+- **Commit-based queries**: files_changed per pushed commit (real
+  `git diff-tree --no-commit-id --name-only -r --root` at push time);
+  GET /repos/:id/agent-sessions/by-file?path= and by-commit?sha=.
+- **Time-travel**: GET /repos/:id/agent-sessions/:sid/state — commits
+  in [started_at, ended_at] via real `git log --all --after/--before`,
+  plus the completion snapshot resolved from
+  refs/agents/{agent-id}/snapshots/{n} (newest ref whose commit date
+  ≤ ended_at, with tree sha + files).
 
-Review attempt 6e9337d498a146228a910eaa9d3e68dd found two session-
-termination gaps and a doc defect; all fixed:
+All new routes are registered in the ABAC resolver (repo resource).
 
-- **MCP completion path** (`mcp.rs` `handle_agent_complete`, the
-  `gyre_agent_complete` tool): now calls
-  `agent_sessions::end_session(state, &agent)` immediately after the
-  Idle transition is persisted — MCP parity with the REST
-  `POST /agents/:id/complete` surface. Previously the session stayed
-  open (no ended_at, no final branch, no dirty state) and a subsequent
-  Ralph-loop respawn stacked a second session on the never-ended first
-  one.
-- **Admin kill path** (`api/admin.rs` `kill_agent`, Dead transition):
-  now calls `end_session` BEFORE the worktree-cleanup loop so the real
-  `git status --porcelain` query captures dirty state while the
-  worktree still exists. Signature widened `&AppState` →
-  `&Arc<AppState>` (single call site).
-- **`lib.rs` comment**: restored the
-  `SessionRepository::delete_expired_before` attribution (the
-  auth-session trait in `gyre-ports/src/user_profile.rs`);
-  `AgentSessionRepository` has no such method.
+### This round — rebase repair (2da3d0b1)
 
-Two regression tests added against real git worktrees with uncommitted
-edits:
-`mcp_agent_complete_terminates_open_session_with_dirty_state` (asserts
-ended_at, dirty=true, the modified path listed, and no open session
-remains after MCP completion) and
-`kill_agent_terminates_open_session_before_worktree_cleanup` (same
-assertions through the admin kill path). Both fail on the pre-fix code
-where the session stayed open.
+The controller rebase of candidate c2352d0e onto base 28a3a40b
+(task-259 mirror namespace isolation + task-254 message limits) was
+redone and committed: the sole conflict, specs/coverage/system/
+source-control.md, was resolved by keeping the task-258 row 12
+(Agent-to-Commit Tracking) coverage from this branch and taking the
+base's row 13 (External Repository Mirroring, task-259) update.
+No source behavior changed; the merged tree keeps both tasks' work.
 
 ### Test evidence
 
-- `cargo check -p gyre-server --tests`: PASS, exit 0 — lib plus all
-  test targets (including both new regression tests) type-check at
-  fff11b71 (evidence:
-  /tmp/stage/review-evidence/cargo-check-gyre-server-tests.txt).
-- `cargo clippy -p gyre-server --tests`: exit 0, no findings in any
-  changed region of mcp.rs / api/admin.rs / lib.rs — only pre-existing
-  findings outside changed lines (evidence:
-  /tmp/stage/review-evidence/clippy-gyre-server-tests.txt).
-- Mechanical gates clean at fff11b71: check-mem-port-contracts,
-  check-abac-route-registry, check-abac-exempt-handlers,
-  check-in-memory-state-stores, check-migration-versions (evidence:
-  /tmp/stage/review-evidence/gates.txt).
-- gyre-server test *execution* is blocked in this sandbox by the build
-  wrapper's 4 GiB hard budget (codegen of the server plus the model
-  exceeds it — an infrastructure restriction, not a code defect). The
-  independent verifier must run: `cargo test -p gyre-server --lib
-  mcp_agent_complete_terminates_open_session_with_dirty_state`,
-  `cargo test -p gyre-server --lib
-  kill_agent_terminates_open_session_before_worktree_cleanup`, the
-  existing `agent_sessions` and admin-kill suites, and the full
-  `cargo test --all` per the acceptance criteria (evidence:
-  /tmp/stage/review-evidence/verification-notes.md).
-- Prior-round focused evidence on the same implementation (50452ac5):
-  cargo test -p gyre-domain agent_tracking 7 passed; gyre-adapters
-  session and agent_commit contract tests passed
-  (create_and_find_by_agent_chronological, create_duplicate_id_fails,
-  find_by_id_and_repo, find_open_by_agent, update_missing_session_fails,
-  update_termination_state_round_trip, find_by_session_chronological,
-  session_and_files_round_trip).
+At merged tree 2da3d0b1 (evidence under /tmp/stage/review-evidence/):
+
+- `cargo check -p gyre-server --all-targets`: PASS, exit 0 — the
+  merged server (task-258 sessions + task-259 mirror changes)
+  type-checks including all test targets
+  (cargo-check-gyre-server-all-targets.txt).
+- `cargo test -p gyre-domain agent_tracking`: 7 passed, exit 0
+  (test-gyre-domain-agent_tracking.txt).
+- `cargo test -p gyre-adapters session`: 17 passed, exit 0 — includes
+  the SQLite session contract suite (create_and_find_by_agent_
+  chronological, create_duplicate_id_fails, find_by_id_and_repo,
+  find_open_by_agent, update_missing_session_fails,
+  update_termination_state_round_trip) and agent-commit session tests
+  (find_by_session_chronological, session_and_files_round_trip)
+  (test-gyre-adapters-session.txt).
+- Mechanical gates all PASS with no new exemption entries:
+  check-mem-port-contracts, check-abac-route-registry,
+  check-abac-exempt-handlers, check-in-memory-state-stores,
+  check-migration-versions (merge-repair-gates.txt).
+- gyre-server test *execution* remains blocked in this sandbox by the
+  build wrapper's 4 GiB hard budget (infrastructure restriction, not a
+  code defect). The independent verifier must run: `cargo test --all`
+  per the acceptance criteria, including the regression tests
+  `mcp_agent_complete_terminates_open_session_with_dirty_state`,
+  `kill_agent_terminates_open_session_before_worktree_cleanup`, and
+  the two-session attribution / dirty-state / branch-lifecycle /
+  by-file / by-commit / time-travel integration tests added in
+  50452ac5.
