@@ -128,3 +128,88 @@ impl OAuthStateRepository for SqliteStorage {
         .await?
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gyre_ports::OAuthStateRepository as _;
+    use tempfile::NamedTempFile;
+
+    fn setup() -> (NamedTempFile, SqliteStorage) {
+        let tmp = NamedTempFile::new().unwrap();
+        let s = SqliteStorage::new(tmp.path().to_str().unwrap()).unwrap();
+        (tmp, s)
+    }
+
+    fn row(state: &str, expires_at: u64, consumed: bool) -> OAuthStateRecord {
+        OAuthStateRecord {
+            state: state.to_string(),
+            tenant_id: "tenant-1".to_string(),
+            workspace_id: Some("ws-1".to_string()),
+            initiated_by: "user-admin".to_string(),
+            pkce_verifier: "verifier-abc".to_string(),
+            created_at: expires_at - 600,
+            expires_at,
+            consumed,
+            provider_config: "{}".to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn create_find_roundtrip_and_duplicate_fails() {
+        let (_tmp, s) = setup();
+        s.create(&row("st-1", 10_000, false)).await.unwrap();
+
+        let found = s
+            .find_by_state("st-1")
+            .await
+            .unwrap()
+            .expect("row must exist");
+        assert_eq!(found.tenant_id, "tenant-1");
+        assert_eq!(found.workspace_id.as_deref(), Some("ws-1"));
+        assert_eq!(found.initiated_by, "user-admin");
+        assert_eq!(found.pkce_verifier, "verifier-abc");
+        assert_eq!(found.expires_at, 10_000);
+        assert!(!found.consumed);
+
+        // Port contract: duplicate state values are rejected.
+        let dup = s.create(&row("st-1", 20_000, false)).await;
+        assert!(dup.is_err(), "duplicate state create must fail");
+
+        assert!(s.find_by_state("st-missing").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn mark_consumed_flips_row_and_fails_for_unknown_state() {
+        let (_tmp, s) = setup();
+        s.create(&row("st-1", 10_000, false)).await.unwrap();
+
+        // Single-use consumption.
+        s.mark_consumed("st-1").await.unwrap();
+        assert!(s.find_by_state("st-1").await.unwrap().unwrap().consumed);
+
+        // Port contract: consuming an unknown state fails.
+        assert!(s.mark_consumed("st-missing").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn delete_expired_before_removes_only_expired_and_survives_rebuild() {
+        let tmp = NamedTempFile::new().unwrap();
+        let path = tmp.path().to_str().unwrap().to_string();
+        {
+            let s = SqliteStorage::new(&path).unwrap();
+            s.create(&row("st-expired", 1_000, false)).await.unwrap();
+            s.create(&row("st-valid", 90_000, false)).await.unwrap();
+            // Expired AND consumed — still an expired row, still deleted.
+            s.create(&row("st-consumed", 900, true)).await.unwrap();
+
+            let deleted = s.delete_expired_before(10_000).await.unwrap();
+            assert_eq!(deleted, 2, "only the expired rows are deleted");
+            assert!(s.find_by_state("st-valid").await.unwrap().is_some());
+        }
+        // Restart durability: the valid row survives a storage rebuild.
+        let s2 = SqliteStorage::new(&path).unwrap();
+        assert!(s2.find_by_state("st-valid").await.unwrap().is_some());
+        assert!(s2.find_by_state("st-expired").await.unwrap().is_none());
+    }
+}

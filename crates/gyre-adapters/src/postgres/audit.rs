@@ -521,3 +521,150 @@ fn apply_filters(mut query: BoxedAuditQuery, filter: &AuditQueryFilter) -> Boxed
     }
     query
 }
+
+#[cfg(test)]
+mod tests {
+    //! SQL-shape regression tests for the TASK-273 audit filter dimensions
+    //! (tenant scoping + free-text q). The repo has no PG server harness
+    //! (postgres/search.rs + user_profile.rs precedent), so these pin the
+    //! generated statement shape — the surface where a PG-side drift from
+    //! the sqlite sibling (which carries the behavioral tests against a
+    //! real SQLite file) would otherwise surface only in production. The
+    //! behavioral semantics (tenant union, LIKE escaping, zstd
+    //! decompression, paging) are exercised by the sqlite module's suite.
+
+    use super::*;
+
+    fn sql(filter: &AuditQueryFilter) -> String {
+        diesel::debug_query::<diesel::pg::Pg, _>(&apply_filters(
+            audit_events::table.into_boxed(),
+            filter,
+        ))
+        .to_string()
+    }
+
+    fn all() -> AuditQueryFilter {
+        AuditQueryFilter {
+            limit: 100,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn tenant_filter_is_eq_or_null_union_in_sql() {
+        // The caller's tenant PLUS unscoped legacy rows: the predicate must
+        // be an (tenant_id = $n OR tenant_id IS NULL) union, never a bare
+        // equality that would hide legacy rows, and never absent.
+        let filtered = sql(&AuditQueryFilter {
+            tenant_id: Some("tenant-1".to_string()),
+            ..all()
+        });
+        assert!(
+            filtered.contains("\"tenant_id\" = $") && filtered.contains("\"tenant_id\" IS NULL"),
+            "tenant scoping predicate missing: {filtered}"
+        );
+        // Both sides of the union in one parenthesized OR group.
+        assert!(
+            filtered.contains(" OR "),
+            "tenant union must be a grouped OR: {filtered}"
+        );
+
+        let unfiltered = sql(&all());
+        assert!(
+            !unfiltered.contains("tenant_id = $"),
+            "no tenant filter requested but WHERE carries one: {unfiltered}"
+        );
+    }
+
+    #[test]
+    fn free_text_filter_compiles_to_lower_like_with_escape() {
+        // The q fast path must be enforced IN SQL: LOWER(detail) LIKE the
+        // lowercased pattern with '\\' escaping, OR-unioned with
+        // detail_zstd IS NOT NULL (compressed rows are matched in the
+        // adapter after decompression).
+        let filtered = sql(&AuditQueryFilter {
+            q: Some("needle".to_string()),
+            ..all()
+        });
+        assert!(
+            filtered.contains("LIKE"),
+            "free-text q must be a SQL LIKE predicate: {filtered}"
+        );
+        assert!(
+            filtered.to_ascii_lowercase().contains("lower("),
+            "LIKE must compare LOWER(detail) for case-insensitivity: {filtered}"
+        );
+        assert!(
+            filtered.contains("\"detail_zstd\" IS NOT NULL"),
+            "compressed rows must pass the SQL filter for adapter-side matching: {filtered}"
+        );
+
+        let unfiltered = sql(&all());
+        assert!(
+            !unfiltered.contains("LIKE"),
+            "no q requested but WHERE carries a LIKE: {unfiltered}"
+        );
+    }
+
+    #[test]
+    fn free_text_filter_combines_with_tenant_scoping() {
+        // q + tenant_id compose: both predicates present in one statement.
+        let both = sql(&AuditQueryFilter {
+            q: Some("needle".to_string()),
+            tenant_id: Some("tenant-1".to_string()),
+            ..all()
+        });
+        assert!(both.contains("LIKE"));
+        assert!(both.contains("\"tenant_id\" IS NULL"));
+    }
+
+    #[test]
+    fn escape_like_escapes_all_wildcards() {
+        assert_eq!(escape_like("plain"), "plain");
+        assert_eq!(escape_like("50%"), "50\\%");
+        assert_eq!(escape_like("a_b"), "a\\_b");
+        assert_eq!(escape_like("back\\slash"), "back\\\\slash");
+        // The escaped term still contains the original characters — the
+        // escape only inserts the backslash guard before each wildcard.
+        assert_eq!(escape_like("50%").replace("\\", ""), "50%");
+    }
+
+    #[test]
+    fn detail_matches_over_compressed_and_plain_rows() {
+        fn row_with(detail: String, zstd_bytes: Option<Vec<u8>>) -> AuditEventRow {
+            AuditEventRow {
+                id: "e".to_string(),
+                event_type: "file_access".to_string(),
+                agent_id: None,
+                user_id: None,
+                session_id: None,
+                workspace_id: None,
+                tenant_id: None,
+                repo_id: None,
+                resource_type: "agent".to_string(),
+                resource_id: None,
+                outcome: "success".to_string(),
+                detail,
+                detail_zstd: zstd_bytes,
+                source_ip: None,
+                user_agent: None,
+                timestamp: 0,
+            }
+        }
+        // Plain row: case-insensitive substring over the raw detail.
+        let plain = row_with(r#"{"needle":"FindMe"}"#.to_string(), None);
+        assert!(detail_matches(&plain, "findme"));
+        assert!(!detail_matches(&plain, "absent"));
+
+        // Compressed row: matched over the DECOMPRESSED payload.
+        let payload = r#"{"needle":"compressed-findme"}"#;
+        let compressed = zstd::encode_all(payload.as_bytes(), 3).unwrap();
+        let zrow = row_with(String::new(), Some(compressed));
+        assert!(detail_matches(&zrow, "compressed-findme"));
+        assert!(!detail_matches(&zrow, "plain-only"));
+
+        // A row that fails to decompress never matches (fail closed).
+        let corrupt = row_with(String::new(), Some(vec![0xff, 0xfe, 0xfd]));
+        assert!(!detail_matches(&corrupt, "anything"));
+    }
+}

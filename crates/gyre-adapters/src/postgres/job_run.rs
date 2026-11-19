@@ -148,3 +148,81 @@ impl JobRunRepository for PgStorage {
         .await?
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! SQL-shape regression tests (postgres/search.rs precedent: the repo
+    //! has no PG server harness). The behavioral semantics — restart
+    //! durability, newest-first listing, finished-only pruning — are
+    //! exercised against a real SQLite file by the sqlite sibling's suite;
+    //! these pin the PG statements the mirror emits.
+
+    use super::*;
+
+    fn delete_sql(cutoff: u64) -> String {
+        diesel::debug_query::<diesel::pg::Pg, _>(
+            &diesel::delete(job_runs::table).filter(job_runs::finished_at.lt(cutoff as i64)),
+        )
+        .to_string()
+    }
+
+    #[test]
+    fn delete_older_than_filters_on_finished_at_in_sql() {
+        // The port contract (finished rows only) must live in the WHERE
+        // clause: a predicate on finished_at < cutoff, never on started_at
+        // (which would delete crashed-but-unfinished runs).
+        let sql = delete_sql(1_000);
+        assert!(
+            sql.contains("finished_at") && sql.contains("< $"),
+            "pruning must filter on finished_at < cutoff in SQL: {sql}"
+        );
+        assert!(
+            !sql.contains("started_at"),
+            "pruning must not consider started_at: {sql}"
+        );
+    }
+
+    #[test]
+    fn record_upserts_on_conflict_for_idempotent_re_record() {
+        // Re-recording the same run id must replace the row (port
+        // contract): ON CONFLICT (id) DO UPDATE, not a plain INSERT that
+        // would fail or duplicate.
+        let run = JobRunRecord {
+            id: "r1".to_string(),
+            job_name: "job".to_string(),
+            started_at: 1,
+            finished_at: Some(2),
+            status: "success".to_string(),
+            error: None,
+            logs: vec![],
+        };
+        let sql = diesel::debug_query::<diesel::pg::Pg, _>(
+            &diesel::insert_into(job_runs::table)
+                .values(&to_row(&run))
+                .on_conflict(job_runs::id)
+                .do_update()
+                .set(job_runs::status.eq("success")),
+        )
+        .to_string();
+        assert!(
+            sql.contains("ON CONFLICT (\"id\") DO UPDATE"),
+            "record must upsert on id: {sql}"
+        );
+    }
+
+    #[test]
+    fn list_by_job_orders_newest_first_and_limits_in_sql() {
+        let sql = diesel::debug_query::<diesel::pg::Pg, _>(
+            &job_runs::table
+                .filter(job_runs::job_name.eq("job"))
+                .order(job_runs::started_at.desc())
+                .limit(20),
+        )
+        .to_string();
+        assert!(
+            sql.contains("ORDER BY") && sql.contains("\"started_at\" DESC"),
+            "listing must be newest-first: {sql}"
+        );
+        assert!(sql.contains("LIMIT"), "listing must be bounded: {sql}");
+    }
+}

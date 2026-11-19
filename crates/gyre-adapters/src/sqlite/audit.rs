@@ -1011,4 +1011,264 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].detail, e.detail);
     }
+
+    // ── TASK-273: tenant scoping + free-text q search (SQL path) ─────────────
+
+    #[tokio::test]
+    async fn audit_query_tenant_scoped_with_null_legacy_union() {
+        // Tenant scoping: rows of the caller's tenant plus unscoped legacy
+        // rows (NULL tenant) are returned; ANOTHER tenant's rows never are.
+        let (_tmp, s) = setup();
+
+        let mut t1 = make_event("e-t1", "a1", AuditEventType::FileAccess, 100);
+        t1.tenant_id = Some("tenant-1".to_string());
+        record(&s, &t1).await;
+
+        let mut t2 = make_event("e-t2", "a2", AuditEventType::FileAccess, 200);
+        t2.tenant_id = Some("tenant-2".to_string());
+        record(&s, &t2).await;
+
+        // Legacy row: created before tenant attribution existed — no
+        // workspace/user the adapter could derive a tenant from, so it is
+        // stored with NULL tenant_id.
+        let legacy = make_event("e-legacy", "a3", AuditEventType::FileAccess, 300);
+        record(&s, &legacy).await;
+
+        let filter = AuditQueryFilter {
+            tenant_id: Some("tenant-1".to_string()),
+            ..all()
+        };
+        let results = AuditRepository::query(&s, &filter).await.unwrap();
+        let ids: Vec<&str> = results.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["e-legacy", "e-t1"],
+            "own tenant + NULL-legacy union, newest first"
+        );
+
+        // count_filtered agrees with the query.
+        assert_eq!(
+            AuditRepository::count_filtered(&s, &filter).await.unwrap(),
+            2
+        );
+
+        // A tenant-2 caller sees only its own row plus the legacy row.
+        let filter = AuditQueryFilter {
+            tenant_id: Some("tenant-2".to_string()),
+            ..all()
+        };
+        let results = AuditRepository::query(&s, &filter).await.unwrap();
+        let ids: Vec<&str> = results.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(ids, vec!["e-legacy", "e-t2"]);
+    }
+
+    #[tokio::test]
+    async fn audit_free_text_search_matches_detail_only() {
+        let (_tmp, s) = setup();
+        let mut hit = make_event("e-hit", "a1", AuditEventType::FileAccess, 100);
+        hit.detail =
+            serde_json::json!({ "secret_name": "claude_max_refresh_token", "scope": "workspace" });
+        let mut other = make_event("e-other", "a2", AuditEventType::FileAccess, 200);
+        other.detail = serde_json::json!({ "secret_name": "gcp_sa_key", "scope": "repo" });
+        record(&s, &hit).await;
+        record(&s, &other).await;
+
+        let filter = AuditQueryFilter {
+            q: Some("claude_max".to_string()),
+            ..all()
+        };
+        let results = AuditRepository::query(&s, &filter).await.unwrap();
+        assert_eq!(results.len(), 1, "only the matching event is returned");
+        assert_eq!(results[0].id, Id::new("e-hit"));
+        assert_eq!(
+            AuditRepository::count_filtered(&s, &filter).await.unwrap(),
+            1
+        );
+
+        // Case-insensitive on the serialized detail payload.
+        let filter = AuditQueryFilter {
+            q: Some("CLAUDE_MAX".to_string()),
+            ..all()
+        };
+        assert_eq!(AuditRepository::query(&s, &filter).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn audit_free_text_search_escapes_like_wildcards() {
+        // `%`/`_` in the term must match LITERALLY — they cannot broaden the
+        // match to every row.
+        let (_tmp, s) = setup();
+        let mut pct = make_event("e-pct", "a1", AuditEventType::FileAccess, 100);
+        pct.detail = serde_json::json!({ "quota": "100%_of_budget" });
+        let mut plain = make_event("e-plain", "a2", AuditEventType::FileAccess, 200);
+        plain.detail = serde_json::json!({ "quota": "half of budget" });
+        record(&s, &pct).await;
+        record(&s, &plain).await;
+
+        // A bare `%` matches only the row whose detail literally contains
+        // a percent sign — not everything.
+        let filter = AuditQueryFilter {
+            q: Some("%".to_string()),
+            ..all()
+        };
+        let results = AuditRepository::query(&s, &filter).await.unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, Id::new("e-pct"));
+
+        // `_` likewise matches literally, not "any character".
+        let filter = AuditQueryFilter {
+            q: Some("100%_of".to_string()),
+            ..all()
+        };
+        let results = AuditRepository::query(&s, &filter).await.unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, Id::new("e-pct"));
+
+        // A term matching nothing returns nothing.
+        let filter = AuditQueryFilter {
+            q: Some("does-not-appear-anywhere".to_string()),
+            ..all()
+        };
+        assert_eq!(AuditRepository::query(&s, &filter).await.unwrap().len(), 0);
+        assert_eq!(
+            AuditRepository::count_filtered(&s, &filter).await.unwrap(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn audit_free_text_search_matches_zstd_compressed_detail() {
+        // The AC combination: q search over a detail payload that the
+        // log-compression job has zstd-compressed (the raw `detail` column
+        // is blanked, so only the decompressing matcher can find it).
+        let (_tmp, s) = setup();
+        let mut old = make_event("e-old", "a1", AuditEventType::FileAccess, 100);
+        old.detail = serde_json::json!({ "secret_name": "compressed_needle_secret" });
+        old.tenant_id = Some("tenant-1".to_string());
+        let mut new = make_event("e-new", "a2", AuditEventType::FileAccess, 200);
+        new.detail = serde_json::json!({ "secret_name": "uncompressed_other" });
+        new.tenant_id = Some("tenant-1".to_string());
+        record(&s, &old).await;
+        record(&s, &new).await;
+
+        let stats = AuditRepository::compress_details_before(&s, 150, 10)
+            .await
+            .unwrap();
+        assert_eq!(stats.compressed, 1, "the old event must be compressed");
+
+        let filter = AuditQueryFilter {
+            q: Some("compressed_needle".to_string()),
+            ..all()
+        };
+        let results = AuditRepository::query(&s, &filter).await.unwrap();
+        assert_eq!(
+            results.len(),
+            1,
+            "compressed detail must still be searchable"
+        );
+        assert_eq!(results[0].id, Id::new("e-old"));
+        assert_eq!(
+            AuditRepository::count_filtered(&s, &filter).await.unwrap(),
+            1
+        );
+
+        // Tenant scoping composes with the compressed-row q path: another
+        // tenant's caller sees nothing (both rows carry explicit tenants,
+        // so the NULL-legacy union does not apply here).
+        let filter = AuditQueryFilter {
+            q: Some("compressed_needle".to_string()),
+            tenant_id: Some("tenant-other".to_string()),
+            ..all()
+        };
+        assert_eq!(AuditRepository::query(&s, &filter).await.unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn audit_free_text_search_pages_past_the_first_page() {
+        // The q path fetches candidates in pages (page = max(limit,100));
+        // with sparse matches the loop must keep paging to collect the
+        // requested number of matches.
+        let (_tmp, s) = setup();
+        // 140 events; every 20th carries the needle → 7 matches scattered
+        // across two pages of 100.
+        for i in 0..140u64 {
+            let mut e = make_event(
+                &format!("e{}", i),
+                "a1",
+                AuditEventType::FileAccess,
+                1000 + i,
+            );
+            if i % 20 == 0 {
+                e.detail = serde_json::json!({ "needle": "sparse-needle-token" });
+            } else {
+                e.detail = serde_json::json!({ "filler": format!("filler-{i}") });
+            }
+            record(&s, &e).await;
+        }
+
+        let filter = AuditQueryFilter {
+            q: Some("sparse-needle-token".to_string()),
+            limit: 10,
+            ..Default::default()
+        };
+        let results = AuditRepository::query(&s, &filter).await.unwrap();
+        assert_eq!(results.len(), 7, "all sparse matches across pages");
+        assert!(results
+            .iter()
+            .all(|e| e.detail["needle"] == "sparse-needle-token"));
+        assert_eq!(
+            AuditRepository::count_filtered(&s, &filter).await.unwrap(),
+            7
+        );
+    }
+
+    #[test]
+    fn escape_like_escapes_all_wildcards() {
+        assert_eq!(escape_like("plain"), "plain");
+        assert_eq!(escape_like("50%"), "50\\%");
+        assert_eq!(escape_like("a_b"), "a\\_b");
+        assert_eq!(escape_like("back\\slash"), "back\\\\slash");
+        // The escaped term still contains the original characters — the
+        // escape only inserts the backslash guard before each wildcard.
+        assert_eq!(escape_like("50%").replace("\\", ""), "50%");
+    }
+
+    #[test]
+    fn detail_matches_over_compressed_and_plain_rows() {
+        fn row_with(detail: String, zstd_bytes: Option<Vec<u8>>) -> AuditEventRow {
+            AuditEventRow {
+                id: "e".to_string(),
+                event_type: "file_access".to_string(),
+                agent_id: None,
+                user_id: None,
+                session_id: None,
+                workspace_id: None,
+                tenant_id: None,
+                repo_id: None,
+                resource_type: "agent".to_string(),
+                resource_id: None,
+                outcome: "success".to_string(),
+                detail,
+                detail_zstd: zstd_bytes,
+                source_ip: None,
+                user_agent: None,
+                timestamp: 0,
+            }
+        }
+        // Plain row: case-insensitive substring over the raw detail.
+        let plain = row_with(r#"{"needle":"FindMe"}"#.to_string(), None);
+        assert!(detail_matches(&plain, "findme"));
+        assert!(!detail_matches(&plain, "absent"));
+
+        // Compressed row: matched over the DECOMPRESSED payload.
+        let payload = r#"{"needle":"compressed-findme"}"#;
+        let compressed = zstd::encode_all(payload.as_bytes(), 3).unwrap();
+        let zrow = row_with(String::new(), Some(compressed));
+        assert!(detail_matches(&zrow, "compressed-findme"));
+        assert!(!detail_matches(&zrow, "plain-only"));
+
+        // A row that fails to decompress never matches (fail closed).
+        let corrupt = row_with(String::new(), Some(vec![0xff, 0xfe, 0xfd]));
+        assert!(!detail_matches(&corrupt, "anything"));
+    }
 }

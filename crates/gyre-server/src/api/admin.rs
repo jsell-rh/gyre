@@ -141,14 +141,15 @@ pub async fn admin_jobs(State(state): State<Arc<AppState>>) -> Json<Vec<JobInfo>
             .map(JobRunResponse::from)
             .collect();
         if recent_runs.is_empty() {
-            recent_runs = state
-                .job_registry
-                .history(&def.name)
-                .await
-                .into_iter()
-                .map(JobRunResponse::from)
-                .collect();
+            // The in-memory ring is oldest-first (VecDeque push_back order);
+            // serve it newest-first like the durable store so both the job
+            // status pill (most recent run's status, below) and the run
+            // ordering presented to the UI are consistent across paths.
+            let mut mem_history = state.job_registry.history(&def.name).await;
+            mem_history.reverse();
+            recent_runs = mem_history.into_iter().map(JobRunResponse::from).collect();
         }
+        // Most recent run's status (both history paths are newest-first).
         let status = recent_runs
             .first()
             .map(|r| r.status.as_str())
@@ -2867,6 +2868,82 @@ mod tests {
         for job in jobs {
             assert!(job["recent_runs"].is_array(), "job should have recent_runs");
         }
+    }
+
+    #[tokio::test]
+    async fn admin_jobs_status_and_runs_reflect_latest_run_on_memory_fallback() {
+        // The in-memory history ring is oldest-first (VecDeque push_back);
+        // the fallback path (no durable rows yet — pure-mem state before
+        // start_job_registry attaches the store) must still present the
+        // MOST RECENT run first, and the job status pill must show the
+        // latest run's status, not the oldest's.
+        let state = test_state();
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let calls_for_handler = std::sync::Arc::clone(&calls);
+        state
+            .job_registry
+            .register(
+                crate::jobs::JobDefinition {
+                    name: "flaky_job".to_string(),
+                    description: "Fails once, then succeeds".to_string(),
+                    interval_secs: 60,
+                    enabled: true,
+                    run_at_utc_hour: None,
+                },
+                move |_state, _log| {
+                    let calls = std::sync::Arc::clone(&calls_for_handler);
+                    async move {
+                        if calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                            anyhow::bail!("first run fails")
+                        }
+                        Ok(())
+                    }
+                },
+            )
+            .await;
+        // First run fails, latest run succeeds.
+        let _ = state
+            .job_registry
+            .trigger("flaky_job", state.clone())
+            .await;
+        state
+            .job_registry
+            .trigger("flaky_job", state.clone())
+            .await
+            .unwrap();
+
+        let app = api_router().with_state(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/admin/jobs")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let jobs = body_json(resp).await;
+        let job = jobs
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|j| j["name"] == "flaky_job")
+            .expect("registered job must be listed");
+        assert_eq!(
+            job["status"], "success",
+            "status pill must reflect the LATEST run, got {}",
+            job["status"]
+        );
+        let runs = job["recent_runs"].as_array().unwrap();
+        assert_eq!(runs.len(), 2);
+        assert_eq!(runs[0]["status"], "success", "runs must be newest-first");
+        assert_eq!(runs[1]["status"], "failed");
+        assert!(
+            runs[0]["started_at"].as_u64().unwrap() >= runs[1]["started_at"].as_u64().unwrap(),
+            "newest run must be served first on the memory fallback path"
+        );
     }
 
     #[tokio::test]

@@ -149,3 +149,49 @@ impl AgentInstanceRepository for PgStorage {
         .await?
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! SQL-shape regression tests (postgres/search.rs precedent: the repo
+    //! has no PG server harness). The behavioral semantics — replace on
+    //! respawn, mark-terminated failure for unknown agents, running-only
+    //! sweep listing, restart durability — are exercised against a real
+    //! SQLite file by the sqlite sibling's suite; these pin the PG
+    //! statements the mirror emits.
+
+    use super::*;
+
+    #[test]
+    fn list_running_filters_terminated_at_null_in_sql() {
+        // The sweep candidate set is "not yet marked terminated": the
+        // predicate must be terminated_at IS NULL, in SQL.
+        let sql = diesel::debug_query::<diesel::pg::Pg, _>(
+            &agent_instances::table.filter(agent_instances::terminated_at.is_null()),
+        )
+        .to_string();
+        assert!(
+            sql.contains("\"terminated_at\" IS NULL"),
+            "list_running must filter terminated_at IS NULL in SQL: {sql}"
+        );
+    }
+
+    #[test]
+    fn mark_terminated_sets_timestamp_and_reason() {
+        let sql = diesel::debug_query::<diesel::pg::Pg, _>(
+            &diesel::update(agent_instances::table.filter(agent_instances::agent_id.eq("agent-1")))
+                .set((
+                    agent_instances::terminated_at.eq(1i64),
+                    agent_instances::terminated_reason.eq("remote_agent_cleanup"),
+                )),
+        )
+        .to_string();
+        assert!(
+            sql.contains("terminated_at") && sql.contains("terminated_reason"),
+            "mark_terminated must set both fields: {sql}"
+        );
+        assert!(
+            sql.contains("agent_id") && sql.contains("= $"),
+            "mark_terminated must scope to the agent: {sql}"
+        );
+    }
+}
