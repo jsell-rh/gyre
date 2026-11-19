@@ -203,7 +203,11 @@ pub async fn send_message(
         // If the target's workspace record cannot be resolved, the tenant
         // scope is indeterminable — skip-and-log (the established
         // unresolvable-scope pattern), never fabricate a scope identity.
-        match state.workspaces.find_by_id(&target_agent.workspace_id).await {
+        match state
+            .workspaces
+            .find_by_id(&target_agent.workspace_id)
+            .await
+        {
             Ok(Some(target_ws)) => {
                 if target_ws.tenant_id.as_str() != auth.tenant_id {
                     crate::rbac::record_rbac_denied(
@@ -1178,16 +1182,16 @@ mod tests {
         state.users.create(&user).await.unwrap();
         state
             .api_keys
-            .create(&crate::auth::hash_api_key(raw_key), &user.id, "messages-test")
+            .create(
+                &crate::auth::hash_api_key(raw_key),
+                &user.id,
+                "messages-test",
+            )
             .await
             .unwrap();
     }
 
-    async fn create_workspace(
-        state: &std::sync::Arc<crate::AppState>,
-        ws_id: &str,
-        tenant: &str,
-    ) {
+    async fn create_workspace(state: &std::sync::Arc<crate::AppState>, ws_id: &str, tenant: &str) {
         let ws = gyre_domain::Workspace::new(
             Id::new(ws_id),
             Id::new(tenant),
@@ -1596,7 +1600,10 @@ mod tests {
         let bus_msg = bus_rx
             .try_recv()
             .expect("same-tenant send must be broadcast");
-        assert_eq!(bus_msg.to, gyre_common::message::Destination::Agent(Id::new("agent-t1")));
+        assert_eq!(
+            bus_msg.to,
+            gyre_common::message::Destination::Agent(Id::new("agent-t1"))
+        );
     }
 
     /// Crash-recovery contract: GET inbox responses still INCLUDE the
@@ -1638,7 +1645,7 @@ mod tests {
         assert_eq!(arr.len(), 1);
         assert_eq!(arr[0]["id"], "msg-ka");
         assert!(
-            arr[0].get("acknowledged").is_some_and(|v| v.is_bool()),
+            arr[0].get("acknowledged").is_some_and(|v| v.is_boolean()),
             "GET inbox must include `acknowledged` (crash-recovery contract), got: {arr:?}"
         );
     }

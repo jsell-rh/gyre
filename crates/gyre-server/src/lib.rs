@@ -2645,209 +2645,220 @@ mod tests {
         );
     }
 
-// ── Scopeless-message guard (message-bus.md §Message Envelope) ──────────────
-//
-// The send_message() helper validation: a non-Broadcast message with
-// workspace_id: None must be rejected with Err + an error-level log record,
-// and never constructed, stored, or broadcast.
+    // ── Scopeless-message guard (message-bus.md §Message Envelope) ──────────────
+    //
+    // The send_message() helper validation: a non-Broadcast message with
+    // workspace_id: None must be rejected with Err + an error-level log record,
+    // and never constructed, stored, or broadcast.
 
-/// tracing field visitor capturing an event's `message` field.
-struct CaptureVisit(String);
-impl tracing::field::Visit for CaptureVisit {
-    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-        if field.name() == "message" {
-            self.0 = format!("{value:?}");
+    /// tracing field visitor capturing an event's `message` field.
+    struct CaptureVisit(String);
+    impl tracing::field::Visit for CaptureVisit {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            if field.name() == "message" {
+                self.0 = format!("{value:?}");
+            }
         }
     }
-}
 
-/// Capturing tracing layer: records (level, message) pairs while a scoped
-/// default subscriber is active.
-struct CaptureLayer(Arc<std::sync::Mutex<Vec<(tracing::Level, String)>>>);
-impl<S> tracing_subscriber::Layer<S> for CaptureLayer
-where
-    S: tracing::Subscriber,
-{
-    fn on_event(
-        &self,
-        event: &tracing::Event<'_>,
-        _ctx: tracing_subscriber::layer::Context<'_, S>,
-    ) {
-        let mut visit = CaptureVisit(String::new());
-        event.record(&mut visit);
-        self.0.lock().unwrap().push((*event.level(), visit.0));
+    /// Capturing tracing layer: records (level, message) pairs while a scoped
+    /// default subscriber is active.
+    struct CaptureLayer(Arc<std::sync::Mutex<Vec<(tracing::Level, String)>>>);
+    impl<S> tracing_subscriber::Layer<S> for CaptureLayer
+    where
+        S: tracing::Subscriber,
+    {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            let mut visit = CaptureVisit(String::new());
+            event.record(&mut visit);
+            self.0
+                .lock()
+                .unwrap()
+                .push((*event.metadata().level(), visit.0));
+        }
     }
-}
 
-/// MessageRepository wrapper counting store() calls, delegating to the mem
-/// adapter — proves whether the emitter reached the persistence port.
-struct CountingMessages {
-    inner: mem::MemMessageRepository,
-    stores: std::sync::atomic::AtomicUsize,
-}
+    /// MessageRepository wrapper counting store() calls, delegating to the mem
+    /// adapter — proves whether the emitter reached the persistence port.
+    struct CountingMessages {
+        inner: mem::MemMessageRepository,
+        stores: std::sync::atomic::AtomicUsize,
+    }
 
-#[async_trait::async_trait]
-impl gyre_ports::MessageRepository for CountingMessages {
-    async fn store(&self, message: &Message) -> anyhow::Result<()> {
-        self.stores
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        self.inner.store(message).await
+    #[async_trait::async_trait]
+    impl gyre_ports::MessageRepository for CountingMessages {
+        async fn store(&self, message: &Message) -> anyhow::Result<()> {
+            self.stores
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.inner.store(message).await
+        }
+        async fn find_by_id(&self, id: &Id) -> anyhow::Result<Option<Message>> {
+            self.inner.find_by_id(id).await
+        }
+        async fn list_after(
+            &self,
+            agent_id: &Id,
+            after_ts: u64,
+            after_id: Option<&Id>,
+            limit: usize,
+        ) -> anyhow::Result<Vec<Message>> {
+            self.inner
+                .list_after(agent_id, after_ts, after_id, limit)
+                .await
+        }
+        async fn list_unacked(&self, agent_id: &Id, limit: usize) -> anyhow::Result<Vec<Message>> {
+            self.inner.list_unacked(agent_id, limit).await
+        }
+        async fn count_unacked(&self, agent_id: &Id) -> anyhow::Result<u64> {
+            self.inner.count_unacked(agent_id).await
+        }
+        async fn acknowledge(&self, message_id: &Id, agent_id: &Id) -> anyhow::Result<()> {
+            self.inner.acknowledge(message_id, agent_id).await
+        }
+        async fn acknowledge_all(&self, agent_id: &Id, reason: &str) -> anyhow::Result<u64> {
+            self.inner.acknowledge_all(agent_id, reason).await
+        }
+        async fn list_by_workspace(
+            &self,
+            workspace_id: &Id,
+            kind: Option<&str>,
+            since: Option<u64>,
+            before_ts: Option<u64>,
+            before_id: Option<&Id>,
+            limit: Option<usize>,
+        ) -> anyhow::Result<Vec<Message>> {
+            self.inner
+                .list_by_workspace(workspace_id, kind, since, before_ts, before_id, limit)
+                .await
+        }
+        async fn expire_events(&self, older_than: u64) -> anyhow::Result<u64> {
+            self.inner.expire_events(older_than).await
+        }
+        async fn expire_acked_inboxes(&self, older_than: u64) -> anyhow::Result<u64> {
+            self.inner.expire_acked_inboxes(older_than).await
+        }
+        async fn expire_for_agents(
+            &self,
+            agent_ids: &[Id],
+            older_than: u64,
+        ) -> anyhow::Result<u64> {
+            self.inner.expire_for_agents(agent_ids, older_than).await
+        }
     }
-    async fn find_by_id(&self, id: &Id) -> anyhow::Result<Option<Message>> {
-        self.inner.find_by_id(id).await
-    }
-    async fn list_after(
-        &self,
-        agent_id: &Id,
-        after_ts: u64,
-        after_id: Option<&Id>,
-        limit: usize,
-    ) -> anyhow::Result<Vec<Message>> {
-        self.inner
-            .list_after(agent_id, after_ts, after_id, limit)
+
+    #[tokio::test]
+    async fn emit_scoped_event_rejects_scopeless_non_broadcast_message() {
+        use gyre_common::message::Destination;
+        use tracing_subscriber::prelude::*;
+
+        let counting = Arc::new(CountingMessages {
+            inner: mem::MemMessageRepository::default(),
+            stores: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let state = mem::test_state_with_messages(counting.clone());
+        let mut bus_rx = state.message_broadcast_tx.subscribe();
+        let mut dispatch_rx = state
+            .take_message_dispatch_rx()
             .await
-    }
-    async fn list_unacked(&self, agent_id: &Id, limit: usize) -> anyhow::Result<Vec<Message>> {
-        self.inner.list_unacked(agent_id, limit).await
-    }
-    async fn count_unacked(&self, agent_id: &Id) -> anyhow::Result<u64> {
-        self.inner.count_unacked(agent_id).await
-    }
-    async fn acknowledge(&self, message_id: &Id, agent_id: &Id) -> anyhow::Result<()> {
-        self.inner.acknowledge(message_id, agent_id).await
-    }
-    async fn acknowledge_all(&self, agent_id: &Id, reason: &str) -> anyhow::Result<u64> {
-        self.inner.acknowledge_all(agent_id, reason).await
-    }
-    async fn list_by_workspace(
-        &self,
-        workspace_id: &Id,
-        kind: Option<&str>,
-        since: Option<u64>,
-        before_ts: Option<u64>,
-        before_id: Option<&Id>,
-        limit: Option<usize>,
-    ) -> anyhow::Result<Vec<Message>> {
-        self.inner
-            .list_by_workspace(workspace_id, kind, since, before_ts, before_id, limit)
-            .await
-    }
-    async fn expire_events(&self, older_than: u64) -> anyhow::Result<u64> {
-        self.inner.expire_events(older_than).await
-    }
-    async fn expire_acked_inboxes(&self, older_than: u64) -> anyhow::Result<u64> {
-        self.inner.expire_acked_inboxes(older_than).await
-    }
-    async fn expire_for_agents(&self, agent_ids: &[Id], older_than: u64) -> anyhow::Result<u64> {
-        self.inner.expire_for_agents(agent_ids, older_than).await
-    }
-}
+            .expect("dispatcher not yet taken");
 
-#[tokio::test]
-async fn emit_scoped_event_rejects_scopeless_non_broadcast_message() {
-    use gyre_common::message::Destination;
+        let logs = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(CaptureLayer(logs.clone()));
+        // current_thread test runtime: the whole future (and every await resume)
+        // runs on this thread, so the thread-local default subscriber captures
+        // everything the emitter logs.
+        let _guard = tracing::subscriber::set_default(subscriber);
 
-    let counting = Arc::new(CountingMessages {
-        inner: mem::MemMessageRepository::default(),
-        stores: std::sync::atomic::AtomicUsize::new(0),
-    });
-    let state = mem::test_state_with_messages(counting.clone());
-    let mut bus_rx = state.message_broadcast_tx.subscribe();
-    let mut dispatch_rx = state
-        .take_message_dispatch_rx()
-        .await
-        .expect("dispatcher not yet taken");
+        // Workspace destination + workspace_id None → Err, error-level log,
+        // nothing stored / broadcast / dispatched.
+        let result = state
+            .emit_scoped_event(
+                Id::new("tenant-1"),
+                None,
+                Destination::Workspace(Id::new("ws-x")),
+                MessageKind::TaskCreated,
+                None,
+            )
+            .await;
+        assert!(
+            result.is_err(),
+            "scopeless Workspace message must be rejected"
+        );
 
-    let logs = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let subscriber = tracing_subscriber::registry().with(CaptureLayer(logs.clone()));
-    // current_thread test runtime: the whole future (and every await resume)
-    // runs on this thread, so the thread-local default subscriber captures
-    // everything the emitter logs.
-    let _guard = tracing::subscriber::set_default(subscriber);
+        // Agent destination + workspace_id None → same rejection.
+        let result = state
+            .emit_scoped_event(
+                Id::new("tenant-1"),
+                None,
+                Destination::Agent(Id::new("agent-x")),
+                MessageKind::TaskAssignment,
+                None,
+            )
+            .await;
+        assert!(result.is_err(), "scopeless Agent message must be rejected");
 
-    // Workspace destination + workspace_id None → Err, error-level log,
-    // nothing stored / broadcast / dispatched.
-    let result = state
-        .emit_scoped_event(
-            Id::new("tenant-1"),
-            None,
-            Destination::Workspace(Id::new("ws-x")),
-            MessageKind::TaskCreated,
-            None,
-        )
-        .await;
-    assert!(result.is_err(), "scopeless Workspace message must be rejected");
+        let logs = logs.lock().unwrap();
+        assert!(
+            logs.iter()
+                .any(|(level, msg)| *level == tracing::Level::ERROR
+                    && msg.contains("workspace scope")),
+            "the guard must log at error level, captured: {logs:?}"
+        );
+        drop(logs);
 
-    // Agent destination + workspace_id None → same rejection.
-    let result = state
-        .emit_scoped_event(
-            Id::new("tenant-1"),
-            None,
-            Destination::Agent(Id::new("agent-x")),
-            MessageKind::TaskAssignment,
-            None,
-        )
-        .await;
-    assert!(result.is_err(), "scopeless Agent message must be rejected");
+        assert_eq!(
+            counting.stores.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "no message may reach store()"
+        );
+        assert!(
+            bus_rx.try_recv().is_err(),
+            "no message may reach the broadcast channel"
+        );
+        assert!(
+            dispatch_rx.try_recv().is_err(),
+            "no message may reach the dispatch consumer"
+        );
 
-    let logs = logs.lock().unwrap();
-    assert!(
-        logs.iter()
-            .any(|(level, msg)| *level == tracing::Level::ERROR
-                && msg.contains("workspace scope")),
-        "the guard must log at error level, captured: {logs:?}"
-    );
-    drop(logs);
+        // Control 1 — Broadcast is the specced carve-out: workspace_id None is
+        // valid for Broadcast (never stored, but broadcast + dispatched).
+        let result = state
+            .emit_scoped_event(
+                Id::new("tenant-1"),
+                None,
+                Destination::Broadcast,
+                MessageKind::TaskCreated,
+                None,
+            )
+            .await;
+        assert!(result.is_ok(), "Broadcast without workspace scope is valid");
+        assert_eq!(counting.stores.load(std::sync::atomic::Ordering::SeqCst), 0);
+        let bus_msg = bus_rx.try_recv().expect("Broadcast must be broadcast");
+        assert!(matches!(bus_msg.to, Destination::Broadcast));
+        let _ = dispatch_rx.try_recv();
 
-    assert_eq!(
-        counting.stores.load(std::sync::atomic::Ordering::SeqCst),
-        0,
-        "no message may reach store()"
-    );
-    assert!(
-        bus_rx.try_recv().is_err(),
-        "no message may reach the broadcast channel"
-    );
-    assert!(
-        dispatch_rx.try_recv().is_err(),
-        "no message may reach the dispatch consumer"
-    );
-
-    // Control 1 — Broadcast is the specced carve-out: workspace_id None is
-    // valid for Broadcast (never stored, but broadcast + dispatched).
-    let result = state
-        .emit_scoped_event(
-            Id::new("tenant-1"),
-            None,
-            Destination::Broadcast,
-            MessageKind::TaskCreated,
-            None,
-        )
-        .await;
-    assert!(result.is_ok(), "Broadcast without workspace scope is valid");
-    assert_eq!(counting.stores.load(std::sync::atomic::Ordering::SeqCst), 0);
-    let bus_msg = bus_rx.try_recv().expect("Broadcast must be broadcast");
-    assert!(matches!(bus_msg.to, Destination::Broadcast));
-    let _ = dispatch_rx.try_recv();
-
-    // Control 2 — a scoped (Some(workspace_id)) Workspace message passes the
-    // guard, is stored once, and is broadcast.
-    let result = state
-        .emit_scoped_event(
-            Id::new("tenant-1"),
-            Some(Id::new("ws-x")),
-            Destination::Workspace(Id::new("ws-x")),
-            MessageKind::TaskCreated,
-            None,
-        )
-        .await;
-    assert!(result.is_ok(), "scoped message must pass the guard");
-    assert_eq!(
-        counting.stores.load(std::sync::atomic::Ordering::SeqCst),
-        1,
-        "scoped message must be stored exactly once"
-    );
-    let bus_msg = bus_rx.try_recv().expect("scoped message must be broadcast");
-    assert_eq!(bus_msg.workspace_id, Some(Id::new("ws-x")));
-}
+        // Control 2 — a scoped (Some(workspace_id)) Workspace message passes the
+        // guard, is stored once, and is broadcast.
+        let result = state
+            .emit_scoped_event(
+                Id::new("tenant-1"),
+                Some(Id::new("ws-x")),
+                Destination::Workspace(Id::new("ws-x")),
+                MessageKind::TaskCreated,
+                None,
+            )
+            .await;
+        assert!(result.is_ok(), "scoped message must pass the guard");
+        assert_eq!(
+            counting.stores.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "scoped message must be stored exactly once"
+        );
+        let bus_msg = bus_rx.try_recv().expect("scoped message must be broadcast");
+        assert_eq!(bus_msg.workspace_id, Some(Id::new("ws-x")));
+    }
 }
