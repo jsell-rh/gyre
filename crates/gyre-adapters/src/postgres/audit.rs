@@ -477,15 +477,13 @@ fn apply_filters(mut query: BoxedAuditQuery, filter: &AuditQueryFilter) -> Boxed
         query = query.filter(audit_events::workspace_id.eq(w.clone()));
     }
     // Tenant scoping (admin-panel.md §Audit Log Viewer): rows scoped to
-    // the caller's tenant, plus unscoped legacy rows (NULL tenant — created
-    // before tenant attribution existed); another tenant's events are
-    // never returned.
+    // the caller's tenant only. Unattributed legacy rows (NULL tenant,
+    // created before tenant attribution existed) are visible to unscoped
+    // internal reads only — never to a tenant-scoped admin query, which
+    // would attribute them to a tenant they did not come from — and
+    // another tenant's events are never returned.
     if let Some(t) = &filter.tenant_id {
-        query = query.filter(
-            audit_events::tenant_id
-                .eq(t.clone())
-                .or(audit_events::tenant_id.is_null()),
-        );
+        query = query.filter(audit_events::tenant_id.eq(t.clone()));
     }
     if let Some(u) = &filter.user_id {
         query = query.filter(audit_events::user_id.eq(u.clone()));
@@ -551,22 +549,23 @@ mod tests {
     }
 
     #[test]
-    fn tenant_filter_is_eq_or_null_union_in_sql() {
-        // The caller's tenant PLUS unscoped legacy rows: the predicate must
-        // be an (tenant_id = $n OR tenant_id IS NULL) union, never a bare
-        // equality that would hide legacy rows, and never absent.
+    fn tenant_filter_is_bare_equality_in_sql() {
+        // The caller's tenant ONLY: the predicate must be a bare
+        // "tenant_id = $n" equality. A (tenant_id = $n OR tenant_id IS
+        // NULL) union would leak unattributed legacy rows to every
+        // tenant-scoped admin query — the exact contradiction of the
+        // AuditEvent::tenant_id contract the task-273 review round fixed.
         let filtered = sql(&AuditQueryFilter {
             tenant_id: Some("tenant-1".to_string()),
             ..all()
         });
         assert!(
-            filtered.contains("\"tenant_id\" = $") && filtered.contains("\"tenant_id\" IS NULL"),
+            filtered.contains("\"tenant_id\" = $"),
             "tenant scoping predicate missing: {filtered}"
         );
-        // Both sides of the union in one parenthesized OR group.
         assert!(
-            filtered.contains(" OR "),
-            "tenant union must be a grouped OR: {filtered}"
+            !filtered.contains("\"tenant_id\" IS NULL"),
+            "tenant scoping must not union NULL-tenant rows in: {filtered}"
         );
 
         let unfiltered = sql(&all());
@@ -615,7 +614,11 @@ mod tests {
             ..all()
         });
         assert!(both.contains("LIKE"));
-        assert!(both.contains("\"tenant_id\" IS NULL"));
+        assert!(both.contains("\"tenant_id\" = $"));
+        assert!(
+            !both.contains("\"tenant_id\" IS NULL"),
+            "tenant scoping must stay a bare equality when combined with q: {both}"
+        );
     }
 
     #[test]

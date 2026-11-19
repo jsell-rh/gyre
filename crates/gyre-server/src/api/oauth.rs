@@ -8,7 +8,7 @@
 //!    a random `state` + PKCE `code_verifier`, persists them via the
 //!    `OAuthStateRepository` port with the initiating admin and tenant
 //!    derived SERVER-SIDE from the authenticated caller (never
-//!    client-supplied), and redirects (302) to the provider's
+//!    client-supplied), and redirects (303 See Other) to the provider's
 //!    authorization endpoint.
 //! 2. The provider redirects to
 //!    `GET /api/v1/oauth/claude-max/callback?code=…&state=…` (public: the
@@ -126,7 +126,7 @@ pub struct EnrollRequest {
 /// POST /api/v1/admin/oauth/claude-max/enroll — Admin-only initiation of
 /// the Claude Max OAuth enrollment. Persists the authorization-request
 /// state (server-derived admin + tenant, PKCE verifier, expiry) and
-/// redirects (302) to the provider's authorization endpoint.
+/// redirects (303 See Other) to the provider's authorization endpoint.
 pub async fn enroll_claude_max(
     State(state): State<Arc<AppState>>,
     auth: AuthenticatedAgent,
@@ -215,7 +215,12 @@ pub async fn enroll_claude_max(
         "Claude Max OAuth enrollment initiated"
     );
 
-    Ok(Redirect::temporary(authorization_url.as_str()))
+    // 303 See Other: the enrollment is a POST, and 303 is the
+    // method-switching redirect — a redirect-following client re-issues
+    // GET at the provider's authorization endpoint (RFC 9110 §15.4.4;
+    // 307 Temporary Redirect would preserve POST and re-send the JSON
+    // body to the provider, which expects GET per RFC 6749 §3.1).
+    Ok(Redirect::to(authorization_url.as_str()))
 }
 
 #[derive(Deserialize)]
@@ -478,7 +483,7 @@ mod tests {
         let state = crate::mem::test_state();
         let app = app(state.clone());
         let response = app.oneshot(enroll_request("{}")).await.unwrap();
-        assert_eq!(response.status(), StatusCode::FOUND);
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
         let location = response
             .headers()
             .get("location")
@@ -727,5 +732,42 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn callback_reachable_through_full_middleware_stack_without_bearer() {
+        // Review-round regression (task-273): the provider's redirect to
+        // the callback carries NO Gyre credentials, so the request must
+        // pass `require_auth_middleware` — the outermost layer of
+        // `build_router` — and reach the handler, not die with 401
+        // "Missing Bearer token" before the state row is ever validated.
+        // The tests above use a bare two-route Router without the
+        // middleware stack, which is exactly how this stayed green while
+        // the full stack 401'd; this test pins the DEPLOYED shape.
+        let state = crate::mem::test_state();
+        let app = crate::build_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/oauth/claude-max/callback?code=x&state=y")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // No Authorization header at all: the request must reach the
+        // handler, which rejects the unknown state with 400 — a 401 here
+        // means the route is unreachable in deployment and the whole
+        // enroll→provider→callback→exchange flow cannot complete.
+        assert_ne!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "callback must be reachable without a Bearer token (provider redirect)"
+        );
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "unknown state must be rejected by the handler itself"
+        );
     }
 }

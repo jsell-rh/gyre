@@ -176,3 +176,36 @@ fn looks_like_sops_distinguishes_formats() {
     assert!(!looks_like_sops(b"{}"));
     assert!(!looks_like_sops(b"not json at all"));
 }
+
+/// Cross-implementation ground truth (review round for the task-273 SOPS
+/// backend): this document was produced by an INDEPENDENT implementation
+/// of the sops v3.9.4 algorithm — Node's crypto for AES-256-GCM (32-byte
+/// IV, verified against sops's own Go test vector) and the npm
+/// `age-encryption` package for the data-key wrap — following the fetched
+/// getsops/sops v3.9.4 source:
+///
+/// - `sops.go Tree.Encrypt`: the MAC hash writes `ToBytes(value)` per
+///   non-comment leaf — KEY PATHS NEVER ENTER THE HASH (a single-value
+///   binary envelope hashes its one value), formatted `%X` uppercase hex;
+/// - `cmd/sops/common/common.go:121-128`: the MAC string is sealed with
+///   the data key using `LastModified.Format(time.RFC3339)` as the AAD;
+/// - `aes/cipher.go`: 32-byte IVs, `ENC[...]` field format.
+///
+/// If the Rust implementation hashed key paths into the MAC (the
+/// reviewer's concern), sealed the MAC under a different AAD, or wrapped
+/// the data key non-conformantly, this decryption would fail. The fixed
+/// identity is the vector's private key; the plaintext is deterministic.
+#[test]
+fn sops_decrypt_accepts_independent_implementation_vector() {
+    const DOC: &str = r#"{"data":"ENC[AES256_GCM,data:x6/ONQmhHZbiveotUqIRDmazl8GqOAQ4cAioBhqTZQ/yb6w=,iv:DxIVGBseISQnKi0wMzY5PD9CRUhLTlFUV1pdYGNmaWw=,tag:vJV2EVLE4icTA8hKSRLwQg==,type:str]","sops":{"kms":null,"gcp_kms":null,"azure_kv":null,"hc_vault":null,"age":[{"recipient":"age145tc8r9pk3akl2r3l3gugrmzpuu32flruvewvz0e0er36kptv93s8tmw8w","enc":"-----BEGIN AGE ENCRYPTED FILE-----\nYWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBrWEU4RHRQd0UyakJUZUpN\nN2o3Y25yZ3E5TzNlR3d6R2JPWGJEWVN0cUVzCkRLdTJlZzhaRWFYWUpNd2dqaVlT\nRzZSazdqaThpR1ExdWFkeitnUWFxVDAKLS0tIGJQM3hhOCthRFNFMkJsY1FGRjcw\naERKbUlWcG9XYml0Y0VjTVBBY0RSMFEK349+lVcAho+0XNFjZD3ZozvxhcsVSnwM\nEi0kRiW5txPe0bSSsJ214oeM9Qley3Aj/HMPZS04y/WC6rE/iu+Rrw==\n-----END AGE ENCRYPTED FILE-----\n"}],"lastmodified":"2026-11-19T00:25:55Z","mac":"ENC[AES256_GCM,data:5kROQBD3I+vmmQm6QzrvdW2oyla4odjhBMXzSyqi2chl2g3jG/GHxm2JXPdjpF50EMUGQmHxGjGsDatIEGqVsm5rCP7bDKCpxicFJFXo3+xtNz+e341lNPWgORQVi3809K9R4Rwxi5cCxtMgmont46BW8lVNKttSNThbVhl0lGI=,iv:P0ZNVFtiaXB3foWMk5qhqK+2vcTL0tng5+71/AMKERg=,tag:Mu8p0uiWw7Ir9AyHS2AreA==,type:str]","pgp":null,"unencrypted_suffix":"","version":"3.9.4"}}"#;
+    const IDENTITY: &str = "AGE-SECRET-KEY-1LRT6VMP96WQ9ZA466EGQ46WY5ZMQK0NTH7E9FTEXL4FFJF7K2WUSMFGVNM";
+    let identity = AgeIdentity::from_str(IDENTITY).unwrap();
+    let decrypted = sops_decrypt(DOC.as_bytes(), &identity).unwrap();
+    assert_eq!(
+        decrypted,
+        b"sops-cross-check-ground-truth-value",
+        "an independently generated sops v3.9.4 document must decrypt"
+    );
+}
+
+

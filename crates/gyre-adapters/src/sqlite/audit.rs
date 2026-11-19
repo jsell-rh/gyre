@@ -477,15 +477,13 @@ fn apply_filters(mut query: BoxedAuditQuery, filter: &AuditQueryFilter) -> Boxed
         query = query.filter(audit_events::workspace_id.eq(w.clone()));
     }
     // Tenant scoping (admin-panel.md §Audit Log Viewer): rows scoped to
-    // the caller's tenant, plus unscoped legacy rows (NULL tenant — created
-    // before tenant attribution existed); another tenant's events are
-    // never returned.
+    // the caller's tenant only. Unattributed legacy rows (NULL tenant,
+    // created before tenant attribution existed) are visible to unscoped
+    // internal reads only — never to a tenant-scoped admin query, which
+    // would attribute them to a tenant they did not come from — and
+    // another tenant's events are never returned.
     if let Some(t) = &filter.tenant_id {
-        query = query.filter(
-            audit_events::tenant_id
-                .eq(t.clone())
-                .or(audit_events::tenant_id.is_null()),
-        );
+        query = query.filter(audit_events::tenant_id.eq(t.clone()));
     }
     if let Some(u) = &filter.user_id {
         query = query.filter(audit_events::user_id.eq(u.clone()));
@@ -1015,9 +1013,14 @@ mod tests {
     // ── TASK-273: tenant scoping + free-text q search (SQL path) ─────────────
 
     #[tokio::test]
-    async fn audit_query_tenant_scoped_with_null_legacy_union() {
-        // Tenant scoping: rows of the caller's tenant plus unscoped legacy
-        // rows (NULL tenant) are returned; ANOTHER tenant's rows never are.
+    async fn audit_query_tenant_scoped_excludes_null_and_other_tenants() {
+        // Tenant scoping: ONLY rows of the caller's tenant are returned.
+        // Another tenant's rows are never visible, and unattributed legacy
+        // rows (NULL tenant — created before tenant attribution existed)
+        // are visible to unscoped internal reads only: returning them to a
+        // tenant-scoped admin query would attribute them to a tenant they
+        // did not come from (gyre-domain/src/audit.rs AuditEvent::tenant_id
+        // contract; migration 000070 comment).
         let (_tmp, s) = setup();
 
         let mut t1 = make_event("e-t1", "a1", AuditEventType::FileAccess, 100);
@@ -1042,24 +1045,31 @@ mod tests {
         let ids: Vec<&str> = results.iter().map(|e| e.id.as_str()).collect();
         assert_eq!(
             ids,
-            vec!["e-legacy", "e-t1"],
-            "own tenant + NULL-legacy union, newest first"
+            vec!["e-t1"],
+            "own tenant only — NULL-legacy and other-tenant rows excluded"
         );
 
         // count_filtered agrees with the query.
         assert_eq!(
             AuditRepository::count_filtered(&s, &filter).await.unwrap(),
-            2
+            1
         );
 
-        // A tenant-2 caller sees only its own row plus the legacy row.
+        // A tenant-2 caller likewise sees only its own row.
         let filter = AuditQueryFilter {
             tenant_id: Some("tenant-2".to_string()),
             ..all()
         };
         let results = AuditRepository::query(&s, &filter).await.unwrap();
         let ids: Vec<&str> = results.iter().map(|e| e.id.as_str()).collect();
-        assert_eq!(ids, vec!["e-legacy", "e-t2"]);
+        assert_eq!(ids, vec!["e-t2"]);
+
+        // Unscoped internal reads (no tenant filter) still see all rows,
+        // including the legacy one — that is the NULL-tenant visibility
+        // contract's only surface.
+        let results = AuditRepository::query(&s, &all()).await.unwrap();
+        let ids: Vec<&str> = results.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(ids, vec!["e-legacy", "e-t2", "e-t1"]);
     }
 
     #[tokio::test]
@@ -1174,7 +1184,7 @@ mod tests {
 
         // Tenant scoping composes with the compressed-row q path: another
         // tenant's caller sees nothing (both rows carry explicit tenants,
-        // so the NULL-legacy union does not apply here).
+        // so no unattributed-row question arises here).
         let filter = AuditQueryFilter {
             q: Some("compressed_needle".to_string()),
             tenant_id: Some("tenant-other".to_string()),

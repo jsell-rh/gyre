@@ -12,8 +12,11 @@ pub struct AuditQueryFilter {
     pub workspace_id: Option<String>,
     /// Tenant scoping (admin-panel.md §Audit Log Viewer): every query from
     /// an authenticated caller is scoped to the caller's tenant — events of
-    /// other tenants are never returned. Derived server-side from the
-    /// acting identity, never client-supplied.
+    /// other tenants are never returned, and unattributed (NULL-tenant
+    /// legacy) rows are visible to unscoped internal reads only, never to
+    /// a tenant-scoped query (they cannot be attributed to a tenant they
+    /// did not come from). Derived server-side from the acting identity,
+    /// never client-supplied.
     pub tenant_id: Option<String>,
     /// Free-text search over the detail payload (case-insensitive substring).
     /// Enforced by the SQL adapters against the `detail` column, with
