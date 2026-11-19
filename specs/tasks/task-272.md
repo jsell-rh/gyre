@@ -360,3 +360,28 @@ Publish exactly the independently reviewed missing-work plan below. Only create 
 ## Shipped
 
 Task definitions and explicit bindings only; no product implementation claimed.
+
+### Reconciliation round
+
+The published branch conflicted with main (task-274's admin-panel backlog
+publication had landed and appended entries to the same
+`specs/task-spec-inputs.json` regions). Resolved as merge commit
+`249facf13d83495d325ff401eb81b616d61d848a` (parents: candidate `2459036a` +
+main `ee03c299`): both conflicts were purely additive, so the resolution keeps
+this branch's four agent-workflow backlog sections and spec-gap bindings and
+main's admin-panel section and binding — the union of both sides. All task
+documents (task-268 through task-274), registry entries, coverage statuses, and
+product files from both sides are preserved; no product behavior changed.
+
+### Verification evidence
+
+- Resolved `specs/task-spec-inputs.json` parses as JSON; all five newly added
+  keys (four agent-workflow, one admin-panel) present; every binding target
+  resolves to a section entry (no dangling references).
+- `git diff ee03c299` on the registry shows only this branch's four additions —
+  no deletions or rewrites of main's entries; final tree vs main differs by
+  exactly the six task-272 publication files (628 insertions, 0 deletions).
+- Canonical spec `specs/development/agent-workflow.md` is byte-identical to
+  both merge parents; task-268..271 remain `not-started` and identical to the
+  independently reviewed plan.
+- Evidence retained at `/tmp/stage/review-evidence/task-272-reconcile.txt`.
