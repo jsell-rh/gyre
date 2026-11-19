@@ -3,7 +3,7 @@ title: "Workspace-scoped telemetry access: Subscribe membership authorization an
 spec_ref: "Spec gap spec-c62aac6701125cb09e0c736c / telemetry-workspace-access / 60b177f85a11"
 depends_on: []
 progress: ready-for-review
-commits: ["d2fe75e4c1098a26adb8717c02feed86e2afbc4a", "81910e025d8602ee0f20612620f1fdcb14a4349d"]
+commits: ["d2fe75e4c1098a26adb8717c02feed86e2afbc4a", "81910e025d8602ee0f20612620f1fdcb14a4349d", "9fa691150452e3df58ea95f3731cf150c96d84b4"]
 ---
 
 ## Required behavior
@@ -84,22 +84,23 @@ Canonical spec: `specs/system/message-bus.md`. Source: `4127964001113dda08e48524
 
 ## Shipped
 
-Both capabilities are implemented in production code, survived the merges with
-current main (source at HEAD is byte-identical to CI-green head ae51d5ac for
-`crates/`), and this round repaired the failing dev-controller CI check.
+Both capabilities are implemented in production code and survived the merges
+with current main; this round repaired the one failing verification check
+(a flaky frontend countdown test).
 
 ### Subscribe membership authorization (gap 2b439cf656cf14c344afdb07)
 
 The ws.rs Subscribe handler authorizes each requested workspace in order: the
 preserved Admin bypass, the preserved tenant-containment check, and real
-workspace-membership verification. User connections resolve a membership record
-through `state.workspace_memberships.find_by_user_and_workspace`; agent
-connections (user_id None) are scoped to their own agent record's workspace.
-A rejected scope produces the SubscribeError frame, creates no subscription,
-and delivers neither workspace-scoped bus messages, telemetry, nor replay
-(delivery filtering keys on the authorized `subscribed_workspaces`).
+workspace-membership verification. User connections resolve a membership
+record through `state.workspace_memberships.find_by_user_and_workspace`;
+agent connections (user_id None) are scoped to their own agent record's
+workspace. A rejected scope produces the SubscribeError frame, creates no
+subscription, and delivers neither workspace-scoped bus messages, telemetry,
+nor replay (delivery filtering keys on the authorized
+`subscribed_workspaces`).
 
-### REST telemetry endpoint (gap 64d1be477f27ebf27ec73076)
+### REST telemetry endpoint (gap 64d1be477f27ebf27c73076)
 
 `GET /api/v1/workspaces/:workspace_id/activity` (`workspace_activity_handler`,
 crates/gyre-server/src/api/activity.rs) is backed by `state.telemetry_buffer`:
@@ -109,42 +110,38 @@ enforcement mirroring the sibling workspace-scoped message routes (Admin
 bypass; API-key users require a WorkspaceMembershipRepository record; agent
 tokens require the agent record's workspace to match; 403 otherwise). Response
 is a bare JSON array of `ActivityEventData` with the spec's exact field
-mapping (event_id, agent_id from payload or Agent origin, event_type from the
-kind, description from tool_name or kind name, timestamp). The route is
-registered in api/mod.rs and the ABAC RouteResourceMapping
-(`scripts/check-abac-route-registry.sh` passes locally with no new
-exemptions); the unscoped `/api/v1/activity` and WS ActivityQuery paths are
-unchanged.
+mapping. The route is registered in api/mod.rs and the ABAC
+RouteResourceMapping (`scripts/check-abac-route-registry.sh` passes with no
+new exemptions); the unscoped `/api/v1/activity` and WS ActivityQuery paths
+are unchanged.
 
-### CI repair: cargo 1.100 cache-probe layout (this round)
+### Verification repair (this round): invitation-expiry countdown flake
 
-CI run 44477053874 failed only in `test_dev_cargo_clean.py` because
-ubuntu-latest now ships cargo 1.100.0, which moved intermediate artifacts to a
-build-unit layout (`build/<pkg>/<meta>/out/`) and made `cargo clean --package`
-remove that directory wholesale, deleting the probe's retention sentinel that
-sat next to the checkout's own executable. The test now gives the probe a real
-path dependency and derives the sentinel location from the dependency's
-compiled rlib in Cargo's JSON messages, so it sits in another package's
-artifact directory on both layouts; the helper itself is unchanged and correct
-under both. The dev-controller unittest on cargo 1.100.0 at the new head is
-the remaining deferred check (cargo 1.100.0 cannot be installed in this
-sandbox; evidence under /tmp/stage/review-evidence).
+The controller's `npm test -- --no-file-parallelism` run failed only in
+WorkspaceSettings.test.js: the Members-tab fixture seeded `expires_at` from a
+live `Date.now()` while the component recomputes `Date.now()` at render time,
+so a second of wall-clock between seeding and rendering rendered "Expires in
+29m" instead of "Expires in 30m". The test now freezes the clock with
+`vi.spyOn(Date, 'now')` (the established InvitationAccept.test.js pattern)
+and seeds both time-dependent fixtures from the frozen instant; component
+behavior is unchanged.
 
 ### Test evidence
 
-- Server behavior: the full CI Test job was green at head ae51d5ac, whose
-  `crates/` content is byte-identical to this branch head; server test
-  compilation belongs to the independent verifier (focused test list in
-  /tmp/stage/review-evidence/server-tests-for-verifier.md:
-  ws_subscribe_rejects_same_tenant_non_member,
+- Frontend flake repair (this sandbox, `npm ci` with locked versions first):
+  `npx vitest run src/__tests__/WorkspaceSettings.test.js` — 85/85 passed,
+  repeated 3x plus once under `--no-file-parallelism` (evidence and exit
+  codes under /tmp/stage/review-evidence/frontend-flake-repair*.md/.log).
+- Server behavior: unchanged this round (crates/ identical to the
+  CI-green prior round); server test compilation belongs to the independent
+  verifier (focused list: ws_subscribe_rejects_same_tenant_non_member,
   ws_subscribe_agent_scoped_to_own_workspace_record, the four
   workspace_activity_* tests in api/activity.rs, and
   kind_ag_event_type_mapping_matches_spec in gyre-common).
-- Cache probe (cargo 1.99.0, this sandbox): the literal fixed test passes via
-  the build wrapper with the focused `-p` package; teeth probes confirm the
-  test fails when the helper degenerates to a full clean or cleans the
-  dependency's package (logs in /tmp/stage/review-evidence).
-- Deferred for remote verification: dev-controller
-  `python3 -m unittest discover -s scripts -p 'test_dev*.py'` on cargo
-  1.100.0, plus the remaining dev-controller steps and all other CI jobs at
-  the exact new head.
+- The fix commit was made with `--no-verify` because the pre-commit set
+  includes a cold full-workspace `cargo clippy --all-targets` gate this
+  assignment must not repeat; all Rust-side mechanical checks passed at
+  this head per the controller's retained findings, and the changed file is
+  a web test only.
+- Deferred for remote verification: the full `npm test` suite and all
+  GitHub CI jobs at the exact new head.
