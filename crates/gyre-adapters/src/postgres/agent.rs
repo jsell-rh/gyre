@@ -260,6 +260,7 @@ impl AgentRepository for PgStorage {
                 agents::current_task_id.eq(a.current_task_id.as_ref().map(|id| id.as_str())),
                 agents::lifetime_budget_secs.eq(a.lifetime_budget_secs.map(|v| v as i64)),
                 agents::last_heartbeat.eq(a.last_heartbeat.map(|v| v as i64)),
+                agents::spawned_by.eq(a.spawned_by.as_deref()),
                 agents::orchestrator_type.eq(orchestrator_type_to_str(&a.orchestrator_type)),
                 agents::repo_id.eq(a.repo_id.as_ref().map(|id| id.as_str())),
                 agents::restart_on_failure.eq(a.restart_on_failure),

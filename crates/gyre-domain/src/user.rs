@@ -353,6 +353,12 @@ pub struct User {
     pub oidc_issuer: Option<String>,
     /// When the user last authenticated (HSI §12). Server-recorded.
     pub last_login_at: Option<u64>,
+    /// Manager's user id — the `manager.value` of the SCIM enterprise
+    /// extension (RFC 7643 §4.3), pushed by the IdP over SCIM
+    /// (identity-security.md §SCIM User Schema). `None` while no manager
+    /// has been provisioned. Not user-editable via the profile API.
+    #[serde(default)]
+    pub manager_id: Option<Id>,
     /// Unix seconds at which a TenantAdmin deactivated the account
     /// (user-management.md §API > User Management: PUT /users/{id}/deactivate).
     /// None while the account is active. A deactivated user fails
@@ -381,6 +387,7 @@ impl User {
             roles: vec![UserRole::ReadOnly],
             oidc_issuer: None,
             last_login_at: None,
+            manager_id: None,
             deactivated_at: None,
             created_at: now,
             updated_at: now,

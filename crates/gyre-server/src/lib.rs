@@ -847,6 +847,22 @@ async fn require_auth_middleware(
         return next.run(req).await;
     }
 
+    // SCIM 2.0 provisioning endpoints (identity-security.md §SCIM
+    // Provisioning) authenticate with the dedicated `GYRE_SCIM_TOKEN`
+    // bearer token — a server-to-server credential separate from the agent
+    // JWT / global-token ladder below. Passing a SCIM request through that
+    // ladder rejected it 401 ("Invalid token") before the handler-level
+    // `check_scim_auth` ever ran, so the specced authentication model did
+    // not work end-to-end in the shipped server. The exemption is safe
+    // because every /scim/v2 handler enforces `check_scim_auth` itself:
+    // fail-closed 403 when GYRE_SCIM_TOKEN is unset, constant-time bearer
+    // compare otherwise. ABAC middleware passes these routes through as
+    // resolver-exempt (RouteResourceMapping::exempt entries), so no policy
+    // evaluation is skipped by this bypass.
+    if req.uri().path().starts_with("/scim/v2/") {
+        return next.run(req).await;
+    }
+
     let token = req
         .headers()
         .get(axum::http::header::AUTHORIZATION)
