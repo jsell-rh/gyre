@@ -125,7 +125,8 @@ Canonical spec: `specs/system/message-bus.md`. Source: `4127964001113dda08e48524
 
 All five send-path guards are implemented and retained on this branch
 (955c134a, 9dd4a1f0, 873d0821, 3bb9c9bd, a2781ff0), merged with current
-main (cd088f9c → task-254, 02e018de → task-259).
+main (cd088f9c → task-254, 02e018de → task-259, d5a69026 → task-274,
+specs-only).
 
 ### Behavior
 
@@ -159,10 +160,11 @@ main (cd088f9c → task-254, 02e018de → task-259).
    (nothing stored or broadcast), including Server-origin global-token
    callers. An unresolvable workspace record rejects fail-closed.
 
-### This round: verification repair (951fa88b)
+### Verification repairs
 
-Retained verification (`cargo test --all`, exit 101) failed the three
-task-254 tests in `crates/gyre-server/tests/message_size_and_key_rotation.rs`
+**Round 7 — task-254 fixture repair (951fa88b).** Retained
+verification (`cargo test --all`, exit 101) failed the three task-254
+tests in `crates/gyre-server/tests/message_size_and_key_rotation.rs`
 with 403 "target agent ... cannot be resolved; tenant isolation cannot
 be verified": those fixtures predate rule 1 and created only the target
 agent row, never the workspace record the guard resolves the tenant
@@ -172,6 +174,17 @@ first, mirroring the `create_agent_in_workspace` helper this task's own
 tests use; the rotation test's boot 2 reuses the same SQLite DB so the
 row persists. No assertion weakened (same sends must still return
 201/413); production code unchanged.
+
+**Round 8 — attribution recording.** Retained verification
+(`bash /tmp/stage/checks.sh`, exit 1) failed the task-commit-attribution
+gate: 951fa88b mentions task-254 in its subject and touches product
+surface, so the gate requires its SHA in task-254's `commits:`
+frontmatter as well (review scoping). Recorded it there
+(specs/tasks/task-254.md, with a note in that task's Shipped record) —
+the frozen exemption file was NOT extended. No code change this round:
+`git diff 30e9049b..HEAD -- crates/ web/` is empty, so the verified
+candidate's code surface is bit-identical to this head; the merge with
+main (ee03c299, task-274 spec backlog) is specs-only.
 
 ### Test evidence
 
@@ -188,5 +201,8 @@ row persists. No assertion weakened (same sends must still return
 - Prior rounds' in-sandbox probes for the five guards themselves
   (origin-table probes, rule-1 cross-tenant 403 with empty store, WS
   replay/live `acknowledged` exclusion, mem-store Err-on-None contract
-  test, scopeless-guard Err + error-level log) are unchanged by this
-  round's fixture-only repair and remain in the commits above.
+  test, scopeless-guard Err + error-level log) are unchanged by the
+  fixture-only and specs-only repairs and remain in the commits above.
+- Round 8 probe: `bash scripts/check-task-commit-attribution.sh` exits 0
+  after the task-254 frontmatter recording (it exited 1 on the retained
+  run with 951fa88b/task-254 as the only violation).
