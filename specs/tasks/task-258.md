@@ -3,7 +3,7 @@ title: "Agent-to-commit tracking at session granularity: session persistence, br
 spec_ref: "Spec gap spec-36fad8fcafe7b73a2b6f2d0e / agent-session-commit-tracking / b580b93c564f"
 depends_on: []
 progress: ready-for-review
-commits: ["fff11b71fb5e9a7f3a113c61bbcccfbd79e1b295", "eff02cffb16bbc5ad1026478ff46d2062b5c6ceb", "50452ac5318beaf98f0ff6a5b63557f02c0543b3"]
+commits: ["fff11b71fb5e9a7f3a113c61bbcccfbd79e1b295", "eff02cffb16bbc5ad1026478ff46d2062b5c6ceb", "50452ac5318beaf98f0ff6a5b63557f02c0543b3", "dfcb500fa9dfcc496f67b5a52b3ff830c0a9c77c"]
 ---
 
 ## Required behavior
@@ -99,15 +99,25 @@ bullets are real, persisted, queryable behavior:
 
 All new routes are registered in the ABAC resolver (repo resource).
 
-### This round — rebase repair (2da3d0b1)
+### Repair rounds
 
-The controller rebase of candidate c2352d0e onto base 28a3a40b
-(task-259 mirror namespace isolation + task-254 message limits) was
-redone and committed: the sole conflict, specs/coverage/system/
-source-control.md, was resolved by keeping the task-258 row 12
-(Agent-to-Commit Tracking) coverage from this branch and taking the
-base's row 13 (External Repository Mirroring, task-259) update.
-No source behavior changed; the merged tree keeps both tasks' work.
+- **Rebase repair (2da3d0b1)**: the controller rebase of candidate
+  c2352d0e onto base 28a3a40b (task-259 mirror namespace isolation +
+  task-254 message limits) was redone and committed: the sole
+  conflict, specs/coverage/system/source-control.md, was resolved by
+  keeping this branch's row 12 (Agent-to-Commit Tracking) coverage and
+  taking the base's row 13 (External Repository Mirroring, task-259)
+  update. No source behavior changed; the merged tree keeps both
+  tasks' work.
+- **Formatting repair (dfcb500f)**: the independent verifier's
+  checks.sh failed with exit 1 solely on `rustfmt: mcp.rs changed
+  lines need formatting: 5648-5652` — the
+  `handle_agent_complete(...)` call in the
+  `mcp_agent_complete_terminates_open_session_with_dirty_state` test.
+  Fixed by running `rustfmt --edition 2021` on mcp.rs
+  (formatting-only, behavior preserved); every .rs file changed vs
+  base ee03c299 is now whole-file rustfmt-clean
+  (/tmp/stage/review-evidence/rustfmt-fix-mcp.txt).
 
 ### Test evidence
 
@@ -130,6 +140,9 @@ At merged tree 2da3d0b1 (evidence under /tmp/stage/review-evidence/):
   check-mem-port-contracts, check-abac-route-registry,
   check-abac-exempt-handlers, check-in-memory-state-stores,
   check-migration-versions (merge-repair-gates.txt).
+- The verifier's own checks.sh run at candidate 0a28d46f confirmed
+  every gate above clean; its sole failure was the mcp.rs rustfmt
+  finding, repaired in dfcb500f (rustfmt-fix-mcp.txt).
 - gyre-server test *execution* remains blocked in this sandbox by the
   build wrapper's 4 GiB hard budget (infrastructure restriction, not a
   code defect). The independent verifier must run: `cargo test --all`
