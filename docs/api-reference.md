@@ -276,6 +276,8 @@ See [server-config.md](server-config.md) for authentication mechanisms and envir
 | `GET/PUT` | `/api/v1/admin/llm/config/{function}` | **Admin only** — Get / set tenant-wide default LLM config for a function (applied when no workspace override exists) (LLM integration) |
 | `GET/PUT` | `/api/v1/admin/llm/prompts/{function}` | **Admin only** — Get / set tenant-wide default prompt template for a function (LLM integration) |
 | `GET` | `/api/v1/federation/trusted-issuers` | List configured trusted remote Gyre instances (base URLs from `GYRE_TRUSTED_ISSUERS`); returns `[]` when federation is disabled (G11) |
+| `POST` | `/api/v1/federation/spiffe/attest` | SPIFFE federation (Layer 1, independent of the OIDC-issuer layer): a federated agent presents its X.509-SVID (PEM chain, leaf first; body `{"svid": "..."}`) for workload-identity verification against the trust bundle exchanged with the SVID's trust domain (`GYRE_SPIFFE_FEDERATION_PEERS`). Fail-closed 403 on a trust domain whose bundle was never exchanged, an untrusted/expired signer, or an SVID naming another session. Returns the extracted SPIFFE ID, trust domain, role, session id, serial, and `not_after` (task-262) |
+| `GET` | `/api/v1/federation/spiffe/workload` | The federated caller's own workload-attestation record on this instance (404 before a first verifying SVID presentation) (task-262) |
 | `POST` | `/api/v1/auth/api-keys` | Create API key (Admin role required; returns `gyre_<uuid>` key — stored as SHA-256 hash, visible only once on creation; rotate by creating a new key) |
 | `GET` | `/metrics` | Prometheus metrics (request count, duration, active agents, merge queue depth) |
 | `GET` | `/api/v1/admin/health` | Admin: server uptime + agent/task/project counts (Admin only) |
@@ -392,7 +394,7 @@ Four auth mechanisms are accepted (checked in priority order):
 |---|---|---|
 | `GYRE_AUTH_TOKEN` env var | Server config (default: `gyre-dev-token`) | Global admin — all endpoints |
 | JWT agent token (EdDSA) | Returned by `POST /api/v1/agents/spawn` (starts with `ey`, 3 dot-separated parts) | Agent-scoped; signed + expiry validated + revocation checked; verify via `/.well-known/jwks.json`; TTL via `GYRE_AGENT_JWT_TTL` (M18) |
-| Federated JWT (remote EdDSA) | JWT minted by a trusted remote Gyre instance in `GYRE_TRUSTED_ISSUERS` | Agent-scoped; verified via remote OIDC discovery + JWKS (no local registration); `agent_id = "<remote-host>/<sub>"`; JWKS cached 5 min per issuer (G11) |
+| Federated JWT (remote EdDSA) | JWT minted by a trusted remote Gyre instance in `GYRE_TRUSTED_ISSUERS` | Agent-scoped; verified via remote OIDC discovery + JWKS (no local registration); `agent_id = "<remote-host>/<sub>"`; JWKS cached 5 min per issuer (G11). Layer 2 only — the federated agent's Layer-1 SVID is verified separately via `POST /api/v1/federation/spiffe/attest` against the exchanged SPIFFE trust bundle (task-262) |
 | Per-agent UUID token | Returned by `POST /api/v1/agents` (legacy); still accepted for backwards compatibility | Agent-scoped operations |
 | API key (`gyre_<uuid>`) | `POST /api/v1/auth/api-keys` (Admin only) | Same as the user's role |
 | JWT (Keycloak OIDC) | Keycloak token exchange | Role from `realm_access` JWT claim |

@@ -28,6 +28,7 @@
 
 pub mod bundle;
 pub mod ca;
+pub mod federation;
 pub mod id;
 pub mod verify;
 pub mod workload_api;
@@ -36,8 +37,8 @@ pub use bundle::{parse_trust_bundle, trust_bundle_jwks};
 pub use ca::{TrustDomainCa, BASE_SVID_TTL_SECS};
 pub use id::{agent_spiffe_id, AgentPath, SpiffeId};
 pub use verify::{
-    verify_svid, verify_svid_for_record_id, ExpectedIdentity, VerificationError, VerifiedSvid,
-    CHAIN_PEM_LABEL,
+    extract_spiffe_id, verify_svid, verify_svid_for_record_id, ExpectedIdentity, VerificationError,
+    VerifiedSvid, CHAIN_PEM_LABEL,
 };
 
 /// The canonical hex form of an X.509 serial number: minimal big-endian

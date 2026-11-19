@@ -531,6 +531,12 @@ impl ResourceResolver {
                 RouteResourceMapping::api("/api/v1/dependencies/graph", "dependency", None),
                 // ── Federation ─────────────────────────────────────────────
                 RouteResourceMapping::api("/api/v1/federation/trusted-issuers", "federation", None),
+                RouteResourceMapping::api(
+                    "/api/v1/federation/spiffe/attest",
+                    "federation",
+                    Some("write"),
+                ),
+                RouteResourceMapping::api("/api/v1/federation/spiffe/workload", "federation", None),
                 // ── Budget ─────────────────────────────────────────────────
                 RouteResourceMapping::api("/api/v1/workspaces/:id/budget", "budget", None),
                 RouteResourceMapping::api("/api/v1/budget/summary", "budget", None),
