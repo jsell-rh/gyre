@@ -30,7 +30,8 @@ import { query } from '@anthropic-ai/claude-agent-sdk';
 import { createHash } from 'node:crypto';
 import { gzip } from 'node:zlib';
 import { promisify } from 'node:util';
-import { writeFileSync, mkdirSync } from 'node:fs';
+import { writeFileSync, mkdirSync, existsSync } from 'node:fs';
+import { spawn as spawnChild } from 'node:child_process';
 import { join } from 'node:path';
 
 const gzipAsync = promisify(gzip);
@@ -277,6 +278,12 @@ Instructions:
 3. Commit your changes with a descriptive conventional-commit message.
 4. Push your changes: \`git push origin ${branch}\`
 
+The runner mechanically verifies your work: after you finish, it runs the
+repository's locally-configured quality gates (GYRE_LOCAL_GATES) in your
+working directory BEFORE completion. If they fail you will receive the
+failing gate's name and captured output — fix the failures, commit, and push
+again. No merge request is created until every gate passes.
+
 Do NOT call gyre_agent_complete — the runner handles completion after uploading
 conversation provenance. Just implement, commit, and push.
 
@@ -293,9 +300,16 @@ Begin by reading your task description, then implement it completely.`;
 // hop the registry is stored and attested but never actually shapes agent
 // behavior — "the meta-spec registry IS the prompt configuration".
 const metaSpecPrompt = (process.env.GYRE_META_SPEC_PROMPT || '').trim();
-const fullPrompt = metaSpecPrompt
-  ? `${metaSpecPrompt}\n---\n${taskPrompt}`
-  : taskPrompt;
+// agent-runtime.md §5 / task-268 (4): the PROTOCOL section is
+// system-managed, injected at spawn as GYRE_PROTOCOL_PROMPT. Include it in
+// the LLM query prompt so the protocol's instructions (Ralph loop rules,
+// MCP tool catalog, and the Act-step norm "run the repo's quality gates")
+// actually reach the model — an env var the model never sees shapes
+// nothing.
+const protocolPrompt = (process.env.GYRE_PROTOCOL_PROMPT || '').trim();
+const fullPrompt = [metaSpecPrompt, protocolPrompt, taskPrompt]
+  .filter((section) => section.length > 0)
+  .join('\n---\n');
 
 // ── Main execution ──────────────────────────────────────────────────────────
 
@@ -311,8 +325,14 @@ let messageCount = 0;
 let lastHeartbeat = Date.now();
 const HEARTBEAT_INTERVAL_MS = 15_000; // Must be < server's 60s stale timeout
 let conversationSha = null;
-try {
-  for await (const message of query({ prompt: fullPrompt, options })) {
+
+/**
+ * Run one SDK query to completion, collecting provenance, forwarding
+ * progress to stdout/server logs, and heartbeating. Used for the initial
+ * task prompt AND for pre-PR gate-failure remediation queries.
+ */
+async function runAgentQuery(prompt) {
+  for await (const message of query({ prompt, options })) {
     messageCount++;
 
     // Record message for provenance
@@ -380,9 +400,181 @@ try {
       }
     }
   }
+}
 
-  // ── Post-query: upload conversation, then signal completion ─────────────
+// ── Pre-PR local verification (agent-workflow.md §Immediate Feedback) ───────
+//
+// The server delivers the repo's locally-runnable command gates as
+// GYRE_LOCAL_GATES JSON ([{id, name, command, timeout_secs?}]), derived
+// from the repo's real QualityGate configuration. After the agent query
+// loop and BEFORE any conversation upload / completion call (which creates
+// the MR), each command is executed as a real subprocess in the agent's
+// working directory with a bounded timeout — no unbounded waits: slow or
+// absent feedback is a platform bug per the spec. On failure the captured
+// output is fed back to the agent as a follow-up SDK query for remediation;
+// completion happens only when every gate passes. If the retry cap is
+// exhausted the runner terminates with a nonzero exit and no completion
+// call — an unambiguous failure, never a knowingly-broken MR.
 
+const LOCAL_GATE_DEFAULT_TIMEOUT_MS = 300_000;
+const LOCAL_GATE_MAX_OUTPUT_CHARS = 8_000;
+
+/**
+ * Parse GYRE_LOCAL_GATES. Returns an array (possibly empty) on success, or
+ * null when the variable is set but malformed — the platform delivered
+ * corrupt gate config, and treating that as "no gates" would silently skip
+// local verification and open an MR anyway. The caller fails closed.
+ */
+function parseLocalGates() {
+  const raw = process.env.GYRE_LOCAL_GATES;
+  if (!raw || !raw.trim()) return [];
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (e) {
+    console.error(`[local-gates] GYRE_LOCAL_GATES is malformed JSON — failing closed, no MR will be created: ${e.message}`);
+    return null;
+  }
+  if (!Array.isArray(parsed)) {
+    console.error('[local-gates] GYRE_LOCAL_GATES is not a JSON array — failing closed, no MR will be created');
+    return null;
+  }
+  return parsed.filter((g) => g && typeof g.command === 'string' && g.command.trim() !== '');
+}
+
+/** The directory gate commands run in: the agent worktree when it exists,
+ * else the process cwd (the entrypoint starts the runner there). */
+function gateWorkDir() {
+  const configured = process.env.GYRE_WORK_DIR;
+  if (configured && existsSync(configured)) return configured;
+  return process.cwd();
+}
+
+function truncateForFeedback(text) {
+  if (text.length <= LOCAL_GATE_MAX_OUTPUT_CHARS) return text;
+  return text.slice(0, LOCAL_GATE_MAX_OUTPUT_CHARS) + '\n...(truncated)';
+}
+
+/**
+ * Execute one gate command as a real subprocess with a bounded timeout.
+ * Resolves {ok, code, timedOut, output}; a hang is SIGKILLed at the timeout
+ * and reported as a failure with feedback, never an indefinite wait.
+ */
+function runGateCommand(gate, cwd) {
+  const timeoutMs = Number.isFinite(gate.timeout_secs) && gate.timeout_secs > 0
+    ? gate.timeout_secs * 1000
+    : LOCAL_GATE_DEFAULT_TIMEOUT_MS;
+  return new Promise((resolve) => {
+    // Detached process group (posix): the shell runs the command in its own
+    // group so a timeout kill can take down the WHOLE tree — killing only
+    // the shell would orphan the real command, which would keep the stdio
+    // pipes (and this promise) open well past the timeout.
+    const child = spawnChild(gate.command, {
+      shell: true,
+      cwd,
+      detached: process.platform !== 'win32',
+    });
+    let output = '';
+    let timedOut = false;
+    let settled = false;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(result);
+    };
+    const killTree = () => {
+      try {
+        if (process.platform === 'win32' || !child.pid) {
+          child.kill('SIGKILL');
+        } else {
+          process.kill(-child.pid, 'SIGKILL');
+        }
+      } catch {
+        try { child.kill('SIGKILL'); } catch { /* already gone */ }
+      }
+    };
+    const timer = setTimeout(() => {
+      timedOut = true;
+      killTree();
+      // Guarantee the bounded wait even if the kill cannot take down the
+      // whole tree (e.g. an orphaned grandchild holding the stdio pipes):
+      // destroy our ends of the pipes and settle NOW with a timeout
+      // failure — never an indefinite hang.
+      try {
+        child.stdout?.destroy();
+        child.stderr?.destroy();
+      } catch { /* already closed */ }
+      finish({
+        ok: false,
+        code: null,
+        timedOut: true,
+        output: `${output}\n[gate timed out after ${timeoutMs}ms and was killed]`,
+      });
+    }, timeoutMs);
+    child.stdout?.on('data', (d) => { output += d.toString(); });
+    child.stderr?.on('data', (d) => { output += d.toString(); });
+    child.on('error', (err) => {
+      finish({ ok: false, code: null, timedOut: false, output: `${output}\n[gate process failed to start: ${err.message}]` });
+    });
+    child.on('close', (code) => {
+      if (timedOut) return; // already settled by the timeout path
+      finish({ ok: code === 0, code, timedOut: false, output });
+    });
+  });
+}
+
+/** Run every local gate; log each result (failures include the captured
+ * output — the runner log is the unambiguous feedback channel) and return
+ * the failing gates with their results. */
+async function runLocalGates(gates) {
+  const cwd = gateWorkDir();
+  const failures = [];
+  for (const gate of gates) {
+    const label = gate.name || gate.command;
+    console.log(`[local-gates] running gate "${label}": ${gate.command}`);
+    postLog(`[local-gates] running gate "${label}"`);
+    const result = await runGateCommand(gate, cwd);
+    if (result.ok) {
+      console.log(`[local-gates] gate "${label}" passed`);
+      postLog(`[local-gates] gate "${label}" passed`);
+    } else {
+      const reason = result.timedOut
+        ? `timed out after ${gate.timeout_secs ?? LOCAL_GATE_DEFAULT_TIMEOUT_MS / 1000}s and was killed`
+        : result.code === null
+          ? 'failed to start'
+          : `exited with code ${result.code}`;
+      console.error(`[local-gates] gate "${label}" FAILED (${reason})`);
+      console.error(`[local-gates] gate "${label}" output:\n${truncateForFeedback(result.output)}`);
+      postLog(`[local-gates] gate "${label}" FAILED (${reason})`);
+      failures.push({ gate, result });
+    }
+  }
+  return failures;
+}
+
+/** Build the remediation follow-up query: the failing gates' names and
+ * captured output fed back to the agent so it can fix the work. */
+function gateFailureFeedback(failures) {
+  const sections = failures.map(({ gate, result }) => {
+    const label = gate.name || gate.command;
+    const reason = result.timedOut
+      ? 'the command did not finish within its timeout and was killed'
+      : result.code === null
+        ? 'the command failed to start'
+        : `the command exited with code ${result.code}`;
+    return `#### Gate "${label}" failed\nCommand: \`${gate.command}\`\nReason: ${reason}\nCaptured output:\n\`\`\`\n${truncateForFeedback(result.output)}\n\`\`\``;
+  });
+  return `The repository's local quality gates were executed in your working directory and FAILED.
+No merge request will be created until every gate passes. Fix the failures listed below,
+commit your changes, and push your branch.
+
+${sections.join('\n\n')}`;
+}
+
+/** Upload conversation provenance and signal completion (creates the MR).
+ * Called ONLY after all local gates pass. */
+async function completeAgent() {
   console.log(`[provenance] Uploading conversation (${conversationLog.length} messages, ${turnCounter} turns)...`);
   conversationSha = await uploadConversation();
   if (conversationSha) {
@@ -414,23 +606,61 @@ try {
   } catch (e) {
     console.warn(`[complete] failed: ${e.message}`);
   }
+}
+
+try {
+  await runAgentQuery(fullPrompt);
+
+  // ── Pre-PR local verification: run the repo's command gates BEFORE any
+  // completion call. No MR is opened until every gate passes.
+  const localGates = parseLocalGates();
+  if (localGates === null) {
+    // Malformed gate config — fail closed (provenance only, no completion).
+    await uploadConversation();
+    console.error('=== Agent runner aborted: malformed GYRE_LOCAL_GATES, no MR created ===');
+    postLog('Agent runner aborted: malformed GYRE_LOCAL_GATES, no MR created');
+    process.exit(1);
+  }
+  if (localGates.length > 0) {
+    const parsedCap = parseInt(process.env.GYRE_LOCAL_GATE_MAX_RETRIES ?? '2', 10);
+    const maxRemediations = Number.isFinite(parsedCap) && parsedCap >= 0 ? parsedCap : 2;
+    let remediations = 0;
+    for (;;) {
+      const failures = await runLocalGates(localGates);
+      if (failures.length === 0) break;
+      if (remediations >= maxRemediations) {
+        console.error(`[local-gates] ${failures.length} gate(s) still failing after ${remediations} remediation attempt(s) — retry cap exhausted`);
+        console.error('[local-gates] NOT signaling completion: no MR will be created for failing work');
+        postLog(`Agent runner failed: ${failures.length} local gate(s) still failing after ${remediations} remediation attempt(s); no MR created`);
+        // Provenance is uploaded (the conversation explains why), but the
+        // completion call — the MR-creating step — is never made.
+        await uploadConversation();
+        process.exit(1);
+      }
+      remediations++;
+      console.log(`[local-gates] ${failures.length} gate(s) failed — feeding failure output back to the agent (remediation attempt ${remediations}/${maxRemediations})`);
+      postLog(`[local-gates] ${failures.length} gate(s) failed — remediation attempt ${remediations}/${maxRemediations}`);
+      await runAgentQuery(gateFailureFeedback(failures));
+    }
+  }
+
+  // ── All local gates passed (or none configured): upload conversation,
+  // then signal completion ─────────────────────────────────────────────
+
+  await completeAgent();
 
   console.log(`=== Agent runner complete (${messageCount} messages, ${turnCounter} turns) ===`);
   postLog(`Agent complete: ${messageCount} messages, ${turnCounter} turns, conversation_sha=${conversationSha || 'none'}`);
 } catch (err) {
-  // Best-effort: upload whatever conversation we have even on error
+  // Best-effort: upload whatever conversation we have even on error —
+  // provenance only. The error-path force-completion is deliberately
+  // REMOVED (task-268): a runner error before local verification passes
+  // must not open an MR.
   console.log(`[provenance] Uploading partial conversation after error...`);
   conversationSha = await uploadConversation();
 
-  // Still try to complete
-  try {
-    await fetch(`${serverUrl}/api/v1/agents/${agentId}/complete`, {
-      method: 'POST',
-      headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ branch, title: `feat: implement task (error recovery)`, target_branch: 'main' }),
-    });
-  } catch (_) { /* best effort */ }
-
   console.error(`=== Agent runner error: ${err.message} ===`);
+  console.error('[complete] skipped: runner error before local verification passed — no MR created');
+  postLog(`Agent runner error: ${err.message}; completion skipped, no MR created`);
   process.exit(1);
 }
