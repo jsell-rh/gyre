@@ -2,8 +2,8 @@
 title: "Agent-to-commit tracking at session granularity: session persistence, branch lifecycle, dirty state, file/commit queries, and time-travel"
 spec_ref: "Spec gap spec-36fad8fcafe7b73a2b6f2d0e / agent-session-commit-tracking / b580b93c564f"
 depends_on: []
-progress: complete
-commits: ["dfcb500fa9dfcc496f67b5a52b3ff830c0a9c77c", "fff11b71fb5e9a7f3a113c61bbcccfbd79e1b295", "eff02cffb16bbc5ad1026478ff46d2062b5c6ceb", "50452ac5318beaf98f0ff6a5b63557f02c0543b3"]
+progress: ready-for-review
+commits: ["dfcb500fa9dfcc496f67b5a52b3ff830c0a9c77c", "fff11b71fb5e9a7f3a113c61bbcccfbd79e1b295", "eff02cffb16bbc5ad1026478ff46d2062b5c6ceb", "50452ac5318beaf98f0ff6a5b63557f02c0543b3", "f7d9c3883dda4d544507d78d6f7590e339f9ab96"]
 ---
 
 ## Required behavior
@@ -62,93 +62,62 @@ Canonical spec: `specs/system/source-control.md`. Source: `fb1424fbac55cd23cb086
 
 ## Shipped
 
-Production source implemented in 50452ac5: session persistence via the
-`AgentSessionRepository` port (crates/gyre-ports/src/agent_tracking.rs)
-with SQLite and PostgreSQL adapters (sqlite/session.rs, postgres/
-session.rs) over the shared portable migration `2026-11-14-000067_
-agent_sessions`, a mem adapter with identical duplicate/not-exists
-guards, and `store!` wiring into `AppState.agent_sessions` (lib.rs).
-Sessions are created at spawn (spawn_agent_core) and at each Ralph-loop
-fresh-context respawn (ralph_loop.rs relaunch_agent_session), and ended
-with real worktree observations on every termination path: complete_
-agent, fail_agent, the stale-agent Dead transition, MCP
-`gyre_agent_complete` (fff11b71), and the admin kill path (fff11b71,
-ended before worktree cleanup so `git status --porcelain` still sees
-the tree). All five source-control.md §Agent-to-Commit Tracking
-bullets are real, persisted, queryable behavior:
+All five source-control.md §Agent-to-Commit Tracking bullets are real,
+persisted, queryable behavior on this branch (original implementation in
+50452ac5, fff11b71, eff02cff, dfcb500f; this round's CI repair in
+f7d9c388):
 
-- **Session-to-commit mapping**: `AgentCommit.session_id` stamped from
-  the pushing agent's open session in record_pushed_commits and
-  POST /repos/:id/commits/record (NULL when no open session — never a
+- **Session-to-commit mapping**: `AgentSessionRepository` port with
+  SQLite/PostgreSQL adapters over migration `000067_agent_sessions`, a
+  mem adapter with identical guards, and `store!` wiring. Sessions are
+  created at spawn and at each Ralph-loop fresh-context respawn, ended
+  on every termination path (complete_agent, fail_agent, stale Dead,
+  MCP gyre_agent_complete, admin kill); `AgentCommit.session_id` is
+  stamped from the pushing agent's open session in record_pushed_
+  commits and POST /repos/:id/commits/record (NULL when none — never a
   fabricated id); chronological GET /repos/:id/agent-sessions/:sid/
-  commits (find_by_session, timestamp ASC).
+  commits.
 - **Branch lifecycle**: GET /repos/:id/agents/:aid/branch-lifecycle —
-  spawn-time branch, final branch resolved at termination via real
+  spawn-time branch, current branch resolved at termination via real
   `git rev-parse --abbrev-ref HEAD`, all observed commits.
 - **Dirty state**: real `git status --porcelain` in the agent's
-  worktree at termination; a missing/inaccessible worktree records
-  dirty=NULL plus dirty_detail, never a silent clean.
+  worktree at termination; missing worktrees record an explicit
+  unknown state, never a silent clean.
 - **Commit-based queries**: files_changed per pushed commit (real
-  `git diff-tree --no-commit-id --name-only -r --root` at push time);
-  GET /repos/:id/agent-sessions/by-file?path= and by-commit?sha=.
+  `git diff-tree` at push time); GET /repos/:id/agent-sessions/
+  by-file?path= and by-commit?sha=.
 - **Time-travel**: GET /repos/:id/agent-sessions/:sid/state — commits
-  in [started_at, ended_at] via real `git log --all --after/--before`,
-  plus the completion snapshot resolved from
-  refs/agents/{agent-id}/snapshots/{n} (newest ref whose commit date
-  ≤ ended_at, with tree sha + files).
+  in [started_at, ended_at] via real `git log --after/--before` plus
+  the completion snapshot resolved from refs/agents/{id}/snapshots/{n}.
 
-All new routes are registered in the ABAC resolver (repo resource).
+### This round: CI repair (run 44585095776)
 
-### Repair rounds
-
-- **Rebase repair (2da3d0b1)**: the controller rebase of candidate
-  c2352d0e onto base 28a3a40b (task-259 mirror namespace isolation +
-  task-254 message limits) was redone and committed: the sole
-  conflict, specs/coverage/system/source-control.md, was resolved by
-  keeping this branch's row 12 (Agent-to-Commit Tracking) coverage and
-  taking the base's row 13 (External Repository Mirroring, task-259)
-  update. No source behavior changed; the merged tree keeps both
-  tasks' work.
-- **Formatting repair (dfcb500f)**: the independent verifier's
-  checks.sh failed with exit 1 solely on `rustfmt: mcp.rs changed
-  lines need formatting: 5648-5652` — the
-  `handle_agent_complete(...)` call in the
-  `mcp_agent_complete_terminates_open_session_with_dirty_state` test.
-  Fixed by running `rustfmt --edition 2021` on mcp.rs
-  (formatting-only, behavior preserved); every .rs file changed vs
-  base ee03c299 is now whole-file rustfmt-clean
-  (/tmp/stage/review-evidence/rustfmt-fix-mcp.txt).
+`branch_lifecycle_view` failed with observed commits reversed
+(["BBBB", "AAAA"] vs ["AAAA", "BBBB"]). Root cause: the handler sorted
+observed commits by (timestamp, id); recorded timestamps have second
+granularity and ids are random UUIDs, so two commits recorded within
+the same second ordered arbitrarily — a genuine determinism defect in
+the "chronological" lifecycle view, not a test issue (the merge with
+4e88f183 did not touch this code). Fix (f7d9c388): break timestamp
+ties with the producing session's started_at — durable chronology,
+since one agent's sessions are sequential context windows, so session
+order never contradicts recorded-time order; the id remains only as
+the final deterministic fallback, and NULL-session commits key on
+their own timestamp. Added
+`branch_lifecycle_same_second_tie_ordered_by_session`, which pins the
+equal-timestamp tie deterministically (commits written directly with
+identical timestamps) instead of relying on wall-clock coincidence.
 
 ### Test evidence
 
-At merged tree 2da3d0b1 (evidence under /tmp/stage/review-evidence/):
-
-- `cargo check -p gyre-server --all-targets`: PASS, exit 0 — the
-  merged server (task-258 sessions + task-259 mirror changes)
-  type-checks including all test targets
-  (cargo-check-gyre-server-all-targets.txt).
-- `cargo test -p gyre-domain agent_tracking`: 7 passed, exit 0
-  (test-gyre-domain-agent_tracking.txt).
-- `cargo test -p gyre-adapters session`: 17 passed, exit 0 — includes
-  the SQLite session contract suite (create_and_find_by_agent_
-  chronological, create_duplicate_id_fails, find_by_id_and_repo,
-  find_open_by_agent, update_missing_session_fails,
-  update_termination_state_round_trip) and agent-commit session tests
-  (find_by_session_chronological, session_and_files_round_trip)
-  (test-gyre-adapters-session.txt).
-- Mechanical gates all PASS with no new exemption entries:
-  check-mem-port-contracts, check-abac-route-registry,
-  check-abac-exempt-handlers, check-in-memory-state-stores,
-  check-migration-versions (merge-repair-gates.txt).
-- The verifier's own checks.sh run at candidate 0a28d46f confirmed
-  every gate above clean; its sole failure was the mcp.rs rustfmt
-  finding, repaired in dfcb500f (rustfmt-fix-mcp.txt).
-- gyre-server test *execution* remains blocked in this sandbox by the
-  build wrapper's 4 GiB hard budget (infrastructure restriction, not a
-  code defect). The independent verifier must run: `cargo test --all`
-  per the acceptance criteria, including the regression tests
-  `mcp_agent_complete_terminates_open_session_with_dirty_state`,
-  `kill_agent_terminates_open_session_before_worktree_cleanup`, and
-  the two-session attribution / dirty-state / branch-lifecycle /
-  by-file / by-commit / time-travel integration tests added in
-  50452ac5.
+- `cargo check -p gyre-server`: clean on this exact head (f7d9c388).
+- Standalone mirror of the sort key (same-second tie, distinct
+  timestamps, NULL-session fallback) executed and passing; source and
+  output under /tmp/stage/review-evidence.
+- gyre-server test builds are deferred to the independent verifier
+  (build-wrapper budget). Required probes:
+  `cargo nextest run -p gyre-server api::agent_tracking` (covers
+  branch_lifecycle_view, branch_lifecycle_same_second_tie_ordered_
+  by_session, two_session_attribution, by_file_and_by_commit_queries,
+  session_state_time_travel) and the full
+  `cargo nextest run --all` plus the standing gate scripts.
