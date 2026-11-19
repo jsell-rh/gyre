@@ -260,6 +260,7 @@ impl AgentRepository for SqliteStorage {
                 agents::current_task_id.eq(a.current_task_id.as_ref().map(|id| id.as_str())),
                 agents::lifetime_budget_secs.eq(a.lifetime_budget_secs.map(|v| v as i64)),
                 agents::last_heartbeat.eq(a.last_heartbeat.map(|v| v as i64)),
+                agents::spawned_by.eq(a.spawned_by.as_deref()),
                 agents::orchestrator_type.eq(orchestrator_type_to_str(&a.orchestrator_type)),
                 agents::repo_id.eq(a.repo_id.as_ref().map(|id| id.as_str())),
                 agents::restart_on_failure.eq(a.restart_on_failure),
@@ -454,6 +455,37 @@ mod tests {
         assert_eq!(mine.len(), 2);
         assert_eq!(mine[0].id.as_str(), "a-new");
         assert_eq!(mine[1].id.as_str(), "a-old");
+    }
+
+    #[tokio::test]
+    async fn update_persists_spawned_by_attribution_changes() {
+        // Deactivation de-attribution (identity-security.md §SCIM
+        // Provisioning): the SCIM lifecycle clears `spawned_by` via
+        // `update`, so the column MUST be in the UPDATE set list — an
+        // update that silently skips it leaves deactivated users
+        // attributed as spawners forever (the mem adapter persists the
+        // whole struct, so only the SQL adapters can regress here).
+        let (_tmp, s) = setup();
+        let mut a = make_agent("a1", "worker");
+        a.spawned_by = Some("user-1".to_string());
+        s.create(&a).await.unwrap();
+
+        // Some -> None (deactivation clears attribution).
+        a.spawned_by = None;
+        s.update(&a).await.unwrap();
+        assert_eq!(
+            s.find_by_id(&a.id).await.unwrap().unwrap().spawned_by,
+            None,
+            "update must persist spawned_by clearance"
+        );
+
+        // None -> Some (re-attribution round-trips too).
+        a.spawned_by = Some("user-2".to_string());
+        s.update(&a).await.unwrap();
+        assert_eq!(
+            s.find_by_id(&a.id).await.unwrap().unwrap().spawned_by,
+            Some("user-2".to_string())
+        );
     }
 
     #[tokio::test]
