@@ -7,6 +7,12 @@ Run meaningful focused checks. A test that still passes with the relevant
 production behavior disabled is not proof. Save actual probe command, source,
 exit code, and output under /tmp/stage/review-evidence.
 
+For a formatting-only repair, compare the new source with the pinned formatter's
+output on the previously cited candidate. If they match and there are no other
+functional changes, inspect that diff and leave runtime execution to verification;
+do not cold-compile unchanged behavior. Always issue a fresh verdict for the
+current candidate; no earlier approval transfers.
+
 If `/tmp/stage/review-resume.json` exists, read it first. It identifies saved
 notes and probe evidence from an interrupted review of this exact candidate.
 Continue from those artifacts after checking their relevance; no previous
