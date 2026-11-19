@@ -402,7 +402,11 @@ pub async fn admin_audit(
         limit: q.limit.unwrap_or(100).min(1000),
         q: q.q,
     };
-    let events = state.audit.query(&filter).await.map_err(ApiError::Internal)?;
+    let events = state
+        .audit
+        .query(&filter)
+        .await
+        .map_err(ApiError::Internal)?;
     let count = events.len();
     Ok(Json(serde_json::json!({
         "events": events
@@ -427,12 +431,9 @@ pub struct ServerLogQuery {
     pub limit: Option<usize>,
 }
 
-pub async fn admin_server_logs(
-    Query(q): Query<ServerLogQuery>,
-) -> Json<serde_json::Value> {
+pub async fn admin_server_logs(Query(q): Query<ServerLogQuery>) -> Json<serde_json::Value> {
     let limit = q.limit.unwrap_or(200).min(5000);
-    let entries = crate::telemetry::server_log_buffer()
-        .query(q.level.as_deref(), q.since, limit);
+    let entries = crate::telemetry::server_log_buffer().query(q.level.as_deref(), q.since, limit);
     let count = entries.len();
     Json(serde_json::json!({
         "entries": entries,
@@ -520,7 +521,11 @@ pub(crate) async fn kill_agent(
         }
     }
     // TASK-273: the durable instance record reflects the admin kill.
-    if let Err(e) = state.agent_instances.mark_terminated(&id, "admin_kill").await {
+    if let Err(e) = state
+        .agent_instances
+        .mark_terminated(&id, "admin_kill")
+        .await
+    {
         tracing::warn!(
             agent_id = %id,
             "marking the killed agent instance terminated failed: {e:#}"
@@ -1492,7 +1497,6 @@ mod tests {
             .collect();
         assert!(ids.contains(&"ev-own"));
         assert!(ids.contains(&"ev-legacy"));
-
     }
 
     #[tokio::test]

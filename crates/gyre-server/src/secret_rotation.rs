@@ -221,10 +221,7 @@ fn parses_as_gcp_sa(value: &[u8]) -> bool {
 
 /// Strip PEM armor and base64-decode to DER (PKCS#8).
 fn pem_to_der(pem: &str) -> anyhow::Result<Vec<u8>> {
-    let b64: String = pem
-        .lines()
-        .filter(|l| !l.starts_with("-----"))
-        .collect();
+    let b64: String = pem.lines().filter(|l| !l.starts_with("-----")).collect();
     use base64::Engine as _;
     base64::engine::general_purpose::STANDARD
         .decode(b64.trim())
@@ -298,10 +295,7 @@ impl SecretRotationHandler for GcpServiceAccountHandler {
         let resp = http
             .post(&doc.token_uri)
             .form(&[
-                (
-                    "grant_type",
-                    "urn:ietf:params:oauth:grant-type:jwt-bearer",
-                ),
+                ("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer"),
                 ("assertion", assertion.as_str()),
             ])
             .send()
@@ -941,7 +935,9 @@ mod tests {
             .await
             .unwrap();
 
-        run_once(&state, &crate::jobs::JobRunLog::new()).await.unwrap();
+        run_once(&state, &crate::jobs::JobRunLog::new())
+            .await
+            .unwrap();
 
         let admin_notifs = state
             .notifications
@@ -981,7 +977,9 @@ mod tests {
         // real wall-clock now, so seed relative to real now instead.
         let now = now_secs();
         let state = seed(now).await;
-        run_once(&state, &crate::jobs::JobRunLog::new()).await.unwrap();
+        run_once(&state, &crate::jobs::JobRunLog::new())
+            .await
+            .unwrap();
 
         let admin_notifs = state
             .notifications
@@ -1043,8 +1041,12 @@ mod tests {
     async fn does_not_duplicate_notifications_on_rerun() {
         let now = now_secs();
         let state = seed(now).await;
-        run_once(&state, &crate::jobs::JobRunLog::new()).await.unwrap();
-        run_once(&state, &crate::jobs::JobRunLog::new()).await.unwrap();
+        run_once(&state, &crate::jobs::JobRunLog::new())
+            .await
+            .unwrap();
+        run_once(&state, &crate::jobs::JobRunLog::new())
+            .await
+            .unwrap();
 
         let admin_notifs = state
             .notifications
@@ -1105,7 +1107,9 @@ mod tests {
             .await
             .unwrap();
 
-        run_once(&state, &crate::jobs::JobRunLog::new()).await.unwrap();
+        run_once(&state, &crate::jobs::JobRunLog::new())
+            .await
+            .unwrap();
         let notifs = state
             .notifications
             .list_for_user(
@@ -1226,7 +1230,9 @@ mod tests {
         });
         let state = seed_oauth(now, cred.to_string().as_bytes()).await;
 
-        run_once(&state, &crate::jobs::JobRunLog::new()).await.unwrap();
+        run_once(&state, &crate::jobs::JobRunLog::new())
+            .await
+            .unwrap();
 
         // The handler performed a real refresh_token grant with the stored
         // credential (old refresh token + client id posted to the endpoint).
@@ -1309,7 +1315,9 @@ mod tests {
         let original = cred.to_string();
         let state = seed_oauth(now, original.as_bytes()).await;
 
-        run_once(&state, &crate::jobs::JobRunLog::new()).await.unwrap();
+        run_once(&state, &crate::jobs::JobRunLog::new())
+            .await
+            .unwrap();
 
         // Value untouched: the failed grant must not corrupt the credential.
         let value = state
@@ -1345,7 +1353,9 @@ mod tests {
         let now = now_secs();
         let state = seed_oauth(now, b"not-a-json-credential").await;
 
-        run_once(&state, &crate::jobs::JobRunLog::new()).await.unwrap();
+        run_once(&state, &crate::jobs::JobRunLog::new())
+            .await
+            .unwrap();
 
         let value = state
             .secrets

@@ -27,11 +27,11 @@ pub mod sigstore;
 pub(crate) mod health;
 pub mod impersonation;
 pub mod jobs;
-pub mod maintenance_jobs;
 pub mod llm_defaults;
 pub mod llm_helpers;
 pub mod llm_rate_limit;
 pub mod log_compression;
+pub mod maintenance_jobs;
 pub(crate) mod mcp;
 pub(crate) mod mem;
 pub mod merge_attestation;
@@ -1742,9 +1742,8 @@ fn build_secret_repository(
         .trim()
         .to_ascii_lowercase();
     if backend == "vault" {
-        let config = gyre_adapters::vault::VaultConfig::from_env().unwrap_or_else(|e| {
-            panic!("GYRE_SECRET_BACKEND=vault is misconfigured: {e:#}")
-        });
+        let config = gyre_adapters::vault::VaultConfig::from_env()
+            .unwrap_or_else(|e| panic!("GYRE_SECRET_BACKEND=vault is misconfigured: {e:#}"));
         let repo = gyre_adapters::vault::VaultSecretRepository::new(config.clone())
             .unwrap_or_else(|e| panic!("failed to initialize the Vault client: {e:#}"));
         tracing::info!(

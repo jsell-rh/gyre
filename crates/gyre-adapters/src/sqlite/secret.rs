@@ -605,7 +605,8 @@ mod tests {
         assert!(doc.get("data").is_some(), "SOPS document has a data key");
         let sops = doc.get("sops").expect("SOPS document has a sops key");
         assert!(
-            sops.get("age").is_some_and(|a| a.as_array().is_some_and(|arr| !arr.is_empty())),
+            sops.get("age")
+                .is_some_and(|a| a.as_array().is_some_and(|arr| !arr.is_empty())),
             "data key is age-encrypted: {sops}"
         );
         let stored = doc["data"].as_str().unwrap();
@@ -703,7 +704,11 @@ mod tests {
         assert_eq!(value, b"legacy-plaintext".to_vec());
 
         let (migrated, nonce) = decrypt_row(&storage, secret.id.as_str());
-        assert_eq!(nonce, Vec::<u8>::new(), "nonce column cleared after migration");
+        assert_eq!(
+            nonce,
+            Vec::<u8>::new(),
+            "nonce column cleared after migration"
+        );
         assert!(
             sops::looks_like_sops(&migrated),
             "row re-encrypted as a SOPS document"
@@ -961,7 +966,9 @@ mod tests {
         // the ciphertext no longer matches its authentication tag).
         let mut text = String::from_utf8(encrypted_value.clone()).unwrap();
         let marker = "ENC[AES256_GCM,data:";
-        let pos = text.find(marker).expect("document contains an encrypted value")
+        let pos = text
+            .find(marker)
+            .expect("document contains an encrypted value")
             + marker.len();
         let original = text.as_bytes()[pos];
         let replacement = if original == b'A' { b'B' } else { b'A' };

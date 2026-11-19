@@ -60,8 +60,7 @@ pub struct JobRun {
 impl JobRun {
     /// Derived run duration in seconds (`None` while the run is unfinished).
     pub fn duration_secs(&self) -> Option<u64> {
-        self.finished_at
-            .map(|f| f.saturating_sub(self.started_at))
+        self.finished_at.map(|f| f.saturating_sub(self.started_at))
     }
 
     fn from_record(record: gyre_ports::JobRunRecord) -> Self {

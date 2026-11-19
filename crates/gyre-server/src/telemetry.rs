@@ -40,9 +40,7 @@ pub struct ServerLogBuffer {
 impl ServerLogBuffer {
     fn new(capacity: usize) -> Self {
         Self {
-            entries: std::sync::RwLock::new(VecDeque::with_capacity(
-                capacity.min(1024),
-            )),
+            entries: std::sync::RwLock::new(VecDeque::with_capacity(capacity.min(1024))),
             capacity,
         }
     }
@@ -137,21 +135,13 @@ where
         }
 
         impl Visit for MessageVisitor {
-            fn record_debug(
-                &mut self,
-                field: &tracing::field::Field,
-                value: &dyn std::fmt::Debug,
-            ) {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
                 if field.name() == "message" {
                     self.message = format!("{value:?}");
                 }
             }
 
-            fn record_str(
-                &mut self,
-                field: &tracing::field::Field,
-                value: &str,
-            ) {
+            fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
                 if field.name() == "message" {
                     self.message = value.to_string();
                 }
