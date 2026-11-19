@@ -37,9 +37,15 @@ Config file is stored at `~/.gyre/config` (JSON):
 
 ### Bootstrap ([Platform Model §8](../specs/system/platform-model.md#8-bootstrap--first-run))
 
+Before running bootstrap with `--repo-path`, commit the changes you want to
+import. Use a clean checkout or review both the staged changes and pending
+changes to the starter-kit paths listed below. When `specs/manifest.yaml`
+exists, bootstrap can stage changes to existing starter-kit paths even without
+`--starter-kit`. Its plain `git commit` can include unrelated staged changes,
+and the resulting local commit can remain even if the push is refused.
+
 ```bash
-# Full non-dev bootstrap: tenant, admin user, workspace, repo, built-in
-# personas, default gates, and a repo orchestrator — one command.
+# Full non-dev bootstrap for importing a local Gyre checkout.
 gyre bootstrap \
   --tenant "Acme Corp" \
   --workspace "Platform Team" \
@@ -61,13 +67,17 @@ gyre bootstrap --dev
 gyre bootstrap --dev --starter-kit --repo-path /home/user/code/myrepo
 ```
 
-Steps performed in order: health check → create tenant → create admin user
-(skipped in `--dev`) + API key saved to `~/.gyre/config` → create workspace →
-register repo (bare repo initialized server-side) → register + pre-approve the
-four built-in personas (workspace-orchestrator, repo-orchestrator,
-accountability, security) → repository import and spec registry sync (when a
-local manifest is available) → configure default gates → spawn the repo
-orchestrator → print summary with all IDs, the one-time API key, and URLs.
+Bootstrap checks server health, creates or reuses the tenant, sets up the admin
+user outside `--dev`, and creates or reuses the workspace and repo. The server
+initializes new repos as bare repositories. Bootstrap registers and pre-approves
+the four built-in personas (workspace-orchestrator,
+repo-orchestrator, accountability, security). It then attempts repository import
+and spec registry sync when a local manifest is available, configures default
+gates, and requests a repo orchestrator. The summary reports the tenant,
+workspace, and repo IDs, the server URL, the clone URL if available, and the
+orchestrator status, including an already-active orchestrator or a launch
+failure. Bootstrap saves a newly issued admin API key to `~/.gyre/config` and
+prints it once in the summary when available.
 
 To import Gyre itself, point `--repo-path` at a local Gyre Git checkout with
 at least one commit. Bootstrap skips import if you omit `--repo-path` or the
@@ -83,10 +93,7 @@ require a manifest.
 
 When the manifest exists, bootstrap pushes the checkout's `HEAD` and its
 history to the target Gyre repo's `main`, then syncs the spec registry from
-the server repo's default branch. Commit the changes you want to import
-first. If existing starter-kit paths have pending changes, bootstrap stages
-them and makes a local commit. Any unrelated changes already staged can be
-included in that commit and pushed with it.
+the server repo's default branch.
 
 A normal push creates a missing `main` or fast-forwards it when the checkout
 is ahead. A matching `HEAD` needs no branch update and still triggers a sync.
@@ -97,18 +104,21 @@ For any other `main` with commits missing from the checkout, such as changes
 merged on the server, bootstrap refuses the push. It reports failures in the
 push-and-sync step and continues.
 
-After a refused push, fetch `main` from the intended Gyre repo and integrate
-it into the local branch you intend to import. Fast-forward if that branch
-is behind. If it has diverged, merge the fetched `main`. Reserve rebasing for
-unpublished commits. Then rerun bootstrap from that branch.
+After a refused push, fetch `main` from the intended Gyre repo and check for
+shared history with the branch you plan to import. If the branches share
+history, fast-forward if the local branch is behind or merge the fetched `main`
+if they have diverged. Reserve rebasing for unpublished commits. Then rerun
+bootstrap from that branch. If `main` has unrelated history and fails the seed
+check, bootstrap also refuses the push. Verify that you selected the intended
+Gyre repo and local checkout before retrying.
 
 The run is resumable: re-running `gyre bootstrap` with the same names reuses
 already-created resources (tenant, workspace, repo, personas are matched by
-slug/name; the admin user's saved API key in `~/.gyre/config` is reused; a
-live repo orchestrator is kept rather than re-spawned). If a step still fails,
-the CLI reports which steps completed. The admin API key is shown exactly
-once. Auth token precedence: `--token` flag > `GYRE_AUTH_TOKEN` env var >
-`gyre-dev-token` default.
+slug or name). It verifies the admin user's saved API key in `~/.gyre/config`
+before reusing it and keeps any active repo orchestrator. Fatal errors tracked
+by bootstrap include the failed step and the steps that completed. Auth token
+precedence is `--token` flag > `GYRE_AUTH_TOKEN` env var > `gyre-dev-token`
+default.
 
 ---
 
