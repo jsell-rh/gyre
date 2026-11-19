@@ -56,6 +56,12 @@ attention; there is no escalation to 8 GiB. Historical ad-hoc 8 GiB settings are
 ignored. The harness does not change namespace admission policy or cluster
 resources to increase its budget. Running allocations keep their assigned size.
 
+Operators can set `verification_memory_gib` to 6 when the remote full-suite
+verification workload needs that size from the outset (default 4). This applies
+only to verification and is capped by `worker_memory_max_gib`; coding and review
+still start at 4 GiB. Changing this setting does not resize running allocations
+or manufacture OOM evidence for other tasks.
+
 When the scoped runtime observer is configured, new compute admissions also
 respect the namespace's CPU, memory and pod quotas and container maxima. A fresh
 read-only observation accounts for every namespace pod (including other callers),
@@ -223,6 +229,14 @@ uncertain or queued merge retains that permit, while other candidates continue
 verification and publication. Per-task claims, safety holds, dependencies,
 independent review, exact-head CI, and upstream-tree confirmation still apply.
 
+When workflow-wide logs are unavailable because sibling jobs still run, the
+observer reads the completed failed job's logs after checking its head and
+attempt identity. If neither log source is available, merge remains blocked
+while diagnosis waits; absent logs do not create a speculative coding repair.
+For Python gate failures, an unchanged failing test that main has since edited
+requests fresh exact-tree verification and CI against main first. This is not
+approval: a failure on the refreshed base follows normal repair handling.
+
 A completed verification receipt stays pinned to its original tested head and
 base while main advances. The publisher checks freshness when CI becomes ready.
 It can reuse that original head only if Git proves the resulting merge tree is
@@ -305,6 +319,16 @@ the exact assigned candidate and base. Full commit ancestry is retained for
 attribution; unrelated historical attempt branches are excluded. Checkout blobs
 are materialized as needed and no host-local object alternates are copied into
 the sandbox. Remote Git access remains available for historical blob reads.
+
+After implementation tools stop, the trusted checkpoint finalizer runs the
+worker image's rustfmt on Rust files newly added since the assignment base.
+It includes committed and untracked additions, even after metadata-only commits,
+and leaves existing files' formatting debt alone. Formatting happens before the
+checkpoint and commit attribution, so independent review sees the actual
+normalized source. Formatter failures retain an unapproved source checkpoint;
+symlinks and shared files are rejected. Existing differential formatting checks
+remain mandatory in verification and CI. No prior approval transfers to a
+changed checkpoint.
 
 The model is `gateway/rits/zai-org/glm-5-3`. Fullsend strips `gateway/` and calls
 `https://api.enmaas.devshift.net/v1/chat/completions`, using the inline pinned
@@ -898,3 +922,105 @@ CI and guards are outside this amendment's authority. Independent review,
 remote verification and GitHub checks still precede merge. After the amendment
 lands, normal source reconciliation reassesses the parent task and builds the
 remaining implementation. The old contradictory task is never blindly unpaused.
+
+## Spec discovery and backlog reconciliation
+
+The task queue is not the specification. The optional spec reconcilers inspect
+canonical `specs/system/*.md` and `specs/development/*.md`, including documents
+without coverage tables. `trusted-foundry-integration.md` remains excluded by GOAL.
+Coverage labels, imported completion and historical task receipts never prove
+that current code satisfies a requirement.
+
+Four additional independently claimable stages use the same ledger and leases:
+
+| Stage | Operation | Durable output |
+|---|---|---|
+| `spec_audit` | Read the entire canonical document against an exact upstream base. Account for every heading with literal requirement and source evidence. | Source-bound gap/satisfaction/context observations. |
+| `decompose` | Partition confirmed gaps into bounded tasks with concrete acceptance criteria, negative verification intent and dependency edges. Inspect existing tasks before proposing work. | A complete gap-to-task ownership plan; unfinished tasks can be reused. |
+| `plan_review` | A separate read-only agent challenges every section and the plan, including no-gap/context claims and duplicate-work analysis. | Exact-plan approval or actionable feedback to an audit or plan-only correction. Repeated unresolved issues require attention. |
+| `backlog` | Mechanically materialize approved task documents and explicit registry bindings. Reserve names transactionally across planners, human decisions and CI repairs. | A private immutable checkpoint that enters ordinary independent review, remote verification, PR checks and merge. |
+
+Generated implementation tasks are **not inserted into the runnable catalog**
+before the backlog PR merges. Once imported from main, they follow normal triage,
+implementation, independent review, remote verification and publication. The
+backlog publication cannot change specs, production code, coverage or enforcement.
+Its manifest fences changes to the generated contracts and existing bindings;
+a canonical spec change requires a fresh plan. A lost push response reuses the
+same reserved IDs and deterministic commit, rather than duplicating work.
+
+Planning records have stable `spec-…` identities and are not product deliveries.
+The cockpit reports them separately and includes their active allocations in the
+running count. `observed` means independently reviewed source evidence, **not**
+verified coverage. No-gap audits still require independent plan review; they do
+not manufacture implementation tasks or tests for working behavior. Audit and
+plan preparation are source inspection only; their build wrappers reject tests
+and builds. Product changes still pass all existing deterministic gates.
+Workflow YAML, Docker source and public root build manifests also qualify as
+literal behavior evidence, so CI, release and packaging specs can cite their
+actual implementation. These configuration files participate in evidence
+freshness and duplicate-plan detection. The new configuration allowances exclude
+`.env`, private-key files, credential JSON and other hidden directories.
+
+An assigned document is re-audited after its linked tasks are satisfied. Observed
+documents are re-audited when inspected source changes or the audit interval
+expires. Spec/GOAL changes fence old work immediately. The same remaining gaps
+with unchanged production evidence cannot acquire another paraphrased plan:
+they require diagnosis of the original delivery. Existing work and its evidence
+are preserved. Unrelated main advances do not invalidate an audit solely because
+the commit SHA changed; independent publication review checks the materialized
+plan against its newer assigned base.
+
+In Configuration, enable **Discover missing spec work**. It defaults off for an
+explicit rollout. **Spec planning concurrency** defaults to two across all three
+model stages, also bounded by total slots, quota admission and the verification
+reserve. **Spec re-audit interval** defaults to one day. An optional local
+`spec_reconciliation_documents` list restricts a production qualification run to
+named canonical paths; removing it restores the full inventory. `only_task`
+continues to restrict all dispatcher work and should be unset for normal use.
+
+Each stage can also be invoked through the standard `discover`, `run` or `tick`
+commands. `spec_reconciliation` in the cockpit snapshot reports document states;
+the existing coverage display remains independent. The controller never interprets
+an empty task queue or a successful planning run as proof all specs are implemented.
+
+Downstream planning has precedence over fresh audits within the background pool:
+the first useful plan can reach implementation without waiting for the entire
+inventory scan. Normal product work stays ahead of background planning. Deleted
+specs fence their audit claims and retire their planning records without altering
+an operator pause. Semantic conflicts enter the existing three-option human
+decision flow; a reviewed amendment releases a fresh audit, never a blind code run.
+
+A semantic rejection of a generated backlog returns its findings to spec planning,
+not to a coding worker. The rejected publication is retained as retired, with no
+shipped or satisfied receipt. Its private checkpoint and reserved IDs remain
+historical; a revised, independently reviewed plan gets new IDs. The exact rejected
+plan cannot be resubmitted unchanged. Three rejected publications in one spec epoch
+require attention. A newer canonical-spec epoch is not reset by an older rejection.
+
+Schema-rejected planning reports are fenced by work identity and report content.
+An intervening transport retry cannot re-adopt the rejected receipt or erase the
+bounded correction draft. A later, different valid published report remains
+recoverable without repeating its model work.
+
+Rejected revisions retain at most one bounded, unapproved audit/plan draft in the
+machine-readable context. Review feedback drives corrections; every requirement and
+source citation is validated again. The draft is omitted from the inline prompt,
+not treated as current evidence, and discarded on a new canonical-spec epoch.
+
+Other active plans are supplied as a compact index plus complete, content-identified
+JSON artifacts under `/tmp/stage/other-plans/`. Agents inspect related artifacts for
+duplicate work. Completed assignments and retired specs leave this index; full plan
+history is not copied into each prompt or discarded to fit its context window.
+
+Independent plan review distinguishes audit defects from plan-only corrections.
+A plan-only correction requires the reviewer's explicit confirmation that the audit
+remains sound; decomposition then retains the audit and corrects the task contract.
+Stable heading-scoped finding IDs bound repeated unresolved issues to three reviews.
+Distinct corrections may progress, with a separate ceiling of twelve revisions
+without approval. Approval resets this budget. Re-auditing unchanged production
+source cannot resubmit the same rejected task contracts unchanged.
+
+The inline planning prompt contains input identities and availability counts; the
+complete audit, plan, catalog and correction inputs are read once from the staged
+machine context. A plan-only correction reuses that current audit instead of copying
+it again into its retained draft. Normative requirements and validation remain intact.

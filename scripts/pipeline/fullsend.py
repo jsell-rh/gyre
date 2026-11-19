@@ -63,6 +63,10 @@ def adopt(execution, task):
         if previous.get('fresh_model') and path.parent != execution.directory:
             continue
         receipt = json.loads(path.read_text())
+        if claim['stage'] in ('spec_audit','decompose','plan_review'):
+            from .requirements import digest
+            if execution.store.setting('spec_report_rejected:'+claim['id']+':'+digest(receipt.get('planning'))):
+                continue  # An intervening transport failure cannot make a rejected report recoverable.
         job_path = path.parent / 'bundle/job.json'
         if not job_path.is_file() or not receipt.get('published'):
             continue
@@ -77,7 +81,7 @@ def adopt(execution, task):
         job = json.loads(job_path.read_text())
         if job['stage'] != claim['stage'] or job['task'] != task['name']:
             raise ValueError('published receipt belongs to another assignment')
-        if claim['stage'] in ('triage', 'assess', 'review') and not receipt.get('valid'):
+        if claim['stage'] in ('triage', 'assess', 'review', 'spec_audit', 'decompose', 'plan_review') and not receipt.get('valid'):
             continue
         execution.branch = job['branch']
         execution.phase('AdoptingPublishedOutcome', head=receipt['head'])
@@ -132,12 +136,24 @@ def prepare(execution, task, prompt):
     (bundle / 'job.json').write_text(json.dumps(job))
     (bundle / 'push-expected').write_text('')
     (bundle / 'prompt.md').write_text(prompt)
+    if task['data'].get('spec_planner'):
+        from .spec_backlog import planning_context, previous_report
+        documents={}
+        planning=planning_context(task,execution.store,documents)
+        plan_directory=bundle/'other-plans'
+        if plan_directory.exists():shutil.rmtree(plan_directory)
+        if documents:
+            plan_directory.mkdir()
+            for filename,document in documents.items():
+                (plan_directory/filename).write_text(json.dumps(document,indent=2)+'\n')
+        planning.update(previous_report=previous_report(execution),assignment=claim['input'],stage=claim['stage'])
+        (bundle/'planning-context.json').write_text(json.dumps(planning))
     (bundle / 'bin').mkdir(exist_ok=True)
     for name in ('cargo', 'npm', 'npx'):
         shutil.copy(ROOT / 'scripts/dev-build-command.sh', bundle / 'bin' / name)
-    for name in ('pipeline-remote.py', 'dev-contract.py', 'dev-checkpoint.py', 'dev-review-guard.py', 'dev-attribution.py', 'pipeline-agent.py', 'pipeline-artifacts.py','dev-coverage.py', 'pipeline-usage.py', 'pipeline-build-env.py'):
+    for name in ('pipeline-remote.py', 'pipeline-evidence.py', 'dev-contract.py', 'dev-checkpoint.py', 'dev-review-guard.py', 'dev-attribution.py', 'pipeline-agent.py', 'pipeline-artifacts.py','dev-coverage.py', 'pipeline-usage.py', 'pipeline-build-env.py'):
         shutil.copyfile(ROOT / 'scripts' / name, bundle / name)
-    if claim['stage'] in ('review', 'assess', 'triage'):
+    if claim['stage'] in ('review', 'assess', 'triage', 'spec_audit', 'decompose', 'plan_review'):
         execution.command(sys.executable, str(bundle / 'dev-review-guard.py'), 'snapshot',
                           str(bundle / 'review-before.json'), '--task', task['name'], cwd=repo)
     if claim['stage'] == 'review':
@@ -186,7 +202,7 @@ def prepare(execution, task, prompt):
     stage = claim['stage']
     harness = {'base': 'worker.yaml', 'agent': 'agents/' + stage + '.md',
                'providers': [forge_provider],
-               'role': {'implement': 'coder', 'review': 'review', 'triage': 'triage', 'assess':'review'}[stage],
+               'role': {'implement': 'coder', 'review': 'review', 'triage': 'triage', 'assess':'review','spec_audit':'review','decompose':'review','plan_review':'review'}[stage],
                'image': execution.store.setting('fullsend_image', json.loads((ROOT / '.fullsend/toolchain.json').read_text())['worker_image']),
                # Pinned Fullsend 0.50.0 validates this field in [30,600].
                # Model/CLI budgets and capacity backoff are separate bounds.
@@ -265,7 +281,7 @@ def collect(execution, sandbox, success):
     if not job.exists():
         raise ValueError('fullsend assignment bundle missing')
     # Re-upload trusted checkpoint code after the model has finished.
-    for name in ('pipeline-remote.py', 'dev-contract.py', 'dev-checkpoint.py', 'dev-review-guard.py', 'dev-attribution.py', 'pipeline-artifacts.py','dev-coverage.py', 'pipeline-agent.py', 'job.json'):
+    for name in ('pipeline-remote.py', 'pipeline-evidence.py', 'dev-contract.py', 'dev-checkpoint.py', 'dev-review-guard.py', 'dev-attribution.py', 'pipeline-artifacts.py','dev-coverage.py', 'pipeline-agent.py', 'job.json'):
         source = execution.directory / 'bundle' / name
         if name == 'pipeline-agent.py' or (name in ('pipeline-artifacts.py','dev-coverage.py','dev-contract.py') and not source.exists()):
             source = ROOT / 'scripts' / name

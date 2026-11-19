@@ -103,3 +103,10 @@ table.tasks td.dev-last { max-width: 440px; overflow: hidden; text-overflow: ell
   .masthead nav.views { order: 3; width: 100%; overflow-x: auto; }
   .masthead input#global-search { max-width: 100%; min-width: 0; }
 }
+
+/* Planning identities and canonical paths can be longer than numbered tasks. */
+.dev-overview-grid > div { min-width: 0; }
+.dev-panel { overflow-wrap: anywhere; }
+.dev-task-button .mono { max-width: 100%; overflow-wrap: anywhere; }
+#drawer header { flex-wrap: wrap; }
+#drawer header .id, #drawer header .title { min-width: 0; overflow-wrap: anywhere; }

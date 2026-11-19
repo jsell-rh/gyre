@@ -26,6 +26,7 @@ let errorText = "";
 let retryAllPending = false;
 let slotsDraft = null;
 let decisionPending = null;
+let specPlanningExpanded = false;
 
 function e(tag, props = {}, ...children) {
   const node = document.createElement(tag);
@@ -232,6 +233,14 @@ function renderOverview() {
       `Delivery ${gate.delivery.condition.toLowerCase()} · ${gate.delivery.unfinished} unfinished tasks` +
       (gate.delivery.last_merge_at ? ` · last merge ${new Date(gate.delivery.last_merge_at * 1000).toLocaleString()}` : "") +
       (Object.keys(gate.delivery.blockers || {}).length ? ` · blockers: ${Object.entries(gate.delivery.blockers).map(([name, count]) => `${name.replaceAll("_", " ")} (${count})`).join(", ")}` : "") }) : null,
+    s.spec_reconciliation ? e("p", { class: "muted", text:
+      `Spec reconciliation ${s.spec_reconciliation.enabled ? "enabled" : "disabled"} · ${s.spec_reconciliation.documents} canonical documents · ` +
+      Object.entries(s.spec_reconciliation.states || {}).map(([state, count]) => `${count} ${state}`).join(" · ") +
+      ". Observed means reviewed source evidence, not verified coverage." }) : null,
+    s.spec_reconciliation?.enabled ? e("details", { open: specPlanningExpanded, ontoggle: (event) => { specPlanningExpanded = event.currentTarget.open; } }, e("summary", { text: "Spec audits and planning · inspect work or failures" }),
+      ...(s.spec_reconciliation.items || []).map((item) => e("div", { class: "dev-control-line" },
+        taskButton(item, `${item.stage || item.progress} · ${item.gaps} observed gaps`),
+        item.condition ? e("span", { class: "dev-health-error", text: item.condition }) : null))) : null,
     gate.stress_guard ? e("p", { class: "dev-health-error", text: `Stress guard paused new admissions: ${gate.stress_guard.reason}. Tasks: ${(gate.stress_guard.tasks || []).join(", ")}. Active work continues; inspect the fault before resuming.` }) : null,
     ...Object.entries(s.stages || {}).map(([stage, count]) => e("div", { class: "dev-control-line", text: `${stage}: ${count.claimed || 0} running · ${count.ready || 0} ready · ${count.retry || 0} ${stage === "observe" ? "waiting for CI" : "backing off"} · ${count.succeeded || 0} completed` })),
     e("p", { class: "muted", text: s.dispatch?.integration
@@ -496,7 +505,7 @@ function showStream(id) {
   };
 }
 function renderDrawer() {
-  const task = (snapshot?.tasks || []).find((t) => t.name === selected);
+  const task = [...(snapshot?.tasks || []), ...(snapshot?.spec_reconciliation?.items || [])].find((t) => t.name === selected);
   if (!task) { if (snapshot?.tasks?.length) closeTask(); return; }
   $("drawer-id").textContent = task.name;
   $("drawer-title").textContent = title(task);

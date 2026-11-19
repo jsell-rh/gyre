@@ -2,6 +2,7 @@
 import importlib.util
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -66,6 +67,70 @@ class DetachedCandidateTest(unittest.TestCase):
         (self.root / '.git/rebase-merge').mkdir()
         remote.reattach_candidate('assigned', self.root)
         self.assertEqual(self.git('branch', '--show-current'), '')
+
+    def formatter(self):
+        formatter = shutil.which('rustfmt')
+        self.assertIsNotNone(formatter, 'Rust fixture checks require rustfmt')
+        return formatter
+
+    def normalize(self, base, formatter):
+        return remote.normalize_new_rust(base, formatter,
+                                         os.environ.get('RUSTUP_HOME', str(Path.home() / '.rustup')))
+
+    def test_formatter_uses_installed_toolchain_when_native_exec_drops_image_environment(self):
+        source = self.root / 'new.rs';source.write_text('fn created( ){ }\n')
+        formatter = self.formatter()
+        toolchain = os.environ.get('RUSTUP_HOME', str(Path.home() / '.rustup'))
+        with patch.dict(os.environ, {'PATH': '/usr/bin:/bin', 'HOME': str(self.root),
+                                     'RUSTUP_HOME': str(self.root / 'unconfigured')}, clear=True):
+            result = remote.normalize_new_rust(self.head, formatter, toolchain)
+        self.assertEqual(result, {'files': ['new.rs'], 'errors': []})
+        self.assertEqual(source.read_text(), 'fn created() {}\n')
+
+    def test_new_rust_is_formatted_across_a_later_metadata_only_commit(self):
+        source = self.root / 'new.rs'
+        source.write_text('fn created( ){println!("value");}\n')
+        self.git('add', '.');self.git('commit', '-qm', 'source')
+        (self.root / 'notes').write_text('bookkeeping')
+        self.git('add', '.');self.git('commit', '-qm', 'metadata')
+        head = self.git('rev-parse', 'HEAD')
+        result = self.normalize(self.head, self.formatter())
+        self.assertEqual(result, {'files': ['new.rs'], 'errors': []})
+        self.assertEqual(source.read_text(), 'fn created() {\n    println!("value");\n}\n')
+        self.assertEqual(self.git('rev-parse', 'HEAD'), head)  # finalizer owns commit/attribution
+        self.assertEqual(self.normalize(self.head, self.formatter()), {'files': [], 'errors': []})
+
+    def test_untracked_unicode_path_formats_without_changing_existing_debt(self):
+        old = self.root / 'old.rs';old.write_text('fn legacy( ){ }\n')
+        self.git('add', '.');self.git('commit', '-qm', 'baseline')
+        base = self.git('rev-parse', 'HEAD')
+        old.write_text('fn legacy( ){ } // existing-file edit\n')
+        before = old.read_bytes()
+        new = self.root / 'new file-λ.rs';new.write_text('fn added( ){ }\n')
+        self.assertEqual(self.normalize(base, self.formatter()),
+                         {'files': [new.name], 'errors': []})
+        self.assertEqual(old.read_bytes(), before)
+        self.assertEqual(new.read_text(), 'fn added() {}\n')
+
+    def test_new_rust_cannot_follow_symlinks_or_modify_shared_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            outside = Path(directory) / 'outside.rs';outside.write_text('fn valuable( ){ }\n')
+            original = outside.read_bytes()
+            (self.root / 'link.rs').symlink_to(outside)
+            os.link(outside, self.root / 'hard.rs')
+            result = self.normalize(self.head, self.formatter())
+            self.assertEqual(result['files'], [])
+            self.assertEqual({item['path'] for item in result['errors']}, {'link.rs', 'hard.rs'})
+            self.assertEqual(outside.read_bytes(), original)
+
+    def test_formatter_failure_keeps_source_available_for_checkpoint_recovery(self):
+        source = self.root / 'new.rs';source.write_text('fn preserved( ){ }\n')
+        original = source.read_bytes()
+        result = self.normalize(self.head, shutil.which('false'))
+        self.assertEqual(result['files'], [])
+        self.assertEqual(result['errors'], [{'path': 'new.rs', 'error': 'CalledProcessError'}])
+        self.assertEqual(source.read_bytes(), original)
+        self.assertEqual(self.git('rev-parse', 'HEAD'), self.head)
 
 
 if __name__ == '__main__':

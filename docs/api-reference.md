@@ -20,7 +20,7 @@ See [server-config.md](server-config.md) for authentication mechanisms and envir
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET` | `/.well-known/openid-configuration` | OIDC discovery document — issuer, JWKS URI, supported algorithms (no auth required) (M18) |
-| `GET` | `/.well-known/jwks.json` | Ed25519 JWK Set for JWT signature verification (no auth required) (M18) |
+| `GET` | `/.well-known/jwks.json` | Ed25519 JWK Set for JWT signature verification (no auth required) (M18). After a signing-key rotation the keys array also serves the retained historical keys, so signatures made before the rotation stay verifiable by `key_id` (message-bus.md §Edge Cases "Signature key rotation", task-254) |
 | `GET` | `/health` | Returns `{"status":"ok","version":"0.1.0"}` |
 | `GET` | `/ws` | WebSocket upgrade (requires `Auth` handshake first) |
 | `GET` | `/api/v1/version` | Returns `{"name":"gyre","version":"0.1.0","milestone":"M0"}` |
@@ -37,7 +37,7 @@ See [server-config.md](server-config.md) for authentication mechanisms and envir
 | `GET` | `/api/v1/workspaces/{workspace_id}/tasks` | List tasks scoped to a workspace (M34 Slice 6 — preferred access pattern) |
 | `GET` | `/api/v1/workspaces/{workspace_id}/agents` | List agents scoped to a workspace (M34 Slice 6) |
 | `GET` | `/api/v1/workspaces/{workspace_id}/merge-requests` | List MRs scoped to a workspace (M34 Slice 6); optional `?has_trace=true` filters to MRs with captured gate traces and `?limit=N` returns the N most recent — the MR-discovery list the explorer view generator injects into its LLM prompt (HSI §3, task-089) |
-| `POST/GET` | `/api/v1/workspaces/{workspace_id}/messages` | Send a message to all workspace members / list messages; body: `{to: {"agent": "<id>"}\|{"workspace": "<id>"}\|"broadcast", kind, tier?: "directed", payload?}`; `payload` is validated against the kind's schema (message-bus.md §Payload Schemas) — a non-object payload, a missing/null required field, or a schema-known field with the wrong wire type (string/unsigned-integer/number/string-array per the table) is rejected with 400 naming the field; messages are Ed25519-signed at rest (Message Bus Phase 3) |
+| `POST/GET` | `/api/v1/workspaces/{workspace_id}/messages` | Send a message to all workspace members / list messages; body: `{to: {"agent": "<id>"}\|{"workspace": "<id>"}\|"broadcast", kind, tier?: "directed", payload?}`; the TOTAL request body (full envelope incl. `to`, `kind`, `payload`) is limited to 64KB (`GYRE_MAX_MESSAGE_SIZE`) and rejected with 413 when exceeded — nothing is stored or broadcast (message-bus.md §Edge Cases "Message too large", task-254); `payload` is validated against the kind's schema (message-bus.md §Payload Schemas) — a non-object payload, a missing/null required field, or a schema-known field with the wrong wire type (string/unsigned-integer/number/string-array per the table) is rejected with 400 naming the field; messages are Ed25519-signed at rest (Message Bus Phase 3) |
 | `GET` | `/api/v1/workspaces/{workspace_id}/presence` | Workspace presence — `[{user_id, session_id, view, workspace_id, last_seen}]`; stale entries evicted every 30 s (HSI §7, S1.5) |
 | `POST/GET` | `/api/v1/personas` | Create (**Admin only**, H-16) / list personas (`?scope=tenant|workspace|repo&scope_id=` filter); `PersonaScope` JSON wire format: `{"kind": "Tenant"|"Workspace"|"Repo", "id": "<uuid>"}` (serde tagged enum — both `kind` and `id` fields required; `id` is the tenant/workspace/repo UUID); Rust type: `Tenant(Id)`, `Workspace(Id)`, `Repo(Id)` (M22.1) |
 | `GET/PUT/DELETE` | `/api/v1/personas/{id}` | Read / update (**Admin only**) / delete (**Admin only**) persona -- fields: `name`, `slug`, `scope`, `system_prompt`, `capabilities`, `model`, `temperature`, `max_tokens`, `budget` (H-16, M22.1) |
@@ -48,7 +48,7 @@ See [server-config.md](server-config.md) for authentication mechanisms and envir
 | `DELETE` | `/api/v1/repos/{id}` | Delete repository (**Admin only**); soft-delete sets `status=deleting`; background job removes bare git directory (M35-lifecycle) |
 | `POST` | `/api/v1/repos/{id}/archive` | Archive a repo — sets `status=archived`, cancels open tasks, stops running agents, closes open MRs with `MRStatus::Reverted` (M35-lifecycle) |
 | `POST` | `/api/v1/repos/{id}/unarchive` | Unarchive a repo — restores `status=active` (M35-lifecycle) |
-| `POST` | `/api/v1/repos/mirror` | Create a pull mirror from an external git URL (bare clone + periodic background sync); body: `{url, name, interval_secs?}`; URL must use `https://` (M12.2) |
+| `POST` | `/api/v1/repos/mirror` | Create a pull mirror from an external git URL (bare clone + periodic background sync); body: `{url, name, interval_secs?}`; URL must use `https://` and its path must be `/{owner}/{repo}` (optional `.git` suffix) — storage is isolated under `{repos_root}/{ws}/mirrors/{forge}/{owner}/{repo}.git` (`github.com`→`github`, `gitlab.com`→`gitlab`, other hosts sanitized); unsafe URLs (traversal, percent-encoded separators) are rejected 400, and a duplicate upstream URL in the workspace is rejected 409 (M12.2, task-259) |
 | `POST` | `/api/v1/repos/{id}/mirror/sync` | Manually trigger a fetch sync on a mirror repo (M12.2) |
 | `POST` | `/api/v1/repos/{id}/sync-specs` | Re-run the spec-ledger sync against the repo's default-branch HEAD (same sync the post-receive hook runs on push); used by `gyre bootstrap` step 6 to initialize the spec registry at first-run. ABAC `repo:write`; handler additionally verifies the repo's workspace tenant matches the caller's tenant. Returns `{registered, head_sha}` (platform-model.md §8) |
 | `GET` | `/api/v1/repos/{id}/branches` | List branches in repository |
@@ -291,7 +291,7 @@ See [server-config.md](server-config.md) for authentication mechanisms and envir
 | `DELETE` | `/api/v1/admin/impersonate/{request_id}` | **Admin only** (must be the impersonating admin) — end the session; revokes the token immediately and emits `ImpersonationEnded` with `duration_secs`/`actions_taken` |
 | `GET` | `/*` | Svelte SPA dashboard (served from `web/dist/`) |
 | `POST` | `/mcp` | MCP JSON-RPC 2.0 handler (`initialize`, `tools/list`, tool calls) — requires authentication |
-| `GET` | `/mcp/sse` | MCP SSE stream — typed AG-UI activity events — requires authentication |
+| `GET` | `/mcp/sse` | MCP SSE stream — workspace-scoped bus messages as typed AG-UI activity events — requires authentication |
 | `GET` | `/api/v1/agents/discover` | Discover active agents by capability (`?capability=<str>`) |
 | `PUT` | `/api/v1/agents/{id}/card` | Publish / update an agent's A2A AgentCard |
 | `POST` | `/api/v1/compose/apply` | Apply agent-compose spec (JSON or YAML), creates agent tree in dependency order; **preview-agent callers get 403** (meta-spec-reconciliation §5 — compose task/agent rows are exactly the ceremony `POST /api/v1/tasks` refuses for preview scratch) |
@@ -580,7 +580,7 @@ Gyre exposes an MCP (Model Context Protocol) server at `/mcp`. Agents can discov
 
 **Endpoints:**
 - `POST /mcp` — JSON-RPC 2.0. Methods: `initialize`, `tools/list`, `tools/call`, `resources/list`, `resources/read`, `prompts/list`, `prompts/get`. Requires authentication.
-- `GET /mcp/sse` — SSE stream of typed AG-UI activity events. Requires authentication.
+- `GET /mcp/sse` — SSE stream of server→client notifications and typed AG-UI activity events, scoped to the authenticated agent's workspace (Workspace-destination and Broadcast messages, plus Directed messages addressed to the agent itself; other workspaces'/tenants' messages and other agents' directed messages are never delivered). Event names follow the AG-UI mapping (message-bus.md §MCP Integration): `TOOL_CALL_START`, `TOOL_CALL_END`, `RUN_STARTED`, `RUN_FINISHED`, `TEXT_MESSAGE_CONTENT`, `STATE_CHANGED`, `ERROR` (AgentError); kinds outside the spec table are emitted as generic `message` events. The SSE `data` payload is the raw `Message` envelope JSON. Requires authentication.
 
 **Available tools** (from `tools/list`):
 

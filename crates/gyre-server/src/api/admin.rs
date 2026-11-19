@@ -7,7 +7,10 @@ use axum::{
     http::StatusCode,
     Json,
 };
-use gyre_common::{AgEventType, Id};
+use gyre_common::{
+    message::{Destination, MessageKind},
+    AgEventType, Id,
+};
 use gyre_domain::{AgentStatus, TaskStatus};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -943,6 +946,22 @@ pub async fn admin_seed(
             )
             .await;
     }
+
+    // message-bus.md §Broadcast-only kinds: a DataSeeded broadcast is emitted
+    // when workspace data seeding completes — server origin,
+    // Destination::Broadcast, workspace_id: None, payload: none. It is a
+    // broadcast-only kind, so the kind-based storage short-circuit keeps it
+    // out of MessageRepository::store() (in-memory broadcast channel only).
+    // The tenant scope is the seeding caller's tenant (the same scope every
+    // seeded record was created in), never fabricated.
+    state
+        .emit_tenant_event(
+            Id::new(&tenant_id),
+            Destination::Broadcast,
+            MessageKind::DataSeeded,
+            None,
+        )
+        .await;
 
     Ok(Json(SeedResponse {
         projects: 2,
@@ -2172,6 +2191,80 @@ mod tests {
         assert_eq!(agents.len(), 4);
         let tasks = state.tasks.list().await.unwrap();
         assert_eq!(tasks.len(), 6);
+    }
+
+    /// message-bus.md §Broadcast-only kinds: completing the workspace
+    /// data-seed flow emits a `DataSeeded` broadcast observable by a
+    /// subscribed client — server origin, `Destination::Broadcast`,
+    /// `workspace_id: None`, payload none — and the kind's storage exemption
+    /// means no row is ever persisted. Before task-249 the kind had zero
+    /// production emitters, so this assertion could never pass.
+    #[tokio::test]
+    async fn admin_seed_broadcasts_data_seeded() {
+        use gyre_common::message::{Destination, MessageKind, MessageOrigin};
+
+        let state = test_state();
+        let mut rx = state.message_broadcast_tx.subscribe();
+        let app = api_router().with_state(state.clone());
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/admin/seed")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Drain: the seed flow also emits StateChanged telemetry on the same
+        // channel, so scan for the DataSeeded broadcast.
+        let mut found = None;
+        for _ in 0..32 {
+            match rx.try_recv() {
+                Ok(m) if m.kind == MessageKind::DataSeeded => {
+                    found = Some(m);
+                    break;
+                }
+                Ok(_) => continue,
+                Err(_) => break,
+            }
+        }
+        let msg = found.expect("seed completion must broadcast DataSeeded to subscribers");
+        assert!(matches!(msg.from, MessageOrigin::Server));
+        assert_eq!(msg.to, Destination::Broadcast);
+        assert_eq!(
+            msg.workspace_id, None,
+            "broadcast-only kinds carry no workspace scope"
+        );
+        assert!(
+            msg.payload.is_none(),
+            "DataSeeded payload is (none) per spec"
+        );
+        // Storage exemption is kind-based: no DataSeeded row, ever.
+        assert!(
+            state.messages.find_by_id(&msg.id).await.unwrap().is_none(),
+            "DataSeeded is storage-exempt: it must never hit MessageRepository::store()"
+        );
+        let listed = state
+            .messages
+            .list_by_workspace(
+                &gyre_common::Id::new("default"),
+                None,
+                None,
+                None,
+                None,
+                Some(100),
+            )
+            .await
+            .unwrap();
+        assert!(
+            listed.iter().all(|m| m.kind != MessageKind::DataSeeded),
+            "DataSeeded must never hit MessageRepository::store()"
+        );
     }
 
     #[tokio::test]

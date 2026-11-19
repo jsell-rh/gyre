@@ -19,11 +19,10 @@ from pipeline.catalog import helper
 from pipeline.credentials import load
 from pipeline.eligibility import eligible
 from pipeline.execution import ROOT, gateway
-from pipeline.store import Store, StaleClaim, STAGES
+from pipeline.store import Store, StaleClaim, STAGES, COMPUTE
 from pipeline.settings import configuration, save_configuration
 
 pipeline = helper('dev-pipeline')
-COMPUTE = {'triage', 'assess', 'implement', 'review', 'verify'}
 AGENTS = {'implement': 'code-implementation', 'review': 'code-review'}
 
 

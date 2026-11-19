@@ -3,7 +3,7 @@ import json
 import time
 
 from .catalog import contract
-from .store import STAGES
+from .store import STAGES, PLANNING
 
 
 def snapshot(store):
@@ -14,7 +14,8 @@ def snapshot(store):
     from .capacity import summary
     capacity=summary(store)
     from .progress import blockers, delivery
-    records = store.tasks()
+    from .spec_backlog import summary as spec_summary
+    records = [t for t in store.tasks() if not t['data'].get('spec_planner')]
     by_name = {task['name']: task for task in records}
     work = [dict(row) for row in store.db.execute('SELECT * FROM work ORDER BY created DESC')]
     tasks, attempts, counts = [], [], {}
@@ -35,7 +36,7 @@ def snapshot(store):
             attention, retry = None, None  # Historical failures remain in attempts, not the current condition.
         triage_attention = bool(attention and json.loads(attention['result']).get('category') == 'requirements_triage')
         shared_wait = (data.get('repair') or {}).get('shared_environment')
-        state = ('merged' if satisfied(data) and data.get('delivered') else
+        state = ('retired' if data.get('backlog_rejected') else 'merged' if satisfied(data) and data.get('delivered') else
                  'resolved' if satisfied(data) else 'needs-triage' if triage_attention else 'failed' if attention else 'running' if active else
                  'needs-triage' if (data.get('requirements') or {}).get('errors') else
                  'published' if retry and retry['stage'] == 'publish' and data.get('pr') else
@@ -47,6 +48,8 @@ def snapshot(store):
                      (json.loads((attention or retry)['result']).get('message') if attention or retry else None) or
                      (data.get('resolved') or {}).get('reason') or errors.get(task['name']) or
                      ('Requirements changed; independent assessment pending' if pending(data) else None))
+        if data.get('backlog_rejected'):
+            condition='Rejected backlog returned to spec planning; no product implementation was shipped'
         reasons = blockers(store, task, by_name, related)
         if not condition and reasons:
             condition = reasons[0]['message']
@@ -96,8 +99,8 @@ def snapshot(store):
                       for state in ('ready', 'claimed', 'retry', 'succeeded', 'attention')}
               for stage in STAGES}
     from .decisions import list_decisions
-    return {'decisions': list_decisions(store), 'tasks': tasks, 'attempts': attempts, 'events': events, 'counts': counts,
-            'running': sum(bool(task['stage']) for task in tasks), 'eligible': sum(task['state'] == 'ready' for task in tasks),
+    return {'spec_reconciliation':spec_summary(store), 'decisions': list_decisions(store), 'tasks': tasks, 'attempts': attempts, 'events': events, 'counts': counts,
+            'running': sum(bool(task['stage']) for task in tasks)+sum(w['stage'] in PLANNING and w['state']=='claimed' and (w['expires'] or 0)>time.time() for w in work), 'eligible': sum(task['state'] == 'ready' for task in tasks),
             'slots': store.setting('slots', 8), 'stages': stages,
             'confirmed_merges': sum(bool(task['merge_sha']) for task in tasks),
             'resources': {'used': store.compute_used(), 'deletion_pending': dict(resources).get('deleting', 0),

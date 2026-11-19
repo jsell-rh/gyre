@@ -13,6 +13,17 @@ from .execution import ROOT, Retry, Wait, gateway
 
 def prompt(execution, task):
     role = execution.claim['stage']
+    planning={}
+    if task['data'].get('spec_planner'):
+        from .spec_backlog import planning_context, previous_report
+        context=planning_context(task,execution.store)
+        planning={'document':context['document'],'requirements':context['requirements'],
+            'heading_count':len(context['sections']),'audit_available':bool(context.get('audit')),
+            'plan_available':bool(context.get('plan')),
+            'revision_draft_available':bool(context.get('revision_draft')),
+            'other_plan_count':len(context['other_plans']),
+            'previous_report_available':bool(previous_report(execution)),
+            'machine_context':'/tmp/stage/planning-context.json'}
     task_path = execution.directory / 'task.md'
     task_path.write_text(task['body'])
     bounded = (task['body'][:16000] if role == 'triage' and safe_metadata(task['body']).get('metadata_error') else
@@ -31,6 +42,7 @@ def prompt(execution, task):
                         (ROOT / ('specs/prompts/pipeline-decision.md' if execution.claim['input'].get('decision_request') else f'specs/prompts/pipeline-{role}.md')).read_text(),
                         'Assigned task:\n' + bounded,
                         'Exact assignment:\n' + json.dumps(execution.claim['input']),
+                        'Planning context:\n' + json.dumps(planning),
                         'Current requirement inputs:\n' + json.dumps((task['data'].get('requirements') or {}).get('components', {})),
                         'Previous assignment outcome:\n' + str(execution.claim.get('result') or 'none')[-4000:],
                         'Durable findings:\n' + json.dumps(findings),
@@ -79,7 +91,10 @@ def triage(execution, task):
 def implement(execution, task):
     from .contract_recovery import normalize
     result = normalize(execution, task) or execution.cloud_step(task, prompt(execution, task))
-    if task['data'].get('source_decision'):
+    if task['data'].get('backlog_manifest'):
+        from .spec_backlog import validate_manifest
+        validate_manifest(checkout(execution,result['head']),task['data']['backlog_manifest'])
+    if task['data'].get('source_decision') or task['data'].get('backlog_plan'):
         path=checkout(execution,result['head'])
         base=execution.claim['input']['base']
         changed=execution.command('git','diff','--name-only','-z',base,result['head'],cwd=path).stdout.rstrip('\0').split('\0')
@@ -195,6 +210,18 @@ def review(execution, task):
                'review_checkpoint': result['head'], 'branch': result['branch'],
                'details': result.get('source_edits') or verdict.get('findings') or ['review did not produce an affirmative exact-source verdict'],
                'artifact': receipt['artifact'], 'id': execution.claim['id']}
+    if (task['data'].get('backlog_manifest') and result['valid'] and findings
+            and isinstance(verdict.get('findings'),list)
+            and verdict.get('candidate')==assigned and verdict.get('approved') is False):
+        from .requirements import digest
+        parent_name='spec-'+digest(task['data']['backlog_manifest']['document'])[:24]
+        parent=execution.store.task(parent_name)
+        if (parent['generation']==task['data']['backlog_manifest']['requirements']
+                and parent['data'].get('publication_rejections',0)>=2):
+            from .execution import Attention
+            error=Attention('Three reviewed backlog publications were rejected; inspect the planner and retained review findings before retrying')
+            error.category='spec_plan';error.diagnostic=finding;raise error
+        return result, {'review':receipt,'backlog_rejected':finding,'repair':None}, [finding]
     from .repair_budget import check
     check(execution,task,path,assigned,findings or finding['details'])
     return result, {'review': receipt, 'repair': finding}, [finding]
@@ -259,6 +286,9 @@ def verify(execution, task):
         return {'passed': False}, {'repair': finding}, [finding]
     head = execution.command('git', 'rev-parse', 'HEAD', cwd=path).stdout.strip()
     tree = execution.command('git', 'rev-parse', 'HEAD^{tree}', cwd=path).stdout.strip()
+    if task['data'].get('backlog_manifest'):
+        from .spec_backlog import validate_manifest
+        validate_manifest(path,task['data']['backlog_manifest'])
     remote = remote_verify(execution, path, {'candidate': inp['candidate'], 'base': inp['base'], 'head': head, 'tree': tree})
     records = remote['checks']
     if not remote['passed']:
@@ -308,6 +338,9 @@ def verify(execution, task):
     return receipt, {'verified': receipt}, []
 
 def publish(execution, task):
+    if task['data'].get('backlog_manifest'):
+        from .spec_backlog import validate_spec_source
+        validate_spec_source(execution.store.directory/'source',task['data']['backlog_manifest'])
     from .ci import publication, read as observe_ci, failure as ci_failure
     verified = execution.claim['input']['verified']
     head = verified['head']
@@ -507,8 +540,8 @@ def baseline_repair(execution, observation):
                             continue
             if (signature and previous_signature == signature) or task['data'].get('baseline_key') == key:
                 return task['name']
-        number = max((int(task['name'][5:]) for task in store.tasks()), default=0) + 1
-        name = f'task-{number:03d}'
+        from .spec_backlog import allocate
+        name = allocate(store,1,'baseline repair '+key)[0]
         data = metadata(body) | {'baseline_key': key, 'catalog_generation': generation,
                                 'baseline_probe': observation.get('probe'), 'baseline_failure': signature}
         if shared:data.update(ci_environment=observation['environment_failure'],triaged=generation)
@@ -708,3 +741,7 @@ HANDLERS = {'triage': triage, 'assess': assess, 'implement': implement, 'review'
             'verify': verify, 'publish': publish, 'cleanup': cleanup}
 from .ci import observe
 HANDLERS['observe'] = observe
+
+from .spec_backlog import run_model as plan_specs, reconcile as reconcile_backlog
+HANDLERS.update({stage:plan_specs for stage in ('spec_audit','decompose','plan_review')})
+HANDLERS['backlog']=reconcile_backlog

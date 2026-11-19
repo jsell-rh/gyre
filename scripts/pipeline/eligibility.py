@@ -20,7 +20,14 @@ def eligible(store, work):
         return row is not None
     if store.setting('task_paused:' + task['name'], False):
         return False
-    if satisfied(data):
+    if stage == 'triage' and inputs.get('decision_request'):
+        from .decisions import request, exists
+        decision=request(store,task)
+        return decision==inputs['decision_request'] and (work.get('state')=='claimed' or not exists(store,decision['id']))
+    if data.get('spec_planner'):
+        from .spec_backlog import eligible as planning_eligible
+        return planning_eligible(store,work,task,inputs)
+    if data.get('backlog_rejected') or satisfied(data):
         return False
     if stage in ('triage','assess','implement','review','verify'):
         repair=data.get('repair') or {}
@@ -31,10 +38,6 @@ def eligible(store, work):
             task_priority(store,task)
         except PriorityError:
             return False
-    if stage == 'triage' and inputs.get('decision_request'):
-        from .decisions import request, exists
-        decision=request(store,task)
-        return decision==inputs['decision_request'] and (work.get('state')=='claimed' or not exists(store,decision['id']))
     requirements = data.get('requirements') or {}
     if requirements.get('errors'):
         return stage == 'triage' and inputs.get('binding_errors') == requirements['errors']
