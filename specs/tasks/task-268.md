@@ -2,8 +2,8 @@
 title: "Pre-PR local verification: repo quality gates mechanically executed in the agent environment before any MR is opened"
 spec_ref: "Spec gap spec-4c39ca6ea3e71ce8a53398f3 / pre-pr-local-verification / d30f233daf86"
 depends_on: []
-progress: not-started
-commits: []
+progress: ready-for-review
+commits: ["950a65a098116c5d3bad82ee7cbbb425d491da5e"]
 ---
 
 ## Required behavior
@@ -57,3 +57,84 @@ Canonical spec: `specs/development/agent-workflow.md`. Source: `fb1424fbac55cd23
     ]
   }
 ]
+
+## Shipped
+
+Production implementation in commit `950a65a0` (branch
+`pipeline/task-268/066d7b50a6a84e3a8a178c650b2aebaf-1`), covering all four
+required behaviors:
+
+### Server-side gate delivery (1)
+
+`crates/gyre-server/src/api/spawn.rs` (`launch_agent_process` container_env
+assembly): the repo's pre-merge `TestCommand`/`LintCommand` gates are
+resolved at spawn via `state.quality_gates.list_by_repo_id_and_phase(repo,
+PreMerge)` — real QualityGateRepository rows, never hardcoded commands — and
+injected as machine-readable `GYRE_LOCAL_GATES` JSON
+(`[{"id","name","command","timeout_secs"}]`) alongside the existing `GYRE_*`
+variables. A repo with no command gates gets `[]`. Gate-list resolution
+failure fails the launch closed (`ApiError::Internal`), so an unreadable
+gate config can never silently degrade to "no local verification".
+Post-merge gates (post-merge HEAD validation, not pre-PR checks) and
+non-command gates (RequiredApprovals etc., not locally runnable) are
+excluded by design.
+
+### Runner-side local execution (2) + failure feedback loop (3)
+
+`docker/gyre-agent/agent-runner.mjs`: after the agent query loop and BEFORE
+conversation upload / `POST /complete` (the MR-creating call), every
+`GYRE_LOCAL_GATES` command runs as a real shell subprocess in the agent
+working directory (`GYRE_WORK_DIR` when it exists, else the entrypoint's
+cwd) with a bounded timeout (the gate's `timeout_secs`, default 300s). A
+hanging command is SIGKILLed and reported as a failure — the promise
+settles at the timeout regardless (the runner destroys its stdio pipe ends
+so an orphaned grandchild cannot hold it open; this sandbox denies
+process-group kills with EPERM, which is why the belt-and-suspenders settle
+exists — recorded in `/tmp/stage/review-evidence/task-268-local-gates.md`).
+On failure: no completion call, no MR; the failing gate's name and captured
+output are fed back to the agent as a follow-up SDK query
+("Gate \"X\" failed … exited with code N … Captured output: …"), the agent
+fixes, the gates re-run. Retry cap `GYRE_LOCAL_GATE_MAX_RETRIES` (default
+2); exhaustion terminates the runner with exit 1 and no completion call —
+conversation provenance is uploaded so the failure is auditable. Malformed
+`GYRE_LOCAL_GATES` fails closed the same way. The error-path
+force-completion is removed: a runner error before local verification
+passes uploads provenance only and exits nonzero — an MR is never opened
+for errored or unverified work.
+
+### Protocol prompt delivery (4)
+
+The runner reads `GYRE_PROTOCOL_PROMPT` and includes it in the LLM query
+prompt (meta-spec → protocol → task ordering), so the protocol's "run the
+repo's quality gates" instruction reaches the model. The mechanical
+subprocess execution above — not the prompt text — is the enforcement.
+
+### Test evidence
+
+- `docker/gyre-agent/agent-runner.test.mjs`: 10/10 pass locally
+  (`node --test agent-runner.test.mjs`), including new suites for protocol
+  delivery and local gates (failing gate → nonzero exit + zero `/complete`
+  requests + failure output in the runner log + remediation follow-up
+  query carrying the captured output; passing gates → `POST /complete`
+  reached; hanging gate killed at its 1s timeout in ~1.1s total; malformed
+  config fails closed). Mutation-proven: making the gates hollow
+  (`localGates = []`) fails 3 tests; removing the `GYRE_PROTOCOL_PROMPT`
+  read fails 2 — exactly the hollow and dead-env-var defects the
+  verification intent names. Raw outputs saved under
+  `/tmp/stage/review-evidence/`.
+- `cargo check -p gyre-server --tests` passes (new spawn tests
+  type-check); the full gyre-server test build is deferred to the
+  independent verifier per the 4 GiB budget rule. Verifier must run:
+  `cargo test -p gyre-server --lib api::spawn::tests::spawn_delivers_local_gates_from_repo_gate_config`,
+  `cargo test -p gyre-server --lib api::spawn::tests::spawn_local_gates_empty_when_repo_configures_none`
+  (plus the meta-spec delivery regression neighbor), and
+  `cd docker/gyre-agent && npm test`.
+- `scripts/check-arch.sh`, byte-slice-truncation, relative-path-defaults,
+  lossy-secret-conversion, conditional-test-guards, aspirational-test-names,
+  concurrent-shared-write, inert-enforcement all pass on this tree.
+
+### Coverage rows
+
+No coverage matrix exists for `specs/development/agent-workflow.md`
+(`specs/coverage/` covers system/ specs only), so there are no rows to
+update for this spec; this task file is the delivery record.
