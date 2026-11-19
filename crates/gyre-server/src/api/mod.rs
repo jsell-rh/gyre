@@ -202,6 +202,33 @@ pub fn api_router() -> Router<Arc<AppState>> {
             "/api/v1/repos/:id/agent-commits",
             get(agent_tracking::list_commits),
         )
+        // Agent-session tracking (source-control.md §Agent-to-Commit
+        // Tracking): session list, commits-by-session, by-file/by-commit
+        // session queries, branch lifecycle, and time-travel.
+        .route(
+            "/api/v1/repos/:id/agent-sessions",
+            get(agent_tracking::list_sessions),
+        )
+        .route(
+            "/api/v1/repos/:id/agent-sessions/by-file",
+            get(agent_tracking::sessions_by_file),
+        )
+        .route(
+            "/api/v1/repos/:id/agent-sessions/by-commit",
+            get(agent_tracking::sessions_by_commit),
+        )
+        .route(
+            "/api/v1/repos/:id/agent-sessions/:session_id/commits",
+            get(agent_tracking::session_commits),
+        )
+        .route(
+            "/api/v1/repos/:id/agent-sessions/:session_id/state",
+            get(agent_tracking::session_state),
+        )
+        .route(
+            "/api/v1/repos/:id/agents/:agent_id/branch-lifecycle",
+            get(agent_tracking::branch_lifecycle),
+        )
         // Worktree management
         .route(
             "/api/v1/repos/:id/worktrees",

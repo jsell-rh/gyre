@@ -685,6 +685,16 @@ pub(crate) async fn relaunch_agent_session(
     let branch = wt.branch.clone();
     let work_dir = wt.path.clone();
 
+    // source-control.md §Agent-to-Commit Tracking: a Ralph-loop respawn
+    // runs with fresh context — that is a NEW session. The initial branch
+    // is resolved from the worktree's real current branch (the agent may
+    // have moved since spawn), falling back to the recorded branch when
+    // the worktree cannot be read.
+    let session_initial_branch = crate::agent_sessions::current_branch_in(&work_dir)
+        .await
+        .unwrap_or_else(|| wt.branch.clone());
+    crate::agent_sessions::start_session(state, &agent.id, &repo.id, &session_initial_branch).await;
+
     // Resolve the workspace compute target (same as the first spawn) —
     // used both for the JWT's workload/attestation claims and the launch
     // context below.
@@ -1291,6 +1301,80 @@ mod tests {
             "the re-spawn JWT must carry the repo's workspace scope, like the \
              first-spawn JWT"
         );
+    }
+
+    /// source-control.md §Agent-to-Commit Tracking: a Ralph-loop respawn
+    /// with fresh context starts a NEW session — one session per context
+    /// window. After a completed session 1 (the spawn) and a gate-failure
+    /// respawn, the agent's session list shows two sessions, and only the
+    /// second is open (attributing subsequently pushed commits).
+    #[tokio::test]
+    async fn respawn_opens_a_new_session() {
+        struct EnvVarRemove(&'static str);
+        impl Drop for EnvVarRemove {
+            fn drop(&mut self) {
+                std::env::remove_var(self.0);
+            }
+        }
+        let _env_guard = EnvVarRemove("GYRE_AGENT_COMMAND");
+        std::env::set_var("GYRE_AGENT_COMMAND", "/bin/true");
+        let state = loop_state(None).await;
+
+        // Bind the approved persona to the agent row (same setup as the
+        // sibling respawn test — the re-spawn resolves it for the launch
+        // context).
+        {
+            let mut bound = state
+                .agents
+                .find_by_id(&Id::new("agent-1"))
+                .await
+                .unwrap()
+                .unwrap();
+            bound.persona_id = Some(Id::new("repo-orchestrator-persona"));
+            state.agents.update(&bound).await.unwrap();
+        }
+
+        // Session 1: the (already-completed) spawn context window.
+        crate::agent_sessions::start_session(
+            &state,
+            &Id::new("agent-1"),
+            &Id::new("r-1"),
+            "task/abc",
+        )
+        .await;
+        let mut s1 = state
+            .agent_sessions
+            .find_open_by_agent(&Id::new("agent-1"))
+            .await
+            .unwrap()
+            .expect("session 1 open after spawn");
+        s1.ended_at = Some(500);
+        state.agent_sessions.update(&s1).await.unwrap();
+
+        // Gate failure under the ceiling → respawn with fresh context.
+        on_gates_failed(&state, &Id::new("mr-1"), &Id::new("agent-1")).await;
+
+        let sessions = state
+            .agent_sessions
+            .find_by_agent(&Id::new("agent-1"))
+            .await
+            .unwrap();
+        assert_eq!(sessions.len(), 2, "one session per context window");
+        assert_eq!(
+            sessions[0].ended_at,
+            Some(500),
+            "session 1 stays terminated"
+        );
+        assert!(
+            sessions[1].ended_at.is_none(),
+            "the respawned context window is the open session"
+        );
+        // The open session is what commit attribution resolves: a commit
+        // pushed by the re-spawned agent lands in session 2, not session 1.
+        let open_id = crate::agent_sessions::open_session_id(&state, &Id::new("agent-1"))
+            .await
+            .expect("open session resolves");
+        assert_eq!(open_id, sessions[1].id.to_string());
     }
 
     /// Phase 7 spawn-failure policy on the RE-SPAWN path (review F1,

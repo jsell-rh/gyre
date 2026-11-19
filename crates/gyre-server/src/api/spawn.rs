@@ -1168,6 +1168,13 @@ pub(crate) async fn spawn_agent_core(
         None
     };
 
+    // source-control.md §Agent-to-Commit Tracking: one session per context
+    // window — the spawn starts session 1. Port-backed, so it survives a
+    // server restart; commits pushed while it is open are stamped with
+    // this session's id. The initial branch is the spawn-time branch
+    // (AgentWorktree.branch).
+    crate::agent_sessions::start_session(state, &agent.id, &repo.id, &req.branch).await;
+
     // Agent-runtime §2: assemble the meta-spec prompt set for this agent —
     // required tenant → required workspace → spec-level bindings at pinned
     // versions. The set is injected into the agent environment and recorded
@@ -2658,6 +2665,12 @@ pub async fn complete_agent(
     let _ = agent.transition_status(AgentStatus::Idle);
     state.agents.update(&agent).await?;
 
+    // source-control.md §Agent-to-Commit Tracking: completion terminates
+    // the agent's open session — records the worktree's real current
+    // branch and dirty state, and stamps ended_at. Best-effort: never
+    // fails the completion.
+    crate::agent_sessions::end_session(&state, &agent).await;
+
     // Agent lifecycle audit events (observability.md §Audit Event Types).
     crate::agent_audit::emit_completed(
         &state,
@@ -2952,6 +2965,12 @@ pub async fn fail_agent(
         .transition_status(AgentStatus::Failed)
         .map_err(|e| ApiError::InvalidInput(e.to_string()))?;
     state.agents.update(&agent).await?;
+
+    // source-control.md §Agent-to-Commit Tracking: failure terminates the
+    // agent's open session — records the worktree's real current branch
+    // and dirty state, and stamps ended_at. Best-effort: never fails the
+    // failure path.
+    crate::agent_sessions::end_session(&state, &agent).await;
 
     // M22.2: Decrement budget active-agent counter.
     let workspace_id = agent.workspace_id.to_string();
@@ -4450,6 +4469,181 @@ mod tests {
             .unwrap();
         let agent_json = body_json(agent_resp).await;
         assert_eq!(agent_json["status"], "idle");
+    }
+
+    /// source-control.md §Agent-to-Commit Tracking: the spawn starts an
+    /// open session, and completion terminates it — recording the
+    /// worktree's REAL current branch and dirty state (a real
+    /// `git status --porcelain` query in the agent's worktree, never a
+    /// hardcoded value). Completing with an uncommitted edit in the
+    /// worktree records dirty=true with the file listed.
+    #[tokio::test]
+    async fn complete_agent_ends_session_with_real_dirty_state() {
+        // Pin the launch command for THIS test only (process-global env var;
+        // the guard removes it on scope exit, including panic unwind).
+        struct EnvVarRemove(&'static str);
+        impl Drop for EnvVarRemove {
+            fn drop(&mut self) {
+                std::env::remove_var(self.0);
+            }
+        }
+        let _env_guard = EnvVarRemove("GYRE_AGENT_COMMAND");
+        std::env::set_var("GYRE_AGENT_COMMAND", "/bin/true");
+
+        let jj = std::sync::Arc::new(crate::mem::ConfigurableJjOps::default());
+        let git = std::sync::Arc::new(crate::mem::ConfigurableGitOps::default());
+        let state = crate::mem::test_state_with_jj_and_git_ops(jj, git);
+
+        // A real git repo + a real linked worktree for the agent.
+        let dir = tempfile::tempdir().unwrap();
+        let main = dir.path().join("main");
+        std::fs::create_dir_all(&main).unwrap();
+        let run = |cwd: &std::path::Path, args: &[&str]| {
+            let ok = std::process::Command::new("git")
+                .arg("-C")
+                .arg(cwd)
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@t")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@t")
+                .status()
+                .unwrap()
+                .success();
+            assert!(ok, "git {:?} failed", args);
+        };
+        run(&main, &["init", "-b", "main"]);
+        std::fs::write(main.join("src"), "fn main() {}\n").unwrap();
+        run(&main, &["add", "src"]);
+        run(&main, &["commit", "-m", "init"]);
+        let wt = dir.path().join("wt");
+        run(
+            &main,
+            &["worktree", "add", "-b", "feat/dirty", wt.to_str().unwrap()],
+        );
+
+        seed_ws1_workspace(&state).await;
+        let mut repo = gyre_domain::Repository::new(
+            Id::new("repo-dirty"),
+            Id::new("ws-1"),
+            "dirty-repo",
+            main.to_str().unwrap().to_string(),
+            1000,
+        );
+        repo.default_branch = "main".to_string();
+        state.repos.create(&repo).await.unwrap();
+
+        let mut task = gyre_domain::Task::new(Id::new("task-dirty"), "dirty completion task", 1000);
+        task.task_type = Some(gyre_domain::TaskType::Implementation);
+        task.workspace_id = Id::new("ws-1");
+        state.tasks.create(&task).await.unwrap();
+        let auth = crate::auth::AuthenticatedAgent {
+            agent_id: "spawner".to_string(),
+            user_id: None,
+            roles: vec![],
+            tenant_id: "default".to_string(),
+            workspace_id: None,
+            repo_id: None,
+            scope: Vec::new(),
+            jwt_claims: None,
+            bearer_token: None,
+            deprecated_token_auth: false,
+            impersonation: None,
+        };
+        let req = SpawnAgentRequest {
+            name: "dirty-worker".to_string(),
+            repo_id: "repo-dirty".to_string(),
+            task_id: "task-dirty".to_string(),
+            branch: "feat/dirty".to_string(),
+            parent_id: None,
+            compute_target_id: None,
+            persona_slug: None,
+            disconnected_behavior: None,
+            loop_config: None,
+            agent_type: None,
+            conversation_sha: None,
+            persona: None,
+        };
+        let resp = spawn_agent_core(&state, req, &auth, "spawn_agent_core (direct test drive)")
+            .await
+            .expect("spawn must succeed");
+        let agent_id = Id::new(resp.agent.id.clone());
+
+        // The spawn started an open session attributed to this agent.
+        let open = state
+            .agent_sessions
+            .find_open_by_agent(&agent_id)
+            .await
+            .unwrap()
+            .expect("spawn must start an open session");
+        assert_eq!(open.initial_branch, "feat/dirty");
+        assert!(open.ended_at.is_none());
+
+        // Point the agent's worktree record at the real git worktree (the
+        // recorded path is the production source of the worktree location
+        // — the termination observation reads exactly this record).
+        for w in state.worktrees.find_by_agent(&agent_id).await.unwrap() {
+            state.worktrees.delete(&w.id).await.unwrap();
+        }
+        state
+            .worktrees
+            .create(&gyre_domain::AgentWorktree::new(
+                Id::new("wt-dirty"),
+                agent_id.clone(),
+                repo.id.clone(),
+                Some(Id::new("task-dirty")),
+                "feat/dirty",
+                wt.to_str().unwrap().to_string(),
+                1000,
+            ))
+            .await
+            .unwrap();
+
+        // The agent moves branches mid-session, and leaves an uncommitted
+        // modification behind.
+        run(&wt, &["switch", "-c", "feat/moved"]);
+        std::fs::write(wt.join("src"), "fn main() { changed }\n").unwrap();
+
+        let (status, _mr) = {
+            let (code, body) = complete_agent(
+                axum::extract::State(state.clone()),
+                axum::extract::Path(agent_id.to_string()),
+                axum::Json(CompleteAgentRequest {
+                    branch: "feat/moved".to_string(),
+                    title: "D feature".to_string(),
+                    target_branch: "main".to_string(),
+                    conversation_sha: None,
+                }),
+            )
+            .await
+            .expect("complete must succeed");
+            (code, serde_json::to_value(&body.0).unwrap())
+        };
+        assert_eq!(status, StatusCode::CREATED);
+
+        // The session terminated with the REAL observations: dirty=true,
+        // the modified file listed, and the moved branch resolved from the
+        // worktree (not the spawn-time branch copied forward).
+        let sessions = state.agent_sessions.find_by_agent(&agent_id).await.unwrap();
+        assert_eq!(sessions.len(), 1);
+        let s = &sessions[0];
+        assert!(s.ended_at.is_some(), "completion must end the session");
+        assert_eq!(
+            s.dirty,
+            Some(true),
+            "uncommitted edit must record dirty=true"
+        );
+        assert!(
+            s.uncommitted_paths.contains(&"src".to_string()),
+            "modified file must be listed, got {:?}",
+            s.uncommitted_paths
+        );
+        assert_eq!(
+            s.final_branch.as_deref(),
+            Some("feat/moved"),
+            "current branch must be resolved from the worktree at termination"
+        );
+        assert_eq!(s.initial_branch, "feat/dirty");
     }
 
     #[tokio::test]
