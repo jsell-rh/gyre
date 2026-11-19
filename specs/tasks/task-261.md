@@ -3,7 +3,7 @@ title: "SPIFFE workload attestation: X.509-SVIDs replace the G10 local scheme"
 spec_ref: "Spec gap spec-31d3ae72e12e22c52442e309 / spiffe-workload-attestation / b60edce5bc49"
 depends_on: []
 progress: ready-for-review
-commits: ["d9d97d4ee3f6d023997c3df053f89c0073484f6b", "2934153b307ad6f2cca32db758e134a375b8de90", "0c37ba3c1972849406c4c233579c4c2cd9ef8230", "14c63ffbd16a48b386fde1c63b18ff1af1e1e464", "ea0f207339d7f231560338d0e64b62302231de8a", "354a5e7a653431c98784ef3cb8326697b7998909", "c9a4d0337ef3aac273be09561d7548f82b2b51b8"]
+commits: ["c9a4d0337ef3aac273be09561d7548f82b2b51b8", "354a5e7a653431c98784ef3cb8326697b7998909", "ea0f207339d7f231560338d0e64b62302231de8a", "14c63ffbd16a48b386fde1c63b18ff1af1e1e464", "0c37ba3c1972849406c4c233579c4c2cd9ef8230", "2934153b307ad6f2cca32db758e134a375b8de90", "d9d97d4ee3f6d023997c3df053f89c0073484f6b", "b8b023fb9c376be2525993ff408d761d300118df"]
 ---
 
 ## Required behavior
@@ -125,18 +125,27 @@ compare are deleted from the verification path).
   `docker/gyre-agent/entrypoint.sh`), so agents driven by these dev
   helpers no longer silently fail every heartbeat.
 
+### Rebase repair round (b8b023fb)
+
+- Rebased the branch onto base 05024b3e (task-254 agent signing key
+  rotation). Single conflict in
+  `crates/gyre-server/src/middleware.rs`: the candidate branch added
+  `spiffe: base.spiffe.clone()` to the test AppState literal, the base
+  added `signing_key_history: Vec::new()` to the same literal; AppState
+  carries both fields, so the resolution keeps both lines. No behavior
+  change; all other files auto-merged.
+- Post-rebase probes (sandbox limits: gyre-server test compilation
+  belongs to the independent verifier): `cargo check -p gyre-spiffe -p
+  gyre-server` passes; `cargo test -p gyre-spiffe` passes 27/27
+  including the full fail-closed rejection matrix (unknown key,
+  expired, not-yet-valid, foreign trust domain, wrong session, wrong
+  role, tampered leaf, no SVID, empty bundle); `rustfmt --edition 2021
+  --check` clean on every .rs file changed vs base. Logs:
+  /tmp/stage/review-evidence/task-261-spiffe-tests.log,
+  task-261-rebase-verify.log.
+
 ### Test evidence
 
-- This round (sandbox limits: gyre-server test compilation belongs to
-  the independent verifier): `cargo check -p gyre-server --test
-  api_integration` passes with the updated test — an error probe
-  (deliberate syntax error in the same file) confirmed the check
-  command genuinely covers the test target and fails on it (log:
-  /tmp/stage/review-evidence/api-integration-check.log). `bash -n` on
-  both scripts; jq/node payload builders verified against a multi-line
-  PEM fixture; `rustfmt --check`, `check-arch.sh`,
-  `check-byte-slice-truncation.sh`, and (after the frontmatter update)
-  `check-task-commit-attribution.sh` all pass.
 - Prior rounds (reviewer-run evidence, durable findings ca00525f and
   a619ffb4): gyre-spiffe serial-flakiness measured 0 FAILED / 20 runs
   after 0c37ba3c; the mcp.rs heartbeat test regression was confirmed
