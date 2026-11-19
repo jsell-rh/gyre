@@ -49,6 +49,13 @@ async fn start_server() -> TestServer {
     let base_url = format!("http://127.0.0.1:{port}");
     let token = format!("spec-enf-token-{}", uuid::Uuid::new_v4());
 
+    // task-264: production's default signing mode is keyless Fulcio; this
+    // harness runs real merge cycles with non-JWT dev tokens, so it
+    // explicitly opts into local forge-key signing (the documented
+    // operator opt-in). Keyless/fail-loud signing has its own suites
+    // (merge_processor.rs merge_signing_tests, api/jj.rs, git_http.rs).
+    unsafe { std::env::set_var("GYRE_SIGNING_MODE", "local") };
+
     let state = build_state(&token, &base_url, None);
     abac_middleware::seed_builtin_policies(&state)
         .await

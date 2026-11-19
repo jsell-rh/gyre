@@ -34,8 +34,10 @@
 //!
 //! Latency (review F10): every outbound call is wrapped in
 //! `tokio::time::timeout` — reqwest has no default total timeout, and the
-//! fall-back-to-local guarantee must hold for hung endpoints, not just
-//! refused connections.
+//! task-264 fail-loud guarantee must hold for hung endpoints, not just
+//! refused connections: a hung signing stack must surface as an explicit
+//! error (or the operator-configured fallback), never as an indefinite
+//! stall.
 
 use anyhow::{anyhow, Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
@@ -358,20 +360,37 @@ impl SigningHttpTransport for ReqwestTransport {
     }
 }
 
-/// The digest Rekor records and verification compares: SHA-256 over the raw
-/// commit-SHA hex-string bytes. The commit id is content-addressed, so
-/// signing/digesting its hex binds the content; sign and verify compute this
-/// identically.
-pub fn commit_digest(commit_sha: &str) -> String {
-    hex::encode(Sha256::digest(commit_sha.as_bytes()))
+/// The digest Rekor records and verification compares: SHA-256 over the
+/// canonical attribution-bound signed payload (commit SHA + task_id +
+/// spawned_by — task-264). Signing a bare commit SHA left the attribution
+/// as detached plaintext; digesting (and signing) the canonical payload
+/// binds task/spawner provenance into the transparency-log entry too.
+/// Sign and verify compute this identically from the same triple.
+pub fn commit_digest(commit_sha: &str, task_id: &str, spawned_by: &str) -> String {
+    hex::encode(Sha256::digest(
+        crate::commit_signatures::signed_commit_payload(commit_sha, task_id, spawned_by).as_slice(),
+    ))
+}
+
+/// Whether `token` can be presented to Fulcio as an OIDC identity: a
+/// decodable JWT payload carrying a `sub` claim (task-264). Non-JWT
+/// bearers (dev tokens, API keys) and empty tokens are refused BEFORE any
+/// HTTP call — the old behavior presented them anyway, guaranteeing a
+/// Fulcio failure that silently degraded to local forge-key signing.
+pub fn jwt_is_presentable(token: &str) -> bool {
+    decode_jwt_payload(token)
+        .is_ok_and(|payload| payload.get("sub").and_then(|v| v.as_str()).is_some())
 }
 
 /// Sign `commit_sha` keylessly: request a Fulcio certificate for the agent's
-/// OIDC JWT, sign the commit SHA with the certificate's ephemeral P-256 key,
-/// and record the signature in Rekor.
+/// OIDC JWT, sign the canonical attribution-bound payload (commit SHA +
+/// task_id + spawned_by) with the certificate's ephemeral P-256 key, and
+/// record the signature in Rekor.
 ///
-/// On any failure the caller falls back to local signing (its guarantee is
-/// that squash itself never fails because of the external signing stack).
+/// On any failure the error is returned to the caller, which decides how to
+/// surface it (task-264: the default is to fail the commit operation
+/// loudly; only the operator-configured
+/// `GYRE_SIGNING_FULCIO_FALLBACK=local` may degrade to local signing).
 pub async fn sign_commit_keyless(
     repo_id: &str,
     commit_sha: &str,
@@ -453,17 +472,25 @@ pub async fn sign_commit_keyless(
         .clone();
     let full_chain_pem = chain_pem.join("\n");
 
-    // 4. Sign the commit SHA with the ephemeral key (DER ECDSA signature).
+    // 4. Sign the canonical attribution-bound payload with the ephemeral
+    //    key (DER ECDSA signature). The payload binds commit SHA + task_id
+    //    + spawned_by (task-264): verification recomputes it from the
+    //    record's own fields, so tampered attribution fails.
+    let payload = crate::commit_signatures::signed_commit_payload(
+        commit_sha,
+        &attribution.task_id,
+        &attribution.spawned_by,
+    );
     let signature_der = ecdsa_key
-        .sign(&ring::rand::SystemRandom::new(), commit_sha.as_bytes())?
+        .sign(&ring::rand::SystemRandom::new(), &payload)?
         .as_ref()
         .to_vec();
     let signature_b64 = BASE64.encode(&signature_der);
 
-    // 5. Record in Rekor: hashedrekord with the commit digest, signature,
+    // 5. Record in Rekor: hashedrekord with the payload digest, signature,
     //    and the leaf certificate (base64 PEM in `publicKey.content`, the
     //    encoding upstream Rekor's DecodeEntry + x509.NewPublicKey accept).
-    let digest = commit_digest(commit_sha);
+    let digest = commit_digest(commit_sha, &attribution.task_id, &attribution.spawned_by);
     let entry = RekorEntryRequest {
         kind: "hashedrekord",
         api_version: "0.0.1",
@@ -654,8 +681,11 @@ fn fail(mut result: SignatureVerificationResult, reason: &str) -> SignatureVerif
     result
 }
 
-/// (a) Verify the record's base64-DER ECDSA signature over the commit SHA
-/// using the leaf certificate's public key.
+/// (a) Verify the record's base64-DER ECDSA signature over the canonical
+/// attribution-bound payload (recomputed from the record's OWN
+/// commit_sha/task_id/spawned_by — task-264) using the leaf certificate's
+/// public key. A record whose attribution was edited after signing fails
+/// here, because the recomputed payload no longer matches the signed bytes.
 fn check_signature(record: &CommitSignature, leaf_pem: &str) -> bool {
     let Ok(parsed) = ParsedCertificate::from_pem(leaf_pem) else {
         return false;
@@ -671,7 +701,11 @@ fn check_signature(record: &CommitSignature, leaf_pem: &str) -> bool {
         &ring::signature::ECDSA_P256_SHA256_ASN1,
         spki.subject_public_key.data.as_ref(),
     );
-    pk.verify(record.commit_sha.as_bytes(), &sig_bytes).is_ok()
+    pk.verify(
+        &crate::commit_signatures::record_signed_payload(record),
+        &sig_bytes,
+    )
+    .is_ok()
 }
 
 /// Fetch and decode the trust bundle from the CONFIGURED Fulcio (F3).
@@ -854,8 +888,10 @@ async fn check_rekor_entry(
         None => return false,
     };
 
-    // Digest must match this commit.
-    let digest = commit_digest(&record.commit_sha);
+    // Digest must match this record's attribution-bound payload — an entry
+    // whose digest covers different task/spawner attribution (or a record
+    // whose attribution was edited after signing) does not match (task-264).
+    let digest = commit_digest(&record.commit_sha, &record.task_id, &record.spawned_by);
     let hash_matches = spec
         .get("data")
         .and_then(|d| d.get("hash"))
@@ -1153,11 +1189,26 @@ mod tests {
 
     #[test]
     fn commit_digest_is_stable_and_hex() {
-        let d1 = commit_digest("abc123");
-        let d2 = commit_digest("abc123");
+        let d1 = commit_digest("abc123", "task-1", "user-1");
+        let d2 = commit_digest("abc123", "task-1", "user-1");
         assert_eq!(d1, d2);
         assert_eq!(d1.len(), 64);
         assert!(d1.chars().all(|c| c.is_ascii_hexdigit()));
+        // The digest is attribution-sensitive: a different task/spawner
+        // yields a different transparency-log digest (task-264).
+        assert_ne!(d1, commit_digest("abc123", "task-2", "user-1"));
+        assert_ne!(d1, commit_digest("abc123", "task-1", "user-2"));
+    }
+
+    #[test]
+    fn jwt_presentability_gate() {
+        assert!(jwt_is_presentable(&test_jwt("agent-7")));
+        // Empty / non-JWT bearers (dev tokens, API keys) are refused before
+        // any Fulcio call — the old path presented them and guaranteed
+        // failure + silent local fallback (task-264).
+        assert!(!jwt_is_presentable(""));
+        assert!(!jwt_is_presentable("gyre-dev-token"));
+        assert!(!jwt_is_presentable("not-a-jwt"));
     }
 
     #[test]
@@ -1651,6 +1702,47 @@ mod tests {
             "a tampered signature must not match its Rekor entry (F4)"
         );
     }
+    /// task-264: the attribution is covered by the cryptographic signature
+    /// AND the Rekor entry, not only by plaintext DB columns. Take a valid
+    /// keyless record, tamper ONLY the stored task_id (exactly the
+    /// verification-intent probe: swap in another task's attribution), and
+    /// verification must fail — the recomputed payload no longer matches
+    /// the signed bytes (phase a) nor the recorded digest (phase d).
+    #[tokio::test]
+    async fn verification_fails_on_tampered_task_attribution() {
+        let stack = MockSigningStack::new();
+        let mut record = sign(&stack, "attrib-tamper").await;
+        assert!(record.task_id == "task-107");
+        record.task_id = "task-forged".to_string();
+
+        let result = verify_signature_fulcio(&record, &test_config(), &stack, test_now()).await;
+        assert!(
+            !result.valid,
+            "a record with forged task attribution must fail verification"
+        );
+        assert!(
+            !result.signature_valid,
+            "the signature covers the canonical payload — tampered task_id \
+             breaks the signature check (a)"
+        );
+        assert!(
+            !result.rekor_entry_exists,
+            "the Rekor digest covers the canonical payload — tampered task_id \
+             breaks the entry content match (d)"
+        );
+        // The certificate and subject are untouched.
+        assert!(result.certificate_chain_valid);
+        assert!(result.subject_matches);
+
+        // Same for spawned_by.
+        let mut record2 = sign(&stack, "attrib-tamper-2").await;
+        record2.spawned_by = "user-forged".to_string();
+        let result2 = verify_signature_fulcio(&record2, &test_config(), &stack, test_now()).await;
+        assert!(!result2.valid);
+        assert!(!result2.signature_valid);
+        assert!(!result2.rekor_entry_exists);
+    }
+
     /// Phase (b) negative: a leaf issued by a CA absent from the trust
     /// bundle must fail certificate_chain_valid.
     #[tokio::test]
@@ -1721,7 +1813,13 @@ mod tests {
         let rogue_leaf = params.self_signed(&rogue_key).unwrap();
         let rogue_leaf_pem = rogue_leaf.pem();
 
-        // Valid ECDSA signature by the rogue key over the commit SHA.
+        // Valid ECDSA signature by the rogue key over the SAME canonical
+        // attribution-bound payload the genuine signing path signs
+        // (`record_signed_payload`: commit SHA + task_id + spawned_by —
+        // task-264). Signing the bare commit SHA here would fail phase (a)
+        // trivially and the test would no longer isolate the leaf binding;
+        // a real forger controls their key and signs whatever material
+        // makes the record internally consistent.
         let rogue_ecdsa = ring::signature::EcdsaKeyPair::from_pkcs8(
             &ring::signature::ECDSA_P256_SHA256_ASN1_SIGNING,
             &rogue_key.serialize_der(),
@@ -1732,7 +1830,7 @@ mod tests {
             rogue_ecdsa
                 .sign(
                     &ring::rand::SystemRandom::new(),
-                    record.commit_sha.as_bytes(),
+                    &crate::commit_signatures::record_signed_payload(&record),
                 )
                 .unwrap()
                 .as_ref(),
@@ -1745,7 +1843,7 @@ mod tests {
             "kind": "hashedrekord",
             "apiVersion": "0.0.1",
             "spec": {
-                "data": { "hash": { "algorithm": "sha256", "value": commit_digest(&record.commit_sha) } },
+                "data": { "hash": { "algorithm": "sha256", "value": commit_digest(&record.commit_sha, &record.task_id, &record.spawned_by) } },
                 "signature": {
                     "content": rogue_sig,
                     "publicKey": { "content": BASE64.encode(rogue_leaf_pem.as_bytes()) },
