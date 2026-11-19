@@ -19,6 +19,7 @@
 
 use crate::id::{AgentPath, SpiffeId};
 use std::time::SystemTime;
+use x509_parser::certificate::X509Certificate;
 use x509_parser::extensions::{GeneralName, ParsedExtension};
 
 /// PEM label expected for certificate blocks in a presented SVID chain.
@@ -125,6 +126,26 @@ pub fn verify_svid_for_record_id(
     })
 }
 
+/// Extract the (cryptographically UNVERIFIED) SPIFFE ID from a presented
+/// SVID chain's leaf URI SAN.
+///
+/// SPIFFE federation use only: the trust domain of the extracted ID
+/// selects which exchanged trust bundle the full verification runs
+/// against (the SPIFFE federation model — bundle endpoints keyed by
+/// trust domain). The result is never trusted on its own: it is a claim
+/// from the presented certificate, and only [`verify_svid`] against the
+/// selected bundle's anchors turns it into an attested identity.
+pub fn extract_spiffe_id(presented_pem: &str) -> Result<SpiffeId, VerificationError> {
+    if presented_pem.trim().is_empty() {
+        return Err(VerificationError::NoSvid);
+    }
+    let chain = parse_pem_chain(presented_pem).ok_or(VerificationError::MalformedPem)?;
+    let leaf_der = chain.first().ok_or(VerificationError::EmptyChain)?;
+    let (_, leaf) = x509_parser::parse_x509_certificate(leaf_der)
+        .map_err(|_| VerificationError::MalformedPem)?;
+    extract_id_from_leaf(&leaf)
+}
+
 /// Checks (1)-(4): parse, chain signature against the bundle anchors,
 /// validity windows, single-URI-SAN extraction. Returns the parsed leaf and
 /// its SPIFFE ID.
@@ -187,6 +208,21 @@ fn verify_chain_and_extract_id(
     }
 
     // (4) Exactly one URI SAN, no other name forms.
+    let spiffe_id = extract_id_from_leaf(&leaf)?;
+
+    Ok(ChainVerified {
+        spiffe_id,
+        // Canonical big-integer hex — the SAME form issuance stamps on
+        // IssuedSvid::serial (see canonical_serial_hex).
+        serial: crate::canonical_serial_hex(&leaf.serial.to_bytes_be()),
+        not_before: leaf.validity.not_before.timestamp(),
+        not_after: leaf.validity.not_after.timestamp(),
+    })
+}
+
+/// Check (4) alone: exactly one URI SAN carrying a well-formed SPIFFE ID,
+/// and no other SAN name forms (per the SPIFFE X.509-SVID spec).
+fn extract_id_from_leaf(leaf: &X509Certificate) -> Result<SpiffeId, VerificationError> {
     let mut uri_count = 0;
     let mut other_forms = 0;
     let mut spiffe_id_str: Option<String> = None;
@@ -211,18 +247,8 @@ fn verify_chain_and_extract_id(
         1 => {}
         n => return Err(VerificationError::MultipleUriSans(n)),
     }
-    let spiffe_id =
-        SpiffeId::parse(&spiffe_id_str.expect("uri_count == 1 guarantees the SAN string"))
-            .map_err(|e| VerificationError::MalformedSpiffeId(e.to_string()))?;
-
-    Ok(ChainVerified {
-        spiffe_id,
-        // Canonical big-integer hex — the SAME form issuance stamps on
-        // IssuedSvid::serial (see canonical_serial_hex).
-        serial: crate::canonical_serial_hex(&leaf.serial.to_bytes_be()),
-        not_before: leaf.validity.not_before.timestamp(),
-        not_after: leaf.validity.not_after.timestamp(),
-    })
+    SpiffeId::parse(&spiffe_id_str.expect("uri_count == 1 guarantees the SAN string"))
+        .map_err(|e| VerificationError::MalformedSpiffeId(e.to_string()))
 }
 
 /// Check (5): bind the SPIFFE ID to the expected agent session.
@@ -509,5 +535,36 @@ mod tests {
         );
         let result = verify_svid(&tampered_pem, &anchors, &issued.expected, now());
         assert!(result.is_err(), "tampered leaf must not verify");
+    }
+
+    /// Federation helper: extract_spiffe_id reads the trust domain (and full
+    /// SPIFFE ID) off the leaf URI SAN WITHOUT any anchor — the caller then
+    /// selects the exchanged bundle to verify against. It must reject the
+    /// same malformed shapes the full verification rejects.
+    #[test]
+    fn extract_spiffe_id_reads_unverified_id() {
+        let (ca, id, issued) = setup();
+        let extracted = extract_spiffe_id(&issued.chain_pem).unwrap();
+        assert_eq!(extracted, id);
+        assert_eq!(extracted.trust_domain, TD);
+
+        // No SVID / garbage / non-PEM inputs are rejected.
+        assert_eq!(
+            extract_spiffe_id("").unwrap_err(),
+            VerificationError::NoSvid
+        );
+        assert_eq!(
+            extract_spiffe_id("not a pem").unwrap_err(),
+            VerificationError::MalformedPem
+        );
+
+        // The extracted ID is UNVERIFIED: an SVID signed by a rogue CA still
+        // yields its (claimed) SPIFFE ID here — the anchor check happens in
+        // verify_svid, not here.
+        let rogue = TrustDomainCa::generate(TD).unwrap();
+        let rogue_id = SpiffeId::agent(TD, "worker", "session-42").unwrap();
+        let rogue_svid = rogue.issue_svid(&rogue_id, 3600).unwrap();
+        assert_eq!(extract_spiffe_id(&rogue_svid.chain_pem).unwrap(), rogue_id);
+        let _ = ca; // silences unused-variable when assertions short-circuit
     }
 }
