@@ -9987,6 +9987,8 @@ mod tests {
         let events = state
             .audit
             .query(&AuditQueryFilter {
+                q: None,
+                tenant_id: None,
                 agent_id: None,
                 event_type: Some(
                     crate::merge_attestation::MERGE_ATTESTATION_AUDIT_TYPE.to_string(),

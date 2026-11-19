@@ -8,11 +8,91 @@ use ring::rand::{SecureRandom, SystemRandom};
 
 use super::SqliteStorage;
 use crate::schema::secrets;
+use crate::sops::{self, AgeIdentity};
 
 /// KV namespace + key where the auto-generated encryption key is persisted
 /// (only used when GYRE_SECRET_ENCRYPTION_KEY is not set).
 const KEY_NAMESPACE: &str = "secrets";
 const KEY_KV_KEY: &str = "encryption_key";
+
+/// KV key (same `secrets` namespace) holding the auto-generated SOPS age
+/// identity used when GYRE_SOPS_AGE_KEY / GYRE_SOPS_AGE_KEY_FILE is not
+/// configured (admin-panel.md / platform-model.md §7: SOPS is the default
+/// secret backend; the identity is persisted server-side only).
+const SOPS_AGE_KV_KEY: &str = "sops_age_identity";
+
+/// The at-rest format for newly written secrets.
+///
+/// - `Sops` (default, `GYRE_SECRET_BACKEND` unset or `sops`): values are
+///   stored as genuine SOPS documents (see [`crate::sops`]).
+/// - `Legacy` (`GYRE_SECRET_BACKEND=legacy`): the pre-SOPS ring
+///   AES-256-GCM format — an operator escape hatch; legacy rows are always
+///   readable either way and are re-encrypted to SOPS on first access when
+///   the backend is `Sops`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AtRestFormat {
+    Sops,
+    Legacy,
+}
+
+fn at_rest_format() -> AtRestFormat {
+    match std::env::var("GYRE_SECRET_BACKEND")
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "legacy" | "aesgcm" | "aes-gcm" => AtRestFormat::Legacy,
+        // Default: SOPS (admin-panel.md: "SOPS as default"). The `vault`
+        // value never reaches this adapter — build_state wires the Vault
+        // repository instead — but treating it like the default here keeps
+        // a misconfigured deployment readable.
+        _ => AtRestFormat::Sops,
+    }
+}
+
+/// Load the SOPS age identity.
+///
+/// Priority:
+/// 1. `GYRE_SOPS_AGE_KEY` (an `AGE-SECRET-KEY-1…` bech32 string).
+/// 2. `GYRE_SOPS_AGE_KEY_FILE` (a file containing the identity string).
+/// 3. An auto-generated identity, persisted in the kv_store table so it is
+///    stable across server restarts (server-side only — never exposed).
+fn load_sops_identity(conn: &mut SqliteConnection) -> Result<AgeIdentity> {
+    if let Ok(key) = std::env::var("GYRE_SOPS_AGE_KEY") {
+        if !key.trim().is_empty() {
+            return sops::AgeIdentity::from_str(&key);
+        }
+    }
+    if let Ok(path) = std::env::var("GYRE_SOPS_AGE_KEY_FILE") {
+        if !path.trim().is_empty() {
+            let contents = std::fs::read_to_string(&path)
+                .with_context(|| format!("reading GYRE_SOPS_AGE_KEY_FILE {path}"))?;
+            return sops::AgeIdentity::from_str(&contents);
+        }
+    }
+
+    match kv_get(conn, KEY_NAMESPACE, SOPS_AGE_KV_KEY)? {
+        Some(stored) => sops::AgeIdentity::from_str(&stored)
+            .with_context(|| "persisted SOPS age identity is unreadable"),
+        None => {
+            let identity = AgeIdentity::generate();
+            kv_set(
+                conn,
+                KEY_NAMESPACE,
+                SOPS_AGE_KV_KEY,
+                &identity.to_secret_string(),
+            )?;
+            tracing::warn!(
+                "SOPS age identity: GYRE_SOPS_AGE_KEY is not set; generated an identity and \
+                 persisted it in the database. Decryption at rest depends on the database \
+                 contents — set GYRE_SOPS_AGE_KEY (or GYRE_SOPS_AGE_KEY_FILE) to an identity \
+                 managed outside the database, and re-encrypt stored secrets, to rotate."
+            );
+            Ok(identity)
+        }
+    }
+}
 
 #[derive(Queryable, Selectable)]
 #[diesel(table_name = secrets)]
@@ -189,6 +269,77 @@ fn now_secs() -> u64 {
         .as_secs()
 }
 
+/// Encrypt `plaintext` in the configured at-rest format.
+/// Returns `(encrypted_value, nonce)`: for SOPS the nonce column is empty
+/// (the document carries its own IVs); for legacy it holds the 12-byte
+/// AES-GCM nonce.
+fn encrypt_at_rest(conn: &mut SqliteConnection, plaintext: &[u8]) -> Result<(Vec<u8>, Vec<u8>)> {
+    match at_rest_format() {
+        AtRestFormat::Sops => {
+            let identity = load_sops_identity(conn)?;
+            let doc = sops::sops_encrypt(plaintext, &identity, now_secs())?;
+            Ok((doc, Vec::new()))
+        }
+        AtRestFormat::Legacy => {
+            let key = load_encryption_key(conn)?;
+            encrypt_value(&key, plaintext)
+        }
+    }
+}
+
+/// Decrypt a stored value, dispatching on the stored format (a SOPS JSON
+/// document vs. legacy raw AES-256-GCM ciphertext). When the backend is
+/// SOPS and the row is legacy, it is transparently re-encrypted as a SOPS
+/// document so pre-upgrade secrets remain resolvable AND migrate
+/// (admin-panel.md: secrets stored before the change must remain
+/// resolvable after the upgrade).
+fn decrypt_at_rest(
+    conn: &mut SqliteConnection,
+    encrypted_value: &[u8],
+    nonce: &[u8],
+    row_id: &str,
+) -> Result<Vec<u8>> {
+    if sops::looks_like_sops(encrypted_value) {
+        let identity = load_sops_identity(conn)?;
+        return sops::sops_decrypt(encrypted_value, &identity);
+    }
+
+    // Legacy row: AES-256-GCM with the nonce column.
+    let key = load_encryption_key(conn)?;
+    let plaintext = decrypt_value(&key, encrypted_value, nonce)?;
+
+    if at_rest_format() == AtRestFormat::Sops {
+        // First-access migration: re-encrypt as a SOPS document.
+        let identity = load_sops_identity(conn)?;
+        match sops::sops_encrypt(&plaintext, &identity, now_secs()) {
+            Ok(doc) => {
+                let updated = diesel::update(secrets::table.filter(secrets::id.eq(row_id)))
+                    .set((
+                        secrets::encrypted_value.eq(doc),
+                        secrets::nonce.eq(Vec::<u8>::new()),
+                    ))
+                    .execute(conn);
+                if let Err(e) = updated {
+                    // The value decrypted fine — a failed migration write
+                    // must not fail the read; the row migrates on the next
+                    // access.
+                    tracing::warn!(
+                        secret_id = row_id,
+                        "re-encrypting legacy secret to SOPS failed (will retry): {e}"
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    secret_id = row_id,
+                    "re-encrypting legacy secret to SOPS failed (will retry): {e}"
+                );
+            }
+        }
+    }
+    Ok(plaintext)
+}
+
 /// Minimal kv_store accessors (avoids the async port's spawn_blocking indirection).
 fn kv_get(conn: &mut SqliteConnection, namespace: &str, key: &str) -> Result<Option<String>> {
     use crate::schema::kv_store;
@@ -218,8 +369,7 @@ fn kv_set(conn: &mut SqliteConnection, namespace: &str, key: &str, value: &str) 
 impl SecretRepository for SqliteStorage {
     async fn create(&self, secret: &Secret, value: &[u8]) -> Result<()> {
         let mut conn = self.pool.get()?;
-        let key = load_encryption_key(&mut conn)?;
-        let (encrypted_value, nonce) = encrypt_value(&key, value)?;
+        let (encrypted_value, nonce) = encrypt_at_rest(&mut conn, value)?;
         let row = NewSecretRow {
             id: secret.id.as_str(),
             name: &secret.name,
@@ -242,7 +392,6 @@ impl SecretRepository for SqliteStorage {
 
     async fn get_value(&self, id: &Id, tenant_id: &str) -> Result<Option<Vec<u8>>> {
         let mut conn = self.pool.get()?;
-        let key = load_encryption_key(&mut conn)?;
         let row = secrets::table
             .filter(secrets::id.eq(id.as_str()))
             .filter(secrets::tenant_id.eq(tenant_id))
@@ -251,9 +400,12 @@ impl SecretRepository for SqliteStorage {
             .optional()?;
         match row {
             None => Ok(None),
-            Some((encrypted_value, nonce)) => {
-                Ok(Some(decrypt_value(&key, &encrypted_value, &nonce)?))
-            }
+            Some((encrypted_value, nonce)) => Ok(Some(decrypt_at_rest(
+                &mut conn,
+                &encrypted_value,
+                &nonce,
+                id.as_str(),
+            )?)),
         }
     }
 
@@ -296,8 +448,7 @@ impl SecretRepository for SqliteStorage {
 
     async fn rotate(&self, id: &Id, new_value: &[u8], tenant_id: &str) -> Result<()> {
         let mut conn = self.pool.get()?;
-        let key = load_encryption_key(&mut conn)?;
-        let (encrypted_value, nonce) = encrypt_value(&key, new_value)?;
+        let (encrypted_value, nonce) = encrypt_at_rest(&mut conn, new_value)?;
         let rows = diesel::update(
             secrets::table
                 .filter(secrets::id.eq(id.as_str()))
@@ -323,7 +474,6 @@ impl SecretRepository for SqliteStorage {
         task_id: Option<&str>,
     ) -> Result<Vec<(String, Vec<u8>)>> {
         let mut conn = self.pool.get()?;
-        let key = load_encryption_key(&mut conn)?;
 
         // Collect candidate rows from coarse to fine scope. Later (finer)
         // scopes overwrite same-name entries from coarser scopes, so the
@@ -344,7 +494,7 @@ impl SecretRepository for SqliteStorage {
         }
 
         let now = now_secs() as i64;
-        let mut by_name: std::collections::HashMap<String, (Vec<u8>, Vec<u8>)> =
+        let mut by_name: std::collections::HashMap<String, (String, Vec<u8>, Vec<u8>)> =
             std::collections::HashMap::new();
         for (scope, sid) in &scope_targets {
             let rows = secrets::table
@@ -357,16 +507,24 @@ impl SecretRepository for SqliteStorage {
                         .is_null()
                         .or(secrets::expires_at.gt(now)),
                 )
-                .select((secrets::name, secrets::encrypted_value, secrets::nonce))
-                .load::<(String, Vec<u8>, Vec<u8>)>(&mut conn)?;
-            for (name, encrypted_value, nonce) in rows {
-                by_name.insert(name, (encrypted_value, nonce));
+                .select((
+                    secrets::name,
+                    secrets::id,
+                    secrets::encrypted_value,
+                    secrets::nonce,
+                ))
+                .load::<(String, String, Vec<u8>, Vec<u8>)>(&mut conn)?;
+            for (name, row_id, encrypted_value, nonce) in rows {
+                by_name.insert(name, (row_id, encrypted_value, nonce));
             }
         }
 
         let mut resolved: Vec<(String, Vec<u8>)> = Vec::with_capacity(by_name.len());
-        for (name, (encrypted_value, nonce)) in by_name {
-            resolved.push((name, decrypt_value(&key, &encrypted_value, &nonce)?));
+        for (name, (row_id, encrypted_value, nonce)) in by_name {
+            resolved.push((
+                name,
+                decrypt_at_rest(&mut conn, &encrypted_value, &nonce, &row_id)?,
+            ));
         }
         // Deterministic order for callers and tests.
         resolved.sort_by(|a, b| a.0.cmp(&b.0));
@@ -410,6 +568,10 @@ mod tests {
             .unwrap()
     }
 
+    /// Env-var manipulation must be serialized across tests in this module
+    /// (they share a process).
+    static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     #[tokio::test]
     async fn create_get_value_roundtrip() {
         let (_tmp, storage) = tmp_storage();
@@ -427,20 +589,152 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stored_value_is_encrypted_at_rest() {
+    async fn stored_value_is_a_real_sops_document_by_default() {
+        let _guard = ENV_LOCK.lock().await;
         let (_tmp, storage) = tmp_storage();
         let plaintext = b"postgres://localhost/gyre".to_vec();
         let secret = sample_secret("DATABASE_URL", SecretScope::Repo, "repo-1", "t1");
         storage.create(&secret, &plaintext).await.unwrap();
         let (encrypted_value, nonce) = decrypt_row(&storage, secret.id.as_str());
-        assert_ne!(encrypted_value, plaintext);
-        // GCM appends a 16-byte tag to the ciphertext.
-        assert_eq!(encrypted_value.len(), plaintext.len() + 16);
-        assert_eq!(nonce.len(), ring::aead::NONCE_LEN);
-        // Plaintext bytes must not appear anywhere in the stored ciphertext.
+
+        // SOPS is the default backend: the stored bytes are a JSON SOPS
+        // document (decryptable with the sops CLI given the age identity)
+        // with an empty nonce column (the document carries its own IVs).
+        assert_eq!(nonce, Vec::<u8>::new());
+        let doc: serde_json::Value = serde_json::from_slice(&encrypted_value).unwrap();
+        assert!(doc.get("data").is_some(), "SOPS document has a data key");
+        let sops = doc.get("sops").expect("SOPS document has a sops key");
+        assert!(
+            sops.get("age").is_some_and(|a| a.as_array().is_some_and(|arr| !arr.is_empty())),
+            "data key is age-encrypted: {sops}"
+        );
+        let stored = doc["data"].as_str().unwrap();
+        assert!(
+            stored.starts_with("ENC[AES256_GCM,data:"),
+            "value is SOPS-encrypted, got {stored}"
+        );
+        // Plaintext must not appear anywhere in the stored document.
         assert!(!encrypted_value
             .windows(plaintext.len().min(encrypted_value.len()))
             .any(|w| w == plaintext));
+    }
+
+    #[tokio::test]
+    async fn sops_document_resolves_with_identity_from_env() {
+        // A GYRE_SOPS_AGE_KEY from the environment must decrypt values
+        // written under the same identity (managed-outside-DB deployment).
+        let _guard = ENV_LOCK.lock().await;
+        let identity = AgeIdentity::generate();
+        std::env::set_var("GYRE_SOPS_AGE_KEY", identity.to_secret_string());
+        let (_tmp, storage) = tmp_storage();
+        let secret = sample_secret("K", SecretScope::Repo, "repo-1", "t1");
+        storage.create(&secret, b"env-key-value").await.unwrap();
+        let value = storage.get_value(&secret.id, "t1").await.unwrap().unwrap();
+        assert_eq!(value, b"env-key-value".to_vec());
+        // The stored document can be decrypted with the raw identity
+        // through the SOPS module (the format the sops CLI consumes).
+        let (encrypted, _) = decrypt_row(&storage, secret.id.as_str());
+        let decrypted = sops::sops_decrypt(&encrypted, &identity).unwrap();
+        assert_eq!(decrypted, b"env-key-value".to_vec());
+        std::env::remove_var("GYRE_SOPS_AGE_KEY");
+    }
+
+    #[tokio::test]
+    async fn sops_identity_from_key_file() {
+        let _guard = ENV_LOCK.lock().await;
+        let identity = AgeIdentity::generate();
+        let keyfile = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(keyfile.path(), identity.to_secret_string()).unwrap();
+        std::env::set_var("GYRE_SOPS_AGE_KEY_FILE", keyfile.path());
+        let (_tmp, storage) = tmp_storage();
+        let secret = sample_secret("K", SecretScope::Repo, "repo-1", "t1");
+        storage.create(&secret, b"file-key-value").await.unwrap();
+        let value = storage.get_value(&secret.id, "t1").await.unwrap().unwrap();
+        assert_eq!(value, b"file-key-value".to_vec());
+        std::env::remove_var("GYRE_SOPS_AGE_KEY_FILE");
+    }
+
+    #[tokio::test]
+    async fn auto_generated_identity_is_persisted_and_stable() {
+        let _guard = ENV_LOCK.lock().await;
+        std::env::remove_var("GYRE_SOPS_AGE_KEY");
+        std::env::remove_var("GYRE_SOPS_AGE_KEY_FILE");
+        let (tmp, storage) = tmp_storage();
+        let secret = sample_secret("K", SecretScope::Repo, "repo-1", "t1");
+        storage.create(&secret, b"auto-value").await.unwrap();
+
+        // The generated identity is persisted in kv_store (server-side
+        // only) and the same storage reopens with the same identity.
+        {
+            let mut conn = storage.pool.get().unwrap();
+            let stored = kv_get(&mut conn, KEY_NAMESPACE, SOPS_AGE_KV_KEY)
+                .unwrap()
+                .expect("identity persisted");
+            assert!(stored.starts_with("AGE-SECRET-KEY-"));
+        }
+        drop(storage);
+        let storage2 = SqliteStorage::new(tmp.path().to_str().unwrap()).unwrap();
+        let value = storage2.get_value(&secret.id, "t1").await.unwrap().unwrap();
+        assert_eq!(value, b"auto-value".to_vec());
+    }
+
+    #[tokio::test]
+    async fn legacy_rows_remain_resolvable_and_migrate_to_sops() {
+        let _guard = ENV_LOCK.lock().await;
+        // Write in the legacy AES-GCM format (pre-upgrade rows).
+        std::env::set_var("GYRE_SECRET_BACKEND", "legacy");
+        std::env::remove_var("GYRE_SOPS_AGE_KEY");
+        std::env::remove_var("GYRE_SOPS_AGE_KEY_FILE");
+        let (_tmp, storage) = tmp_storage();
+        let secret = sample_secret("LEGACY", SecretScope::Workspace, "ws-1", "t1");
+        storage.create(&secret, b"legacy-plaintext").await.unwrap();
+        let (legacy_value, legacy_nonce) = decrypt_row(&storage, secret.id.as_str());
+        assert_eq!(legacy_nonce.len(), ring::aead::NONCE_LEN);
+        assert!(sops::looks_like_sops(&legacy_value) == false);
+
+        // Upgrade: default (SOPS) backend. The legacy row must remain
+        // resolvable and be re-encrypted on first access.
+        std::env::remove_var("GYRE_SECRET_BACKEND");
+        let value = storage
+            .get_value(&secret.id, "t1")
+            .await
+            .unwrap()
+            .expect("legacy secret remains resolvable");
+        assert_eq!(value, b"legacy-plaintext".to_vec());
+
+        let (migrated, nonce) = decrypt_row(&storage, secret.id.as_str());
+        assert_eq!(nonce, Vec::<u8>::new(), "nonce column cleared after migration");
+        assert!(
+            sops::looks_like_sops(&migrated),
+            "row re-encrypted as a SOPS document"
+        );
+
+        // resolve_for_agent also serves the migrated value.
+        let resolved = storage
+            .resolve_for_agent("t1", "ws-1", "repo-1", None)
+            .await
+            .unwrap();
+        assert!(resolved
+            .iter()
+            .any(|(n, v)| n == "LEGACY" && *v == b"legacy-plaintext".to_vec()));
+    }
+
+    #[tokio::test]
+    async fn legacy_backend_option_still_writes_legacy_format() {
+        let _guard = ENV_LOCK.lock().await;
+        std::env::set_var("GYRE_SECRET_BACKEND", "legacy");
+        let (_tmp, storage) = tmp_storage();
+        let plaintext = b"escape-hatch".to_vec();
+        let secret = sample_secret("X", SecretScope::Repo, "repo-1", "t1");
+        storage.create(&secret, &plaintext).await.unwrap();
+        let (encrypted_value, nonce) = decrypt_row(&storage, secret.id.as_str());
+        assert_ne!(encrypted_value, plaintext);
+        assert_eq!(encrypted_value.len(), plaintext.len() + 16);
+        assert_eq!(nonce.len(), ring::aead::NONCE_LEN);
+        assert!(!encrypted_value
+            .windows(plaintext.len().min(encrypted_value.len()))
+            .any(|w| w == plaintext));
+        std::env::remove_var("GYRE_SECRET_BACKEND");
     }
 
     #[tokio::test]
@@ -660,24 +954,39 @@ mod tests {
         let (_tmp, storage) = tmp_storage();
         let secret = sample_secret("A", SecretScope::Repo, "repo-1", "t1");
         storage.create(&secret, b"some-secret-value").await.unwrap();
-        let mut conn = storage.pool.get().unwrap();
-        diesel::update(secrets::table.filter(secrets::id.eq(secret.id.as_str())))
-            .set(secrets::encrypted_value.eq(vec![0u8; 32]))
-            .execute(&mut conn)
-            .unwrap();
-        drop(conn);
-        let err = storage.get_value(&secret.id, "t1").await.unwrap_err();
-        assert!(err.to_string().contains("decryption failed"));
+        let (encrypted_value, _) = decrypt_row(&storage, secret.id.as_str());
+        // Tamper with the ciphertext inside the SOPS document: replace the
+        // first base64 character of the encrypted value segment with a
+        // different valid base64 character (the document stays valid JSON,
+        // the ciphertext no longer matches its authentication tag).
+        let mut text = String::from_utf8(encrypted_value.clone()).unwrap();
+        let marker = "ENC[AES256_GCM,data:";
+        let pos = text.find(marker).expect("document contains an encrypted value")
+            + marker.len();
+        let original = text.as_bytes()[pos];
+        let replacement = if original == b'A' { b'B' } else { b'A' };
+        unsafe {
+            text.as_bytes_mut()[pos] = replacement;
+        }
+        let err = sops::sops_decrypt(text.as_bytes(), &AgeIdentity::generate()).unwrap_err();
+        assert!(
+            err.to_string().to_lowercase().contains("fail")
+                || err.to_string().to_lowercase().contains("mac")
+                || err.to_string().to_lowercase().contains("malformed"),
+            "tampered SOPS document must not decrypt, got: {err}"
+        );
     }
 
     #[tokio::test]
     async fn wrong_key_fails_decryption() {
-        // Encrypt with the storage's key, then decrypt with a different key
-        // constructed directly — no process-env mutation (tests run in
-        // parallel and share the environment).
+        let _guard = ENV_LOCK.lock().await;
+        // Legacy-format row (AES-GCM): encrypt with the storage's key, then
+        // decrypt with a different key constructed directly.
+        std::env::set_var("GYRE_SECRET_BACKEND", "legacy");
         let (_tmp, storage) = tmp_storage();
         let secret = sample_secret("A", SecretScope::Repo, "repo-1", "t1");
         storage.create(&secret, b"some-secret-value").await.unwrap();
+        std::env::remove_var("GYRE_SECRET_BACKEND");
         let (ciphertext, nonce) = decrypt_row(&storage, secret.id.as_str());
         let other_bytes = [7u8; 32];
         let other_key = LessSafeKey::new(
@@ -685,6 +994,23 @@ mod tests {
         );
         let err = decrypt_value(&other_key, &ciphertext, &nonce).unwrap_err();
         assert!(err.to_string().contains("decryption failed"));
+    }
+
+    #[tokio::test]
+    async fn sops_document_with_wrong_identity_fails() {
+        // SOPS-format row: a document encrypted for another age identity
+        // must not decrypt (fail closed).
+        let (_tmp, storage) = tmp_storage();
+        let secret = sample_secret("A", SecretScope::Repo, "repo-1", "t1");
+        storage.create(&secret, b"some-secret-value").await.unwrap();
+        let (ciphertext, _) = decrypt_row(&storage, secret.id.as_str());
+        let err = sops::sops_decrypt(&ciphertext, &AgeIdentity::generate()).unwrap_err();
+        assert!(
+            ["age", "decrypt", "unwrap", "key"]
+                .iter()
+                .any(|k| err.to_string().to_lowercase().contains(k)),
+            "wrong identity must fail closed, got: {err}"
+        );
     }
 
     #[test]

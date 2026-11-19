@@ -44,6 +44,7 @@
     { id: 'audit',      labelKey: 'tenant_settings.tabs.audit' },
     { id: 'health',     labelKey: 'tenant_settings.tabs.health' },
     { id: 'jobs',       labelKey: 'tenant_settings.tabs.jobs' },
+    { id: 'logs',       labelKey: 'tenant_settings.tabs.logs' },
     { id: 'bcp',        label: 'BCP' },
   ];
 
@@ -127,6 +128,7 @@
   let auditLoading = $state(false);
   let auditError = $state(null);
   let auditFilterType = $state('');
+  let auditSearch = $state('');
 
   // ── Health ────────────────────────────────────────────────────────────
   let health = $state(null);
@@ -139,6 +141,14 @@
   let jobsLoading = $state(false);
   let jobsError = $state(null);
   let runningJob = $state(null);
+  let expandedJobRuns = $state(null);
+
+  // ── Server Logs ───────────────────────────────────────────────────────
+  let serverLogs = $state([]);
+  let serverLogsLoading = $state(false);
+  let serverLogsError = $state(null);
+  let serverLogLevel = $state('');
+  let serverLogLimit = $state(200);
 
   // ── Compute CRUD ─────────────────────────────────────────────────────
   let showComputeForm = $state(false);
@@ -262,6 +272,9 @@
     }
     if (tab === 'jobs') {
       if (untrack(() => jobs.length === 0 && !jobsLoading)) loadJobs();
+    }
+    if (tab === 'logs') {
+      if (untrack(() => serverLogs.length === 0 && !serverLogsLoading)) loadServerLogs();
     }
     if (tab === 'policies') {
       if (untrack(() => !currentUser && !usersLoading)) ensureCurrentUser();
@@ -537,9 +550,13 @@
     auditLoading = true;
     auditError = null;
     try {
-      const params = auditFilterType ? { event_type: auditFilterType } : {};
+      const params = {};
+      if (auditFilterType) params.event_type = auditFilterType;
+      if (auditSearch.trim()) params.q = auditSearch.trim();
       const data = await api.adminAudit(params);
-      auditEvents = Array.isArray(data) ? data : (data?.items ?? []);
+      // TASK-273: the durable admin trail ({events, count}) — the same
+      // filter set /audit/events supports, plus free-text `q` search.
+      auditEvents = Array.isArray(data) ? data : (data?.events ?? data?.items ?? []);
     } catch (e) {
       auditError = e?.message ?? $t('tenant_settings.error_load_audit');
     } finally {
@@ -550,6 +567,22 @@
   async function refreshAudit() {
     auditEvents = [];
     await loadAudit();
+  }
+
+  async function loadServerLogs() {
+    serverLogsLoading = true;
+    serverLogsError = null;
+    try {
+      const params = {};
+      if (serverLogLevel) params.level = serverLogLevel;
+      params.limit = serverLogLimit;
+      const data = await api.adminServerLogs(params);
+      serverLogs = data?.entries ?? [];
+    } catch (e) {
+      serverLogsError = e?.message ?? 'Failed to load server logs';
+    } finally {
+      serverLogsLoading = false;
+    }
   }
 
   async function loadHealth() {
@@ -802,6 +835,30 @@
     if (!ts) return '—';
     const d = typeof ts === 'number' ? new Date(ts < 1e12 ? ts * 1000 : ts) : new Date(ts);
     return d.toLocaleString();
+  }
+
+  // Durable audit events carry `detail` as a JSON value (object or string);
+  // render a readable one-line form for the table cell.
+  function auditDetailText(ev) {
+    const d = ev.detail ?? ev.message;
+    if (d == null) return '—';
+    if (typeof d === 'string') return d;
+    try {
+      const s = JSON.stringify(d);
+      return s.length > 160 ? s.slice(0, 160) + '…' : s;
+    } catch {
+      return String(d);
+    }
+  }
+
+  // Job-run duration for the Jobs tab (TASK-273: status, duration,
+  // failures and logs are rendered from the persisted history).
+  function fmtDuration(secs) {
+    if (secs == null) return '—';
+    if (secs < 60) return `${secs}s`;
+    const m = Math.floor(secs / 60);
+    const s = secs % 60;
+    return s ? `${m}m ${s}s` : `${m}m`;
   }
 
   function shortId(id) {
@@ -1512,6 +1569,16 @@
             <option value="snapshot_created">{$t('tenant_settings.audit_event_types.snapshot_created')}</option>
             <option value="job_run">{$t('tenant_settings.audit_event_types.job_run')}</option>
           </select>
+          <label for="audit-filter-q" class="filter-label">{$t('tenant_settings.audit_search_label')}</label>
+          <input
+            id="audit-filter-q"
+            class="filter-input"
+            type="search"
+            placeholder={$t('tenant_settings.audit_search')}
+            bind:value={auditSearch}
+            onkeydown={(e) => { if (e.key === 'Enter') refreshAudit(); }}
+            data-testid="audit-search-input"
+          />
           <button class="refresh-btn" onclick={refreshAudit} aria-label={$t('tenant_settings.refresh')} data-testid="audit-refresh">
             {$t('tenant_settings.refresh')}
           </button>
@@ -1539,8 +1606,8 @@
                 <tr class="clickable-row" onclick={() => { expandedAuditId = expandedAuditId === evId ? null : evId; }} tabindex="0" role="button" onkeydown={(e) => { if (e.key === 'Enter') expandedAuditId = expandedAuditId === evId ? null : evId; }}>
                   <td class="td-mono">{fmtTimestamp(ev.timestamp)}</td>
                   <td><span class="event-type">{(ev.event_type ?? ev.kind ?? '—').replace(/_/g, ' ')}</span></td>
-                  <td>{ev.actor ?? ev.user ?? '—'}</td>
-                  <td class="td-detail">{ev.detail ?? ev.message ?? '—'}</td>
+                  <td>{ev.user_id ?? ev.agent_id ?? ev.actor ?? ev.user ?? '—'}</td>
+                  <td class="td-detail">{auditDetailText(ev)}</td>
                 </tr>
                 {#if expandedAuditId === evId}
                   <tr class="audit-detail-row">
@@ -1647,10 +1714,11 @@
             </thead>
             <tbody>
               {#each sortedBy(jobs, jobsSortCol, jobsSortDir) as job (job.name ?? job.id)}
-                <tr>
+                {@const jobId = job.name ?? job.id}
+                <tr class="clickable-row" onclick={() => { expandedJobRuns = expandedJobRuns === jobId ? null : jobId; }} tabindex="0" role="button" onkeydown={(e) => { if (e.key === 'Enter') expandedJobRuns = expandedJobRuns === jobId ? null : jobId; }} aria-expanded={expandedJobRuns === jobId}>
                   <td class="td-name">{job.name ?? job.id ?? '—'}</td>
                   <td class="td-mono">{job.schedule ?? '—'}</td>
-                  <td class="td-mono">{job.last_run ? new Date(job.last_run).toLocaleString() : '—'}</td>
+                  <td class="td-mono">{job.last_run ? new Date(job.last_run).toLocaleString() : (job.recent_runs?.[0] ? fmtTimestamp(job.recent_runs[0].started_at) : '—')}</td>
                   <td>
                     <span class="status-pill" class:status-ok={job.status === 'ok' || job.status === 'success'} class:status-warn={job.status === 'running'} class:status-err={job.status === 'error' || job.status === 'failed'} title={job.status === 'ok' || job.status === 'success' ? 'Last run completed successfully' : job.status === 'running' ? 'Job is currently executing' : job.status === 'error' || job.status === 'failed' ? 'Last run failed — check logs for details' : ''}>
                       {job.status ?? '—'}
@@ -1659,7 +1727,7 @@
                   <td>
                     <button
                       class="run-btn"
-                      onclick={() => runJob(job.name ?? job.id)}
+                      onclick={(e) => { e.stopPropagation(); runJob(job.name ?? job.id); }}
                       disabled={runningJob === (job.name ?? job.id)}
                       aria-label="Run job {job.name ?? job.id}"
                       data-testid="run-job-{job.name ?? job.id}"
@@ -1667,6 +1735,110 @@
                       {runningJob === (job.name ?? job.id) ? $t('tenant_settings.jobs.running') : $t('tenant_settings.jobs.run_now')}
                     </button>
                   </td>
+                </tr>
+                {#if expandedJobRuns === jobId}
+                  <!-- TASK-273: persisted run history — status, duration,
+                       failures and captured logs (admin-panel.md: "Full job
+                       history stored and visible in admin UI"). -->
+                  <tr class="audit-detail-row">
+                    <td colspan="5">
+                      <div class="audit-detail-content" data-testid="job-runs-{jobId}">
+                        {#if !job.recent_runs?.length}
+                          <div class="panel-empty">{$t('tenant_settings.jobs.runs_empty')}</div>
+                        {:else}
+                          {#each job.recent_runs as run (run.id)}
+                            <div class="job-run-entry" data-testid="job-run-entry">
+                              <div class="job-run-header">
+                                <span class="status-pill" class:status-ok={run.status === 'success'} class:status-err={run.status === 'failed'}>{run.status}</span>
+                                <span class="td-mono">{fmtTimestamp(run.started_at)}</span>
+                                <span>{$t('tenant_settings.jobs.run_duration')}: {fmtDuration(run.duration_secs)}</span>
+                              </div>
+                              {#if run.error}
+                                <div class="panel-error" role="alert">{run.error}</div>
+                              {/if}
+                              {#if run.logs?.length}
+                                <pre class="job-run-logs">{run.logs.join('\n')}</pre>
+                              {:else}
+                                <div class="job-run-nologs">{$t('tenant_settings.jobs.run_no_logs')}</div>
+                              {/if}
+                            </div>
+                          {/each}
+                        {/if}
+                      </div>
+                    </td>
+                  </tr>
+                {/if}
+              {/each}
+            </tbody>
+          </table>
+        {/if}
+      </div>
+
+    <!-- ── Server Logs (admin-panel.md §Server Logs; TASK-273) ──────────── -->
+    {:else if activeTab === 'logs'}
+      <div id="tab-panel-logs" role="tabpanel" aria-label="Server Logs" class="tab-panel" data-testid="tenant-tab-logs">
+        <div class="panel-header">
+          <h2 class="panel-title">{$t('tenant_settings.logs.title')}</h2>
+          <p class="panel-desc">{$t('tenant_settings.logs.subtitle')}</p>
+        </div>
+
+        <div class="filter-bar" data-testid="server-logs-filter-bar">
+          <label for="server-logs-level" class="filter-label">{$t('tenant_settings.logs.level')}</label>
+          <select
+            id="server-logs-level"
+            class="filter-select"
+            bind:value={serverLogLevel}
+            onchange={loadServerLogs}
+          >
+            <option value="">{$t('tenant_settings.logs.all_levels')}</option>
+            <option value="TRACE">TRACE</option>
+            <option value="DEBUG">DEBUG</option>
+            <option value="INFO">INFO</option>
+            <option value="WARN">WARN</option>
+            <option value="ERROR">ERROR</option>
+          </select>
+          <label for="server-logs-limit" class="filter-label">{$t('tenant_settings.logs.limit')}</label>
+          <select
+            id="server-logs-limit"
+            class="filter-select"
+            bind:value={serverLogLimit}
+            onchange={loadServerLogs}
+          >
+            <option value={100}>100</option>
+            <option value={200}>200</option>
+            <option value={1000}>1000</option>
+            <option value={5000}>5000</option>
+          </select>
+          <button class="refresh-btn" onclick={loadServerLogs} data-testid="server-logs-refresh">
+            {$t('tenant_settings.logs.refresh')}
+          </button>
+        </div>
+
+        {#if serverLogsLoading}
+          <div class="panel-loading" aria-live="polite">{$t('tenant_settings.logs.loading')}</div>
+        {:else if serverLogsError}
+          <div class="panel-error" role="alert">{serverLogsError}</div>
+        {:else if serverLogs.length === 0}
+          <div class="panel-empty">{$t('tenant_settings.logs.empty')}</div>
+        {:else}
+          <table class="data-table" data-testid="server-logs-table">
+            <thead>
+              <tr>
+                <th scope="col">{$t('tenant_settings.logs.col_time')}</th>
+                <th scope="col">{$t('tenant_settings.logs.col_level')}</th>
+                <th scope="col">{$t('tenant_settings.logs.col_target')}</th>
+                <th scope="col">{$t('tenant_settings.logs.col_message')}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {#each serverLogs as entry, i (i)}
+                <tr>
+                  <td class="td-mono">{fmtTimestamp(Math.floor((entry.timestamp_ms ?? 0) / 1000))}</td>
+                  <td>
+                    <span class="status-pill" class:status-err={entry.level === 'ERROR'} class:status-warn={entry.level === 'WARN'} class:status-ok={entry.level === 'INFO' || entry.level === 'DEBUG' || entry.level === 'TRACE'}>{entry.level}</span>
+                  </td>
+                  <td class="td-mono">{entry.target}</td>
+                  <td class="td-detail">{entry.message}</td>
                 </tr>
               {/each}
             </tbody>
@@ -2428,6 +2600,22 @@
     white-space: nowrap;
   }
 
+  .filter-input {
+    padding: var(--space-1) var(--space-3);
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius);
+    color: var(--color-text);
+    font-family: var(--font-body);
+    font-size: var(--text-sm);
+    min-width: 200px;
+  }
+
+  .filter-input:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 1px;
+  }
+
   .filter-select {
     padding: var(--space-1) var(--space-3);
     background: var(--color-surface-elevated);
@@ -2596,6 +2784,41 @@
   }
 
   .audit-detail-content { max-width: 600px; }
+
+  /* TASK-273: job run history entries (status, duration, failures, logs). */
+  .job-run-entry {
+    padding: var(--space-2) 0;
+    border-bottom: 1px dashed var(--color-border);
+  }
+
+  .job-run-entry:last-child { border-bottom: none; }
+
+  .job-run-header {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    font-size: var(--text-sm);
+    margin-bottom: var(--space-1);
+  }
+
+  .job-run-logs {
+    margin: 0;
+    padding: var(--space-2);
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm, 4px);
+    font-family: var(--font-mono, monospace);
+    font-size: var(--text-xs);
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 240px;
+    overflow-y: auto;
+  }
+
+  .job-run-nologs {
+    color: var(--color-text-muted);
+    font-size: var(--text-xs);
+  }
 
   .audit-dl {
     display: grid;

@@ -21,7 +21,9 @@ pub mod mem_search;
 pub mod postgres;
 pub mod rekor;
 pub mod schema;
+pub mod sops;
 pub mod sqlite;
+pub mod vault;
 
 pub use attestation_storage::MergeAttestationStorage;
 pub use call_graph::SubprocessCallGraphExtractor;

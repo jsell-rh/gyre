@@ -10,6 +10,16 @@ pub struct AuditQueryFilter {
     pub agent_id: Option<String>,
     pub event_type: Option<String>,
     pub workspace_id: Option<String>,
+    /// Tenant scoping (admin-panel.md §Audit Log Viewer): every query from
+    /// an authenticated caller is scoped to the caller's tenant — events of
+    /// other tenants are never returned. Derived server-side from the
+    /// acting identity, never client-supplied.
+    pub tenant_id: Option<String>,
+    /// Free-text search over the detail payload (case-insensitive substring).
+    /// Enforced by the SQL adapters against the `detail` column, with
+    /// zstd-compressed details decompressed transparently so compressed
+    /// rows stay searchable (observability.md §Log Retention & Compression).
+    pub q: Option<String>,
     pub user_id: Option<String>,
     pub resource_type: Option<String>,
     /// Scope to events targeting a specific repo. `None` = no constraint.

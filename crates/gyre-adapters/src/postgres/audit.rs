@@ -20,6 +20,7 @@ pub(crate) struct AuditEventRow {
     user_id: Option<String>,
     session_id: Option<String>,
     workspace_id: Option<String>,
+    tenant_id: Option<String>,
     repo_id: Option<String>,
     resource_type: String,
     resource_id: Option<String>,
@@ -60,6 +61,7 @@ impl AuditEventRow {
             user_id: self.user_id.map(Id::new),
             session_id: self.session_id,
             workspace_id: self.workspace_id.map(Id::new),
+            tenant_id: self.tenant_id,
             repo_id: self.repo_id.map(Id::new),
             resource_type: self.resource_type,
             resource_id: self.resource_id,
@@ -81,6 +83,7 @@ struct AuditEventRecord<'a> {
     user_id: Option<&'a str>,
     session_id: Option<&'a str>,
     workspace_id: Option<&'a str>,
+    tenant_id: Option<&'a str>,
     repo_id: Option<&'a str>,
     resource_type: &'a str,
     resource_id: Option<&'a str>,
@@ -109,6 +112,7 @@ fn to_record(e: &AuditEvent) -> AuditEventRecord<'_> {
         user_id: e.user_id.as_ref().map(|id| id.as_str()),
         session_id: e.session_id.as_deref(),
         workspace_id: e.workspace_id.as_ref().map(|id| id.as_str()),
+        tenant_id: e.tenant_id.as_deref(),
         repo_id: e.repo_id.as_ref().map(|id| id.as_str()),
         resource_type: &e.resource_type,
         resource_id: e.resource_id.as_deref(),
@@ -127,7 +131,22 @@ fn to_record(e: &AuditEvent) -> AuditEventRecord<'_> {
 impl AuditRepository for PgStorage {
     async fn record(&self, event: &AuditEvent) -> Result<()> {
         let pool = Arc::clone(&self.pool);
-        let e = event.clone();
+        let mut e = event.clone();
+        // Tenant scoping (admin-panel.md §Audit Log Viewer): derive the
+        // scope server-side when the emitter did not — the workspace's
+        // owning tenant, or the acting user's tenant binding. A record
+        // that cannot be scoped keeps NULL (never attributed to a tenant
+        // it did not come from).
+        if e.tenant_id.is_none() {
+            if let Some(ws_id) = e.workspace_id.as_ref() {
+                e.tenant_id = self.tenant_of_workspace(&ws_id.to_string()).await?;
+            }
+            if e.tenant_id.is_none() {
+                if let Some(user_id) = e.user_id.as_ref() {
+                    e.tenant_id = self.tenant_of_user(&user_id.to_string()).await?;
+                }
+            }
+        }
         tokio::task::spawn_blocking(move || -> Result<()> {
             let mut conn = pool.get().context("get db connection")?;
             let record = to_record(&e);
@@ -145,14 +164,7 @@ impl AuditRepository for PgStorage {
         let filter = filter.clone();
         tokio::task::spawn_blocking(move || -> Result<Vec<AuditEvent>> {
             let mut conn = pool.get().context("get db connection")?;
-            let rows = apply_filters(audit_events::table.into_boxed(), &filter)
-                .order(audit_events::timestamp.desc())
-                .limit(filter.limit as i64)
-                .load::<AuditEventRow>(&mut *conn)
-                .context("query audit_events")?;
-            rows.into_iter()
-                .map(AuditEventRow::into_event)
-                .collect::<Result<Vec<_>>>()
+            query_rows(&mut conn, &filter)
         })
         .await?
     }
@@ -175,13 +187,7 @@ impl AuditRepository for PgStorage {
         let filter = filter.clone();
         tokio::task::spawn_blocking(move || -> Result<u64> {
             let mut conn = pool.get().context("get db connection")?;
-            // `limit` deliberately not applied: the count covers the full
-            // filtered set (port contract).
-            let n = apply_filters(audit_events::table.into_boxed(), &filter)
-                .count()
-                .get_result::<i64>(&mut *conn)
-                .context("count audit_events (filtered)")?;
-            Ok(n as u64)
+            count_rows(&mut conn, &filter)
         })
         .await?
     }
@@ -282,10 +288,175 @@ impl AuditRepository for PgStorage {
 type BoxedAuditQuery =
     diesel::dsl::IntoBoxed<'static, crate::schema::audit_events::table, diesel::pg::Pg>;
 
+// Portable SQL LOWER() for the case-insensitive free-text search (both
+// SQLite and PostgreSQL implement LOWER over text).
+diesel::define_sql_function! {
+    fn lower(x: diesel::sql_types::Text) -> diesel::sql_types::Text;
+}
+
 /// Mirror of the sqlite adapter's filter builder — the same port contract
 /// (every `AuditQueryFilter` dimension, including `repo_id`) compiled to
 /// SQL. Shared by `query` and `count_filtered` so the two can never
 /// disagree on what matches.
+impl PgStorage {
+    /// Resolve a workspace's owning tenant (audit tenant scoping,
+    /// admin-panel.md §Audit Log Viewer). `Ok(None)` when the workspace row
+    /// does not exist — the scope cannot be determined, so it is not
+    /// attributed (skip, never fabricate).
+    async fn tenant_of_workspace(&self, workspace_id: &str) -> Result<Option<String>> {
+        use crate::schema::workspaces;
+        let pool = Arc::clone(&self.pool);
+        let ws = workspace_id.to_string();
+        tokio::task::spawn_blocking(move || -> Result<Option<String>> {
+            let mut conn = pool.get().context("get db connection")?;
+            Ok(workspaces::table
+                .filter(workspaces::id.eq(ws))
+                .select(workspaces::tenant_id)
+                .first::<String>(&mut conn)
+                .optional()?)
+        })
+        .await?
+    }
+
+    /// Resolve a user's tenant binding (same contract as
+    /// [`Self::tenant_of_workspace`]).
+    async fn tenant_of_user(&self, user_id: &str) -> Result<Option<String>> {
+        use crate::schema::users;
+        let pool = Arc::clone(&self.pool);
+        let uid = user_id.to_string();
+        tokio::task::spawn_blocking(move || -> Result<Option<String>> {
+            let mut conn = pool.get().context("get db connection")?;
+            Ok(users::table
+                .filter(users::id.eq(uid))
+                .select(users::tenant_id)
+                .first::<Option<String>>(&mut conn)
+                .optional()?
+                .flatten())
+        })
+        .await?
+    }
+}
+
+/// Escape LIKE wildcards in a free-text search term so `q` matches
+/// literally (`%`/`_`/`\\` in the term cannot broaden or break the match).
+fn escape_like(term: &str) -> String {
+    let mut out = String::with_capacity(term.len());
+    for c in term.chars() {
+        if matches!(c, '%' | '_' | '\\') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Whether a row's detail payload matches the free-text term
+/// (case-insensitive substring over the serialized detail JSON).
+/// Compressed rows are decompressed before matching — the same JSON the
+/// uncompressed `detail` column would hold — so search works uniformly
+/// across both storage states (observability.md §Log Retention &
+/// Compression).
+fn detail_matches(row: &AuditEventRow, term: &str) -> bool {
+    let needle = term.to_ascii_lowercase();
+    let haystack = match &row.detail_zstd {
+        Some(z) if !z.is_empty() => match zstd::decode_all(z.as_slice()) {
+            Ok(raw) => String::from_utf8_lossy(&raw).to_string(),
+            Err(_) => return false,
+        },
+        _ => row.detail.clone(),
+    };
+    haystack.to_ascii_lowercase().contains(&needle)
+}
+
+/// Fetch rows matching `filter`, honoring the free-text `q` term over both
+/// the raw `detail` column (SQL LIKE — enforced in SQL, the fast path) and
+/// compressed rows (decompressed + matched in the adapter, since the
+/// compressed payload is not LIKE-able). Paging keeps the result correct
+/// without an unbounded scan.
+fn query_rows(conn: &mut diesel::PgConnection, filter: &AuditQueryFilter) -> Result<Vec<AuditEvent>> {
+    let needs_q = filter
+        .q
+        .as_deref()
+        .map(|t| !t.trim().is_empty())
+        .unwrap_or(false);
+    if !needs_q {
+        let rows = apply_filters(audit_events::table.into_boxed(), filter)
+            .order(audit_events::timestamp.desc())
+            .limit(filter.limit as i64)
+            .load::<AuditEventRow>(conn)
+            .context("query audit_events")?;
+        return rows
+            .into_iter()
+            .map(AuditEventRow::into_event)
+            .collect::<Result<Vec<_>>>();
+    }
+
+    let term = filter.q.as_deref().unwrap_or_default().trim().to_string();
+    let mut matched: Vec<AuditEventRow> = Vec::new();
+    let page = (filter.limit.max(100) as i64).min(1_000);
+    let mut offset: i64 = 0;
+    loop {
+        let rows = apply_filters(audit_events::table.into_boxed(), filter)
+            .order(audit_events::timestamp.desc())
+            .limit(page)
+            .offset(offset)
+            .load::<AuditEventRow>(conn)
+            .context("query audit_events (free-text page)")?;
+        let fetched = rows.len() as i64;
+        for row in rows {
+            if detail_matches(&row, &term) {
+                matched.push(row);
+            }
+        }
+        offset += fetched;
+        if matched.len() >= filter.limit || fetched < page {
+            break;
+        }
+    }
+    matched.truncate(filter.limit);
+    matched
+        .into_iter()
+        .map(AuditEventRow::into_event)
+        .collect::<Result<Vec<_>>>()
+}
+
+/// Count rows matching `filter` including the free-text `q` term (same
+/// matching semantics as [`query_rows`]; `limit` deliberately not applied —
+/// the count covers the full filtered set, per the port contract).
+fn count_rows(conn: &mut diesel::PgConnection, filter: &AuditQueryFilter) -> Result<u64> {
+    let needs_q = filter
+        .q
+        .as_deref()
+        .map(|t| !t.trim().is_empty())
+        .unwrap_or(false);
+    if !needs_q {
+        let n = apply_filters(audit_events::table.into_boxed(), filter)
+            .count()
+            .get_result::<i64>(conn)
+            .context("count audit_events (filtered)")?;
+        return Ok(n as u64);
+    }
+    let term = filter.q.as_deref().unwrap_or_default().trim().to_string();
+    let mut total: u64 = 0;
+    let page: i64 = 500;
+    let mut offset: i64 = 0;
+    loop {
+        let rows = apply_filters(audit_events::table.into_boxed(), filter)
+            .order(audit_events::timestamp.desc())
+            .limit(page)
+            .offset(offset)
+            .load::<AuditEventRow>(conn)
+            .context("count audit_events (free-text page)")?;
+        let fetched = rows.len() as i64;
+        total += rows.iter().filter(|r| detail_matches(r, &term)).count() as u64;
+        offset += fetched;
+        if fetched < page {
+            break;
+        }
+    }
+    Ok(total)
+}
+
 fn apply_filters(mut query: BoxedAuditQuery, filter: &AuditQueryFilter) -> BoxedAuditQuery {
     if let Some(s) = filter.since {
         query = query.filter(audit_events::timestamp.ge(s as i64));
@@ -302,6 +473,17 @@ fn apply_filters(mut query: BoxedAuditQuery, filter: &AuditQueryFilter) -> Boxed
     if let Some(w) = &filter.workspace_id {
         query = query.filter(audit_events::workspace_id.eq(w.clone()));
     }
+    // Tenant scoping (admin-panel.md §Audit Log Viewer): rows scoped to
+    // the caller's tenant, plus unscoped legacy rows (NULL tenant — created
+    // before tenant attribution existed); another tenant's events are
+    // never returned.
+    if let Some(t) = &filter.tenant_id {
+        query = query.filter(
+            audit_events::tenant_id
+                .eq(t.clone())
+                .or(audit_events::tenant_id.is_null()),
+        );
+    }
     if let Some(u) = &filter.user_id {
         query = query.filter(audit_events::user_id.eq(u.clone()));
     }
@@ -313,6 +495,26 @@ fn apply_filters(mut query: BoxedAuditQuery, filter: &AuditQueryFilter) -> Boxed
     }
     if let Some(o) = filter.outcome {
         query = query.filter(audit_events::outcome.eq(o.as_str()));
+    }
+    if let Some(q) = filter.q.as_deref() {
+        let term = q.trim();
+        if !term.is_empty() {
+            use diesel::expression_methods::EscapeExpressionMethods;
+            // Case-insensitive on both backends: LOWER(detail) LIKE the
+            // lowercased pattern (SQLite's LIKE is case-insensitive by
+            // default, PostgreSQL's is not — lowering both sides makes the
+            // behavior identical). Wildcards in the term are escaped so it
+            // matches literally. Compressed rows (detail blanked by the
+            // log-compression job) are decompressed and matched in the
+            // adapter — see `query_rows`.
+            let pattern = format!("%{}%", escape_like(&term.to_ascii_lowercase()));
+            query = query.filter(
+                lower(audit_events::detail)
+                    .like(pattern)
+                    .escape('\\')
+                    .or(audit_events::detail_zstd.is_not_null()),
+            );
+        }
     }
     query
 }

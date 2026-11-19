@@ -45,6 +45,23 @@ gyre-ports = { workspace = true }
 reqwest = { workspace = true }
 base64 = "0.22"
 
+# SOPS-compatible secret encryption at rest (TASK-273, admin-panel.md /
+# platform-model.md §7 Storage Backend: SOPS is the default secret
+# backend). `age` is the reference Rust implementation of the age
+# encryption spec (age-encryption.org/v1) used to wrap the SOPS data key
+# for the configured X25519 identity — the same wrap sops itself stores in
+# the `age` metadata array, so stored documents are decryptable with the
+# sops CLI given the identity. `aes-gcm` provides AES-256-GCM with the
+# 32-byte nonce size sops uses for its ENC[AES256_GCM,...] values (ring's
+# AEAD only supports 12-byte nonces). Sync API only; the `async` feature
+# is off and armor is all we need from `age`.
+age = { version = "0.11", default-features = false, features = ["armor"] }
+aes-gcm = { version = "0.10", default-features = false, features = ["aes", "alloc"] }
+typenum = "1"
+
 [dev-dependencies]
 tempfile = "3"
 libsqlite3-sys = { workspace = true }
+# Test HTTP server speaking the Vault KV v2 + JWT-auth API subset for the
+# Vault secret backend tests.
+axum = { workspace = true }

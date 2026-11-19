@@ -45,17 +45,22 @@ pub struct RotatedSecret {
 
 /// A rotation handler performs a real credential refresh for an expiring
 /// secret (platform-model.md §7: Rotated secrets are refreshed by a
-/// "Background job refreshes before expiry"). Handlers match on the secret
-/// name; a secret with no matching handler — or one whose handler fails —
-/// falls back to an admin notification.
+/// "Background job refreshes before expiry"). Handlers match on the
+/// credential-document SHAPE — the decrypted value parsed as JSON — not
+/// the secret name alone (TASK-273: every expiring credential is
+/// dispatched through this registry).
 ///
 /// Handlers receive the decrypted plaintext only as opaque bytes; they MUST
 /// never log or serialize it.
 #[async_trait::async_trait]
 #[allow(clippy::double_must_use)] // async_trait generates a must_use future for each method.
 pub trait SecretRotationHandler: Send + Sync {
-    /// Whether this handler can rotate `secret`.
-    fn handles(&self, secret: &Secret) -> bool;
+    /// Handler name for run-log attribution ("refreshed via <name>").
+    fn name(&self) -> &'static str;
+
+    /// Whether this handler can rotate `secret` whose decrypted value is
+    /// `value` (credential-document shape matching).
+    fn handles(&self, secret: &Secret, value: &[u8]) -> bool;
 
     /// Refresh the credential and return the new value + expiry.
     async fn rotate(
@@ -66,11 +71,13 @@ pub trait SecretRotationHandler: Send + Sync {
     ) -> anyhow::Result<RotatedSecret>;
 }
 
-/// OAuth 2.0 refresh-token grant handler for secrets whose name ends with
-/// `_refresh_token` (e.g. `oauth_refresh_token`, `claude_max_refresh_token`).
+/// OAuth 2.0 refresh-token grant handler for any secret whose value is an
+/// OAuth credential document (TASK-273: credential-document shape, not
+/// name suffix — an API key or other credential carrying this document is
+/// refreshed the same way). Typically created by the Claude Max enrollment
+/// flow as the scoped `claude_max_refresh_token` secret.
 ///
-/// The secret's plaintext value is a JSON credential document set by the
-/// admin via `POST /api/v1/secrets`:
+/// The secret's plaintext value is a JSON credential document:
 ///
 /// ```json
 /// { "token_endpoint": "https://issuer.example/token",
@@ -96,10 +103,21 @@ struct OAuthCredentialDoc {
     access_token: Option<String>,
 }
 
+/// Whether `value` parses as an OAuth credential document.
+fn parses_as_oauth_doc(value: &[u8]) -> bool {
+    serde_json::from_slice::<OAuthCredentialDoc>(value).is_ok()
+}
+
 #[async_trait::async_trait]
 impl SecretRotationHandler for OAuthRefreshHandler {
-    fn handles(&self, secret: &Secret) -> bool {
-        secret.name.to_ascii_lowercase().ends_with("_refresh_token")
+    fn name(&self) -> &'static str {
+        "oauth_refresh_token_grant"
+    }
+
+    fn handles(&self, _secret: &Secret, value: &[u8]) -> bool {
+        // Credential-document shape matching (TASK-273): the value itself
+        // is an OAuth credential document, regardless of the secret name.
+        parses_as_oauth_doc(value)
     }
 
     async fn rotate(
@@ -169,15 +187,172 @@ impl SecretRotationHandler for OAuthRefreshHandler {
 
 static OAUTH_REFRESH: OAuthRefreshHandler = OAuthRefreshHandler;
 
-/// Handlers consulted (in order) by the rotation job.
-static ROTATION_HANDLERS: &[&dyn SecretRotationHandler] = &[&OAUTH_REFRESH];
+// ── GCP service-account handler (admin-panel.md: Vertex AI for Claude Code
+//    is the primary use case; TASK-273) ─────────────────────────────────
 
-/// The handler that can rotate `secret`, if any.
-fn handler_for(secret: &Secret) -> Option<&'static dyn SecretRotationHandler> {
+/// Google Cloud service-account credential handler: a secret whose value
+/// is a GCP service-account JSON key (the Vertex AI primary use case) is
+/// refreshed by exchanging a real RS256-signed JWT-bearer assertion at the
+/// SA's `token_uri` (Google OAuth 2.0 JWT profile, RFC 7523) for a
+/// short-lived access token. The refreshed document keeps the SA key and
+/// gains the new `access_token` + expiry, so the next refresh re-signs from
+/// the same key.
+pub struct GcpServiceAccountHandler;
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct GcpSaDoc {
+    /// "service_account" — shape discriminator.
+    r#type: String,
+    client_email: String,
+    /// PEM PKCS#8 RSA private key ("-----BEGIN PRIVATE KEY-----…").
+    private_key: String,
+    /// Google token endpoint, e.g. https://oauth2.googleapis.com/token.
+    token_uri: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    access_token: Option<String>,
+}
+
+fn parses_as_gcp_sa(value: &[u8]) -> bool {
+    match serde_json::from_slice::<GcpSaDoc>(value) {
+        Ok(d) => d.r#type == "service_account",
+        Err(_) => false,
+    }
+}
+
+/// Strip PEM armor and base64-decode to DER (PKCS#8).
+fn pem_to_der(pem: &str) -> anyhow::Result<Vec<u8>> {
+    let b64: String = pem
+        .lines()
+        .filter(|l| !l.starts_with("-----"))
+        .collect();
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD
+        .decode(b64.trim())
+        .context("service-account private_key is not valid base64")
+}
+
+fn b64url(bytes: &[u8]) -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+}
+
+#[async_trait::async_trait]
+impl SecretRotationHandler for GcpServiceAccountHandler {
+    fn name(&self) -> &'static str {
+        "gcp_service_account_jwt_bearer"
+    }
+
+    fn handles(&self, _secret: &Secret, value: &[u8]) -> bool {
+        parses_as_gcp_sa(value)
+    }
+
+    async fn rotate(
+        &self,
+        http: &reqwest::Client,
+        _secret: &Secret,
+        current_value: &[u8],
+    ) -> anyhow::Result<RotatedSecret> {
+        let doc: GcpSaDoc = serde_json::from_slice(current_value)
+            .context("value is not a GCP service-account key (JSON with type, client_email, private_key, token_uri)")?;
+        anyhow::ensure!(
+            doc.r#type == "service_account",
+            "credential document is not a service account"
+        );
+
+        // RFC 7523 JWT-bearer assertion: RS256 over the SHA-256 digest of
+        // the header.payload, signed with the SA's private key (real
+        // signing — ring parses the PKCS#8 PEM and signs on-device).
+        let now = now_secs();
+        let header = serde_json::json!({ "alg": "RS256", "typ": "JWT" });
+        let claims = serde_json::json!({
+            "iss": doc.client_email,
+            "scope": "https://www.googleapis.com/auth/cloud-platform",
+            "aud": doc.token_uri,
+            "iat": now,
+            "exp": now + 3600,
+        });
+        let signing_input = format!(
+            "{}.{}",
+            b64url(header.to_string().as_bytes()),
+            b64url(claims.to_string().as_bytes())
+        );
+
+        let der = pem_to_der(&doc.private_key)?;
+        let key_pair = ring::signature::RsaKeyPair::from_pkcs8(&der)
+            .map_err(|e| anyhow::anyhow!("service-account private_key is unusable: {e:?}"))?;
+        let mut sig = vec![0u8; key_pair.public().modulus_len()];
+        let rng = ring::rand::SystemRandom::new();
+        key_pair
+            .sign(
+                &ring::signature::RSA_PKCS1_SHA256,
+                &rng,
+                signing_input.as_bytes(),
+                &mut sig,
+            )
+            .map_err(|e| anyhow::anyhow!("RS256 signing failed: {e:?}"))?;
+        let assertion = format!("{signing_input}.{}", b64url(&sig));
+
+        // JWT-bearer grant at the SA's token_uri. `http` is the AppState
+        // client (30 s total timeout), so a hung Google endpoint cannot
+        // stall the job loop.
+        let resp = http
+            .post(&doc.token_uri)
+            .form(&[
+                (
+                    "grant_type",
+                    "urn:ietf:params:oauth:grant-type:jwt-bearer",
+                ),
+                ("assertion", assertion.as_str()),
+            ])
+            .send()
+            .await
+            .context("token endpoint request failed")?;
+        let status = resp.status();
+        let body = resp.bytes().await.context("reading token response")?;
+        anyhow::ensure!(status.is_success(), "token endpoint returned HTTP {status}");
+
+        let tokens: serde_json::Value =
+            serde_json::from_slice(&body).context("token response is not JSON")?;
+        let access_token = tokens
+            .get("access_token")
+            .and_then(|v| v.as_str())
+            .context("token response missing access_token")?
+            .to_string();
+        let expires_in = tokens
+            .get("expires_in")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(3600);
+
+        let updated = GcpSaDoc {
+            r#type: doc.r#type,
+            client_email: doc.client_email,
+            private_key: doc.private_key,
+            token_uri: doc.token_uri,
+            access_token: Some(access_token),
+        };
+        let value = serde_json::to_vec(&updated).context("serializing rotated credential")?;
+        Ok(RotatedSecret {
+            value,
+            expires_at: Some(now_secs().saturating_add(expires_in)),
+        })
+    }
+}
+
+static GCP_SA: GcpServiceAccountHandler = GcpServiceAccountHandler;
+
+/// Handlers consulted (in order) by the rotation job. The GCP SA handler
+/// runs first: a service-account key (type: service_account) is the more
+/// specific document shape; OAuth credential docs have neither
+/// `client_email` nor `private_key` and never collide.
+static ROTATION_HANDLERS: &[&dyn SecretRotationHandler] = &[&GCP_SA, &OAUTH_REFRESH];
+
+/// The handler that can rotate `secret` (whose decrypted value is
+/// `value`), if any.
+fn handler_for(secret: &Secret, value: &[u8]) -> Option<&'static dyn SecretRotationHandler> {
     ROTATION_HANDLERS
         .iter()
         .copied()
-        .find(|h| h.handles(secret))
+        .find(|h| h.handles(secret, value))
 }
 
 /// Attempt automatic rotation of `secret` via its handler. On success the
@@ -189,14 +364,11 @@ async fn attempt_rotation(
     state: &Arc<AppState>,
     handler: &dyn SecretRotationHandler,
     secret: &Secret,
+    current_value: &[u8],
 ) -> anyhow::Result<()> {
-    let current = state
-        .secrets
-        .get_value(&secret.id, &secret.tenant_id)
-        .await?
-        .with_context(|| format!("secret {} value vanished before rotation", secret.id))?;
-
-    let rotated = handler.rotate(&state.http_client, secret, &current).await?;
+    let rotated = handler
+        .rotate(&state.http_client, secret, current_value)
+        .await?;
 
     // Replace the value + `last_rotated_at` via the port, then rewrite the
     // row's metadata (extended `expires_at`) with the same delete + create
@@ -233,13 +405,57 @@ async fn attempt_rotation(
 /// Attempt handler rotation for one expiring secret. Returns `true` when a
 /// handler rotated it (suppressing the admin notification); `false` when
 /// there is no handler or rotation failed — a failed rotation is exactly
-/// what an admin must be warned about, so the caller notifies.
-async fn try_rotate(state: &Arc<AppState>, secret: &Secret) -> bool {
-    let Some(handler) = handler_for(secret) else {
+/// what an admin must be warned about, so the caller notifies. The
+/// per-secret outcome (refreshed / no-refresh-mechanism / failed: reason)
+/// is recorded in the run-scoped log sink (TASK-273: no expiring
+/// credential is silently skipped).
+async fn try_rotate(state: &Arc<AppState>, secret: &Secret, log: &crate::jobs::JobRunLog) -> bool {
+    let value = match state.secrets.get_value(&secret.id, &secret.tenant_id).await {
+        Ok(Some(v)) => v,
+        Ok(None) => {
+            log.log(format!(
+                "secret '{}' ({}:{}): FAILED — value vanished before rotation",
+                secret.name,
+                secret.scope.as_str(),
+                secret.scope_id
+            ))
+            .await;
+            return false;
+        }
+        Err(e) => {
+            log.log(format!(
+                "secret '{}' ({}:{}): FAILED — value read failed: {e:#}",
+                secret.name,
+                secret.scope.as_str(),
+                secret.scope_id
+            ))
+            .await;
+            return false;
+        }
+    };
+
+    let Some(handler) = handler_for(secret, &value) else {
+        log.log(format!(
+            "secret '{}' ({}:{}): no-refresh-mechanism — admin notified",
+            secret.name,
+            secret.scope.as_str(),
+            secret.scope_id
+        ))
+        .await;
         return false;
     };
-    match attempt_rotation(state, handler, secret).await {
-        Ok(()) => true,
+    match attempt_rotation(state, handler, secret, &value).await {
+        Ok(()) => {
+            log.log(format!(
+                "secret '{}' ({}:{}): refreshed via {}",
+                secret.name,
+                secret.scope.as_str(),
+                secret.scope_id,
+                handler.name()
+            ))
+            .await;
+            true
+        }
         Err(e) => {
             warn!(
                 secret_name = %secret.name,
@@ -247,6 +463,14 @@ async fn try_rotate(state: &Arc<AppState>, secret: &Secret) -> bool {
                 tenant_id = %secret.tenant_id,
                 "secret_rotation: automatic rotation failed, falling back to admin notification: {e:#}"
             );
+            log.log(format!(
+                "secret '{}' ({}:{}): FAILED — refresh via {} failed: {e:#}",
+                secret.name,
+                secret.scope.as_str(),
+                secret.scope_id,
+                handler.name()
+            ))
+            .await;
             false
         }
     }
@@ -343,8 +567,10 @@ pub async fn revoke_agent_task_secrets(state: &AppState, agent: &gyre_domain::Ag
     }
 }
 
-/// Run one pass of the secret expiry check across all tenants.
-pub async fn run_once(state: &Arc<AppState>) -> anyhow::Result<()> {
+/// Run one pass of the secret expiry check across all tenants. Per-secret
+/// outcomes (refreshed / no-refresh-mechanism / failed: reason) are written
+/// to the run-scoped log sink, so the durable job-run record carries them.
+pub async fn run_once(state: &Arc<AppState>, log: &crate::jobs::JobRunLog) -> anyhow::Result<()> {
     let now = now_secs();
     let tenants = state.tenants.list().await?;
     debug!(tenants = tenants.len(), "secret_rotation: scanning tenants");
@@ -366,7 +592,7 @@ pub async fn run_once(state: &Arc<AppState>) -> anyhow::Result<()> {
         for secret in expiring(&tenant_secrets, now) {
             // Rotated secrets with a handler are refreshed automatically;
             // only no-handler / failed-rotation secrets notify admins.
-            if try_rotate(state, secret).await {
+            if try_rotate(state, secret, log).await {
                 continue;
             }
             for ws in &workspaces {
@@ -388,7 +614,7 @@ pub async fn run_once(state: &Arc<AppState>) -> anyhow::Result<()> {
             for secret in expiring(&ws_secrets, now) {
                 // Rotated secrets with a handler are refreshed automatically;
                 // only no-handler / failed-rotation secrets notify admins.
-                if try_rotate(state, secret).await {
+                if try_rotate(state, secret, log).await {
                     continue;
                 }
                 notify_workspace_admins(state, ws.id.clone(), secret, now).await;
@@ -410,7 +636,7 @@ pub async fn run_once(state: &Arc<AppState>) -> anyhow::Result<()> {
                     // Rotated secrets with a handler are refreshed
                     // automatically; only no-handler / failed-rotation
                     // secrets notify admins.
-                    if try_rotate(state, secret).await {
+                    if try_rotate(state, secret, log).await {
                         continue;
                     }
                     notify_workspace_admins(state, ws.id.clone(), secret, now).await;
@@ -715,7 +941,7 @@ mod tests {
             .await
             .unwrap();
 
-        run_once(&state).await.unwrap();
+        run_once(&state, &crate::jobs::JobRunLog::new()).await.unwrap();
 
         let admin_notifs = state
             .notifications
@@ -755,7 +981,7 @@ mod tests {
         // real wall-clock now, so seed relative to real now instead.
         let now = now_secs();
         let state = seed(now).await;
-        run_once(&state).await.unwrap();
+        run_once(&state, &crate::jobs::JobRunLog::new()).await.unwrap();
 
         let admin_notifs = state
             .notifications
@@ -817,8 +1043,8 @@ mod tests {
     async fn does_not_duplicate_notifications_on_rerun() {
         let now = now_secs();
         let state = seed(now).await;
-        run_once(&state).await.unwrap();
-        run_once(&state).await.unwrap();
+        run_once(&state, &crate::jobs::JobRunLog::new()).await.unwrap();
+        run_once(&state, &crate::jobs::JobRunLog::new()).await.unwrap();
 
         let admin_notifs = state
             .notifications
@@ -879,7 +1105,7 @@ mod tests {
             .await
             .unwrap();
 
-        run_once(&state).await.unwrap();
+        run_once(&state, &crate::jobs::JobRunLog::new()).await.unwrap();
         let notifs = state
             .notifications
             .list_for_user(
@@ -1000,7 +1226,7 @@ mod tests {
         });
         let state = seed_oauth(now, cred.to_string().as_bytes()).await;
 
-        run_once(&state).await.unwrap();
+        run_once(&state, &crate::jobs::JobRunLog::new()).await.unwrap();
 
         // The handler performed a real refresh_token grant with the stored
         // credential (old refresh token + client id posted to the endpoint).
@@ -1083,7 +1309,7 @@ mod tests {
         let original = cred.to_string();
         let state = seed_oauth(now, original.as_bytes()).await;
 
-        run_once(&state).await.unwrap();
+        run_once(&state, &crate::jobs::JobRunLog::new()).await.unwrap();
 
         // Value untouched: the failed grant must not corrupt the credential.
         let value = state
@@ -1119,7 +1345,7 @@ mod tests {
         let now = now_secs();
         let state = seed_oauth(now, b"not-a-json-credential").await;
 
-        run_once(&state).await.unwrap();
+        run_once(&state, &crate::jobs::JobRunLog::new()).await.unwrap();
 
         let value = state
             .secrets
