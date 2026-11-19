@@ -2,8 +2,8 @@
 title: "Mirror namespace isolation: mirrors/{forge}/{owner}/{repo} storage namespace for external-forge mirrors"
 spec_ref: "Spec gap spec-36fad8fcafe7b73a2b6f2d0e / mirror-namespace-isolation / b580b93c564f"
 depends_on: []
-progress: not-started
-commits: []
+progress: complete
+commits: ["9057fc8f06b699202bd4cb1dd9070198fc94059d", "0bf540aef508b63a1a0586cf60ee24a1f0a96ae6"]
 ---
 
 ## Required behavior
@@ -54,3 +54,97 @@ Canonical spec: `specs/system/source-control.md`. Source: `fb1424fbac55cd23cb086
     ]
   }
 ]
+
+## Shipped
+
+`create_mirror_repo` (crates/gyre-server/src/api/repos.rs) stores every new
+mirror in an isolated namespace derived from its upstream URL:
+`{repos_root}/{ws}/mirrors/{forge}/{owner}/{repo}.git`, per
+source-control.md §External Repository Mirroring. Native `create_repo` is
+byte-for-byte unchanged (its name validation still rejects `/`, so it can
+never allocate under `mirrors/`).
+
+### Behavior
+
+- **Segment derivation** (`derive_mirror_namespace`): host `github.com` →
+  `github`, `gitlab.com` → `gitlab`, any other https host → a sanitized
+  host-derived segment (non-filesystem-safe characters map to `-`);
+  owner/repo come from the two URL path segments, with an optional `.git`
+  suffix stripped. The path is built with `Path::join` from validated
+  components over the startup-canonicalized absolute `repos_root`.
+- **Traversal rejection before any write**: the raw URL is rejected if it
+  contains `..` anywhere (checked before parsing, because the URL parser
+  normalizes `/../` away); each segment must be non-empty, free of `..`, and
+  limited to alphanumeric/`-`/`_`/`.` (so percent-encoded separators like
+  `%2F` fail); the path must be exactly `/{owner}/{repo}`. Violations return
+  400 with no repo row and no directory created.
+- **Scoped stale-dir cleanup**: the pre-`clone_mirror` cleanup is preceded by
+  an explicit containment guard (`repo_path.starts_with(mirrors_root)`,
+  returning an error otherwise), so it can only ever remove paths under
+  `{repos_root}/{ws}/mirrors/` — never a native repo's directory.
+- **Duplicate upstream**: a second mirror of the same upstream URL, or a
+  different URL spelling mapping to the same derived path (e.g. missing
+  `.git` suffix), in the same workspace is rejected with 409 before any
+  row or storage change.
+- **Unchanged downstream**: mirror_sync / `sync_mirror` / fetch_mirror,
+  post-sync graph extraction and spec-ledger sync, receive-pack read-only
+  enforcement, and smart-HTTP clone-by-name all follow the stored
+  `Repository.path`; legacy mirror rows keep their persisted flat paths with
+  no migration. The SSRF https-only gate and the `(workspace_id, name)` DB
+  identity rule are kept.
+
+### CI repair (this checkpoint)
+
+Durable finding: CI run 44505184647 (PR 882, head 7e5c6f87) failed the
+Development controller job in `test_dev_cargo_clean` — the sentinel
+vanished from
+`target/debug/build/gyre_cache_probe/<meta>/out/unrelated-dependency.rlib`.
+Root cause: Rust 1.100.0 (2026-11-12) stabilized Cargo's new build-dir
+layout, which puts a package's own artifacts (test executables included)
+under `<profile>/build/<pkg>/<meta>/out/` and makes `cargo clean
+--package` remove that whole tree. Runners on fresher images (cargo
+1.100.x) put the probe's executable there, so the sentinel — placed next
+to the member's own executable — was legitimately removed by the mutant
+iteration's `cargo clean --package`; runners on cargo 1.99.1 kept the old
+`deps/` layout and passed (the scripts trees of the failing head and
+passing main are byte-identical, so the flake tracks the runner image
+generation, not the commit).
+
+Fix (commit b58fa463): the sentinel now represents an artifact of an
+UNRELATED package — derived from the profile directory owning the reported
+executable (nearest ancestor inside the target dir containing cargo's
+`build/` directory, created unconditionally in both layouts), placed in a
+sibling build unit `build/unrelated-dependency/out/unrelated-dependency.rlib`,
+which `cargo clean --package` of the member never removes in either layout.
+The probe build also selects its single package explicitly
+(`cargo test -p gyre_cache_probe`; identical units) so constrained dev
+environments can run this focused probe.
+
+### Test evidence
+
+- Merged implementation type-checks with all tests:
+  `cargo check -p gyre-server --tests` — exit 0 (the gyre-server test
+  binary exceeds this sandbox's 4 GiB build budget; execution deferred to
+  the independent verifier, which must run `cargo test --all` — in
+  particular `create_mirror_repo_returns_201`,
+  `create_mirror_repo_maps_forge_hosts_into_namespace`,
+  `create_mirror_repo_rejects_traversal_urls`,
+  `create_mirror_repo_rejects_duplicate_upstream_url`,
+  `create_mirror_repo_isolates_storage_and_serves_smart_http` (real git
+  clone into the namespace, stale-cleanup scoping, untouched native/flat
+  dirs, smart-HTTP info/refs 200), `legacy_mirror_rows_sync_from_persisted_path`,
+  and the `derive_mirror_namespace_*` unit battery).
+- `python3 scripts/test_dev_cargo_clean.py -v` — OK on the current
+  toolchain (old layout).
+- New-layout simulation (RUSTC_BOOTSTRAP=1 + `[unstable]`
+  `build-dir-new-layout = true`, the same layout cargo 1.100 stabilized;
+  executable confirmed reported at
+  `target/debug/build/gyre_cache_probe/<meta>/out/`): the pre-fix test
+  fails with the CI's exact FileNotFoundError, the fixed test passes.
+- `env -u GYRE_PIPELINE_STAGE python3 -m unittest discover -s scripts -p
+  'test_dev*.py'` — 65 tests, OK (CI conditions; with the sandbox's
+  implement-stage env set, test_dev_build_command's two bare-`cargo test`
+  fixtures hit the build wrapper's stage gate — environment artifact,
+  those tests pass under CI conditions).
+- Exact-head GitHub checks for the PR remain mandatory after independent
+  review.

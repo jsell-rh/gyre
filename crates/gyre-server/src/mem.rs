@@ -5573,6 +5573,7 @@ fn test_state_inner(
         message_broadcast_tx: broadcast::channel(16).0,
         kv_store: kv.unwrap_or_else(|| Arc::new(MemKvStore::default())),
         agent_signing_key: forge_key.clone(),
+        signing_key_history: Vec::new(),
         attestation_verifier: Arc::new(crate::merge_attestation::ForgeAttestationVerifier::new(
             forge_key.clone(),
         )),
