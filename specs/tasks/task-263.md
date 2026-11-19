@@ -3,7 +3,7 @@ title: "Agent JWT claims completion and hard task-scope boundary (by-effect enfo
 spec_ref: "Spec gap spec-31d3ae72e12e22c52442e309 / agent-jwt-claims-task-scope / b60edce5bc49"
 depends_on: [task-130]
 progress: ready-for-review
-commits: ["37f458b9b33f62b3a85ea82193afdead4b28e4d1", "f338cfc164c3a775de95a520e6ca09d2eec00b39"]
+commits: ["f338cfc164c3a775de95a520e6ca09d2eec00b39", "37f458b9b33f62b3a85ea82193afdead4b28e4d1"]
 ---
 
 ## Required behavior
@@ -28,13 +28,13 @@ Update the relevant coverage rows only after implementing the behavior, with con
 
 ## Shipped
 
-Commit `f338cfc1` implements the full requirement on this branch; `37f458b9` (this round) is formatting-only plus this documentation.
+Commit `f338cfc1` implements the requirement on this branch; `37f458b9` is formatting-only; this round's commit corrects the evidence record for the stack-hash mint mechanism (review F1, reviewer-sanctioned option (b)) plus an in-code comment clarification — no production behavior changed.
 
 ### Layer 2 mint completion
 
 `AgentJwtClaims` (`gyre-server/src/auth.rs`) now carries `aud`, and `stack_hash` (alias of `wl_stack_hash`). Every mint path sets `sub` = `agent:<uuid>`, `aud`, and both stack-hash spellings from the same fingerprint. `AgentSigningKey` is Clone and carries its `audience` ('gyre', or GYRE_OIDC_AUDIENCE via `lib.rs` wiring); `validate()` enforces it (`validation.set_audience`). Federated-issuer validation (remote Gyre instances, Keycloak user JWTs) is untouched — audience validation applies only to self-minted agent tokens. Default `GYRE_AGENT_JWT_TTL` restored to the specced 3600 s (`lib.rs`, `docs/server-config.md`).
 
-Spawn facts: `spawn_agent_core` resolves the validated persona (persona_slug or bare persona), `wl_compute_target` (request compute target or workspace-resolved entity), `wl_hostname` (SSH target host), and — after the process launch, when the workload attestation record with the real stack fingerprint exists — re-mints the token with `wl_stack_hash`/`stack_hash` (`stored_stack_fingerprint` reads workload_attestations, then agent_stacks). `ralph_loop.rs` `relaunch_agent_session` mints the same claims for the re-spawned session (persona from the agent row's bound, approved persona; stored fingerprint as the current stack fact).
+Spawn facts: `spawn_agent_core` resolves the validated persona (persona_slug or bare persona), `wl_compute_target` (request compute target or workspace-resolved entity), `wl_hostname` (SSH target host), and `wl_stack_hash`/`stack_hash` from `stored_stack_fingerprint` (reads `workload_attestations`, then `agent_stacks`) at the single pre-launch mint. **Actual mechanism (corrected per review F1):** the spawn mint happens exactly once, BEFORE the process launch — the token must pre-exist the process it authenticates (it is injected into the launch environment as `GYRE_AUTH_TOKEN`) — so for a fresh agent row, which has not attested a stack yet, the stack-hash claims are honestly absent (spec table: "null if not attested"; `spawn_minted_jwt_carries_task_scoped_claims` asserts exactly this). The claims are populated on the re-spawn mint for the same agent row: `ralph_loop.rs` `relaunch_agent_session` reuses the agent id and mints with the stored fingerprint plus the agent row's bound, approved persona (`respawn_mint_carries_stored_stack_fingerprint` proves both stack-hash spellings). There is deliberately NO post-launch re-mint: a minted token is immutable, and the auth chain matches presented tokens by exact string against the `agent_tokens` KV entry (auth.rs step 2), so replacing that entry after launch would revoke the running agent's own env-injected credential mid-session.
 
 ### Revocation
 
@@ -64,6 +64,7 @@ Swept by execution effect ("mutates task rows, task-scoped secrets, or creates t
 
 ### Out-of-scope statements (justified)
 
+- **First-session `stack_hash`/`wl_stack_hash` absence (review F1 — explicit justified absence)**: the stack fingerprint first exists only after the agent process runs and self-reports its stack (`POST /api/v1/agents/{id}/stack` → `agent_stacks`, folded into the workload-attestation record) — but the token must be minted before the process starts (it IS the process's credential, injected as `GYRE_AUTH_TOKEN`), the spec's claims table itself says `stack_hash` is "null if not attested", and the auth chain matches presented tokens by exact string against `agent_tokens`, so a post-launch KV replacement would revoke the running agent's env-injected token mid-session. The claim is therefore live on re-spawn mints for the same agent row (`ralph_loop.rs` `relaunch_agent_session`, proven by `respawn_mint_carries_stored_stack_fingerprint`), which is the path the spec-registry stack-pinning consumer exercises end-to-end (AC 6: `agent_only_requires_exact_stack_hash_match_e2e` drives the real REST approval path with a JWT-embedded `wl_stack_hash` and proves match/mismatch against a pinned requirement). Making the first-session claim live would require a token-rotation protocol (subject-based auth matching, old-jti revocation on rotation, and client-side adoption of the rotated token by every deployed agent runtime) — an auth-chain redesign outside this task's scope and unsafe to bolt on here.
 - **`wl_pid` / `wl_container_id` at mint time**: these facts do not exist until the process launch completes; minting them at token creation would fabricate them. They are recorded in the fresh workload-attestation record immediately post-launch (and serve `GET /agents/:id/workload`), the same launch that the token authenticates.
 - **MCP `gyre_agent_complete`**: already enforced self-only for agent JWTs pre-task (mcp.rs) — unchanged.
 - **MCP `gyre_spawn_worker`**: already validates spawn scope via `validate_tool_scope` pre-task — unchanged.
@@ -71,7 +72,7 @@ Swept by execution effect ("mutates task rows, task-scoped secrets, or creates t
 - **REST orchestrator spawn (`/repos/:id/orchestrator/spawn`, `/workspaces/:id/orchestrator/spawn`)**: not task-owned-resource mutation (no task rows/secrets/task-linked MRs); both take auth and enforce tenant containment + ABAC.
 - **MR status transition / review / comments (`PUT /merge-requests/:id/status`, `submit_review`, `add_comment`)**: MR-row mutation, not task-row mutation; already governed by ABAC middleware mapping, the human-only `Approved` role gate (agents may not self-approve), and reviewer identity binding (task-134).
 - **Secrets admin API**: Admin-only (role gate) — agent principals cannot reach task-scoped secret mutation there; the agent-reachable revocation path (stop/fail) is boundary-checked above.
-- **Spec approval events**: not task-owned resources; the agent-approval path gains its real `stack_hash` input from this task (see AC 6).
+- **Spec approval events**: not task-owned resources; the agent-approval path's `stack_hash` input is the JWT `wl_stack_hash` claim, live on re-spawned sessions (see the first bullet and AC 6).
 
 ### Non-agent principals
 
@@ -79,18 +80,15 @@ Every new check gates on `is_gyre_agent_jwt()` (non-empty fine-grained scope lis
 
 ### Verification
 
-- `cargo check -p gyre-server --all-targets` passes on this branch.
-- Mechanical checks pass: check-arch, check-abac-route-registry, check-abac-exempt-handlers, check-inert-enforcement (helpers named `require_*`), check-mem-port-contracts, check-scope-literal-defaults, check-forged-scope-fields, check-fabricated-scope-defaults, check-forwarded-header-trust, check-unbounded-external-http, check-in-memory-state-stores, check-lossy-secret-conversion. The remaining failing repo scripts fail identically on the clean base commit (verified via stash) — pre-existing, not caused by this task.
-- **Required test probes for the verifier** (the sandbox cargo wrapper forbids building the gyre-server test binary — codegen exceeds the 4 GiB budget; `cargo check` was the allowed bound): `cargo test -p gyre-server agent_jwt` (auth.rs audience/claims/revocation tests, tasks.rs and spawn.rs boundary tests), `respawn_mint_carries_stored_stack_fingerprint`, `spawn_minted_jwt_carries_task_scoped_claims`, `mcp_agent_jwt_task_scope_on_task_and_mr_tools`, `agent_push_outside_token_repo_scope_rejected`, `agent_jwt_cannot_create_mr_outside_task_scope`, plus the pre-existing suites in the touched files (abac_middleware, orchestrator, gate_executor, merge_requests, repos, compose, discover, constraint_check, rbac).
+- `cargo check -p gyre-server` passes on this round's post-merge tree (merge `96f8748b` of base `bafc0353`, task-249 broadcast-kind work; 7m36s, exit 0 — log retained in the round's review-evidence directory). `cargo fmt --all --check` is clean, including this round's comment edit.
+- Mechanical checks all re-run and passing on this round's final tree: check-arch, check-abac-route-registry, check-abac-exempt-handlers, check-inert-enforcement (helpers named `require_*`), check-mem-port-contracts, check-scope-literal-defaults, check-forged-scope-fields, check-fabricated-scope-defaults, check-forwarded-header-trust, check-unbounded-external-http, check-in-memory-state-stores, check-lossy-secret-conversion (logs retained). check-task-commit-attribution needs full git history and is executor-owned. The remaining failing repo scripts fail identically on the clean base commit — pre-existing, not caused by this task.
+- **Required test probes for the verifier** (the sandbox cargo wrapper forbids building the gyre-server test binary — codegen exceeds the 4 GiB budget; `cargo check` was the allowed bound): `cargo test -p gyre-server agent_jwt` (auth.rs audience/claims/revocation tests, tasks.rs and spawn.rs boundary tests), `respawn_mint_carries_stored_stack_fingerprint`, `spawn_minted_jwt_carries_task_scoped_claims`, `mcp_agent_jwt_task_scope_on_task_and_mr_tools`, `agent_push_outside_token_repo_scope_rejected`, `agent_jwt_cannot_create_mr_outside_task_scope`, plus the pre-existing suites in the touched files (abac_middleware, orchestrator, gate_executor, merge_requests, repos, compose, discover, constraint_check, rbac) and the spec-approval e2e `agent_only_requires_exact_stack_hash_match_e2e`. The full list is recorded in `specs/reviews/task-263.md` (reviewer round 1, restored verbatim on this branch).
 
-### Contract-repair round (this commit)
+### Review-repair round (F1)
 
-The executor restored the assigned task document (checkboxes reset, `commits:` cleared) after the protected-task-text change; the production fix from `f338cfc1` is preserved and was re-verified against the merged base:
-
-- Merge `d9e41f1b` (base `61b6080d`, task-251 stale-agent work) touched the same `spawn.rs`/`mcp.rs` files; `git diff f338cfc1..HEAD` shows only additive base-side changes — every task-263 enforcement point is intact (grep evidence: `require_task_claim`/`agent_task_claim` in tasks.rs, spawn.rs, mcp.rs; `check_agent_mr_task_scope`; `is_gyre_agent_jwt` repo-scope gate in git_http.rs; `revoke_token`/`jti_revocation_denial` in agent_audit.rs/auth.rs; `aud` field + `set_audience` + 3600 s default in auth.rs/lib.rs).
-- `cargo check -p gyre-server --all-targets` passes on the post-merge tree (this round; 8m25s, exit 0).
-- `cargo fmt` applied to the merged sources (`37f458b9`) — behavior-preserving formatting only.
-- Mechanical gates re-run and passing: check-arch, check-abac-route-registry, check-abac-exempt-handlers, check-inert-enforcement, check-mem-port-contracts, check-scope-literal-defaults, check-forged-scope-fields, check-fabricated-scope-defaults, check-forwarded-header-trust, check-unbounded-external-http, check-in-memory-state-stores, check-lossy-secret-conversion, check-task-commit-attribution (after restoring the `commits:` frontmatter).
+- **Finding** (review round 1, `specs/reviews/task-263.md`): the previous Shipped note and coverage row 4 claimed `spawn_agent_core` re-mints the token after launch, once the workload-attestation record with the real stack fingerprint exists. No such code exists — the spawn mint is single and pre-launch; the only production re-mint is `ralph_loop.rs` `relaunch_agent_session` (a later Ralph iteration reusing the agent row).
+- **Repair** (reviewer-sanctioned option (b)): this round corrects the task text, coverage row 4 of `specs/coverage/system/identity-security.md`, the stale persona residual in `specs/coverage/system/platform-model.md` row 7, and the in-code mint comment (`spawn.rs`) to the actual mechanism, and records the first-session stack-hash absence as an explicit justified out-of-scope statement (first bullet above). Option (a) — a post-launch re-mint updating the `agent_tokens` KV entry — was rejected because it would revoke the running agent's env-injected credential (the auth chain matches presented tokens by exact string, auth.rs step 2) and because no non-empty fingerprint exists at launch time for a fresh agent row anyway (the self-report that creates it happens only once the process runs).
+- Base merge `96f8748b` (task-249) touched gyre-server sources; every task-263 enforcement point re-verified intact post-merge (grep evidence retained) and `cargo check -p gyre-server` re-run on the merged tree (exit 0).
 
 ## Discovery evidence
 

@@ -924,13 +924,20 @@ pub(crate) async fn spawn_agent_core(
     // persona/persona_slug), `wl_compute_target` (the request's compute
     // target id), `wl_hostname` (the remote compute target's host), and
     // `wl_stack_hash` (the stored workload-attestation stack fingerprint —
-    // present when the agent already has an attested stack, e.g. a
+    // populated when the agent row already has an attested stack, e.g. a
     // Ralph-loop re-spawn of the same agent row; a first-spawn agent has
-    // not attested a stack yet, so the claim is honestly absent until
-    // then). `wl_pid`/`wl_container_id` exist only after the process
-    // launch — the token must pre-exist the process it authenticates — so
-    // those facts live in the workload-attestation record
-    // (GET /api/v1/agents/{id}/workload) instead of this token.
+    // not attested a stack yet, so the claim is honestly absent — the
+    // spec table says "null if not attested"). A minted token is
+    // immutable: the fingerprint reaches the claim on the NEXT mint for
+    // the same agent row (`ralph_loop.rs` relaunch), never by rewriting
+    // this token — and the `agent_tokens` KV entry must keep matching
+    // the token string injected into the launched process (the auth
+    // chain matches presented tokens by exact string, auth.rs step 2),
+    // so a post-launch KV replacement would revoke the running agent's
+    // own credential. `wl_pid`/`wl_container_id` exist only after the
+    // process launch — the token must pre-exist the process it
+    // authenticates — so those facts live in the workload-attestation
+    // record (GET /api/v1/agents/{id}/workload) instead of this token.
     let wl_compute_target = req.compute_target_id.clone();
     let wl_hostname: Option<String> = match resolved_ct_entity.as_ref() {
         Some(e) if e.target_type == ComputeTargetType::Ssh => {
