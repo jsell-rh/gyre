@@ -35,6 +35,7 @@ gyre-common = { workspace = true }
 gyre-ports = { workspace = true }
 gyre-domain = { workspace = true }
 gyre-adapters = { workspace = true }
+gyre-spiffe = { workspace = true }
 async-trait = { workspace = true }
 uuid = { workspace = true }
 jsonwebtoken = { workspace = true }
