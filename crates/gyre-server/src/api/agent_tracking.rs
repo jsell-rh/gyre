@@ -493,7 +493,24 @@ pub async fn branch_lifecycle(
         .and_then(|s| s.final_branch.clone());
 
     // All observed commits: commits recorded during the agent's lifetime,
-    // chronological (oldest first).
+    // chronological (oldest first). Recorded timestamps have second
+    // granularity, so commits recorded within the same second tie; the
+    // producing session's start time breaks those ties (a durable
+    // chronology signal: one agent's sessions are sequential context
+    // windows, so session order never contradicts recorded-time order),
+    // with the id only as the final deterministic fallback. Sorting on
+    // the random-UUID id alone would order same-second commits
+    // arbitrarily — observable as a reversed lifecycle view.
+    let session_start: std::collections::HashMap<&str, u64> = sessions
+        .iter()
+        .map(|s| (s.id.as_str(), s.started_at))
+        .collect();
+    let session_key = |ac: &AgentCommit| {
+        ac.session_id
+            .as_deref()
+            .and_then(|sid| session_start.get(sid).copied())
+            .unwrap_or(ac.timestamp)
+    };
     let mut observed: Vec<AgentCommit> = state
         .agent_commits
         .find_by_agent(&Id::new(&agent_id))
@@ -504,6 +521,7 @@ pub async fn branch_lifecycle(
     observed.sort_by(|a, b| {
         a.timestamp
             .cmp(&b.timestamp)
+            .then_with(|| session_key(a).cmp(&session_key(b)))
             .then_with(|| a.id.as_str().cmp(b.id.as_str()))
     });
 
@@ -1236,6 +1254,58 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// Same-second commit ordering: recorded timestamps have second
+    /// granularity, so two commits recorded within one second tie. The
+    /// tie must be broken by the producing session's window (durable
+    /// chronology at session granularity), never by the random-UUID row
+    /// id — a bare id tiebreak orders the tie arbitrarily and the
+    /// lifecycle view flips (the CI failure this regresses against).
+    /// The commits are written directly with identical timestamps so the
+    /// tie is pinned deterministically, not by wall-clock coincidence.
+    #[tokio::test]
+    async fn branch_lifecycle_same_second_tie_ordered_by_session() {
+        let (state, app) = state_app();
+        let (app, repo_id) = create_repo(app).await;
+        make_agent(&state, "agent-1").await;
+
+        open_session(&state, "sess-1", "agent-1", &repo_id, 1000, "feat/x").await;
+        open_session(&state, "sess-2", "agent-1", &repo_id, 2000, "feat/y").await;
+
+        // Both commits recorded in the same wall-clock second (identical
+        // timestamps), each stamped to its open session — exactly what
+        // record_commit produces for a same-second pair.
+        let same_second = 1_800_000_000u64;
+        for (sha, session) in [("CCCC", "sess-1"), ("DDDD", "sess-2")] {
+            let ac = gyre_domain::AgentCommit::new(
+                gyre_common::Id::new(format!("ac-{sha}")),
+                gyre_common::Id::new("agent-1"),
+                gyre_common::Id::new(&repo_id),
+                sha,
+                "feat/x",
+                same_second,
+            )
+            .with_session_id(Some(session.to_string()));
+            state.agent_commits.record(&ac).await.unwrap();
+        }
+
+        let view = get_json(
+            &app,
+            format!("/api/v1/repos/{repo_id}/agents/agent-1/branch-lifecycle"),
+        )
+        .await;
+        let commits: Vec<&str> = view["observed_commits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["commit_sha"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            commits,
+            vec!["CCCC", "DDDD"],
+            "same-second commits order by session window, not random id"
+        );
     }
 
     /// Time-travel: the session state view returns the repo state during
