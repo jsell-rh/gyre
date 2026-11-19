@@ -53,3 +53,49 @@ Verifier must run (test-target compilation exceeds this sandbox's budget; wrappe
 - `cargo test -p gyre-server respawn_mint_carries_stored_stack_fingerprint` (ralph_loop::tests).
 - Pre-existing suites in every touched file (abac_middleware, agents, compose, discover, merge_requests, orchestrator, repos, spawn, tasks, constraint_check, gate_executor, rbac, mcp, git_http, auth, agent_audit) plus the spec-approval e2e (`agent_only_requires_exact_stack_hash_match_e2e`) — the ~54 test builders that gained `Authorization` headers must all still pass, proving non-agent principals are not locked out.
 - Full workspace suite + Clippy per standard verification.
+
+## Round 2
+
+Candidate `d0bec3795587d0492e26a28586da2e92c1db7aec` (branch `pipeline/task-263/76bfe69c6a7d46cabe7d24f2920fc959-1`, base `4e88f183`; adds to round 1 the F1 evidence repair `42dad97a`, regression repairs `544b2755`/`585d459e`, checkpoint `88f9a006` + admin gates, admin seed gate `5cdce3aa`, merge onto current main `07d01c55`, docs `266b1341`/`d0bec379`).
+
+Verdict: **needs-revision** — one finding (F2, code: `wl_hostname` merge regression). Round-1 F1 is resolved by the merge round; every other surface re-verified clean.
+
+Probes run (evidence under `/tmp/stage/review-evidence/`):
+
+- `/tmp/stage/bin/cargo check -p gyre-server` → **exit 0** (7m48s; `--all-targets` wrapper-rejected, test-target compilation deferred to the verifier — `cargo-check-gyre-server.log`).
+- Mechanical invariants, all exit 0: `check-arch`, `check-abac-route-registry` (exemption file untouched), `check-abac-exempt-handlers`, `check-inert-enforcement`, `check-mem-port-contracts`, `check-mcp-write-tools`, `check-scope-literal-defaults`, `check-forged-scope-fields`.
+- `rustfmt --check` on all 13 touched server sources → exit 0.
+- Full diff read (base..candidate, 3686 lines) + source re-read of the mint/validate/extractor paths, `resolve_session_stack_evidence`, the launch→attestation-record binding, and every gated handler; by-effect grep sweep for remaining task-mutating surfaces (REST routes, MCP dispatch arms, `tasks.update` writers, `transition_status` callers — signal-chain/reconciliation effects are server-internal; `meta-specs` task writes are test-only; `meta-spec preview` and `specs/:path/reject` are in-handler Admin/Developer role-gated so agent principals cannot reach them).
+- `check-task-commit-attribution.sh` fails **only against the working tree** because the executor's protected-task-text restoration empties the `commits:` frontmatter; the candidate's committed frontmatter lists all 7 product commits (verified via `git show d0bec379:specs/tasks/task-263.md`) — not a candidate defect.
+
+Round-1 F1 resolution verified: the merge onto main (task-261) makes `spawn_agent_core` resolve the stack evidence ONCE pre-launch via `spiffe::resolve_session_stack_evidence` (registered M14.1 fingerprint, else SHA-256 over the server-authorized launch config — always non-empty) and bind the SAME value to the mint's `wl_stack_hash`/`stack_hash`, the session SVID, and the launch-written workload-attestation record (spawn.rs:942/951/1366/1395). Every mint — first spawn included — carries the stored fingerprint; the shipped notes and coverage row 4 now describe the actual mechanism. AC 1's stack-hash clause holds on first spawn.
+
+Re-verified clean (no findings): audience validation live on self-minted tokens (`set_audience`; federated path keeps `validate_aud=false`) with a same-key kill test; TTL 3600 default restored; persona minted from the validated spawn persona; sub `agent:<uuid>` with all downstream identity keyed off the KV entry (federated `agent_id` display string only); jti revocation wired through the single `revoke_agent_token` writer into the durable `revoked_tokens` table (no delete path; checked before signature/expiry on REST and WS paths; `revoked_jti_rejects_token_before_expiry` kills a removal of the check with the KV entry intact); the full by-effect sweep (REST task update/transition/create, complete/stop/fail/status, spawn task-claim-or-scope gate, REST+MCP MR task scope, MCP update/decompose claim match, git-push repo-scope requirement, compose, archive, admin kill/reassign/job/restore/seed) with strong per-call tests (403 + non-mutation + own-scope counterpart + operator counterpart; the admin probe runs under a priority-860 Agent-allow policy and asserts the handler gate message); non-agent principals unaffected (every check gates on `agent_task_claim()`/`is_gyre_agent_jwt()`; orchestrator JWTs exempt via `orchestrator_type`).
+
+Findings:
+
+- [-] **F2 (code / claims fidelity, merge regression): `wl_hostname` is minted as the forge server's own hostname for every spawn, including remote SSH compute targets.** `spawn.rs:952` (`let wl_hostname = Some(crate::workload_attestation::read_hostname());`; same pattern `ralph_loop.rs:812`) replaced, in merge `07d01c55`, the branch's original resolution (`f338cfc1` spawn.rs:934-938: `Ssh` target → `e.config["host"]`). The spec's claims table (identity-security.md line 58) defines `wl_hostname` as "Hostname of the compute target (present when spawned on remote target)"; AC 1 requires it "whenever the corresponding spawn fact is known" — for an SSH spawn the configured host is known at mint time and a different (wrong) host is minted. The candidate's own `auth.rs:722` doc still says "remote compute-target host". No test covers the SSH spawn resolution (the auth.rs unit test passes the value straight into the mint; the route test uses a Container target and never asserts `wl_hostname`), so the suite is blind to it. No enforcement consumer reads the claim (provenance only), which is why this is a narrow repair, not a boundary failure. **Repair:** restore the `f338cfc1` match arm (Ssh → configured host; local → `read_hostname()` is spec-defensible since the local host IS the compute target) in both `spawn.rs` and `ralph_loop.rs`, and assert the SSH-host value in a mint test.
+
+Minor (non-blocking):
+
+- `extract_jti_unverified`'s doc comment ("callers pass tokens read from the server's own KV bucket, never caller-supplied input") is now stale — `jti_revocation_denial` passes the caller-supplied token. The fail-closed analysis in `jti_revocation_denial`'s own comment is correct (unverified extraction can only add a rejection before full EdDSA validation), so this is doc drift only.
+- `jti_revocation_denial` fails open on a table-lookup error (warn + fall through). Acceptable: the KV removal precedes the table write in the single writer, so the live gate is already down when the table write happens; the table is the durable record. Worth an eye if a second writer ever appears.
+- `update_agent_status` uses self-or-task-claim (an agent may terminally transition a sibling agent on its OWN task), while stop/fail are self-only — within the task-scope boundary and consistent with `complete_agent`; recorded for consistency awareness, not a defect.
+- The sweep notes omit `POST /api/v1/workspaces/:id/meta-specs/preview` (its reconciliation wave creates task rows), but the handler is in-handler role-gated (Admin/Developer only; Agent denied), so the surface is already enforced — documentation completeness only.
+- Gate-agent capability tokens now 403 on git fetch (they hold no repo/workspace scope); their contract is read-only MR context via env/REST (task-134 driver), push was already denied — no lockout found.
+
+Test-inflation check: none found. The new probes drive the real router / real MCP dispatch with real spawn-minted or same-key-minted JWTs and assert denial + non-mutation + allowed counterparts.
+
+Verifier must run (test-target compilation exceeds this sandbox's budget; wrapper rejects `--all-targets`):
+
+- `cargo test -p gyre-server agent_jwt` (auth.rs claims/audience/jti tests).
+- `cargo test -p gyre-server agent_jwt_task_scope_boundary_on_lifecycle_endpoints agent_jwt_cannot_spawn_onto_foreign_task spawn_minted_jwt_carries_task_scoped_claims` (api::spawn::tests).
+- `cargo test -p gyre-server agent_jwt_cannot_mutate_foreign_task agent_jwt_create_task_clamped_to_claims` (api::tasks::tests).
+- `cargo test -p gyre-server mcp_agent_jwt_task_scope_on_task_and_mr_tools` (mcp::tests).
+- `cargo test -p gyre-server agent_push_outside_token_repo_scope_rejected` (git_http::tests).
+- `cargo test -p gyre-server agent_jwt_cannot_create_mr_outside_task_scope` (api::merge_requests::tests).
+- `cargo test -p gyre-server respawn_mint_carries_stored_stack_fingerprint` (ralph_loop::tests).
+- `cargo test -p gyre-server agent_jwt_denied_on_admin_task_mutating_surfaces` (api::admin::tests).
+- `cargo test -p gyre-server --test m18_oidc_integration` (`token_info_for_jwt_agent_token` sub assertion).
+- `cargo test -p gyre-server agent_only_requires_exact_stack_hash_match_e2e` (api::specs::tests, stack-pinning consumer e2e).
+- Pre-existing suites in every touched file (the ~54 test builders that gained `Authorization` headers / direct-call auth args must all still pass — non-agent lockout proof), the integration tests under `tests/` (api_integration, auth_integration, task134_review_probe), and the full workspace suite + Clippy per standard verification.
