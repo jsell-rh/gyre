@@ -2027,6 +2027,12 @@
         "Source Control",
         "External Repository Mirroring"
       ]
+    },
+    "backlog/42df7a7e48e1904b76eface1": {
+      "file": "specs/system/admin-panel.md",
+      "heading": [
+        "Admin Panel"
+      ]
     }
   },
   "bindings": {
@@ -2788,6 +2794,9 @@
     ],
     "Spec gap spec-36fad8fcafe7b73a2b6f2d0e / mirror-namespace-isolation / b580b93c564f": [
       "backlog/09c28182c53ccd934aa3b93a"
+    ],
+    "Spec gap spec-5b647653a4554eea3e93ac19 / admin-panel-remaining-gap / e61ffd082155": [
+      "backlog/42df7a7e48e1904b76eface1"
     ]
   }
 }
