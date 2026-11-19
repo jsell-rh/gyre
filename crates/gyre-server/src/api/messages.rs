@@ -297,8 +297,15 @@ pub async fn send_message(
         msg.key_id = Some(kid);
     }
 
-    // Persist Directed and Event tier only (Telemetry is in-memory, Broadcast is not stored).
-    if effective_tier != MessageTier::Telemetry && !matches!(msg.to, Destination::Broadcast) {
+    // Persist Directed and Event tier only (Telemetry is in-memory, Broadcast
+    // is not stored). Broadcast-only kinds (DataSeeded/QueueUpdated) are
+    // storage-exempt regardless of destination (message-bus.md
+    // §Broadcast-only kinds): they flow through the in-memory broadcast
+    // channel only, never hitting MessageRepository::store().
+    if effective_tier != MessageTier::Telemetry
+        && !matches!(msg.to, Destination::Broadcast)
+        && !msg.kind.broadcast_only()
+    {
         state
             .messages
             .store(&msg)
@@ -1056,6 +1063,70 @@ mod tests {
             .await
             .unwrap();
         assert!(found.is_none(), "Telemetry message must not be persisted");
+    }
+
+    /// message-bus.md §Broadcast-only kinds: `DataSeeded` and `QueueUpdated`
+    /// are storage-exempt — "never hitting `MessageRepository::store()`".
+    /// The send path must short-circuit storage for these kinds BY KIND, not
+    /// just by destination: a server-originated broadcast-only kind forced to
+    /// a Workspace destination must still not be stored, while the broadcast
+    /// channel delivers the message to subscribers. Against the prior
+    /// destination-only guard this test fails (the row is persisted).
+    #[tokio::test]
+    async fn broadcast_only_kinds_not_persisted_even_forced_to_workspace() {
+        let state = test_state();
+        let mut rx = state.message_broadcast_tx.subscribe();
+        let app = crate::api::api_router().with_state(state.clone());
+
+        for kind in ["data_seeded", "queue_updated"] {
+            let body = serde_json::json!({
+                "to": {"workspace": "ws-bo"},
+                "kind": kind,
+            });
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/workspaces/ws-bo/messages")
+                        .header("content-type", "application/json")
+                        .header(auth_header().0, auth_header().1) // global token = Server origin
+                        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::CREATED, "kind={kind}");
+            let json = body_json(resp).await;
+            let msg_id = json["id"].as_str().unwrap().to_string();
+
+            // Not stored: neither by id nor in the workspace listing.
+            assert!(
+                state
+                    .messages
+                    .find_by_id(&Id::new(&msg_id))
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "{kind} must never hit MessageRepository::store()"
+            );
+            let listed = state
+                .messages
+                .list_by_workspace(&Id::new("ws-bo"), None, None, None, None, Some(100))
+                .await
+                .unwrap();
+            assert!(
+                listed.is_empty(),
+                "{kind} must never hit MessageRepository::store() (list_by_workspace found rows)"
+            );
+
+            // The broadcast channel DID deliver the message to subscribers.
+            let msg = rx
+                .try_recv()
+                .unwrap_or_else(|e| panic!("{kind} must reach broadcast channel subscribers: {e}"));
+            assert_eq!(msg.kind.as_str(), kind);
+            assert!(matches!(msg.from, MessageOrigin::Server));
+        }
     }
 
     #[tokio::test]
