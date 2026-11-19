@@ -2,7 +2,7 @@
 title: "MCP SSE stream: workspace filtering and MessageKind-to-AG-UI event mapping"
 spec_ref: "Spec gap spec-c62aac6701125cb09e0c736c / mcp-sse-workspace-agui / 60b177f85a11"
 depends_on: []
-progress: ready-for-review
+progress: complete
 commits: ["1388c32e4f4d81242744e9bfa8c9738316ed1e2b", "b4ac4adc9246394c8d3408850c43eeca158b9c33", "c9c8b4c3722d79b8ddc835ea6b1602bc70b9474a"]
 ---
 
