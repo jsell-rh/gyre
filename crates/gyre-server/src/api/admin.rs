@@ -509,8 +509,9 @@ pub(crate) async fn kill_agent(
 /// tasks' workloads deployment-wide: kill blocks the target agent's current
 /// task and tears down its workload, reassign moves every task assigned to
 /// an agent (with a generation bump), job triggers run stale-agent/
-/// reconciliation jobs that mutate task rows, and snapshot restore replaces
-/// task state wholesale. No task claim can cover a cross-task,
+/// reconciliation jobs that mutate task rows, snapshot restore replaces
+/// task state wholesale, and seed creates task/agent/MR rows outside any
+/// task claim. No task claim can cover a cross-task,
 /// deployment-wide effect, so a task-bound agent principal is denied
 /// outright — mirroring `archive_repo`'s outright denial — and the boundary
 /// holds regardless of ABAC policy configuration: the middleware
@@ -682,10 +683,15 @@ pub struct SeedResponse {
 /// ("seed-repo-1", workspace "default") are global, only ONE tenant can own
 /// the demo seed — a caller from a different tenant gets a 409 naming the
 /// collision, never a success response for data outside its scope.
+///
+/// By-effect task-scope surface: seeding creates task rows, agent rows and
+/// task-linked MRs (demo fixtures) outside any task claim, so a task-bound
+/// agent principal is denied (see `deny_task_bound_agent`).
 pub async fn admin_seed(
     State(state): State<Arc<AppState>>,
     auth: crate::auth::AuthenticatedAgent,
 ) -> Result<Json<SeedResponse>, ApiError> {
+    deny_task_bound_agent(&auth)?;
     use gyre_domain::{
         Agent, AgentStatus, MergeQueueEntry, MergeRequest, MrStatus, Repository, Task,
         TaskPriority, TaskStatus, Tenant, Workspace,
