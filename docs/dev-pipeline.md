@@ -950,6 +950,11 @@ verified coverage. No-gap audits still require independent plan review; they do
 not manufacture implementation tasks or tests for working behavior. Audit and
 plan preparation are source inspection only; their build wrappers reject tests
 and builds. Product changes still pass all existing deterministic gates.
+Workflow YAML, Docker source and public root build manifests also qualify as
+literal behavior evidence, so CI, release and packaging specs can cite their
+actual implementation. These configuration files participate in evidence
+freshness and duplicate-plan detection. The new configuration allowances exclude
+`.env`, private-key files, credential JSON and other hidden directories.
 
 An assigned document is re-audited after its linked tasks are satisfied. Observed
 documents are re-audited when inspected source changes or the audit interval
