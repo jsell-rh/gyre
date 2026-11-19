@@ -2,10 +2,10 @@
 title: "Implement meta-spec preview mode: real agent preview runs with branches, diffs, and cleanup"
 spec_ref: "meta-spec-reconciliation.md §5 Preview Mode: The Fast Iteration Loop"
 depends_on: []
-progress: ready-for-review
+progress: not-started
 coverage_sections:
   - "meta-spec-reconciliation.md §5 Preview Mode: The Fast Iteration Loop"
-commits: ["d603b9f0337d784cd313afc2ac34315957815d52", "6f55459cd8681c009117305386410a225fb126e5", "0513d409453bd1a863640aeb8cd6f7c21e989aa1", "c1a709ba62490cf3661b06b6ea6b72308488ebf4", "a4d8bd712ed166b78311ce648a70c58791082ea1", "2f10e8d134c1911f52b07400d7becabb910dbe21", "7cad12616cd28f691664cac1922337c9f5d72bef", "683da5a1afe0bb249a8fa0aa3e84e65006d9cde2", "f4ee98ba5521f5b8e973ae3172481dec4f2d34de", "8212fa5d945070afac1e859a96e1caae27af950c", "05c06fde1c501cd1f9f5ab5b729c1ec2a1ba2860", "cc3080ff119b5084d507330e038aafb30ee5a0d5", "69488298e887e8c4c76ea5a48f3ce01c10d175c6", "c33a86e2ce9c93de50a97ff3e7644a861cef17d6", "1622b73cdf7e36d32299a4010462b9b1c046eab9", "c8f9fed9abef048df4abf83d4a86e1407a17b9db", "001ec52dd65e890637751d40ecb1a64743a4934d", "a31a731a262c62f7c85202cbca727fe9d9633646", "2c1ddfe60be7f19c843d833e7eead308c3585c8f"]
+commits: []
 ---
 
 ## Spec Excerpt
@@ -124,16 +124,3 @@ These are workspace-scoped; the spec specifies the global routes `POST /api/v1/m
 - Read `crates/gyre-server/src/api/mr.rs` (or wherever the MR diff endpoint lives) for the git diff plumbing to reuse for preview diffs.
 - Read `docs/server-config.md` for config-knob conventions before adding the preview budget and GC TTL settings.
 - Follow conventional commits; run `cargo test -p gyre-server` and `bash scripts/check-arch.sh` before completing.
-
-## Shipped
-
-Preview mode (meta-spec-reconciliation.md §5) is a real agent run path, implemented and independently review-approved across the rounds recorded in `commits:`: `POST /api/v1/meta-specs/preview` spawns one real `Active` agent per target on `preview/{preview_id}/{slug}` branches with real worktrees and short-lived JWTs (202 response exactly per spec shape); the draft travels in the agent process env (`GYRE_META_SPEC_DRAFT_KIND`/`GYRE_META_SPEC_DRAFT_CONTENT`, `GYRE_SPEC_PATH`) and the agent runner builds the prompt with the draft meta-spec as governing context over the target spec; skip-ceremony is enforced (no task assignment, no gates, no MR, no merge queue, no provenance, no `Idle`, REST/MCP escape routes refuse preview callers); completion tears down worktree and token, leaving the branch for `GET .../preview/{preview_id}` status + diff; `DELETE` and the `meta_spec_preview_gc` background job (TTL `GYRE_META_SPEC_PREVIEW_TTL_HOURS`, default 24 h) clean up branches, worktrees, agents, and kv records; the preview budget slot release is exactly-once across every generic terminal path (stop/fail/admin kill/budget stop/stale-abort/DELETE/GC); the hollow structural-impact implementation and the workspace-scoped routes were fully removed (clean cutover, including the two stale exemption lines the f70cfac6 base still carried); docs updated (`docs/api-reference.md`, `docs/server-config.md`).
-
-### Re-verification round (this commit)
-
-The prior verification round failed `checks.sh` with exit 1 on the base-integrated tree: the f70cfac6 base still carried the stale `/api/v1/workspaces/:id/meta-specs/preview{,/:preview_id}` exemption lines while the routes are gone, failing `check-abac-route-registry.sh`/`check-abac-exempt-handlers.sh`. That was repaired on this branch (`e8d8426f` merge kept the removal; `d603b9f0` fixed rustfmt on the changed lines). This round re-verified the exact current head (post-merge tree) with no further source changes needed:
-
-- `check-abac-route-registry.sh`, `check-abac-exempt-handlers.sh` (the two previously failing gates): OK on the exact head.
-- `check-arch.sh`, `check-hierarchy.sh`, `check-rustfmt-diff.py f70cfac6` (33 Rust files, changed lines clean), and all 16 mechanical gate scripts (mcp-write-tools, migration-versions, migration-SQL-portability, dead-message-kinds, byte-slice-truncation, relative-path-defaults, fail-open-ref-resolution, mem-port-contracts, fabricated-scope-defaults, lossy-secret-conversion, scope-literal-defaults, inert-enforcement, forged-scope-fields, forwarded-header-trust, in-memory-state-stores, unbounded-external-http): all exit 0. Evidence: `/tmp/stage/review-evidence/gates.log`.
-- `SKIP_WEB_BUILD=1 cargo check -p gyre-server` (via the sandbox build wrapper): exit 0, `Finished dev profile in 6m 23s`; web/dist not rebuilt or committed.
-- `cargo test -p gyre-server preview_` is blocked by this sandbox's build wrapper ("gyre-server code generation plus the model exceeds 4 GiB") — the standing task-206 constraint; deferred to the independent verifier together with the regression suite named in `gates.log` (exactly-once slot release across generic terminal paths, teardown+diff, worktree-failure slot hygiene, persist-failure rollback, process kill on mark-failed, GC/DELETE suite, REST-ceremony refusals, preview-caller JWT detection).
