@@ -3,7 +3,7 @@ title: "SPIFFE workload attestation: X.509-SVIDs replace the G10 local scheme"
 spec_ref: "Spec gap spec-31d3ae72e12e22c52442e309 / spiffe-workload-attestation / b60edce5bc49"
 depends_on: []
 progress: ready-for-review
-commits: ["14c63ffbd16a48b386fde1c63b18ff1af1e1e464", "ea0f207339d7f231560338d0e64b62302231de8a", "354a5e7a653431c98784ef3cb8326697b7998909", "c9a4d0337ef3aac273be09561d7548f82b2b51b8", "0c37ba3c1972849406c4c233579c4c2cd9ef8230"]
+commits: ["14c63ffbd16a48b386fde1c63b18ff1af1e1e464", "ea0f207339d7f231560338d0e64b62302231de8a", "354a5e7a653431c98784ef3cb8326697b7998909", "c9a4d0337ef3aac273be09561d7548f82b2b51b8", "0c37ba3c1972849406c4c233579c4c2cd9ef8230", "2934153b307ad6f2cca32db758e134a375b8de90"]
 ---
 
 ## Required behavior
@@ -119,6 +119,9 @@ the verification path).
   (`{key_pkcs8_b64, cert_pem}`); duplicated
   `#[allow(clippy::too_many_arguments)]` on `auth.rs mint_worker_scoped`
   removed.
+- rustfmt drift left by the task's earlier commits in seven server files
+  cleaned (formatting-only, `cargo fmt --check` clean; check + tests
+  re-verified after).
 
 ### Test evidence
 
