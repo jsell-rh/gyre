@@ -283,6 +283,7 @@ mod tests {
             git_ops: base.git_ops.clone(),
             jj_ops: base.jj_ops.clone(),
             agent_commits: base.agent_commits.clone(),
+            agent_sessions: base.agent_sessions.clone(),
             worktrees: base.worktrees.clone(),
             telemetry_buffer: base.telemetry_buffer.clone(),
             message_broadcast_tx: base.message_broadcast_tx.clone(),
