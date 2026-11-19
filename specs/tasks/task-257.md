@@ -3,7 +3,7 @@ title: "Publish reviewed spec backlog for specs/development/speed-backpressure.m
 spec_ref: "GOAL.md — real implementations and meaningful verification"
 depends_on: []
 progress: ready-for-review
-commits: []
+commits: ["f046fe635ae0839cc06ff8f003329e365e812c1f", "5fcc43d33e4850cab6dc007397c79d76ef0844cd"]
 ---
 
 ## Required behavior
@@ -221,4 +221,22 @@ Publish exactly the independently reviewed missing-work plan below. Only create 
 
 ## Shipped
 
-Task definitions and explicit bindings only; no product implementation claimed.
+Publication of reviewed backlog plan 9a77d1e70c18 for specs/development/speed-backpressure.md, plus repair of the one verification finding retained against the current head. No product behavior, spec requirement, coverage status or gate was changed.
+
+### Backlog publication (f046fe63)
+
+- `specs/tasks/task-256.md` created from the reviewed plan task `commit-time-backpressure-invariants`: title, required behavior, all nine acceptance criteria, verification intent and discovery evidence reproduced verbatim from the plan (byte-compared against the plan JSON, not paraphrased). Progress stays `not-started` until this publication merges.
+- `specs/tasks/task-257.md` carries the full reviewed plan record: audit base fb1424fb, requirements hash 8207800e, one gap section (2a09dd756eff40d15b609010) and one context section.
+- `specs/task-spec-inputs.json` gained exactly two entries: the section binding `backlog/2a09dd756eff40d15b609010` -> specs/development/speed-backpressure.md under heading ["The Wheel: Speed & Backpressure", "Pre-Commit Hooks"], and the task binding for spec gap `spec-17abbc950d9bce3d8a575239 / commit-time-backpressure-invariants / 8207800eca00`.
+- Audit challenged against the current tree before approving, not just trusted: 78 local hooks with only no-em-dash among the eight enumerated invariants enforced at commit time; no backup-file, secret-scanner, shellcheck, i18n-coverage or web-build hook in .pre-commit-config.yaml or either CI workflow; .gitignore covers only *.swp; no Cargo.nix exists (crane-based flake); web/src/locales holds only en.json; email.rs type_heading() lists all 41 NotificationType variants in both Locale::En and Locale::De with no wildcard fallback. No other task covers this gap; task-256 has no dependencies and no existing-task collision (scripts/check-i18n-coverage.sh is absent, so the reuse-or-implement note is a correct contingency, not a fork of an existing script).
+- Nothing else was touched by the publication commit: only the three files above.
+
+### Verification-finding repair (5fcc43d3)
+
+Retained finding 68e962da (npm test --no-file-parallelism at f046fe63, exit 1) failed exactly one test: WorkspaceSettings "renders invitation status and expiry, with revoke only for pending rows" expected "Expires in 30m", received "Expires in 29m". Root cause is a timing flake, not a product defect: the fixture computed `expires_at` from `Date.now()` at mock-setup time while `invitationExpiry()` re-reads `Date.now()` at render time, so any elapsed milliseconds floored 1799s to 29 whole minutes. Fixed by pinning `Date.now` via `vi.spyOn` for that test so fixture and render see the same instant; the exact `toBe('Expires in 30m')` assertion is unchanged in strength. The CI log itself is the pre-fix reproduction.
+
+### Test evidence
+
+- `npx vitest run src/__tests__/WorkspaceSettings.test.js` (locked versions, after `npm ci`): 85/85 passed, including the repaired test. Saved under /tmp/stage/review-evidence/workspace-settings-focused.txt.
+- No Rust code changed; no server tests are required of the verifier beyond the standard suite (cargo test --all belongs to full verification as usual).
+- Full `npm test`, exact-head GitHub checks and repo-wide gates remain with independent verification, per assignment scope.
