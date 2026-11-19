@@ -2,8 +2,8 @@
 title: "Message send-path guards: scope validation, mem store contract, WS acknowledged exclusion, auth-mechanism origin table, Agent-destination tenant isolation"
 spec_ref: "Spec gap spec-c62aac6701125cb09e0c736c / message-send-path-guards / 60b177f85a11"
 depends_on: []
-progress: ready-for-review
-commits: ["951fa88b25aa0c530aab4dc4c4e2c59cbe6994f2", "a2781ff06b71bc443eda82aa1c0022edf011c972", "3bb9c9bd4099810d8583ab647018a5a41297f8c2", "873d0821ca7a33501c178303bdc618a1802ccbb6", "9dd4a1f0f07930760dddf8036a9fede6bbafb44c", "955c134a8c669070c3b936eac55f0e5e3f448418"]
+progress: not-started
+commits: []
 ---
 
 ## Required behavior
@@ -120,75 +120,3 @@ Canonical spec: `specs/system/message-bus.md`. Source: `4127964001113dda08e48524
     ]
   }
 ]
-
-## Shipped
-
-All five send-path guards are implemented and retained on this branch
-(955c134a, 9dd4a1f0, 873d0821, 3bb9c9bd, a2781ff0, 951fa88b), merged
-with current main through this round's rebase.
-
-### Behavior
-
-1. **Scopeless-message guard** — `emit_scoped_event`
-   (crates/gyre-server/src/lib.rs), the shared body of the internal
-   emitter family, returns `Err` and logs at error level when
-   `destination != Broadcast && workspace_id.is_none()`; the message is
-   never constructed, stored, or broadcast.
-2. **Mem store contract** — `MemMessageRepository::store`
-   (crates/gyre-server/src/mem.rs) returns `Err` on `workspace_id: None`,
-   matching the SQLite/PostgreSQL `message_to_new_row` contract; send
-   paths skip `store()` for Broadcast destinations.
-3. **WS `acknowledged` exclusion** — both WebSocket Message
-   serialization sites (live bus-delivery arm and Subscribe replay arm
-   in crates/gyre-server/src/ws.rs) serialize through
-   `ws_message_payload`, which strips `acknowledged` with the same
-   manual-removal pattern as `send_response`; GET inbox responses keep
-   the field.
-4. **Origin table** — `origin_from_auth` (crates/gyre-server/src/api/messages.rs)
-   derives origin from `AuthenticatedAgent.auth_mechanism`, set by the
-   extractor on every auth path: global `GYRE_AUTH_TOKEN` → Server;
-   API key / OIDC user JWT → `User(user_id)`; agent token / federated
-   JWT → `Agent(sub)`. Admin-role API-key/OIDC callers resolve to User
-   origin (server_only 403 gate and rule-3 membership check apply to
-   them); the separate rule-6 Admin-role check still lets them target
-   Broadcast; the global token keeps full forge authority.
-5. **Rule-1 tenant isolation, fail-closed** — the REST send handler and
-   the mirrored MCP `handle_message_send` resolve the target agent's
-   workspace record on every `Destination::Agent(id)` send and compare
-   its tenant with the caller's verified tenant; mismatch rejects 403
-   (nothing stored or broadcast), including Server-origin global-token
-   callers. An unresolvable workspace record rejects fail-closed.
-
-### This round — rebase onto 0ea6a629
-
-Resolved the DIRTY rebase onto base 0ea6a629 (task-253's MCP SSE
-workspace-filtering work). mcp.rs, docs/api-reference.md, and
-specs/tasks/task-253.md auto-merged cleanly — task-248's
-`handle_message_send` tenant-isolation guard and task-253's new
-`mcp_sse_handler` coexist without overlap. The single content conflict
-was specs/coverage/system/message-bus.md's "Last audited" paragraph,
-resolved as the union: this task's row 5/9/10 closure sentence is
-retained alongside task-253's row-14 SSE closure sentence. The conflict
-resolution itself changed no production code: the only crates/ change on
-this round's diff is task-253's already-reviewed mcp.rs SSE work arriving
-from the base (mcp_sse_handler + its tests — the handle_message_send
-tenant-isolation guard region is untouched), and the five guards and
-their tests are bit-identical to the previously verified candidate.
-
-### Test evidence
-
-- In-sandbox probes (prior rounds, unchanged by this specs-only round):
-  origin-table probes (Admin API-key/OIDC server_only 403, directed-send
-  membership 403, global-token Server origin + Broadcast authority,
-  rule-6 Admin-Broadcast allowance), rule-1 cross-tenant 403 with empty
-  store (REST + MCP), WS live/replay `acknowledged` exclusion, GET
-  inbox keeps `acknowledged`, mem-store Err-on-None contract test,
-  scopeless-guard Err + error-level log with empty store/broadcast.
-- Round-7 fixture repair (951fa88b): task-254's
-  message_size_and_key_rotation fixtures now create the target agent's
-  workspace row so rule-1 resolution succeeds; no assertion weakened.
-- Deferred to the independent verifier (build-budget gate): `cargo test
-  -p gyre-server --test message_size_and_key_rotation` and full
-  `cargo test --all`; `cargo check -p gyre-server --tests` and
-  `cargo fmt --check` are the in-sandbox type/format gates for this
-  round.
