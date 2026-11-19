@@ -3,7 +3,7 @@ title: "Publish reviewed spec backlog for specs/development/speed-backpressure.m
 spec_ref: "GOAL.md — real implementations and meaningful verification"
 depends_on: []
 progress: ready-for-review
-commits: ["f046fe635ae0839cc06ff8f003329e365e812c1f", "5fcc43d33e4850cab6dc007397c79d76ef0844cd"]
+commits: ["5fcc43d33e4850cab6dc007397c79d76ef0844cd"]
 ---
 
 ## Required behavior
