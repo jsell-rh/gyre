@@ -2964,6 +2964,36 @@ async fn handle_message_send(state: &AppState, args: &Value, auth: &Authenticate
             ));
         }
 
+        // Scoping rule 1 (message-bus.md §Scoping Rules), mirrored from the
+        // REST send path: ALL Agent-directed messages validate tenant
+        // isolation — the target agent's tenant (resolved from its workspace
+        // record) must match the message's tenant (the caller's verified
+        // tenant), regardless of origin. Skip-and-log when the workspace
+        // record cannot be resolved — never fabricate a scope identity.
+        match state.workspaces.find_by_id(&target.workspace_id).await {
+            Ok(Some(target_ws)) => {
+                if target_ws.tenant_id.as_str() != auth.tenant_id {
+                    return tool_error(format!(
+                        "target agent {} belongs to a different tenant",
+                        target_id
+                    ));
+                }
+            }
+            Ok(None) => {
+                tracing::warn!(
+                    workspace_id = %target.workspace_id,
+                    "message.send: target agent's workspace not found; tenant isolation check skipped"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    workspace_id = %target.workspace_id,
+                    error = %e,
+                    "message.send: failed to resolve target workspace; tenant isolation check skipped"
+                );
+            }
+        }
+
         // Queue depth check for Directed tier.
         if effective_tier == MessageTier::Directed {
             let unacked = state.messages.count_unacked(target_id).await.unwrap_or(0);
@@ -6347,6 +6377,7 @@ mod tests {
     #[test]
     fn is_agent_jwt_detects_gyre_jwt() {
         let auth_with_agent_scope = AuthenticatedAgent {
+            auth_mechanism: crate::auth::AuthMechanism::AgentToken,
             agent_id: "agent-1".to_string(),
             user_id: None,
             roles: vec![UserRole::Agent],
@@ -6367,6 +6398,7 @@ mod tests {
 
         // Global token has no jwt_claims
         let auth_global = AuthenticatedAgent {
+            auth_mechanism: crate::auth::AuthMechanism::GlobalToken,
             agent_id: "system".to_string(),
             user_id: None,
             roles: vec![UserRole::Admin],
@@ -6383,6 +6415,7 @@ mod tests {
 
         // Keycloak JWT has jwt_claims but different scope
         let auth_keycloak = AuthenticatedAgent {
+            auth_mechanism: crate::auth::AuthMechanism::UserJwt,
             agent_id: "alice".to_string(),
             user_id: None,
             roles: vec![UserRole::Developer],
@@ -7476,6 +7509,118 @@ mod tests {
         assert!(text.contains("Message sent"));
     }
 
+    /// Scoping rule 1 (message-bus.md §Scoping Rules), mirrored from the
+    /// REST send path: an Agent-directed message whose target belongs to a
+    /// different tenant than the caller's verified tenant is rejected, and
+    /// nothing is stored. The global token's tenant is "default"; the target
+    /// workspace below is tenant-2 — with the tenant comparison removed this
+    /// call succeeds and leaks the message across tenants.
+    #[tokio::test]
+    async fn mcp_message_send_cross_tenant_rejected() {
+        // Cross-tenant target: sender ("system" — the global token's agent
+        // identity) lives in a tenant-2 workspace alongside the target.
+        let state = test_state();
+        let ws_t2 = gyre_domain::Workspace::new(
+            Id::new("ws-mcp-t2"),
+            Id::new("tenant-2"),
+            "mcp-t2",
+            "mcp-t2",
+            0,
+        );
+        state.workspaces.create(&ws_t2).await.unwrap();
+        let mut sender = gyre_domain::Agent::new(Id::new("system"), "system", 0);
+        sender.workspace_id = Id::new("ws-mcp-t2");
+        state.agents.create(&sender).await.unwrap();
+        let mut target = gyre_domain::Agent::new(Id::new("agent-mcp-t2"), "t", 0);
+        target.workspace_id = Id::new("ws-mcp-t2");
+        state.agents.create(&target).await.unwrap();
+
+        let app = crate::build_router(state.clone());
+        let (status, json) = mcp_post(
+            app,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 81,
+                "method": "tools/call",
+                "params": {
+                    "name": "gyre_message_send",
+                    "arguments": {
+                        "to": {"agent": "agent-mcp-t2"},
+                        "kind": "task_assignment",
+                        "payload": {"task_id": "TASK-X-TENANT"}
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "JSON-RPC envelope is 200");
+        assert!(
+            json["result"]["isError"].as_bool().unwrap(),
+            "cross-tenant Directed send must be a tool error: {json}"
+        );
+        let text = json["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(
+            text.contains("different tenant"),
+            "error must name the tenant isolation rejection, got: {text}"
+        );
+        assert_eq!(
+            gyre_ports::MessageRepository::list_unacked(
+                &*state.messages,
+                &Id::new("agent-mcp-t2"),
+                10
+            )
+            .await
+            .unwrap()
+            .len(),
+            0,
+            "a cross-tenant send must not be persisted"
+        );
+
+        // Same-tenant control (caller tenant "default", workspace tenant
+        // "default"): the comparison runs and PASSES — the send succeeds.
+        let state = test_state();
+        let ws_t1 = gyre_domain::Workspace::new(
+            Id::new("ws-mcp-t1"),
+            Id::new("default"),
+            "mcp-t1",
+            "mcp-t1",
+            0,
+        );
+        state.workspaces.create(&ws_t1).await.unwrap();
+        let mut sender = gyre_domain::Agent::new(Id::new("system"), "system", 0);
+        sender.workspace_id = Id::new("ws-mcp-t1");
+        state.agents.create(&sender).await.unwrap();
+        let mut target = gyre_domain::Agent::new(Id::new("agent-mcp-t1"), "t", 0);
+        target.workspace_id = Id::new("ws-mcp-t1");
+        state.agents.create(&target).await.unwrap();
+
+        let app = crate::build_router(state.clone());
+        let (status, json) = mcp_post(
+            app,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 82,
+                "method": "tools/call",
+                "params": {
+                    "name": "gyre_message_send",
+                    "arguments": {
+                        "to": {"agent": "agent-mcp-t1"},
+                        "kind": "task_assignment",
+                        "payload": {"task_id": "TASK-SAME-TENANT"}
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            !json["result"]["isError"].as_bool().unwrap(),
+            "same-tenant Directed send must succeed: {json}"
+        );
+    }
+
     #[tokio::test]
     async fn mcp_message_send_rejects_payload_missing_required_field() {
         // message-bus.md §Payload Schemas: the MCP receipt path enforces the same
@@ -8506,6 +8651,7 @@ mod tests {
             claims["repo_id"] = serde_json::json!(r);
         }
         AuthenticatedAgent {
+            auth_mechanism: crate::auth::AuthMechanism::AgentToken,
             agent_id: agent_id.to_string(),
             user_id: None,
             roles: vec![UserRole::Agent],
@@ -8705,6 +8851,7 @@ mod tests {
         let state = seed_secret_state().await;
         // A user token (no agent JWT, no agent record) has no secret scope.
         let auth = AuthenticatedAgent {
+            auth_mechanism: crate::auth::AuthMechanism::ApiKey,
             agent_id: "some-user".to_string(),
             user_id: Some(Id::new("u-1")),
             roles: vec![UserRole::Developer],
