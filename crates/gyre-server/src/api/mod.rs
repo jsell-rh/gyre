@@ -847,6 +847,11 @@ pub fn api_router() -> Router<Arc<AppState>> {
             "/api/v1/workspaces/:workspace_id/messages",
             post(messages::send_message).get(messages::list_workspace_messages),
         )
+        // Workspace-scoped telemetry feed (message-bus.md §API > Telemetry)
+        .route(
+            "/api/v1/workspaces/:workspace_id/activity",
+            get(activity::workspace_activity_handler),
+        )
         // Presence (HSI §7)
         .route(
             "/api/v1/workspaces/:workspace_id/presence",

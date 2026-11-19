@@ -2,8 +2,8 @@
 title: "Workspace-scoped telemetry access: Subscribe membership authorization and the REST activity endpoint"
 spec_ref: "Spec gap spec-c62aac6701125cb09e0c736c / telemetry-workspace-access / 60b177f85a11"
 depends_on: []
-progress: not-started
-commits: []
+progress: complete
+commits: ["9fa691150452e3df58ea95f3731cf150c96d84b4", "d2fe75e4c1098a26adb8717c02feed86e2afbc4a", "81910e025d8602ee0f20612620f1fdcb14a4349d"]
 ---
 
 ## Required behavior
@@ -81,3 +81,65 @@ Canonical spec: `specs/system/message-bus.md`. Source: `4127964001113dda08e48524
     ]
   }
 ]
+
+## Shipped
+
+Both capabilities are implemented in production code and previously reviewed;
+this round resolved the rebase onto main head `bafc0353` (task-249's
+storage-exempt broadcast kinds) and re-verified the merged tree.
+
+### Subscribe membership authorization (gap 2b439cf656cf14c344afdb07)
+
+The ws.rs Subscribe handler authorizes each requested workspace in order: the
+preserved Admin bypass, the preserved tenant-containment check, then real
+workspace-membership verification. User connections resolve a membership
+record through `state.workspace_memberships.find_by_user_and_workspace`;
+agent connections (user_id None) are scoped to their own agent record's
+workspace. A rejected scope produces the SubscribeError frame, creates no
+subscription, and delivers neither workspace-scoped bus messages, telemetry,
+nor replay.
+
+### REST telemetry endpoint (gap 64d1be477f27ebf27ec73076)
+
+`GET /api/v1/workspaces/:workspace_id/activity` (`workspace_activity_handler`,
+crates/gyre-server/src/api/activity.rs) is backed by `state.telemetry_buffer`:
+`since` in epoch milliseconds (entries with `created_at <= since` excluded,
+1-ms-newer included), `limit` honored (default 100), per-handler membership
+enforcement (403 for non-members), and the spec's exact ActivityEventData
+field mapping via `MessageKind::ag_event_type`. The route is registered in
+the ABAC RouteResourceMapping; the unscoped `/api/v1/activity` and WS
+ActivityQuery paths are unchanged.
+
+### Rebase repair (this round, merge commit 26fa4983)
+
+Two conflicts against main `bafc0353`, both resolved by union:
+
+- `crates/gyre-common/src/message.rs`: HEAD's `ag_event_type()` (task-252,
+  used by the REST activity endpoint) and main's `broadcast_only()` (task-249,
+  used by mcp.rs/lib.rs/api/messages.rs send paths) are independent methods
+  at the same insertion point — both kept, side by side.
+- `web/src/__tests__/WorkspaceSettings.test.js`: same invitation-expiry
+  countdown test fixed two ways — HEAD froze `Date.now` (9fa69115), main
+  added +30s slack on the seeded expiries. Resolution keeps the frozen clock
+  (deterministic) plus main's slack values and comments (robust); the now
+  unused `nowSecs` local was dropped.
+
+### Test evidence
+
+- This sandbox, merged tree: `cargo check -p gyre-server --all-targets`
+  exit 0 (task-249 + task-252 crate changes type-check together); `cargo
+  fmt -p gyre-common -- --check` clean; `cargo test -p gyre-common --lib`
+  green incl. `kind_ag_event_type_mapping_matches_spec` and
+  `broadcast_only_returns_true_for_dataseeded_queueupdated_only`;
+  `npx vitest run src/__tests__/WorkspaceSettings.test.js` 85/85 passed
+  (evidence under /tmp/stage/review-evidence/task-252-rebase-repair-2.md);
+  `scripts/check-abac-route-registry.sh`, `check-arch.sh`,
+  `check-migration-versions.sh`, and `check-byte-slice-truncation.sh` pass.
+- Server behavior is unchanged this round beyond the union merge; server
+  test execution belongs to the independent verifier — focused list:
+  ws_subscribe_rejects_same_tenant_non_member,
+  ws_subscribe_agent_scoped_to_own_workspace_record, the four
+  workspace_activity_* tests in api/activity.rs, and the gyre-common
+  tests named above.
+- Deferred for remote verification: full `npm test`, all-target clippy,
+  and all GitHub CI jobs at the exact new head.
