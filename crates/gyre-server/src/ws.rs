@@ -208,37 +208,79 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                                     state.ws_connection_workspaces.write().await
                                         .insert(connection_id, subscribed_workspaces.clone());
 
-                                    // Replay Event-tier messages since last_seen, oldest-first.
-                                    let mut replayed = 0usize;
-                                    let replay_limit = 1000usize;
-                                    let mut truncated = false;
+                                    // Replay Event-tier messages strictly newer than
+                                    // last_seen (message-bus.md §Delivery/WebSocket):
+                                    // the NEWEST 1000 qualifying messages across ALL
+                                    // subscribed workspaces combined, delivered
+                                    // oldest-first, plus a single ReplayCatchUp
+                                    // signal exactly when more than 1000 qualified.
+                                    const REPLAY_LIMIT: usize = 1000;
 
+                                    // Strictly-greater boundary: the spec requires
+                                    // created_at > last_seen, but list_by_workspace's
+                                    // `since` filter is an inclusive lower bound (the
+                                    // documented REST workspace-query semantics, kept
+                                    // intact for that endpoint). The replay path
+                                    // therefore shifts the bound by 1ms: for integer
+                                    // epoch milliseconds, created_at >= last_seen + 1
+                                    // <=> created_at > last_seen, so a message created
+                                    // exactly at the client's last_seen is NOT
+                                    // re-delivered on reconnect. Both storage
+                                    // backends see the same shifted bound, so the
+                                    // observable replay contract is identical on mem
+                                    // and SQLite/Postgres.
+                                    let since_ms = match last_seen {
+                                        Some(ts) => ts.saturating_add(1),
+                                        None => 0,
+                                    };
+
+                                    // Fetch the newest REPLAY_LIMIT+1 qualifying
+                                    // messages per workspace (newest-first, as the
+                                    // adapters return them). min(qualifying, LIMIT+1)
+                                    // per workspace is sufficient both to decide
+                                    // whether more than LIMIT qualified in total and
+                                    // to select the newest LIMIT across all workspaces
+                                    // combined: the combined newest-LIMIT window can
+                                    // draw at most LIMIT messages from any single
+                                    // workspace, and LIMIT+1 >= LIMIT.
+                                    let mut pool: Vec<gyre_common::message::Message> = Vec::new();
                                     for ws_id in &subscribed_workspaces {
-                                        let since_ms = last_seen.unwrap_or(0);
-                                        if let Ok(mut messages) = state.messages.list_by_workspace(
+                                        if let Ok(messages) = state.messages.list_by_workspace(
                                             ws_id,
                                             None,
                                             Some(since_ms),
                                             None,
                                             None,
-                                            Some(replay_limit + 1),
-                                        ).await {
-                                            // list_by_workspace returns newest-first; reverse to oldest-first.
-                                            messages.reverse();
-                                            for m in messages {
-                                                if replayed >= replay_limit {
-                                                    truncated = true;
-                                                    break;
-                                                }
-                                                let payload = serde_json::to_string(&m).unwrap();
-                                                if sender.send(Message::Text(payload)).await.is_err() {
-                                                    return;
-                                                }
-                                                replayed += 1;
-                                            }
+                                            Some(REPLAY_LIMIT + 1),
+                                        )
+                                        .await
+                                        {
+                                            pool.extend(messages);
                                         }
-                                        if truncated {
-                                            break;
+                                    }
+
+                                    // Newest-first across all subscribed workspaces
+                                    // combined, ties broken by id — the same
+                                    // composite (created_at DESC, id DESC) order the
+                                    // adapters use within a workspace.
+                                    pool.sort_by(|a, b| {
+                                        b.created_at
+                                            .cmp(&a.created_at)
+                                            .then_with(|| b.id.as_str().cmp(a.id.as_str()))
+                                    });
+                                    let truncated = pool.len() > REPLAY_LIMIT;
+                                    if truncated {
+                                        // Drain in place rather than
+                                        // Vec::truncate — the byte-slice lint
+                                        // textually flags *.truncate(CONST).
+                                        pool.drain(REPLAY_LIMIT..);
+                                    }
+                                    // Deliver the selected window oldest-first.
+                                    pool.reverse();
+                                    for m in pool {
+                                        let payload = serde_json::to_string(&m).unwrap();
+                                        if sender.send(Message::Text(payload)).await.is_err() {
+                                            return;
                                         }
                                     }
 
@@ -1140,6 +1182,426 @@ mod tests {
         } else {
             panic!("expected text message");
         }
+    }
+
+    // ── Subscribe replay window (message-bus.md §Delivery/WebSocket) ──────
+    // The replay contract: persisted Event-tier messages with
+    // created_at > last_seen (strictly greater — no re-delivery on
+    // reconnect), the NEWEST 1000 across all subscribed workspaces
+    // combined, delivered oldest-first, plus exactly one
+    // ReplayCatchUp{truncated:true} when more than 1000 qualified. These
+    // tests run against the mem-backed test AppState;
+    // tests/message_persistence.rs proves the same contract on the wired
+    // SQLite adapter (task-250).
+
+    type WsConn = tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >;
+
+    /// An Event-tier workspace message for replay seeding (created_at is
+    /// caller-controlled so the window/boundary behavior is deterministic).
+    fn replay_event(
+        id: &str,
+        workspace_id: &str,
+        created_at: u64,
+    ) -> gyre_common::message::Message {
+        gyre_common::message::Message {
+            id: gyre_common::Id::new(id),
+            tenant_id: gyre_common::Id::new("default"),
+            from: gyre_common::message::MessageOrigin::Server,
+            workspace_id: Some(gyre_common::Id::new(workspace_id)),
+            to: gyre_common::message::Destination::Workspace(gyre_common::Id::new(workspace_id)),
+            kind: MessageKind::TaskCreated,
+            payload: None,
+            created_at,
+            signature: None,
+            key_id: None,
+            acknowledged: false,
+        }
+    }
+
+    /// A Directed (agent-inbox) message in the same workspace — must never
+    /// be replayed (replay is Event-tier only).
+    fn replay_directed(
+        id: &str,
+        workspace_id: &str,
+        agent_id: &str,
+        created_at: u64,
+    ) -> gyre_common::message::Message {
+        gyre_common::message::Message {
+            to: gyre_common::message::Destination::Agent(gyre_common::Id::new(agent_id)),
+            ..replay_event(id, workspace_id, created_at)
+        }
+    }
+
+    /// Create a workspace in the shared-token caller's tenant so Subscribe's
+    /// per-workspace tenant validation accepts it.
+    async fn seed_replay_workspace(state: &Arc<AppState>, workspace_id: &str) {
+        let ws = gyre_domain::Workspace::new(
+            gyre_common::Id::new(workspace_id),
+            gyre_common::Id::new("default"),
+            workspace_id,
+            workspace_id,
+            now_secs(),
+        );
+        state.workspaces.create(&ws).await.unwrap();
+    }
+
+    /// Subscribe with an explicit last_seen (the replay boundary under test).
+    async fn subscribe_with_last_seen(
+        ws: &mut WsConn,
+        workspace_ids: &[&str],
+        last_seen: Option<u64>,
+    ) {
+        let sub = WsMessage::Subscribe {
+            scopes: workspace_ids
+                .iter()
+                .map(|w| gyre_common::SubscribeScope {
+                    workspace_id: gyre_common::Id::new(*w),
+                })
+                .collect(),
+            last_seen,
+            session_id: None,
+        };
+        ws.send(tungstenite::Message::Text(
+            serde_json::to_string(&sub).unwrap(),
+        ))
+        .await
+        .unwrap();
+    }
+
+    /// Ping/Pong fence: the socket message loop handles one client message
+    /// at a time, and the Subscribe handler emits the whole replay window
+    /// (plus the catch-up signal) synchronously before returning to the
+    /// loop. A Ping sent after the Subscribe therefore fences the complete
+    /// replay response: every frame received before the Pong is the entire
+    /// Subscribe output, nothing more follows it.
+    async fn fenced_replay_frames(ws: &mut WsConn) -> Vec<serde_json::Value> {
+        let ping = WsMessage::Ping { timestamp: 0 };
+        ws.send(tungstenite::Message::Text(
+            serde_json::to_string(&ping).unwrap(),
+        ))
+        .await
+        .unwrap();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
+        let mut frames = Vec::new();
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            assert!(
+                !remaining.is_zero(),
+                "timed out waiting for the Pong fence — incomplete replay response"
+            );
+            let msg = tokio::time::timeout(remaining, ws.next())
+                .await
+                .expect("timed out waiting for the Pong fence")
+                .expect("socket must stay open")
+                .expect("frame must be ok");
+            let tungstenite::Message::Text(text) = msg else {
+                continue;
+            };
+            let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+            if v.get("type").and_then(|t| t.as_str()) == Some("Pong") {
+                return frames;
+            }
+            frames.push(v);
+        }
+    }
+
+    /// Split a fenced replay response into (message frames, catch-up
+    /// frames). Replayed `Message` envelopes have no `type` key; control
+    /// frames (AuthResult/Pong/SubscribeError) and ReplayCatchUp do.
+    fn split_replay_frames(
+        frames: Vec<serde_json::Value>,
+    ) -> (Vec<serde_json::Value>, Vec<serde_json::Value>) {
+        let mut messages = Vec::new();
+        let mut catchups = Vec::new();
+        for f in frames {
+            match f.get("type").and_then(|t| t.as_str()) {
+                Some("ReplayCatchUp") => catchups.push(f),
+                Some(other) => panic!("unexpected control frame in replay response: {other}"),
+                None => messages.push(f),
+            }
+        }
+        (messages, catchups)
+    }
+
+    #[tokio::test]
+    async fn ws_replay_delivers_newest_1000_with_single_truncation_signal() {
+        let (url, state) = start_test_server("tok").await;
+        seed_replay_workspace(&state, "ws-replay").await;
+
+        // 1001 Event-tier messages with distinct created_at. The newest
+        // (replay-m-1000) is the one the old oldest-1000-of-newest-1001
+        // window silently dropped.
+        let base_ts = 1_700_000_000u64;
+        for i in 0..=1000u64 {
+            state
+                .messages
+                .store(&replay_event(
+                    &format!("replay-m-{i:04}"),
+                    "ws-replay",
+                    base_ts + i,
+                ))
+                .await
+                .unwrap();
+        }
+        // A Directed (agent-inbox) message, newer than everything else —
+        // replay is Event-tier only, so it must never appear.
+        state
+            .messages
+            .store(&replay_directed(
+                "replay-directed",
+                "ws-replay",
+                "replay-agent",
+                base_ts + 5_000,
+            ))
+            .await
+            .unwrap();
+
+        let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        auth_ws(&mut ws, "tok").await;
+        subscribe_with_last_seen(&mut ws, &["ws-replay"], Some(0)).await;
+        let (messages, catchups) = split_replay_frames(fenced_replay_frames(&mut ws).await);
+
+        // Exactly 1000 messages qualify for the window (1001 exist) and
+        // exactly one truncation signal, emitted after the window.
+        assert_eq!(
+            messages.len(),
+            1000,
+            "replay must deliver exactly 1000 messages"
+        );
+        assert_eq!(
+            catchups.len(),
+            1,
+            "more than 1000 qualified: exactly one ReplayCatchUp must be sent"
+        );
+        assert_eq!(
+            catchups[0]["truncated"],
+            serde_json::json!(true),
+            "the catch-up signal must carry truncated:true"
+        );
+
+        // The delivered set is the NEWEST 1000: the single newest message
+        // IS delivered, the oldest one is the message dropped.
+        let ids: Vec<&str> = messages
+            .iter()
+            .map(|m| m["id"].as_str().expect("message id"))
+            .collect();
+        assert!(
+            ids.contains(&"replay-m-1000"),
+            "the NEWEST message must be inside the replay window"
+        );
+        assert!(
+            !ids.contains(&"replay-m-0000"),
+            "the oldest message must be the one dropped when truncating"
+        );
+        assert_eq!(
+            ids.iter().filter(|id| **id == "replay-directed").count(),
+            0,
+            "Directed (agent-inbox) messages must be excluded from replay"
+        );
+        // The window is exactly the newest 1000 of the 1001 seeded events.
+        let expected: Vec<String> = (1..=1000).map(|i| format!("replay-m-{i:04}")).collect();
+        assert_eq!(
+            ids.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+            expected,
+            "the window must be the newest 1000 messages, delivered oldest-first"
+        );
+
+        // Delivery ordering is oldest-first.
+        let created: Vec<u64> = messages
+            .iter()
+            .map(|m| m["created_at"].as_u64().expect("created_at"))
+            .collect();
+        assert!(
+            created.windows(2).all(|w| w[0] <= w[1]),
+            "replay must be delivered oldest-first"
+        );
+    }
+
+    #[tokio::test]
+    async fn ws_replay_no_truncation_signal_at_exactly_1000_messages() {
+        let (url, state) = start_test_server("tok").await;
+        seed_replay_workspace(&state, "ws-replay").await;
+
+        // Exactly 1000 qualifying messages — the sharp edge of the cap: the
+        // per-workspace fetch asks for 1001, gets 1000 back, and no
+        // ReplayCatchUp may be sent.
+        let base_ts = 1_700_000_000u64;
+        for i in 0..1000u64 {
+            state
+                .messages
+                .store(&replay_event(
+                    &format!("replay-m-{i:04}"),
+                    "ws-replay",
+                    base_ts + i,
+                ))
+                .await
+                .unwrap();
+        }
+
+        let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        auth_ws(&mut ws, "tok").await;
+        subscribe_with_last_seen(&mut ws, &["ws-replay"], Some(0)).await;
+        let (messages, catchups) = split_replay_frames(fenced_replay_frames(&mut ws).await);
+
+        assert_eq!(
+            messages.len(),
+            1000,
+            "all 1000 qualifying messages must be replayed"
+        );
+        assert_eq!(
+            catchups.len(),
+            0,
+            "1000 qualifying messages is not truncation: no ReplayCatchUp"
+        );
+        assert!(
+            messages.iter().any(|m| m["id"] == "replay-m-0999"),
+            "the newest message must be delivered"
+        );
+    }
+
+    #[tokio::test]
+    async fn ws_replay_cross_workspace_combined_newest_1000() {
+        let (url, state) = start_test_server("tok").await;
+        seed_replay_workspace(&state, "ws-replay-a").await;
+        seed_replay_workspace(&state, "ws-replay-b").await;
+
+        // 600 messages per workspace with globally distinct timestamps:
+        // ws-replay-a owns the even millis 0..=1198, ws-replay-b the odd
+        // millis 1..=1199. 1200 qualify in total, so the newest 1000 across
+        // BOTH workspaces combined is exactly the set with created_at >= 200
+        // (500 from each workspace). A per-workspace cap (the old behavior)
+        // would deliver 600 from the first-subscribed workspace instead.
+        for i in 0..600u64 {
+            state
+                .messages
+                .store(&replay_event(
+                    &format!("replay-a-{i:04}"),
+                    "ws-replay-a",
+                    i * 2,
+                ))
+                .await
+                .unwrap();
+            state
+                .messages
+                .store(&replay_event(
+                    &format!("replay-b-{i:04}"),
+                    "ws-replay-b",
+                    i * 2 + 1,
+                ))
+                .await
+                .unwrap();
+        }
+
+        let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        auth_ws(&mut ws, "tok").await;
+        subscribe_with_last_seen(&mut ws, &["ws-replay-a", "ws-replay-b"], Some(0)).await;
+        let (messages, catchups) = split_replay_frames(fenced_replay_frames(&mut ws).await);
+
+        assert_eq!(
+            messages.len(),
+            1000,
+            "the 1000-message cap is total across subscribed workspaces"
+        );
+        assert_eq!(
+            catchups.len(),
+            1,
+            "1200 qualified: the truncation signal must be sent"
+        );
+
+        let from_a = messages
+            .iter()
+            .filter(|m| m["workspace_id"] == "ws-replay-a")
+            .count();
+        let from_b = messages
+            .iter()
+            .filter(|m| m["workspace_id"] == "ws-replay-b")
+            .count();
+        assert_eq!(
+            (from_a, from_b),
+            (500, 500),
+            "the combined newest-1000 window draws 500 from each workspace, \
+             not a per-workspace cap"
+        );
+
+        // The delivered set is the newest 1000 across both workspaces:
+        // everything with created_at >= 200, nothing older.
+        for m in &messages {
+            let ts = m["created_at"].as_u64().expect("created_at");
+            assert!(
+                ts >= 200,
+                "message older than the combined newest-1000 window must not be replayed"
+            );
+        }
+        let delivered_newest = messages
+            .iter()
+            .map(|m| m["created_at"].as_u64().expect("created_at"))
+            .collect::<std::collections::BTreeSet<_>>();
+        let expected: std::collections::BTreeSet<u64> = (200..=1199).collect();
+        assert_eq!(
+            delivered_newest, expected,
+            "the window must be exactly the 1000 newest timestamps across both workspaces"
+        );
+
+        // Oldest-first across workspaces combined.
+        let created: Vec<u64> = messages
+            .iter()
+            .map(|m| m["created_at"].as_u64().expect("created_at"))
+            .collect();
+        assert!(
+            created.windows(2).all(|w| w[0] <= w[1]),
+            "cross-workspace replay must be delivered oldest-first"
+        );
+    }
+
+    #[tokio::test]
+    async fn ws_replay_strict_last_seen_boundary_on_mem() {
+        let (url, state) = start_test_server("tok").await;
+        seed_replay_workspace(&state, "ws-replay").await;
+
+        // Three events around the boundary: strictly older, exactly at, and
+        // 1ms after the client's last_seen.
+        for (id, ts) in [
+            ("boundary-old", 5_000u64),
+            ("boundary-at", 6_000),
+            ("boundary-after", 6_001),
+        ] {
+            state
+                .messages
+                .store(&replay_event(id, "ws-replay", ts))
+                .await
+                .unwrap();
+        }
+
+        // last_seen == 6_000: the message created exactly at last_seen must
+        // NOT be re-delivered (the old >= filter re-delivered it on every
+        // reconnect); only the strictly newer one is replayed.
+        let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        auth_ws(&mut ws, "tok").await;
+        subscribe_with_last_seen(&mut ws, &["ws-replay"], Some(6_000)).await;
+        let (messages, catchups) = split_replay_frames(fenced_replay_frames(&mut ws).await);
+        assert_eq!(
+            messages.len(),
+            1,
+            "only strictly-newer messages qualify: exactly the 1ms-later one"
+        );
+        assert_eq!(messages[0]["id"], "boundary-after");
+        assert_eq!(catchups.len(), 0);
+
+        // last_seen == 5_999: both the at-boundary and the later message
+        // qualify — the boundary itself is delivered only when last_seen is
+        // strictly below it.
+        let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        auth_ws(&mut ws, "tok").await;
+        subscribe_with_last_seen(&mut ws, &["ws-replay"], Some(5_999)).await;
+        let (messages, catchups) = split_replay_frames(fenced_replay_frames(&mut ws).await);
+        let ids: Vec<&str> = messages
+            .iter()
+            .map(|m| m["id"].as_str().expect("message id"))
+            .collect();
+        assert_eq!(ids, vec!["boundary-at", "boundary-after"]);
+        assert_eq!(catchups.len(), 0);
     }
 
     // ── Presence departure rebroadcast (HSI §7 Presence Awareness) ────────

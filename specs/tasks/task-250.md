@@ -2,8 +2,8 @@
 title: "WebSocket replay correctness: newest-1000 window and strictly-greater last_seen boundary"
 spec_ref: "Spec gap spec-c62aac6701125cb09e0c736c / ws-replay-window / 60b177f85a11"
 depends_on: []
-progress: not-started
-commits: []
+progress: complete
+commits: ["e1c299d4b026ca2f9016a95a236cbd18d60bfaee"]
 ---
 
 ## Required behavior
@@ -63,3 +63,69 @@ Canonical spec: `specs/system/message-bus.md`. Source: `4127964001113dda08e48524
     ]
   }
 ]
+
+## Shipped
+
+### Behavior
+
+The Subscribe replay handler (crates/gyre-server/src/ws.rs:150-228) now
+implements the message-bus.md §Delivery/WebSocket replay contract exactly:
+
+- **Newest-1000 window across all subscribed workspaces combined.** The
+  handler fetches the newest 1001 qualifying messages per subscribed
+  workspace (the adapters return newest-first), merges the pools, sorts by
+  (created_at DESC, id DESC) — the same composite order the adapters use
+  within a workspace — truncates to the newest 1000, reverses, and delivers
+  oldest-first. The old code delivered the OLDEST 1000 of the newest 1001
+  per workspace in subscription order (dropping the single newest message)
+  and effectively capped per workspace; both deviations are gone.
+- **Truncation signal.** ReplayCatchUp{truncated:true} is emitted exactly
+  when more than 1000 messages qualified in total across the subscribed
+  workspaces — once, after the 1000-message window; never at or below 1000.
+- **Strictly-greater last_seen boundary.** The replay path queries with
+  since = last_seen + 1ms, which for integer epoch milliseconds is exactly
+  created_at > last_seen: a message created exactly at the client's
+  last_seen is no longer re-delivered on reconnect, while one 1ms later is.
+  The inclusive `since` semantics of the REST workspace query
+  (GET /api/v1/workspaces/:id/messages) are unchanged, and because the
+  shift is applied at the single replay call site, the mem, SQLite, and
+  Postgres backends behave identically by construction (no adapter
+  changes; the mem-port-contracts invariant is preserved).
+
+### Test evidence
+
+- In-crate WS tests against the mem-backed AppState (real loopback
+  WebSocket; each replay response is fenced by a Ping/Pong round trip so
+  the assertions see the complete Subscribe output):
+  `ws_replay_delivers_newest_1000_with_single_truncation_signal` (1001
+  seeded events: the newest IS delivered, the oldest is the one dropped,
+  exactly 1000 messages + one catch-up, Directed excluded, oldest-first),
+  `ws_replay_no_truncation_signal_at_exactly_1000_messages` (no catch-up
+  at the cap edge), `ws_replay_cross_workspace_combined_newest_1000` (two
+  workspaces, 1200 qualifying: newest 1000 combined = 500/500, not a
+  per-workspace cap), `ws_replay_strict_last_seen_boundary_on_mem`
+  (at-boundary message not replayed; the 1ms-later one is).
+- SQLite path: tests/message_persistence.rs
+  `ws_replay_newest_window_and_strict_boundary_on_sqlite` drives the real
+  router over the wired SqliteStorage: newest-1000 window + single
+  truncation signal over 1001 persisted events, then reconnects with
+  last_seen = the newest created_at (empty replay) and last_seen 1ms below
+  it (exactly the newest message replayed).
+
+Both behavioral suites require gyre-server test compilation, which the
+implement-stage build wrapper defers to the independent verifier:
+`cargo check -p gyre-server --tests` passed here (exit 0; see
+review-evidence 01-cargo-check.txt), and the exact required probes are
+recorded in review-evidence 03-deferred-server-tests.txt
+(`cargo test -p gyre-server --lib ws::tests::ws_replay` and
+`cargo test -p gyre-server --test message_persistence ws_replay_newest_window_and_strict_boundary_on_sqlite`).
+The window-selection algorithm was additionally validated offline against
+a brute-force spec oracle over 4000 randomized trials including heavy
+timestamp ties (review-evidence 02-algorithm-ground-truth-simulation.txt).
+
+Coverage row 9 (Delivery) in specs/coverage/system/message-bus.md was
+updated with the concrete source evidence for this fix.
+
+Telemetry-tier exclusion from replay is structural and unchanged:
+telemetry is never persisted to the messages store (emit_telemetry writes
+only the in-memory TelemetryBuffer), so the replay query cannot return it.
