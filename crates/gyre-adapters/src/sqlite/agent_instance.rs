@@ -128,7 +128,10 @@ impl AgentInstanceRepository for SqliteStorage {
                 .select(AgentInstanceRow::as_select())
                 .load(&mut conn)
                 .context("list running agent_instances")?;
-            Ok(rows.into_iter().map(AgentInstanceRow::into_record).collect())
+            Ok(rows
+                .into_iter()
+                .map(AgentInstanceRow::into_record)
+                .collect())
         })
         .await?
     }

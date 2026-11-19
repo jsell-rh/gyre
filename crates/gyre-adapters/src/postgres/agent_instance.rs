@@ -82,8 +82,7 @@ impl AgentInstanceRepository for PgStorage {
                     agent_instances::handle_id.eq(record.handle_id.clone()),
                     agent_instances::pid.eq(record.pid.map(|p| p as i32)),
                     agent_instances::spawned_at.eq(record.spawned_at as i64),
-                    agent_instances::terminated_at
-                        .eq(record.terminated_at.map(|t| t as i64)),
+                    agent_instances::terminated_at.eq(record.terminated_at.map(|t| t as i64)),
                     agent_instances::terminated_reason.eq(record.terminated_reason.clone()),
                 ))
                 .execute(&mut conn)
@@ -142,7 +141,10 @@ impl AgentInstanceRepository for PgStorage {
                 .select(AgentInstanceRow::as_select())
                 .load(&mut conn)
                 .context("list running agent_instances")?;
-            Ok(rows.into_iter().map(AgentInstanceRow::into_record).collect())
+            Ok(rows
+                .into_iter()
+                .map(AgentInstanceRow::into_record)
+                .collect())
         })
         .await?
     }

@@ -43,7 +43,7 @@ pub async fn job_history_cleanup(state: Arc<AppState>, log: JobRunLog) -> Result
     log.log(format!(
         "pruned {deleted} job runs finished before the {retention_days}-day retention cutoff"
     ))
-        .await;
+    .await;
     Ok(())
 }
 
@@ -55,7 +55,8 @@ pub async fn job_history_cleanup(state: Arc<AppState>, log: JobRunLog) -> Result
 /// aborting the others.
 pub async fn repo_maintenance(state: Arc<AppState>, log: JobRunLog) -> Result<()> {
     let repos = state.repos.list().await?;
-    log.log(format!("maintaining {} repositories", repos.len())).await;
+    log.log(format!("maintaining {} repositories", repos.len()))
+        .await;
 
     let mut failures = 0usize;
     for repo in &repos {
@@ -82,7 +83,8 @@ pub async fn repo_maintenance(state: Arc<AppState>, log: JobRunLog) -> Result<()
         .await;
         match gc {
             Ok(Ok(out)) if out.status.success() => {
-                log.log(format!("repo {}: ok (git gc --prune=now)", repo.name)).await;
+                log.log(format!("repo {}: ok (git gc --prune=now)", repo.name))
+                    .await;
             }
             Ok(Ok(out)) => {
                 let stderr = String::from_utf8_lossy(&out.stderr);
@@ -96,7 +98,8 @@ pub async fn repo_maintenance(state: Arc<AppState>, log: JobRunLog) -> Result<()
                 failures += 1;
             }
             Ok(Err(e)) => {
-                log.log(format!("repo {}: FAILED — git spawn error: {e}", repo.name)).await;
+                log.log(format!("repo {}: FAILED — git spawn error: {e}", repo.name))
+                    .await;
                 failures += 1;
             }
             Err(_) => {
@@ -111,7 +114,10 @@ pub async fn repo_maintenance(state: Arc<AppState>, log: JobRunLog) -> Result<()
     }
 
     if failures > 0 {
-        anyhow::bail!("{failures} of {} repositories failed maintenance (see run logs)", repos.len());
+        anyhow::bail!(
+            "{failures} of {} repositories failed maintenance (see run logs)",
+            repos.len()
+        );
     }
     Ok(())
 }
@@ -120,7 +126,8 @@ pub async fn repo_maintenance(state: Arc<AppState>, log: JobRunLog) -> Result<()
 /// authorization-request state rows (Claude Max enrollment flow).
 pub async fn oauth_state_cleanup(state: Arc<AppState>, log: JobRunLog) -> Result<()> {
     let deleted = state.oauth_states.delete_expired_before(now_secs()).await?;
-    log.log(format!("deleted {deleted} expired OAuth state rows")).await;
+    log.log(format!("deleted {deleted} expired OAuth state rows"))
+        .await;
     Ok(())
 }
 
@@ -133,8 +140,11 @@ pub async fn remote_agent_cleanup(state: Arc<AppState>, log: JobRunLog) -> Resul
     use gyre_domain::AgentStatus;
 
     let running = state.agent_instances.list_running().await?;
-    log.log(format!("{} recorded-running agent instances", running.len()))
-        .await;
+    log.log(format!(
+        "{} recorded-running agent instances",
+        running.len()
+    ))
+    .await;
 
     let agents = state.agents.list().await?;
     let mut reaped = 0usize;
@@ -243,7 +253,11 @@ async fn kill_and_mark(
         .await?;
     // The in-memory fast-path registries (if this process still holds them)
     // must not keep a killed instance alive as a phantom.
-    state.process_registry.lock().await.remove(&instance.agent_id);
+    state
+        .process_registry
+        .lock()
+        .await
+        .remove(&instance.agent_id);
     state
         .spawned_backends
         .lock()

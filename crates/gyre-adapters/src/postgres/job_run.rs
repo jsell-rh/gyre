@@ -88,8 +88,8 @@ impl JobRunRepository for PgStorage {
                     job_runs::finished_at.eq(run.finished_at.map(|t| t as i64)),
                     job_runs::status.eq(run.status.clone()),
                     job_runs::error.eq(run.error.clone()),
-                    job_runs::logs.eq(serde_json::to_string(&run.logs)
-                        .unwrap_or_else(|_| "[]".to_string())),
+                    job_runs::logs
+                        .eq(serde_json::to_string(&run.logs).unwrap_or_else(|_| "[]".to_string())),
                 ))
                 .execute(&mut conn)
                 .context("insert job_run")?;
