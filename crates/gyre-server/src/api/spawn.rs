@@ -3817,8 +3817,12 @@ mod tests {
         task_id: &str,
         branch: &str,
     ) -> (Router, serde_json::Value) {
+        // The name is derived from the branch so a test that spawns more
+        // than one agent (e.g. the task-scope boundary probes) does not
+        // trip spawn_agent_core's duplicate-agent-name 400 — every call
+        // site uses a distinct branch.
         let body = serde_json::json!({
-            "name": "worker-1",
+            "name": format!("worker-{}", branch.replace('/', "-")),
             "repo_id": repo_id,
             "task_id": task_id,
             "branch": branch,
@@ -5439,6 +5443,10 @@ mod tests {
                     .method("POST")
                     .uri(format!("/api/v1/agents/{agent_id}/complete"))
                     .header("content-type", "application/json")
+                    // task-263: complete takes an auth extractor now (agent
+                    // task-scope boundary) — the operator token keeps the
+                    // inbox-cleanup behavior under test reachable.
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -5670,7 +5678,7 @@ mod tests {
         let ev = &events[0];
         assert_eq!(ev.resource_id.as_deref(), Some(agent_id));
         assert_eq!(ev.agent_id.as_ref().map(|id| id.as_str()), Some(agent_id));
-        assert_eq!(ev.detail["name"], "worker-1");
+        assert_eq!(ev.detail["name"], "worker-feat-audit-spawn");
         assert_eq!(ev.detail["task_id"], task_id);
         assert_eq!(ev.detail["compute_target"], "local");
         assert_eq!(ev.detail["branch"], "feat/audit-spawn");
