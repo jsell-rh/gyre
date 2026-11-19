@@ -2,8 +2,8 @@
 title: "Workspace-scoped telemetry access: Subscribe membership authorization and the REST activity endpoint"
 spec_ref: "Spec gap spec-c62aac6701125cb09e0c736c / telemetry-workspace-access / 60b177f85a11"
 depends_on: []
-progress: not-started
-commits: []
+progress: complete
+commits: ["d2fe75e4c1098a26adb8717c02feed86e2afbc4a", "81910e025d8602ee0f20612620f1fdcb14a4349d"]
 ---
 
 ## Required behavior
@@ -81,3 +81,112 @@ Canonical spec: `specs/system/message-bus.md`. Source: `4127964001113dda08e48524
     ]
   }
 ]
+
+## Shipped
+
+Both capabilities are implemented in production code, and the review-round
+test race is repaired.
+
+### Subscribe membership authorization (gap 2b439cf656cf14c344afdb07)
+
+The ws.rs Subscribe handler authorizes each requested workspace in three
+steps, in order: the preserved Admin bypass (global token), the preserved
+tenant-containment check (workspace must belong to the caller's tenant),
+and real workspace-membership verification — user connections resolve a
+membership record through `state.workspace_memberships.find_by_user_and_workspace`
+(the same store the REST handlers use); agent connections (user_id None)
+are scoped to their own agent record's workspace via `state.agents.find_by_id`.
+A rejected scope produces the existing SubscribeError frame, creates no
+subscription, and — because delivery filtering keys on the connection's
+authorized `subscribed_workspaces` — delivers neither workspace-scoped bus
+messages nor telemetry for that workspace. Lookup errors fail closed
+(reject). The unscoped legacy ActivityEvent/ActivityQuery fallback paths
+are unchanged.
+
+### REST telemetry endpoint (gap 64d1be477f27ebf27ec73076)
+
+`GET /api/v1/workspaces/:workspace_id/activity`
+(`activity::workspace_activity_handler`, crates/gyre-server/src/api/activity.rs)
+backed by `state.telemetry_buffer` (the in-memory TelemetryBuffer):
+
+- `since` in epoch milliseconds — `TelemetryBuffer::list_since` filters
+  `created_at > since`, so entries with `created_at <= since` are excluded
+  and 1-ms-newer entries are included; `limit` defaults to 100.
+- Membership enforcement per-handler, mirroring the sibling
+  `list_workspace_messages` route: Admin bypass, API-key users require a
+  `WorkspaceMembershipRepository` record, agent tokens require the agent
+  record's workspace to match — 403 otherwise. (The ABAC middleware's
+  builtin `workspace-membership-required` deny at priority 940 is the
+  first line for user principals; the handler check covers agent tokens,
+  which that policy does not key on.)
+- Response is a bare JSON array of `ActivityEventData` with the spec's
+  exact field mapping: `event_id` ← message.id, `agent_id` ←
+  payload["agent_id"] with the `MessageOrigin::Agent(id)` fallback (empty
+  when neither is present — never a fabricated identity), `event_type` ←
+  `MessageKind::ag_event_type()`, `description` ← payload["tool_name"]
+  or the kind name, `timestamp` ← created_at.
+- Route registered in api/mod.rs and in the ABAC RouteResourceMapping
+  ("activity" resource, `:workspace_id` path param) —
+  `scripts/check-abac-route-registry.sh` passes with no new exemption
+  entries. The unscoped `/api/v1/activity` and the WS ActivityQuery path
+  are unchanged.
+
+### Test-race repair (commit d2fe75e4, review round 1 finding)
+
+The two new WS tests emitted telemetry immediately after the client-side
+Subscribe send; on the current-thread `#[tokio::test]` runtime the
+connection task is not polled until the test task yields, so the telemetry
+broadcast was consumed and dropped while the connection's
+`subscribed_workspaces` was still empty (telemetry is never replayed from
+the buffer) — the member/agent delivery assertions would fail against the
+correct implementation. New `await_ws_subscription` helper polls
+`state.ws_connection_workspaces` until the authorized subscription is
+registered server-side (the Subscribe handler inserts it after
+authorization, before returning to its select loop) and is called between
+`subscribe_ws` and the emits in both tests. This is a happens-before
+synchronization, not a timing sleep: a rejected workspace never reaches
+the index, so the non-member/foreign-workspace leak assertions stay
+unsynchronized by construction (their sync is the SubscribeError frame
+itself).
+
+Validated with a standalone TCP `select!` analog of the connection task
+(current-thread runtime, loopback socket, broadcast channel, shared
+per-connection workspace index — sources and output under
+`/tmp/stage/review-evidence/probe/` and
+`ws-subscribe-sync-probe-output.txt`): the pre-repair sequencing loses
+the telemetry broadcast 160/160 trials; the index-poll sync delivers
+160/160. `cargo check -p gyre-server --lib --tests` passes at the fix
+head.
+
+### Test evidence
+
+- `crates/gyre-server/src/ws.rs` (lib tests):
+  `ws_subscribe_rejects_same_tenant_non_member` (leak probe — same-tenant
+  non-member gets SubscribeError and receives NOTHING after telemetry + a
+  workspace bus message, while a member of the same workspace receives
+  both; fails against the tenant-match-only handler),
+  `ws_subscribe_agent_scoped_to_own_workspace_record` (agent subscribes
+  to own workspace and receives its telemetry; foreign same-tenant
+  workspace rejected with no delivery).
+- `crates/gyre-server/src/api/activity.rs` (lib tests): endpoint probes —
+  member happy path with the exact ActivityEventData field mapping
+  (`workspace_activity_maps_fields_per_spec`), `since` boundary
+  (`created_at <= since` excluded, 1-ms-newer included) and `limit`
+  (`workspace_activity_since_boundary_and_limit`), same-tenant non-member
+  403 (`workspace_activity_rejects_same_tenant_non_member`), agent-token
+  scoping (`workspace_activity_agent_token_scoped_to_own_workspace`).
+- Unscoped `/api/v1/activity` regression: pre-existing
+  `activity_log_query` (crates/gyre-server/tests/api_integration.rs);
+  the handler is untouched by both commits. The WS ActivityQuery handler
+  is likewise untouched.
+
+### Deferred to the independent verifier (sandbox build budget)
+
+gyre-server test builds exceed this sandbox's 4 GiB code-generation
+budget (build wrapper enforces); run after model exit:
+
+    cargo test -p gyre-server --lib ws_subscribe
+    cargo test -p gyre-server --lib workspace_activity
+
+plus the task-wide server suite at the exact review head. `cargo check -p
+gyre-server --lib --tests` was executed locally at the fix head (clean).
