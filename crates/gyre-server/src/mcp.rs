@@ -15,6 +15,7 @@ use axum::{
     Json,
 };
 use futures_util::stream;
+use gyre_common::message::{Destination, MessageKind};
 use gyre_common::Id;
 use gyre_domain::{
     CostEntry, DependencySource, MergeRequest, MergeRequestDependency, PolicyEffect, Task,
@@ -5062,27 +5063,111 @@ pub async fn mcp_handler(
 }
 
 /// GET /mcp/sse — SSE stream for server→client notifications.
-/// Returns an open SSE connection; events are emitted as activity broadcasts arrive.
+///
+/// message-bus.md §MCP Integration: the stream subscribes to the message bus
+/// **filtered by the authenticated agent's workspace**, and maps `MessageKind`
+/// variants to AG-UI event types for protocol compatibility.
+///
+/// Workspace scope resolution (fail-closed, never fabricated):
+/// - for agent/system principals, the agent record is the authoritative ABAC
+///   boundary ("Workspace that governs this agent", M34 hierarchy
+///   enforcement) — when the caller's agent id resolves to a stored agent,
+///   that record's workspace governs;
+/// - callers without an agent record (user/API-key principals, ephemeral
+///   agent JWTs) fall back to the signature-verified `workspace_id` JWT
+///   claim mirrored onto the principal by the auth extractor;
+/// - callers with neither (e.g. the global token) have no workspace scope:
+///   Admin principals keep the legacy unscoped view (admin dashboards —
+///   the same bypass ws.rs Subscribe grants admins), everyone else sees
+///   Broadcast messages only.
+///
+/// Delivery filter:
+/// - `Destination::Workspace(ws)` — delivered only when `ws` matches the
+///   subscriber's resolved workspace (workspace ids are globally unique, so
+///   the match implies tenant containment);
+/// - `Destination::Broadcast` — delivered to all subscribers per the bus's
+///   broadcast semantics (message-bus.md §Delivery: "all connected clients");
+/// - `Destination::Agent(id)` — delivered only on the authenticated agent's
+///   own stream; other agents' directed messages never appear (they reach
+///   their target via the REST/MCP poll paths instead).
 pub async fn mcp_sse_handler(
     State(state): State<Arc<AppState>>,
-    _auth: AuthenticatedAgent,
+    auth: AuthenticatedAgent,
 ) -> impl IntoResponse {
-    let rx = state.message_broadcast_tx.subscribe();
-    let event_stream = stream::unfold(rx, |mut rx| async move {
-        loop {
-            match rx.recv().await {
-                Ok(msg) => {
-                    let data = serde_json::to_string(&msg).unwrap_or_default();
-                    // Map all bus messages to SSE "message" events.
-                    let sse_event = Event::default().event("message").data(data);
-                    return Some((Ok::<Event, std::convert::Infallible>(sse_event), rx));
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
+    // Only agent/system principals resolve a record: user principals
+    // (API key, Keycloak) carry a username in `agent_id`, which must never
+    // accidentally inherit a same-named agent record's workspace.
+    let scope = if auth.user_id.is_none() {
+        match state.agents.find_by_id(&Id::new(&auth.agent_id)).await {
+            Ok(Some(agent)) => Some(agent.workspace_id),
+            Ok(None) => auth.workspace_id.map(Id::new),
+            Err(e) => {
+                tracing::warn!(
+                    agent_id = %auth.agent_id,
+                    error = %e,
+                    "mcp/sse: agent record lookup failed; falling back to JWT workspace claim"
+                );
+                auth.workspace_id.map(Id::new)
             }
         }
-    });
+    } else {
+        auth.workspace_id.map(Id::new)
+    };
+    let unscoped_admin = scope.is_none() && auth.roles.contains(&UserRole::Admin);
+    let agent_id = auth.agent_id.clone();
+    let rx = state.message_broadcast_tx.subscribe();
+    let event_stream = stream::unfold(
+        (rx, scope, agent_id, unscoped_admin),
+        |(mut rx, scope, agent_id, unscoped_admin)| async move {
+            loop {
+                match rx.recv().await {
+                    Ok(msg) => {
+                        let deliver = match &msg.to {
+                            Destination::Broadcast => true,
+                            Destination::Workspace(ws_id) => match &scope {
+                                Some(scope_ws) => scope_ws == ws_id,
+                                None => unscoped_admin,
+                            },
+                            Destination::Agent(aid) => aid.as_str() == agent_id,
+                        };
+                        if !deliver {
+                            continue;
+                        }
+                        let data = serde_json::to_string(&msg).unwrap_or_default();
+                        // Map MessageKind → AG-UI SSE event name per
+                        // message-bus.md §MCP Integration; kinds outside the
+                        // spec table keep the generic "message" event.
+                        let sse_event = Event::default()
+                            .event(agui_event_name(&msg.kind))
+                            .data(data);
+                        return Some((
+                            Ok::<Event, std::convert::Infallible>(sse_event),
+                            (rx, scope, agent_id, unscoped_admin),
+                        ));
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
+                }
+            }
+        },
+    );
     Sse::new(event_stream).keep_alive(KeepAlive::default())
+}
+
+/// AG-UI SSE event name for a bus `MessageKind` — the spec table in
+/// message-bus.md §MCP Integration. Kinds outside the table (including
+/// `Custom`) keep the generic `message` event name.
+fn agui_event_name(kind: &MessageKind) -> &'static str {
+    match kind {
+        MessageKind::ToolCallStart => "TOOL_CALL_START",
+        MessageKind::ToolCallEnd => "TOOL_CALL_END",
+        MessageKind::RunStarted => "RUN_STARTED",
+        MessageKind::RunFinished => "RUN_FINISHED",
+        MessageKind::TextMessageContent => "TEXT_MESSAGE_CONTENT",
+        MessageKind::StateChanged => "STATE_CHANGED",
+        MessageKind::AgentError => "ERROR",
+        _ => "message",
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -5716,6 +5801,309 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         assert!(!json["result"]["isError"].as_bool().unwrap());
+    }
+
+    // ── task-253: GET /mcp/sse workspace filtering + AG-UI event mapping ──
+    // (message-bus.md §MCP Integration)
+
+    use gyre_common::message::{Destination, Message, MessageKind, MessageOrigin};
+
+    /// Mint a workspace-orchestrator JWT (hierarchy claims tenant/workspace)
+    /// and register it in the agent_tokens KV namespace so the auth
+    /// extractor accepts it.
+    fn mint_ws_orchestrator_jwt(
+        state: &crate::AppState,
+        agent_id: &str,
+        tenant: &str,
+        ws: &str,
+    ) -> String {
+        let token = state
+            .agent_signing_key
+            .mint_orchestrator(
+                agent_id,
+                "system",
+                &state.base_url,
+                state.agent_jwt_ttl_secs,
+                tenant,
+                ws,
+                None,
+                None,
+                "workspace_orchestrator",
+                "workspace-orchestrator",
+            )
+            .unwrap();
+        token
+    }
+
+    async fn register_agent_token(state: &crate::AppState, agent_id: &str, token: &str) {
+        state
+            .kv_store
+            .kv_set("agent_tokens", agent_id, token.to_string())
+            .await
+            .unwrap();
+    }
+
+    fn bus_message(kind: MessageKind, to: Destination, ws: Option<Id>) -> Message {
+        Message {
+            id: Id::new(uuid::Uuid::new_v4().to_string()),
+            tenant_id: Id::new("default"),
+            from: MessageOrigin::Server,
+            workspace_id: ws,
+            to,
+            kind,
+            payload: Some(json!({"probe": true})),
+            created_at: 1_700_000_000_000,
+            signature: None,
+            key_id: None,
+            acknowledged: false,
+        }
+    }
+
+    /// Open a GET /mcp/sse stream authenticated with `token`. The handler
+    /// subscribes to the bus broadcast channel before returning the
+    /// response, so messages sent after this awaits are buffered for the
+    /// stream.
+    async fn open_sse(app: Router, token: &str) -> axum::body::BodyDataStream {
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/mcp/sse")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        resp.into_body().into_data_stream()
+    }
+
+    /// Collect SSE frames until `quiet_ms` pass with no frame (nothing more
+    /// is coming — the keep-alive interval is far longer than the window).
+    async fn drain_sse(stream: &mut axum::body::BodyDataStream, quiet_ms: u64) -> String {
+        use futures_util::StreamExt as _;
+        let mut received = Vec::<u8>::new();
+        loop {
+            let next =
+                tokio::time::timeout(std::time::Duration::from_millis(quiet_ms), stream.next())
+                    .await;
+            match next {
+                Err(_) => break,
+                Ok(Some(Ok(chunk))) => received.extend_from_slice(&chunk),
+                Ok(Some(Err(_))) | Ok(None) => break,
+            }
+        }
+        String::from_utf8_lossy(&received).to_string()
+    }
+
+    #[tokio::test]
+    async fn mcp_sse_workspace_isolation() {
+        let state = test_state();
+        let app = crate::build_router(state.clone());
+        // Two agents in different workspaces of different tenants.
+        let token_a = mint_ws_orchestrator_jwt(&state, "sse-agent-a", "t1", "ws-a");
+        register_agent_token(&state, "sse-agent-a", &token_a).await;
+        let token_b = mint_ws_orchestrator_jwt(&state, "sse-agent-b", "t2", "ws-b");
+        register_agent_token(&state, "sse-agent-b", &token_b).await;
+
+        let mut stream_a = open_sse(app.clone(), &token_a).await;
+        let mut stream_b = open_sse(app, &token_b).await;
+
+        // Workspace-scoped ToolCallStart telemetry for workspace A only.
+        state
+            .message_broadcast_tx
+            .send(bus_message(
+                MessageKind::ToolCallStart,
+                Destination::Workspace(Id::new("ws-a")),
+                Some(Id::new("ws-a")),
+            ))
+            .unwrap();
+
+        let text_a = drain_sse(&mut stream_a, 300).await;
+        assert!(
+            text_a.contains("event: TOOL_CALL_START"),
+            "workspace A subscriber must receive its workspace's message; got: {text_a}"
+        );
+
+        let text_b = drain_sse(&mut stream_b, 300).await;
+        assert!(
+            !text_b.contains("TOOL_CALL_START"),
+            "workspace B subscriber must not receive workspace A's (or tenant t1's) \
+             message; got: {text_b}"
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_sse_agui_event_mapping() {
+        let state = test_state();
+        let app = crate::build_router(state.clone());
+        let token = mint_ws_orchestrator_jwt(&state, "sse-map-agent", "t1", "ws-map");
+        register_agent_token(&state, "sse-map-agent", &token).await;
+        let mut stream = open_sse(app, &token).await;
+
+        // The seven spec-table kinds, plus one kind outside the table that
+        // must keep the generic default event name.
+        let cases = [
+            (MessageKind::ToolCallStart, "TOOL_CALL_START"),
+            (MessageKind::ToolCallEnd, "TOOL_CALL_END"),
+            (MessageKind::RunStarted, "RUN_STARTED"),
+            (MessageKind::RunFinished, "RUN_FINISHED"),
+            (MessageKind::TextMessageContent, "TEXT_MESSAGE_CONTENT"),
+            (MessageKind::StateChanged, "STATE_CHANGED"),
+            (MessageKind::AgentError, "ERROR"),
+            (MessageKind::TaskCreated, "message"),
+        ];
+        for (kind, _) in &cases {
+            state
+                .message_broadcast_tx
+                .send(bus_message(
+                    kind.clone(),
+                    Destination::Workspace(Id::new("ws-map")),
+                    Some(Id::new("ws-map")),
+                ))
+                .unwrap();
+        }
+
+        let text = drain_sse(&mut stream, 300).await;
+        for (kind, event_name) in &cases {
+            assert!(
+                text.contains(&format!("event: {event_name}")),
+                "MessageKind {} must map to SSE event {event_name}; got: {text}",
+                kind.as_str()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn mcp_sse_directed_delivery() {
+        let state = test_state();
+        let app = crate::build_router(state.clone());
+        let token = mint_ws_orchestrator_jwt(&state, "sse-directed-agent", "t1", "ws-d");
+        register_agent_token(&state, "sse-directed-agent", &token).await;
+        let mut stream = open_sse(app, &token).await;
+
+        // Directed message to the authenticated agent: delivered (with the
+        // default event name — TaskAssignment is outside the spec table).
+        state
+            .message_broadcast_tx
+            .send(bus_message(
+                MessageKind::TaskAssignment,
+                Destination::Agent(Id::new("sse-directed-agent")),
+                Some(Id::new("ws-d")),
+            ))
+            .unwrap();
+        // Directed message to a different agent: never delivered here.
+        state
+            .message_broadcast_tx
+            .send(bus_message(
+                MessageKind::TaskAssignment,
+                Destination::Agent(Id::new("sse-other-agent")),
+                Some(Id::new("ws-d")),
+            ))
+            .unwrap();
+
+        let text = drain_sse(&mut stream, 300).await;
+        assert!(
+            text.contains("sse-directed-agent") && text.contains("event: message"),
+            "directed message to the authenticated agent must be delivered; got: {text}"
+        );
+        assert!(
+            !text.contains("sse-other-agent"),
+            "directed message to another agent must not be delivered; got: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_sse_admin_connection_still_receives_notifications() {
+        let state = test_state();
+        let app = crate::build_router(state.clone());
+        // Global token → system principal (Admin, no workspace scope).
+        let mut stream = open_sse(app, "test-token").await;
+
+        // Broadcast server→client notification (DataSeeded).
+        state
+            .message_broadcast_tx
+            .send(bus_message(
+                MessageKind::DataSeeded,
+                Destination::Broadcast,
+                None,
+            ))
+            .unwrap();
+
+        let text = drain_sse(&mut stream, 300).await;
+        assert!(
+            text.contains("event: message") && text.contains("data_seeded"),
+            "broadcast server→client notifications must still arrive on the \
+             admin connection; got: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_sse_record_activity_telemetry_reaches_workspace() {
+        let state = test_state();
+        // Agent record for the record_activity caller — the record's
+        // workspace governs both the tool's telemetry destination and the
+        // subscriber filter.
+        let mut agent = gyre_domain::Agent::new(Id::new("sse-ra-worker"), "sse-ra-worker", 1);
+        agent.workspace_id = Id::new("ws-ra");
+        state.agents.create(&agent).await.unwrap();
+
+        // Worker JWT (repo-scoped — the tier gyre_record_activity requires).
+        let worker_token = state
+            .agent_signing_key
+            .mint(
+                "sse-ra-worker",
+                "sse-ra-worker",
+                "system",
+                &state.base_url,
+                state.agent_jwt_ttl_secs,
+                "t1",
+                "ws-ra",
+                "repo-ra",
+                "gyre",
+            )
+            .unwrap();
+        register_agent_token(&state, "sse-ra-worker", &worker_token).await;
+
+        // Subscriber: another agent in the same workspace.
+        let sub_token = mint_ws_orchestrator_jwt(&state, "sse-ra-sub", "t1", "ws-ra");
+        register_agent_token(&state, "sse-ra-sub", &sub_token).await;
+
+        let app = crate::build_router(state.clone());
+        let mut stream = open_sse(app.clone(), &sub_token).await;
+
+        let (status, json) = mcp_post_with_token(
+            app,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {
+                    "name": "gyre_record_activity",
+                    "arguments": {
+                        "agent_id": "sse-ra-worker",
+                        "event_type": "RUN_STARTED",
+                        "description": "Agent started a run"
+                    }
+                }
+            }),
+            &worker_token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(!json["result"]["isError"].as_bool().unwrap(), "{json}");
+
+        let text = drain_sse(&mut stream, 300).await;
+        assert!(
+            text.contains("event: RUN_STARTED"),
+            "record_activity telemetry must surface on same-workspace clients' \
+             streams with the mapped AG-UI event name; got: {text}"
+        );
+        assert!(
+            text.contains("sse-ra-worker"),
+            "the telemetry envelope must identify the reporting agent; got: {text}"
+        );
     }
 
     // ── task-119: MCP prompts (agent-runtime.md §5 / platform-model.md §4) ──
