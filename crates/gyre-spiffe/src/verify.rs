@@ -91,6 +91,46 @@ pub fn verify_svid(
     expected: &ExpectedIdentity,
     now: SystemTime,
 ) -> Result<VerifiedSvid, VerificationError> {
+    let chain = verify_chain_and_extract_id(presented_pem, trust_bundle_ca_der, now)?;
+    bind_to_expected(chain, expected)
+}
+
+/// Verify a presented X.509-SVID against the trust bundle, binding it to an
+/// exact expected SPIFFE ID (used when the SVID was obtained from an
+/// external SPIRE Workload API, where the operator — not Gyre — chose the
+/// SPIFFE ID shape; the session binding is the issuance-time record).
+pub fn verify_svid_for_record_id(
+    presented_pem: &str,
+    trust_bundle_ca_der: &[Vec<u8>],
+    expected_id: &SpiffeId,
+    now: SystemTime,
+) -> Result<VerifiedSvid, VerificationError> {
+    let chain = verify_chain_and_extract_id(presented_pem, trust_bundle_ca_der, now)?;
+    if chain.spiffe_id != *expected_id {
+        return Err(VerificationError::WrongSession {
+            found: chain.spiffe_id.to_string(),
+            expected: expected_id.to_string(),
+        });
+    }
+    let spiffe_id = chain.spiffe_id;
+    let agent_path = spiffe_id.agent_path().ok_or(VerificationError::NotAgentPath)?;
+    Ok(VerifiedSvid {
+        spiffe_id,
+        agent_path,
+        serial: chain.serial,
+        not_before: chain.not_before,
+        not_after: chain.not_after,
+    })
+}
+
+/// Checks (1)-(4): parse, chain signature against the bundle anchors,
+/// validity windows, single-URI-SAN extraction. Returns the parsed leaf and
+/// its SPIFFE ID.
+fn verify_chain_and_extract_id(
+    presented_pem: &str,
+    trust_bundle_ca_der: &[Vec<u8>],
+    now: SystemTime,
+) -> Result<ChainVerified, VerificationError> {
     if presented_pem.trim().is_empty() {
         return Err(VerificationError::NoSvid);
     }
@@ -172,7 +212,20 @@ pub fn verify_svid(
     )
     .map_err(|e| VerificationError::MalformedSpiffeId(e.to_string()))?;
 
-    // (5) Bind the SPIFFE ID to the expected agent session.
+    Ok(ChainVerified {
+        spiffe_id,
+        serial: format!("{:x}", leaf.serial),
+        not_before: leaf.validity.not_before.timestamp(),
+        not_after: leaf.validity.not_after.timestamp(),
+    })
+}
+
+/// Check (5): bind the SPIFFE ID to the expected agent session.
+fn bind_to_expected(
+    chain: ChainVerified,
+    expected: &ExpectedIdentity,
+) -> Result<VerifiedSvid, VerificationError> {
+    let spiffe_id = chain.spiffe_id;
     if spiffe_id.trust_domain != expected.trust_domain {
         return Err(VerificationError::ForeignTrustDomain {
             found: spiffe_id.trust_domain,
@@ -192,14 +245,22 @@ pub fn verify_svid(
             expected: expected.role.clone(),
         });
     }
-
     Ok(VerifiedSvid {
         spiffe_id,
         agent_path,
-        serial: format!("{:x}", leaf.serial),
-        not_before: leaf.validity.not_before.timestamp(),
-        not_after: leaf.validity.not_after.timestamp(),
+        serial: chain.serial,
+        not_before: chain.not_before,
+        not_after: chain.not_after,
     })
+}
+
+/// The result of checks (1)-(4): a cryptographically chain-verified,
+/// in-validity-window SVID with a single well-formed URI SAN.
+struct ChainVerified {
+    spiffe_id: SpiffeId,
+    serial: String,
+    not_before: i64,
+    not_after: i64,
 }
 
 // ---------------------------------------------------------------------------

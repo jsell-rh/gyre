@@ -312,15 +312,62 @@ pub async fn update_agent_status(
     Ok(Json(AgentResponse::from(agent)))
 }
 
+/// Heartbeat request body (identity-security.md Layer 1: the SVID is the
+/// workload proof, presented and verified on the attestation path —
+/// spawn/attest/heartbeat/verify).
+#[derive(Debug, Default, Deserialize)]
+pub struct HeartbeatBody {
+    /// The agent session's X.509-SVID (PEM chain, leaf first), from the
+    /// `GYRE_SVID_PEM` environment variable injected at spawn.
+    #[serde(default)]
+    pub svid: String,
+    /// The workload's current stack fingerprint (from `GYRE_STACK_HASH`
+    /// when present; bound against the SVID-backed attestation record).
+    #[serde(default)]
+    pub stack_fingerprint: String,
+}
+
 pub async fn agent_heartbeat(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    body: axum::body::Bytes,
 ) -> Result<StatusCode, ApiError> {
     let mut agent = state
         .agents
         .find_by_id(&Id::new(&id))
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("agent {id} not found")))?;
+
+    // Layer 1 workload-identity verification (identity-security.md): the
+    // heartbeat carries the session's SVID, verified fail-closed against
+    // the published trust bundle — replacing the retired G10 /proc probe
+    // and skip-on-empty string compare. A heartbeat that presents no SVID,
+    // an invalid SVID, or a tampered/empty stack fingerprint is rejected:
+    // there is no bypass path for unattested workloads on this surface.
+    // (Liveness of the agent record itself is still recorded on success.)
+    let hb: HeartbeatBody = if body.is_empty() {
+        HeartbeatBody::default()
+    } else {
+        serde_json::from_slice(&body)
+            .map_err(|e| ApiError::BadRequest(format!("heartbeat body: {e}")))?
+    };
+    let verification =
+        crate::spiffe::attest_session(&state, &id, &hb.svid, &hb.stack_fingerprint).await;
+    if let Err(reason) = &verification {
+        tracing::warn!(
+            agent_id = %id,
+            reason = %reason,
+            "heartbeat rejected: workload-identity verification failed"
+        );
+        // Rejected heartbeats are audited (Failure) — the workload identity
+        // did not verify; the agent record's liveness is NOT advanced.
+        let (audited_pid, _) = attestation_pid_and_status(&state, &id).await;
+        crate::agent_audit::emit_heartbeat_rejected(&state, &agent, audited_pid, reason).await;
+        return Err(ApiError::Forbidden(format!(
+            "workload-identity verification failed: {reason}"
+        )));
+    }
+
     let now = now_secs();
     agent.heartbeat(now);
     state.agents.update(&agent).await?;
@@ -330,92 +377,34 @@ pub async fn agent_heartbeat(
         let _ = state.network_peers.update_last_seen(&peer.id, now).await;
     }
 
-    // G10: Verify workload attestation liveness on each heartbeat.
-    // Checks PID is still alive; stack hash is left empty (stack re-check
-    // is only done when agent self-reports via POST /api/v1/agents/{id}/stack).
-    //
-    // The attested PID and liveness result also feed the AgentHeartbeat
-    // audit event (observability.md §Audit Event Types).
-    let mut audited_pid: Option<u32> = None;
-    let mut audited_pid_alive: Option<bool> = None;
-    if let Ok(Some(json)) = state.kv_store.kv_get("workload_attestations", &id).await {
-        if let Ok(mut att) =
-            serde_json::from_str::<crate::workload_attestation::WorkloadAttestation>(&json)
-        {
-            audited_pid = att.pid;
-            // M19.4: If a container_id is present, verify container liveness
-            // via `docker inspect --format='{{.State.Running}}'` in addition to
-            // (or instead of) the PID check.
-            let container_alive = if let Some(ref cid) = att.container_id {
-                // Detect runtime from the container audit record (best-effort).
-                let runtime = state
-                    .container_audits
-                    .find_by_agent_id(&id)
-                    .await
-                    .ok()
-                    .flatten()
-                    .map(|r| r.runtime)
-                    .unwrap_or_else(|| "docker".to_string());
-                let result = tokio::process::Command::new(&runtime)
-                    .args(["inspect", "--format={{.State.Running}}", cid.as_str()])
-                    .output()
-                    .await;
-                match result {
-                    Ok(out) if out.status.success() => {
-                        String::from_utf8_lossy(&out.stdout).trim() == "true"
-                    }
-                    _ => {
-                        tracing::warn!(
-                            agent_id = %id,
-                            container_id = %cid,
-                            "Container liveness check via {} inspect failed on heartbeat",
-                            runtime
-                        );
-                        false
-                    }
-                }
-            } else {
-                match att.pid {
-                    Some(pid) => {
-                        let alive = crate::workload_attestation::pid_is_alive(pid);
-                        audited_pid_alive = Some(alive);
-                        alive
-                    }
-                    // No PID recorded → assume alive (attestation cannot disprove).
-                    None => true,
-                }
-            };
-
-            // Container liveness result feeds the AgentHeartbeat audit event.
-            if att.container_id.is_some() {
-                audited_pid_alive = Some(container_alive);
-            }
-
-            let still_ok =
-                crate::workload_attestation::verify_attestation(&mut att, container_alive, "");
-            if !still_ok {
-                tracing::warn!(
-                    agent_id = %id,
-                    pid = ?att.pid,
-                    container_id = ?att.container_id,
-                    "Workload attestation liveness check failed on heartbeat"
-                );
-            }
-            // Persist updated attestation (alive + last_verified_at updated).
-            if let Ok(updated_json) = serde_json::to_string(&att) {
-                let _ = state
-                    .kv_store
-                    .kv_set("workload_attestations", &id, updated_json)
-                    .await;
-            }
-        }
-    }
-
     // Agent lifecycle audit event (observability.md §Audit Event Types).
-    // pid/pid_alive are null when the agent has no workload attestation.
+    // pid is the attestation record's metadata (null when none was
+    // recorded); pid_alive carries the SVID verification result.
+    let (audited_pid, audited_pid_alive) = attestation_pid_and_status(&state, &id).await;
     crate::agent_audit::emit_heartbeat(&state, &agent, audited_pid, audited_pid_alive).await;
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Read the attestation record's PID (metadata) and the verification
+/// status that was just applied, for the AgentHeartbeat audit event.
+async fn attestation_pid_and_status(
+    state: &Arc<AppState>,
+    id: &str,
+) -> (Option<u32>, Option<bool>) {
+    match state
+        .kv_store
+        .kv_get("workload_attestations", id)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|json| {
+            serde_json::from_str::<crate::workload_attestation::WorkloadAttestation>(&json).ok()
+        })
+    {
+        Some(att) => (att.pid, Some(att.alive)),
+        None => (None, None),
+    }
 }
 
 #[cfg(test)]
@@ -761,69 +750,220 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
-    #[tokio::test]
-    async fn agent_heartbeat() {
-        let app = app();
-        let (app, id) = create_test_agent(app, "hb-agent").await;
+    /// Issue a session SVID for a test agent and return the
+    /// (chain_pem, stack_fingerprint) pair the workload presents on the
+    /// heartbeat path (identity-security.md Layer 1).
+    async fn issue_test_svid(
+        state: &std::sync::Arc<crate::AppState>,
+        id: &str,
+    ) -> (String, String) {
+        let svid = crate::spiffe::issue_session_svid(
+            state,
+            id,
+            "test-persona",
+            "local",
+            "sha256:test-stack-fingerprint",
+        )
+        .await
+        .expect("test SVID issuance must succeed");
+        (svid.record.chain_pem.clone(), svid.record.stack_fingerprint.clone())
+    }
 
-        let resp = app
+    async fn send_heartbeat(
+        app: &Router,
+        id: &str,
+        body: serde_json::Value,
+    ) -> axum::response::Response {
+        app.clone()
             .oneshot(
                 Request::builder()
                     .method("PUT")
                     .uri(format!("/api/v1/agents/{id}/heartbeat"))
-                    .body(Body::empty())
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
             .await
-            .unwrap();
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn agent_heartbeat() {
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let (app, id) = create_test_agent(app, "hb-agent").await;
+        let (svid_pem, stack) = issue_test_svid(&state, &id).await;
+
+        let resp = send_heartbeat(&app, &id, serde_json::json!({
+            "svid": svid_pem,
+            "stack_fingerprint": stack,
+        }))
+        .await;
         assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn agent_heartbeat_without_svid_is_rejected() {
+        // Secure-by-default (identity-security.md): a heartbeat that
+        // presents no SVID is rejected with 403 — there is no bypass path
+        // for unattested workloads on the verification surface. The
+        // rejection is audited and the agent's liveness is NOT advanced.
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let (app, id) = create_test_agent(app, "hb-reject-agent").await;
+
+        let before = state
+            .agents
+            .find_by_id(&crate::Id::new(&id))
+            .await
+            .unwrap()
+            .expect("agent exists")
+            .last_heartbeat;
+        let resp = send_heartbeat(&app, &id, serde_json::json!({})).await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        let after = state
+            .agents
+            .find_by_id(&crate::Id::new(&id))
+            .await
+            .unwrap()
+            .expect("agent exists");
+        assert_eq!(
+            after.last_heartbeat, before,
+            "rejected heartbeat must not advance agent liveness"
+        );
+
+        // The rejection is audited as an AgentHeartbeat event with a
+        // Failure outcome (and the rejection reason in the detail).
+        let events = crate::agent_audit::recorded_events(&state, "agent_heartbeat").await;
+        let mine: Vec<_> = events
+            .iter()
+            .filter(|e| e.resource_id.as_deref() == Some(id.as_str()))
+            .collect();
+        assert_eq!(mine.len(), 1, "exactly one heartbeat audit event");
+        assert_eq!(
+            mine[0].outcome,
+            gyre_domain::AuditOutcome::Failure,
+            "rejected heartbeat → Failure outcome"
+        );
+        assert!(
+            !mine[0].detail["reason"].as_str().unwrap_or("").is_empty(),
+            "rejection reason recorded"
+        );
+    }
+
+    #[tokio::test]
+    async fn heartbeat_with_tampered_stack_is_rejected() {
+        // The stack fingerprint is bound to the SVID-backed record at
+        // issuance; presenting a different value is a verification
+        // failure (fail closed), not a skip.
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let (app, id) = create_test_agent(app, "hb-tamper-agent").await;
+        let (svid_pem, _) = issue_test_svid(&state, &id).await;
+
+        let resp = send_heartbeat(
+            &app,
+            &id,
+            serde_json::json!({
+                "svid": svid_pem.clone(),
+                "stack_fingerprint": "sha256:attacker-stack",
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // An empty stack presentation is likewise rejected (the empty
+        // string is not a valid fingerprint to skip on — fail closed).
+        let resp = send_heartbeat(
+            &app,
+            &id,
+            serde_json::json!({ "svid": svid_pem, "stack_fingerprint": "" }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]
     async fn heartbeat_emits_agent_heartbeat_audit_event() {
         // observability.md §Audit Event Types: each heartbeat must record an
-        // AgentHeartbeat audit event. Without a workload attestation the
-        // pid/pid_alive detail fields are null (unknown), never fabricated.
+        // AgentHeartbeat audit event. Without a workload attestation record
+        // the pid detail field is null (unknown), never fabricated; with a
+        // verified SVID the pid_alive detail carries the verification
+        // result (true).
         let state = test_state();
         let app = crate::api::api_router().with_state(state.clone());
         let (app, id) = create_test_agent(app, "hb-audit-agent").await;
-
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri(format!("/api/v1/agents/{id}/heartbeat"))
-                    .body(Body::empty())
-                    .unwrap(),
+        let (svid_pem, stack) = issue_test_svid(&state, &id).await;
+        // Seed the spawn-time metadata record (as the spawn path writes):
+        // the audit event's pid/pid_alive detail fields are read from it.
+        let att = crate::workload_attestation::attest_agent_with_container(
+            &id,
+            None,
+            "local",
+            "sha256:test-stack-fingerprint",
+            None,
+            None,
+            None,
+            None,
+        );
+        state
+            .kv_store
+            .kv_set(
+                "workload_attestations",
+                &id,
+                serde_json::to_string(&att).unwrap(),
             )
             .await
             .unwrap();
+
+        let resp = send_heartbeat(
+            &app,
+            &id,
+            serde_json::json!({
+                "svid": svid_pem,
+                "stack_fingerprint": stack,
+            }),
+        )
+        .await;
         assert_eq!(resp.status(), StatusCode::NO_CONTENT);
 
         let events = crate::agent_audit::recorded_events(&state, "agent_heartbeat").await;
         assert_eq!(events.len(), 1, "exactly one agent_heartbeat event");
         let ev = &events[0];
         assert_eq!(ev.resource_id.as_deref(), Some(id.as_str()));
-        assert!(ev.detail["pid"].is_null(), "no attestation → pid unknown");
-        assert!(
-            ev.detail["pid_alive"].is_null(),
-            "no attestation → pid_alive unknown"
+        assert!(ev.detail["pid"].is_null(), "no pid metadata recorded → pid unknown");
+        assert_eq!(
+            ev.detail["pid_alive"], true,
+            "verified SVID → pid_alive carries the verification result"
         );
     }
 
     #[tokio::test]
-    async fn heartbeat_audit_reports_attested_pid_liveness() {
-        // With a workload attestation present, the AgentHeartbeat audit event
-        // must carry the attested PID and its real liveness. A live PID (this
-        // test process) reports true; a dead PID (an exited child) reports
-        // false — proving the value is measured, not hardcoded.
+    async fn heartbeat_audit_carries_attestation_record_details() {
+        // With a workload attestation record present, the AgentHeartbeat
+        // audit event carries the record's PID metadata and the SVID
+        // verification result as pid_alive. A rejected heartbeat (dead
+        // workload identity: SVID that does not verify) produces a
+        // heartbeat_rejected event instead, with pid_alive false on the
+        // attestation record — proving the value is measured, not
+        // hardcoded.
         let state = test_state();
         let app = crate::api::api_router().with_state(state.clone());
         let (app, id) = create_test_agent(app, "hb-pid-agent").await;
 
-        // Live PID: this test process itself.
-        let live_pid = std::process::id();
-        let att = crate::workload_attestation::attest_agent(&id, Some(live_pid), "local", "");
+        // Seed an attestation record with PID metadata (as the spawn path
+        // writes), then verify a heartbeat over the SVID path.
+        let att = crate::workload_attestation::attest_agent_with_container(
+            &id,
+            Some(4242),
+            "local",
+            "sha256:test-stack-fingerprint",
+            None,
+            None,
+            None,
+            None,
+        );
         state
             .kv_store
             .kv_set(
@@ -833,69 +973,63 @@ mod tests {
             )
             .await
             .unwrap();
-        let resp = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri(format!("/api/v1/agents/{id}/heartbeat"))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        let (svid_pem, stack) = issue_test_svid(&state, &id).await;
+        let resp = send_heartbeat(
+            &app,
+            &id,
+            serde_json::json!({
+                "svid": svid_pem,
+                "stack_fingerprint": stack,
+            }),
+        )
+        .await;
         assert_eq!(resp.status(), StatusCode::NO_CONTENT);
         let events = crate::agent_audit::recorded_events(&state, "agent_heartbeat").await;
         let ev = events
             .iter()
             .find(|e| e.resource_id.as_deref() == Some(id.as_str()))
             .expect("agent_heartbeat event for hb-pid-agent");
-        assert_eq!(ev.detail["pid"], live_pid);
+        assert_eq!(ev.detail["pid"], 4242);
         assert_eq!(ev.detail["pid_alive"], true);
 
-        // Dead PID: a child process that has already exited.
-        let mut child = std::process::Command::new("true").spawn().unwrap();
-        let dead_pid = child.id();
-        child.wait().unwrap();
-        let att = crate::workload_attestation::attest_agent(&id, Some(dead_pid), "local", "");
-        state
-            .kv_store
-            .kv_set(
-                "workload_attestations",
-                &id,
-                serde_json::to_string(&att).unwrap(),
+        // Dead workload identity: an SVID signed by a foreign CA is
+        // rejected (403) — the heartbeat does not advance and the
+        // attestation record's alive flag flips false.
+        let foreign_ca = gyre_spiffe::TrustDomainCa::generate("attacker.example")
+            .expect("foreign CA generation must succeed");
+        let foreign = foreign_ca
+            .issue_svid(
+                &gyre_spiffe::SpiffeId::parse(&format!(
+                    "spiffe://attacker.example/agent/test-persona/session/{id}"
+                ))
+                .expect("foreign SPIFFE ID must parse"),
+                gyre_spiffe::BASE_SVID_TTL_SECS,
             )
-            .await
-            .unwrap();
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri(format!("/api/v1/agents/{id}/heartbeat"))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+            .expect("foreign SVID issuance must succeed");
+        let resp = send_heartbeat(
+            &app,
+            &id,
+            serde_json::json!({
+                "svid": foreign.chain_pem,
+                "stack_fingerprint": stack,
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
         let events = crate::agent_audit::recorded_events(&state, "agent_heartbeat").await;
         let mine: Vec<_> = events
             .iter()
             .filter(|e| e.resource_id.as_deref() == Some(id.as_str()))
             .collect();
-        // Two heartbeats were sent for this agent, no more, no fewer.
-        assert_eq!(mine.len(), 2, "two agent_heartbeat events for hb-pid-agent");
-        // Audit queries return newest-first, but equal second-granularity
-        // timestamps tie under the mem adapter's stable sort, so positional
-        // selection is flaky. The first heartbeat was pinned to
-        // (live_pid, true) above; identify the second by its content: it
-        // must carry the dead child's PID. A handler that re-read a stale
-        // attestation would leave no dead-pid event and fail here.
-        let second = mine
-            .iter()
-            .find(|e| e.detail["pid"] == serde_json::json!(dead_pid))
-            .expect("second heartbeat reports the attested dead pid");
-        assert_eq!(second.detail["pid_alive"], false);
+        assert_eq!(mine.len(), 2, "one success + one rejection event");
+        assert_eq!(
+            mine
+                .iter()
+                .filter(|e| e.outcome == gyre_domain::AuditOutcome::Failure)
+                .count(),
+            1,
+            "one rejection event for the foreign SVID"
+        );
     }
 
     #[tokio::test]

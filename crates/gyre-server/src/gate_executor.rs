@@ -335,6 +335,12 @@ async fn launch_gate_agent_runtime(
         env.insert("GYRE_STACK_HASH".to_string(), stack_hash.clone());
     }
 
+    // Layer 1 (identity-security.md): the gate agent's SVID role segment
+    // is the gate persona (manifest-declared, e.g. "security").
+    let spiffe_role = crate::spiffe::agent_role(
+        Some(&mg.persona),
+        &gyre_domain::OrchestratorType::Worker,
+    );
     match crate::api::spawn::launch_agent_workload(
         state,
         agent,
@@ -344,6 +350,7 @@ async fn launch_gate_agent_runtime(
         env,
         work_dir,
         compute_target_label.clone(),
+        &spiffe_role,
     )
     .await
     {
@@ -5985,6 +5992,9 @@ specs:
             last_verified_at: 1_700_000_000,
             container_id: Some("ctr-1".to_string()),
             image_hash: Some("sha256:img-1".to_string()),
+            spiffe_id: None,
+            svid_serial: None,
+            svid_verified_at: None,
         }
     }
 

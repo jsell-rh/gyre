@@ -348,6 +348,7 @@ pub fn api_router() -> Router<Arc<AppState>> {
         )
         // Workload attestation (G10)
         .route("/api/v1/agents/:id/workload", get(workload::get_workload))
+        .route("/api/v1/agents/:id/attest", post(workload::attest_workload))
         // Container audit trail (M19.3)
         .route(
             "/api/v1/agents/:id/container",

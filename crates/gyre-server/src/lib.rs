@@ -74,6 +74,7 @@ pub mod trust_suggestion;
 pub mod trusted_proxy;
 pub(crate) mod tty;
 pub mod version_compute;
+pub mod spiffe;
 pub mod workload_attestation;
 pub mod workspace_ownership;
 pub(crate) mod ws;
@@ -221,6 +222,10 @@ pub struct AppState {
     pub auth_token: String,
     /// Base URL for building clone URLs, e.g. "http://localhost:3000".
     pub base_url: String,
+    /// SPIFFE workload-attestation service (identity-security.md Layer 1):
+    /// trust-domain CA / external SPIRE Workload API, trust-bundle
+    /// publication, and SVID issuance for agent sessions.
+    pub spiffe: Arc<spiffe::SpiffeService>,
     pub repos: Arc<dyn RepoRepository>,
     pub agents: Arc<dyn AgentRepository>,
     pub tasks: Arc<dyn TaskRepository>,
@@ -974,6 +979,11 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             get(oidc::openid_configuration),
         )
         .route("/.well-known/jwks.json", get(oidc::jwks))
+        // SPIFFE trust bundle (identity-security.md Layer 1): the trust
+        // domain's X.509-SVID anchors in SPIFFE bundle format, at the
+        // standard well-known location. Public like the JWKS endpoint —
+        // any verifier must be able to check SVIDs.
+        .route(spiffe::TRUST_BUNDLE_PATH, get(spiffe::trust_bundle_endpoint))
         .route("/ws", get(ws::ws_handler))
         .route("/ws/agents/:id/tty", get(tty::tty_handler))
         // WebSocket ticket endpoint: issues short-lived, single-use tokens.
@@ -1225,6 +1235,159 @@ fn load_or_persist_agent_signing_key(
     key
 }
 
+/// KV key holding the persisted SPIFFE trust-domain CA (local mode).
+pub const SPIFFE_CA_KV_KEY: &str = "spiffe_trust_domain_ca";
+
+/// Resolve the SPIFFE workload-attestation service for this boot
+/// (identity-security.md Layer 1):
+///
+/// - Trust domain: `GYRE_SPIFFE_TRUST_DOMAIN` (default `gyre.example.com`).
+/// - External mode: `GYRE_SPIFFE_WORKLOAD_API_SOCKET` (UDS path to a SPIRE
+///   Workload API) + `GYRE_SPIFFE_TRUST_BUNDLE_URL` (the trust domain's
+///   bundle in SPIFFE bundle format, e.g. SPIRE's federation bundle
+///   endpoint). SVIDs are then obtained from the Workload API and the
+///   operator-configured bundle is the verification anchor.
+/// - Local mode (default): Gyre operates a trust-domain CA, persisted in
+///   the durable KV store like the agent signing key. `GYRE_SPIFFE_CA`
+///   (JSON: base64 PKCS#8 key + CA certificate PEM) provisions the CA
+///   explicitly and is never overwritten.
+///
+/// Invalid operator material is a hard startup error: silently falling
+/// back to a different anchor would break every SVID the operator expects
+/// to verify.
+fn load_spiffe_service(
+    sqlite_db: &Option<Arc<gyre_adapters::SqliteStorage>>,
+    pg_db: &Option<Arc<gyre_adapters::PgStorage>>,
+) -> Arc<spiffe::SpiffeService> {
+    let trust_domain = std::env::var("GYRE_SPIFFE_TRUST_DOMAIN")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| spiffe::DEFAULT_TRUST_DOMAIN.to_string());
+    // Validate: the trust domain must be usable in a SPIFFE ID.
+    if gyre_spiffe::SpiffeId::agent(&trust_domain, "worker", "probe").is_err() {
+        panic!(
+            "GYRE_SPIFFE_TRUST_DOMAIN {trust_domain:?} is not a valid SPIFFE trust domain"
+        );
+    }
+    let svid_ttl_secs = std::env::var("GYRE_SPIFFE_SVID_TTL")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|ttl: &u64| *ttl > 0)
+        .unwrap_or(gyre_spiffe::BASE_SVID_TTL_SECS);
+
+    if let Ok(socket) = std::env::var("GYRE_SPIFFE_WORKLOAD_API_SOCKET") {
+        let Ok(bundle_url) = std::env::var("GYRE_SPIFFE_TRUST_BUNDLE_URL") else {
+            panic!(
+                "GYRE_SPIFFE_WORKLOAD_API_SOCKET requires GYRE_SPIFFE_TRUST_BUNDLE_URL \
+                 (the trust domain's SPIFFE bundle in SPIFFE bundle format)"
+            );
+        };
+        let service = spiffe::SpiffeService::external(
+            trust_domain,
+            socket,
+            bundle_url,
+            svid_ttl_secs,
+        )
+        .expect("external SPIFFE service construction must succeed");
+        tracing::info!(
+            trust_domain = %service.trust_domain(),
+            "SPIFFE workload attestation: external SPIRE Workload API mode"
+        );
+        return Arc::new(service);
+    }
+
+    // 1. Operator-provisioned CA.
+    if let Ok(encoded) = std::env::var("GYRE_SPIFFE_CA") {
+        let serialized: gyre_spiffe::ca::SerializedCa = serde_json::from_str(encoded.trim())
+            .unwrap_or_else(|e| panic!("GYRE_SPIFFE_CA is not valid CA material: {e}"));
+        let ca = gyre_spiffe::TrustDomainCa::from_serialized(&serialized)
+            .unwrap_or_else(|e| panic!("GYRE_SPIFFE_CA is not usable CA material: {e}"));
+        tracing::info!(
+            trust_domain = %trust_domain,
+            "using operator-provisioned SPIFFE trust-domain CA from GYRE_SPIFFE_CA"
+        );
+        return Arc::new(
+            spiffe::SpiffeService::local(trust_domain, ca, svid_ttl_secs)
+                .expect("local SPIFFE service construction must succeed"),
+        );
+    }
+
+    // 2. CA persisted in the durable KV store.
+    let persisted: anyhow::Result<Option<String>> = if let Some(pg) = pg_db {
+        pg.kv_get_sync(AGENT_SIGNING_KEY_KV_NAMESPACE, SPIFFE_CA_KV_KEY)
+    } else if let Some(sqlite) = sqlite_db {
+        sqlite.kv_get_sync(AGENT_SIGNING_KEY_KV_NAMESPACE, SPIFFE_CA_KV_KEY)
+    } else {
+        Ok(None)
+    };
+    match persisted {
+        Ok(Some(json)) => match serde_json::from_str::<gyre_spiffe::ca::SerializedCa>(&json)
+            .map_err(|e| format!("json: {e}"))
+            .and_then(|serialized| {
+                gyre_spiffe::TrustDomainCa::from_serialized(&serialized)
+                    .map_err(|e| format!("ca: {e}"))
+            }) {
+            Ok(ca) => {
+                tracing::info!(
+                    trust_domain = %trust_domain,
+                    "loaded persisted SPIFFE trust-domain CA (issued SVIDs and the trust bundle survive restarts)"
+                );
+                return Arc::new(
+                    spiffe::SpiffeService::local(trust_domain, ca, svid_ttl_secs)
+                        .expect("local SPIFFE service construction must succeed"),
+                );
+            }
+            Err(e) => {
+                // Unreadable stored material: regenerate and overwrite below,
+                // loudly — SVIDs issued by the old CA will no longer verify,
+                // which the operator must know about.
+                tracing::error!(
+                    error = %e,
+                    "persisted SPIFFE CA is unreadable; generating a replacement"
+                );
+            }
+        },
+        Ok(None) => { /* first boot with this DB — generate below */ }
+        Err(e) => {
+            // Read failed (transient DB trouble): keep this boot's CA
+            // process-local and do NOT overwrite storage, so a transient
+            // failure cannot destroy the existing CA.
+            tracing::warn!(
+                error = %e,
+                "could not read the persisted SPIFFE CA; using a process-local CA for this boot"
+            );
+            let ca = gyre_spiffe::TrustDomainCa::generate(&trust_domain)
+                .expect("CA generation must succeed");
+            return Arc::new(
+                spiffe::SpiffeService::local(trust_domain, ca, svid_ttl_secs)
+                    .expect("local SPIFFE service construction must succeed"),
+            );
+        }
+    }
+
+    // 3. Fresh CA, persisted for subsequent boots.
+    let ca =
+        gyre_spiffe::TrustDomainCa::generate(&trust_domain).expect("CA generation must succeed");
+    let serialized = serde_json::to_string(&ca.serialize()).expect("CA serialization");
+    let store_result = if let Some(pg) = pg_db {
+        pg.kv_set_sync(AGENT_SIGNING_KEY_KV_NAMESPACE, SPIFFE_CA_KV_KEY, &serialized)
+    } else if let Some(sqlite) = sqlite_db {
+        sqlite.kv_set_sync(AGENT_SIGNING_KEY_KV_NAMESPACE, SPIFFE_CA_KV_KEY, &serialized)
+    } else {
+        Ok(())
+    };
+    if let Err(e) = store_result {
+        tracing::warn!(
+            error = %e,
+            "could not persist the SPIFFE trust-domain CA; issued SVIDs will not verify after a restart"
+        );
+    }
+    Arc::new(
+        spiffe::SpiffeService::local(trust_domain, ca, svid_ttl_secs)
+            .expect("local SPIFFE service construction must succeed"),
+    )
+}
+
 pub fn build_state(
     auth_token: &str,
     base_url: &str,
@@ -1443,9 +1606,14 @@ pub fn build_state(
     // gate agents' keys from the same material) share it.
     let agent_signing_key = load_or_persist_agent_signing_key(&sqlite_db, &pg_db);
 
+    // SPIFFE workload attestation (identity-security.md Layer 1): resolve
+    // the trust domain and anchor before wiring AppState.
+    let spiffe_service = load_spiffe_service(&sqlite_db, &pg_db);
+
     Arc::new(AppState {
         auth_token: auth_token.to_string(),
         base_url: base_url.to_string(),
+        spiffe: spiffe_service,
         repos: store!(dyn RepoRepository, mem::MemRepoRepository::default()),
         agents,
         tasks,

@@ -1096,6 +1096,7 @@ dependencies = [
  "gyre-common",
  "gyre-domain",
  "gyre-ports",
+ "gyre-spiffe",
  "hex",
  "http",
  "jsonwebtoken",

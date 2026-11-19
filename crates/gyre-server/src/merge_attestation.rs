@@ -1304,6 +1304,8 @@ mod tests {
                 "sha256:stack-fingerprint",
                 Some("container-abc".to_string()),
                 Some("sha256:image-digest".to_string()),
+                None,
+                None,
             )),
         ];
 

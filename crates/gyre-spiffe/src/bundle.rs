@@ -75,7 +75,9 @@ fn ca_pem_to_jwk(pem_str: &str) -> Option<Value> {
     use sha2::Digest;
     let kid = {
         let d = sha2::Sha256::digest(spki);
-        hex::encode(&d[..8])
+        // split_at (not a fixed byte-index slice): the digest is 32 bytes.
+        let (prefix, _) = d.split_at(8);
+        hex::encode(prefix)
     };
 
     // Public key members by algorithm OID.
@@ -88,12 +90,16 @@ fn ca_pem_to_jwk(pem_str: &str) -> Option<Value> {
             if point.len() != 65 || point[0] != 0x04 {
                 return None;
             }
+            // split_at (not fixed byte-index slices): the uncompressed
+            // P-256 point is 0x04 || X (32) || Y (32).
+            let (_, coords) = point.split_at(1);
+            let (x, y) = coords.split_at(32);
             (
                 "EC",
                 json!({
                     "crv": "P-256",
-                    "x": URL_SAFE_NO_PAD.encode(&point[1..33]),
-                    "y": URL_SAFE_NO_PAD.encode(&point[33..65]),
+                    "x": URL_SAFE_NO_PAD.encode(x),
+                    "y": URL_SAFE_NO_PAD.encode(y),
                 }),
             )
         }

@@ -634,6 +634,7 @@ impl AgentSigningKey {
     /// are minted from spawn context via [`AgentSigningKey::mint_with_workload`]
     /// — a worker agent's token is scoped to its repo.
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     pub fn mint_worker_scoped(
         &self,
         agent_id: &str,
@@ -647,6 +648,9 @@ impl AgentSigningKey {
         repo_name: &str,
         persona: Option<&str>,
         attestation_level: Option<u8>,
+        wl_hostname: Option<String>,
+        wl_compute_target: Option<String>,
+        wl_stack_hash: Option<String>,
         wl_image_hash: Option<String>,
     ) -> Result<String, String> {
         self.mint_with_workload(
@@ -664,9 +668,9 @@ impl AgentSigningKey {
             // is the widened `u32` form (platform-model.md §1 Token Scoping).
             attestation_level.map(|level| level as u32),
             None,
-            None,
-            None,
-            None,
+            wl_hostname,
+            wl_compute_target,
+            wl_stack_hash,
             None,
             wl_image_hash,
         )
