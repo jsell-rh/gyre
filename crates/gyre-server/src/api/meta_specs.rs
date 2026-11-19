@@ -1114,6 +1114,14 @@ pub(crate) async fn finish_preview_agent(state: &AppState, agent_id: &str) -> bo
             return false;
         }
     };
+    // message-bus.md §Delivery Guarantees (Agent completion cleanup): the
+    // process exit IS the preview agent's completion (REST/MCP `complete` is
+    // refused for preview agents — skip-ceremony), so bulk-ack any unacked
+    // Directed messages in its inbox: retained for audit, never redelivered,
+    // reclaimable by expire_acked_inboxes. Best-effort like every other
+    // terminal path. Placed before the terminal flip so it runs on both the
+    // normal and the corrupt-record branches below.
+    crate::api::spawn::acknowledge_agent_inbox(state, &Id::new(agent_id), "agent_completed").await;
     let agent_ref = match serde_json::from_str::<PreviewAgentRef>(&raw) {
         Ok(a) => a,
         Err(e) => {
@@ -1917,6 +1925,18 @@ async fn teardown_preview_agent(state: &AppState, agent_ref: &PreviewAgentRef) {
     kill_preview_process(state, &agent_ref.agent_id).await;
     // Stopped first: a monitor's late exit callback must not park it in Idle.
     stop_preview_agent_row(state, &agent_ref.agent_id).await;
+    // Killed without completion (human DELETE or GC TTL expiry): same
+    // orphaned-inbox handling as the stale-agent detector (message-bus.md
+    // §Edge Cases). The kill removed the process-registry handle, so the
+    // exit monitor will not run finish_preview_agent for this agent — the
+    // ack must happen here or the inbox's unacked Directed messages are
+    // redeliverable forever (expire_acked_inboxes only reclaims acked rows).
+    crate::api::spawn::acknowledge_agent_inbox(
+        state,
+        &Id::new(&agent_ref.agent_id),
+        "agent_orphaned",
+    )
+    .await;
     remove_preview_worktree(state, agent_ref).await;
     close_preview_branch_mrs(state, agent_ref).await;
     delete_preview_branch(state, agent_ref).await;
@@ -4356,6 +4376,175 @@ mod tests {
                     .any(|p| p["path"].as_str().unwrap() == "specs/system/search.md"),
                 "diff must include the changed spec: {patches:?}"
             );
+        })
+        .await;
+    }
+
+    /// message-bus.md §Delivery Guarantees (Agent completion cleanup)
+    /// meets preview skip-ceremony: a preview agent's ONLY completion path
+    /// is the process exit (`POST /agents/:id/complete` and the MCP
+    /// equivalent refuse preview agents), and the DELETE/GC teardown kills
+    /// without completion. Both terminal paths must bulk-ack the agent's
+    /// unacked Directed inbox — otherwise the rows stay redeliverable
+    /// forever: the stale-agent detector only acks agents it marks Dead
+    /// (preview agents land in Stopped), and expire_acked_inboxes reclaims
+    /// only acked rows. Fails on a finish/teardown path that skips
+    /// acknowledge_agent_inbox.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn preview_terminal_paths_bulk_ack_directed_inbox() {
+        use gyre_common::message::{Destination, Message, MessageKind, MessageOrigin};
+
+        let dir = tempfile::tempdir().unwrap();
+        let (state, repo_id, ws_id) = preview_state(dir.path(), 86_400, None).await;
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // A sleeping agent: the test drives both terminal paths explicitly
+        // (the process-exit finish path directly, the DELETE kill via the
+        // endpoint), so the runtime must still be alive when they run.
+        let script_path = dir.path().join("agent-sleep.sh");
+        std::fs::write(&script_path, "#!/bin/sh\nsleep 30\n").unwrap();
+        make_executable(&script_path);
+
+        with_agent_command(script_path.to_str().unwrap(), || async {
+            let resp = post_preview(
+                &app,
+                preview_body(
+                    &repo_id,
+                    &["specs/system/search.md", "specs/system/identity.md"],
+                ),
+            )
+            .await;
+            assert_eq!(resp.status(), StatusCode::ACCEPTED);
+            let json = body_json(resp).await;
+            let preview_id = json["preview_id"].as_str().unwrap().to_string();
+            let agent0 = json["agents"][0]["agent_id"].as_str().unwrap().to_string();
+            let agent1 = json["agents"][1]["agent_id"].as_str().unwrap().to_string();
+
+            // Both runtimes registered before the terminal paths run.
+            soon(|| {
+                let reg = state.process_registry.try_lock().ok()?;
+                reg.contains_key(&agent0).then_some(())?;
+                reg.contains_key(&agent1).then_some(())
+            })
+            .await;
+
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64;
+            // Aged past the reclamation cutoff below so the reason probe can
+            // use a short window (mirrors complete_agent_bulk_acks_directed_inbox).
+            let created_at = now - 10_000;
+            let directed = |id: &str, agent: &str| Message {
+                id: gyre_common::Id::new(id.to_string()),
+                tenant_id: gyre_common::Id::new("default"),
+                from: MessageOrigin::Server,
+                workspace_id: Some(ws_id.clone()),
+                to: Destination::Agent(gyre_common::Id::new(agent.to_string())),
+                kind: MessageKind::TaskAssignment,
+                payload: None,
+                created_at,
+                signature: None,
+                key_id: None,
+                acknowledged: false,
+            };
+
+            // Two unacked Directed messages in agent0's inbox, one in
+            // agent1's — the sibling must survive the first terminal path.
+            state
+                .messages
+                .store(&directed("preview-ack-a1", &agent0))
+                .await
+                .unwrap();
+            state
+                .messages
+                .store(&directed("preview-ack-a2", &agent0))
+                .await
+                .unwrap();
+            state
+                .messages
+                .store(&directed("preview-ack-b1", &agent1))
+                .await
+                .unwrap();
+            assert_eq!(
+                state
+                    .messages
+                    .count_unacked(&gyre_common::Id::new(&agent0))
+                    .await
+                    .unwrap(),
+                2,
+                "precondition: two unacked Directed messages before the exit path"
+            );
+
+            // Process-exit terminal path: this is what every compute-target
+            // monitor calls when a preview agent's runtime goes away.
+            assert!(
+                super::finish_preview_agent(&state, &agent0).await,
+                "agent0 is a preview agent"
+            );
+
+            assert_eq!(
+                state
+                    .messages
+                    .count_unacked(&gyre_common::Id::new(&agent0))
+                    .await
+                    .unwrap(),
+                0,
+                "the process-exit finish path must bulk-ack the inbox"
+            );
+            for msg_id in ["preview-ack-a1", "preview-ack-a2"] {
+                let msg = state
+                    .messages
+                    .find_by_id(&gyre_common::Id::new(msg_id))
+                    .await
+                    .unwrap()
+                    .unwrap_or_else(|| panic!("{msg_id} must remain stored for audit"));
+                assert!(msg.acknowledged, "{msg_id} must be acknowledged");
+            }
+            let sibling = state
+                .messages
+                .find_by_id(&gyre_common::Id::new("preview-ack-b1"))
+                .await
+                .unwrap()
+                .expect("sibling preview agent's message must survive the exit path");
+            assert!(!sibling.acknowledged);
+
+            // The recorded reason is a lifecycle reason: expire_acked_inboxes
+            // matches only agent_completed/agent_orphaned, so reclaiming the
+            // two rows proves the finish path wrote one of them (not
+            // "explicit", not nothing).
+            let deleted = state
+                .messages
+                .expire_acked_inboxes(now - 1_000)
+                .await
+                .unwrap();
+            assert_eq!(
+                deleted, 2,
+                "dead-inbox retention must reclaim exactly the finished agent's inbox"
+            );
+
+            // DELETE terminal path: the teardown kills without completion —
+            // the exit monitor cannot run finish_preview_agent for a handle
+            // the kill already removed, so the ack must happen in the
+            // teardown itself.
+            let del = delete_preview(&app, &preview_id).await;
+            assert_eq!(del.status(), StatusCode::NO_CONTENT);
+            assert_eq!(
+                state
+                    .messages
+                    .count_unacked(&gyre_common::Id::new(&agent1))
+                    .await
+                    .unwrap(),
+                0,
+                "the DELETE teardown must bulk-ack the killed agent's inbox"
+            );
+            let killed = state
+                .messages
+                .find_by_id(&gyre_common::Id::new("preview-ack-b1"))
+                .await
+                .unwrap()
+                .expect("killed agent's message must remain stored for audit");
+            assert!(killed.acknowledged);
         })
         .await;
     }

@@ -2778,11 +2778,7 @@ mod tests {
             Ok(())
         }
 
-        async fn delete_branch(
-            &self,
-            _repo_path: &str,
-            _branch_name: &str,
-        ) -> anyhow::Result<()> {
+        async fn delete_branch(&self, _repo_path: &str, _branch_name: &str) -> anyhow::Result<()> {
             Ok(())
         }
 
