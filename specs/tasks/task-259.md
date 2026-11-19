@@ -2,8 +2,8 @@
 title: "Mirror namespace isolation: mirrors/{forge}/{owner}/{repo} storage namespace for external-forge mirrors"
 spec_ref: "Spec gap spec-36fad8fcafe7b73a2b6f2d0e / mirror-namespace-isolation / b580b93c564f"
 depends_on: []
-progress: not-started
-commits: []
+progress: complete
+commits: ["9057fc8f06b699202bd4cb1dd9070198fc94059d", "0bf540aef508b63a1a0586cf60ee24a1f0a96ae6"]
 ---
 
 ## Required behavior
@@ -54,3 +54,88 @@ Canonical spec: `specs/system/source-control.md`. Source: `fb1424fbac55cd23cb086
     ]
   }
 ]
+
+## Shipped
+
+`create_mirror_repo` (crates/gyre-server/src/api/repos.rs) stores every new
+mirror in an isolated namespace derived from its upstream URL:
+`{repos_root}/{ws}/mirrors/{forge}/{owner}/{repo}.git`, per
+source-control.md §External Repository Mirroring. Native `create_repo` is
+byte-for-byte unchanged (its name validation still rejects `/`, so it can
+never allocate under `mirrors/`).
+
+### Behavior
+
+- **Segment derivation** (`derive_mirror_namespace`): host `github.com` →
+  `github`, `gitlab.com` → `gitlab`, any other https host → a sanitized
+  host-derived segment (non-filesystem-safe characters map to `-`);
+  owner/repo come from the two URL path segments, with an optional `.git`
+  suffix stripped. The path is built with `Path::join` from validated
+  components over the startup-canonicalized absolute `repos_root`.
+- **Traversal rejection before any write**: the raw URL is rejected if it
+  contains `..` anywhere (checked before parsing, because the URL parser
+  normalizes `/../` away); each segment must be non-empty, free of `..`, and
+  limited to alphanumeric/`-`/`_`/`.` (so percent-encoded separators like
+  `%2F` fail); the path must be exactly `/{owner}/{repo}`. Violations return
+  400 with no repo row and no directory created.
+- **Scoped stale-dir cleanup**: the pre-`clone_mirror` cleanup is preceded by
+  an explicit containment guard (`repo_path.starts_with(mirrors_root)`,
+  returning an error otherwise), so it can only ever remove paths under
+  `{repos_root}/{ws}/mirrors/` — never a native repo's directory.
+- **Duplicate upstream**: a second mirror of the same upstream URL, or a
+  different URL spelling mapping to the same derived path (e.g. missing
+  `.git` suffix), in the same workspace is rejected with 409 before any
+  row or storage change.
+- **Unchanged downstream**: mirror_sync / `sync_mirror` / fetch_mirror,
+  post-sync graph extraction and spec-ledger sync, receive-pack read-only
+  enforcement, and smart-HTTP clone-by-name all follow the stored
+  `Repository.path`; legacy mirror rows keep their persisted flat paths with
+  no migration. The SSRF https-only gate and the `(workspace_id, name)` DB
+  identity rule are kept.
+
+### Review repair (this checkpoint)
+
+Independent review found one defect (F1): the new test
+`create_mirror_repo_maps_forge_hosts_into_namespace` posted both URL cases
+with the same `(workspace_id, name)`, so the second request deterministically
+hit `MemRepoRepository`'s `(workspace_id, name)` uniqueness bail → HTTP 500
+instead of the asserted 201. Fixed by giving each case its own name
+(`m-gitlab`, `m-example`); the name is not part of path derivation, so the
+namespace assertions are unchanged. Production code needed no change.
+
+### Test evidence
+
+Tests in the `repos.rs` tests module (compile-checked via
+`cargo check -p gyre-server --tests` — exit 0 — and `cargo fmt --check`
+clean; the gyre-server test binary exceeds this sandbox's 4 GiB build
+budget, so execution is deferred to the independent verifier):
+
+- `create_mirror_repo_returns_201` — asserts the record path is
+  `{repos_root}/{ws}/mirrors/github/org/repo.git` and NOT the old flat
+  `{ws}/{name}.git` namespace.
+- `create_mirror_repo_maps_forge_hosts_into_namespace` — gitlab and
+  other-host mapping (repaired: distinct name per case).
+- `create_mirror_repo_rejects_traversal_urls` — `..`, `%2F`, `.`, 3-segment,
+  empty-path and `.git`-only URLs all 400; no row, no directory on disk.
+- `create_mirror_repo_rejects_duplicate_upstream_url` — 409 for same URL
+  under a new name and for a same-derived-path spelling; first mirror
+  intact.
+- `create_mirror_repo_isolates_storage_and_serves_smart_http` — a REAL
+  `git clone --mirror` (recording git-ops double cloning a local fixture)
+  lands on disk at the derived namespace; the stale dir inside `mirrors/` is
+  removed pre-clone; the pre-isolation flat dir and an adjacent native repo
+  directory with refs are untouched; smart-HTTP
+  `/git/{ws}/{name}/info/refs` returns 200.
+- `legacy_mirror_rows_sync_from_persisted_path` — a pre-change flat-path
+  mirror row still fetches from its persisted path, no rewrite.
+- `derive_mirror_namespace_maps_forge_hosts` /
+  `derive_mirror_namespace_rejects_unsafe_urls` — unit battery for the
+  derivation and its fail-closed rules.
+
+Verifier must run: `cargo test -p gyre-server --lib create_mirror_repo` and
+`cargo test -p gyre-server --lib derive_mirror_namespace`, plus the
+workspace gates it owns (`cargo test --all`, arch/CI checks).
+
+Coverage row `specs/coverage/system/source-control.md` §13 (External
+Repository Mirroring) updated to `implemented` with source evidence
+(commit 5678d534).
