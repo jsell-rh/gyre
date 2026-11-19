@@ -67,6 +67,9 @@ pub struct WorkloadApiSvid {
 /// The transport used to reach the Workload API. Production uses the
 /// gRPC-over-UDS implementation; tests inject a fake to exercise response
 /// handling without a SPIRE server.
+// clippy: async-trait's expansion re-applies #[must_use] to a method that
+// already returns Result (double_must_use) — not actionable at the source.
+#[allow(clippy::double_must_use)]
 #[async_trait::async_trait]
 pub trait WorkloadApiTransport: Send + Sync {
     /// Send a FetchX509SVID request and return the first response message.

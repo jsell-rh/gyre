@@ -337,6 +337,10 @@ mod tests {
     #[test]
     fn accepts_genuine_svid() {
         let (ca, id, issued) = setup();
+        assert!(
+            issued.not_after > issued.not_before,
+            "issued SVID must carry a positive validity window"
+        );
         let anchors = vec![ca.cert_der().to_vec()];
         let verified = verify_svid(&issued.chain_pem, &anchors, &issued.expected, now()).unwrap();
         assert_eq!(verified.spiffe_id, id);
@@ -495,7 +499,7 @@ mod tests {
             pem::encode(&pem::Pem::new("CERTIFICATE", leaf_der)),
             blocks
                 .iter()
-                .map(|b| pem::encode(b))
+                .map(pem::encode)
                 .collect::<String>()
         );
         let result = verify_svid(&tampered_pem, &anchors, &issued.expected, now());
