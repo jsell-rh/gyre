@@ -7149,10 +7149,17 @@ mod tests {
             "workspace member (non-author) should NOT receive a notification"
         );
 
-        // Verify event.
-        let msg = rx
-            .try_recv()
-            .expect("AtomicGroupFailed event should be emitted");
+        // Verify event. Task-249 (message-bus.md §Broadcast-only
+        // kinds): the rollback requeue also broadcasts QueueUpdated first,
+        // so scan for the AtomicGroupFailed event instead of assuming it
+        // is the first message.
+        let mut failed_event = None;
+        while let Ok(msg) = rx.try_recv() {
+            if msg.kind == gyre_common::MessageKind::AtomicGroupFailed {
+                failed_event = Some(msg);
+            }
+        }
+        let msg = failed_event.expect("AtomicGroupFailed event should be emitted");
         assert_eq!(msg.kind, gyre_common::MessageKind::AtomicGroupFailed);
     }
 
