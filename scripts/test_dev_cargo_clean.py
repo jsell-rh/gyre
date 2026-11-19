@@ -33,24 +33,38 @@ class CargoArtifactTest(unittest.TestCase):
                     '#[test]\nfn requires_scope() { assert!(scoped()); }\n')
             env = {**os.environ, 'CARGO_TARGET_DIR': str(root / 'target')}
             helper = Path(__file__).with_name('dev-cargo-clean.py')
-            sentinel = None
+            # The sentinel stands in for a compiled dependency artifact in the
+            # shared target dir: it must survive package-scoped cleaning of the
+            # workspace members. It lives in the shared dependency cache
+            # (debug/deps) rather than next to the probe's own executable —
+            # Cargo's artifact layout varies across toolchains, and a release
+            # that reports the test executable inside a package-attributed
+            # build/.../out directory would place the sentinel exactly where
+            # `cargo clean --package` legitimately removes it. Self-scoping the
+            # test invocation with --package also keeps the probe runnable
+            # under memory-bounded build policies that require explicit
+            # package selection for code generation.
+            sentinel = root / 'target' / 'debug' / 'deps' / 'unrelated-dependency.rlib'
+            sentinel_written = False
             for name, expected in [('good', 0), ('mutant', 101), ('good', 0)]:
                 cleaned = subprocess.run([sys.executable, str(helper)], cwd=root / name,
                                          env=env, capture_output=True, text=True, timeout=30)
                 self.assertEqual(cleaned.returncode, 0, cleaned.stderr)
-                result = subprocess.run(['cargo', 'test', '--offline', '--quiet', '--message-format=json'], cwd=root / name,
+                result = subprocess.run(['cargo', 'test', '--package', 'gyre_cache_probe',
+                                         '--offline', '--quiet', '--message-format=json'], cwd=root / name,
                                         env=env, capture_output=True, text=True, timeout=120)
                 self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
-                if sentinel is None:
+                if not sentinel_written:
                     artifacts = [json.loads(line) for line in result.stdout.splitlines() if line.startswith('{')]
                     executables = [Path(item['executable']) for item in artifacts
                                    if item.get('reason') == 'compiler-artifact' and item.get('executable')]
                     self.assertEqual(len(executables), 1, result.stdout)
                     # Target triples and Cargo's intermediate build layout can
-                    # vary across toolchains; use Cargo's actual artifact path.
+                    # vary across toolchains; only require the shared target dir.
                     self.assertTrue(executables[0].is_relative_to(root / 'target'))
-                    sentinel = executables[0].parent / 'unrelated-dependency.rlib'
+                    sentinel.parent.mkdir(parents=True, exist_ok=True)
                     sentinel.write_text('dependency cache retained')
+                    sentinel_written = True
                 self.assertEqual(sentinel.read_text(), 'dependency cache retained')
 
 
