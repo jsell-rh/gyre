@@ -263,9 +263,17 @@ pub async fn get_agent(
     Ok(Json(resp))
 }
 
+/// PUT /api/v1/agents/:id/status
+///
+/// identity-security.md §Task-Scoped JWT Claims — by-effect task-scope
+/// surface: a terminal transition (Dead/Failed/Stopped) revokes the target
+/// task's Task-scoped secrets, so an agent principal may only act on its
+/// own agent or an agent whose task is covered by its `task_id` claim.
+/// Non-agent principals are unaffected.
 pub async fn update_agent_status(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    auth: crate::auth::AuthenticatedAgent,
     Json(req): Json<UpdateStatusRequest>,
 ) -> Result<Json<AgentResponse>, ApiError> {
     let mut agent = state
@@ -273,6 +281,19 @@ pub async fn update_agent_status(
         .find_by_id(&Id::new(&id))
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("agent {id} not found")))?;
+    if let Some(claim) = auth.agent_task_claim() {
+        let own = auth.agent_id == agent.id.to_string();
+        let task_covered = agent
+            .current_task_id
+            .as_ref()
+            .is_some_and(|t| t.to_string() == claim);
+        if !own && !task_covered {
+            return Err(ApiError::Forbidden(format!(
+                "agent token is scoped to task {claim}; cannot act on agent {}",
+                agent.id
+            )));
+        }
+    }
     let new_status = parse_agent_status(&req.status)?;
     agent
         .transition_status(new_status)
@@ -509,6 +530,7 @@ mod tests {
                     .method("PUT")
                     .uri(format!("/api/v1/agents/{id}/status"))
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -648,6 +670,7 @@ mod tests {
                     .method("PUT")
                     .uri("/api/v1/agents/agent-status-dead/status")
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -664,6 +687,7 @@ mod tests {
                     .method("PUT")
                     .uri("/api/v1/agents/agent-status-idle/status")
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -738,6 +762,7 @@ mod tests {
                     .method("PUT")
                     .uri(format!("/api/v1/agents/{id}/status"))
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -753,6 +778,7 @@ mod tests {
                     .method("PUT")
                     .uri(format!("/api/v1/agents/{id}/status"))
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -910,6 +936,7 @@ mod tests {
                     .method("PUT")
                     .uri(format!("/api/v1/agents/{id}/status"))
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )

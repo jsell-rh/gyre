@@ -2360,10 +2360,13 @@ mod tests {
                 .await
                 .unwrap();
 
-        let code =
-            crate::api::spawn::fail_agent(State(state.clone()), Path(repo_orch.id.to_string()))
-                .await
-                .unwrap();
+        let code = crate::api::spawn::fail_agent(
+            State(state.clone()),
+            Path(repo_orch.id.to_string()),
+            auth_in_tenant("t1"),
+        )
+        .await
+        .unwrap();
         assert_eq!(code, StatusCode::OK);
 
         let replacement = state
@@ -2402,9 +2405,13 @@ mod tests {
                 .await
                 .unwrap();
 
-        let code = crate::api::spawn::stop_agent(State(state.clone()), Path(agent.id.to_string()))
-            .await
-            .unwrap();
+        let code = crate::api::spawn::stop_agent(
+            State(state.clone()),
+            Path(agent.id.to_string()),
+            auth_in_tenant("t1"),
+        )
+        .await
+        .unwrap();
         assert_eq!(code, StatusCode::OK);
 
         let stopped = state.agents.find_by_id(&agent.id).await.unwrap().unwrap();
@@ -2526,13 +2533,21 @@ mod tests {
                 .unwrap();
 
         let id = agent.id.to_string();
-        let code = crate::api::spawn::stop_agent(State(state.clone()), Path(id.clone()))
-            .await
-            .unwrap();
+        let code = crate::api::spawn::stop_agent(
+            State(state.clone()),
+            Path(id.clone()),
+            auth_in_tenant("t1"),
+        )
+        .await
+        .unwrap();
         assert_eq!(code, StatusCode::OK);
-        let code = crate::api::spawn::fail_agent(State(state.clone()), Path(id.clone()))
-            .await
-            .unwrap();
+        let code = crate::api::spawn::fail_agent(
+            State(state.clone()),
+            Path(id.clone()),
+            auth_in_tenant("t1"),
+        )
+        .await
+        .unwrap();
         assert_eq!(code, StatusCode::OK);
 
         // Exactly one live workspace orchestrator (§3.2) — the stop-path
@@ -2594,9 +2609,13 @@ mod tests {
         state.agents.update(&aged).await.unwrap();
         crate::stale_agents::run_once(&state).await.unwrap();
 
-        let code = crate::api::spawn::fail_agent(State(state.clone()), Path(agent.id.to_string()))
-            .await
-            .unwrap();
+        let code = crate::api::spawn::fail_agent(
+            State(state.clone()),
+            Path(agent.id.to_string()),
+            auth_in_tenant("t1"),
+        )
+        .await
+        .unwrap();
         assert_eq!(code, StatusCode::OK);
 
         let peers = state

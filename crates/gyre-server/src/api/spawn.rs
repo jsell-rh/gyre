@@ -391,6 +391,47 @@ pub async fn cleanup_jj_workspace(
 
 // ── Shared agent-process launch ──────────────────────────────────────────
 
+/// The agent's stored stack fingerprint for JWT minting
+/// (identity-security.md §Task-Scoped JWT Claims: `stack_hash` /
+/// `wl_stack_hash` — "SHA-256 of the agent's runtime stack fingerprint").
+///
+/// Sources, in order: the stored workload-attestation record (written at
+/// the previous launch of the same agent row — the Ralph-loop re-spawn
+/// path reuses the agent id) and the agent's self-reported stack (M14.1,
+/// `agent_stacks` KV — the same source `launch_agent_workload` reads when
+/// it writes the attestation record). An absent or empty fingerprint
+/// yields `None`: the claim is only ever populated from a real attested
+/// value, never invented — a first-spawn agent has not attested a stack
+/// yet, and its token honestly omits the claim.
+pub(crate) async fn stored_stack_fingerprint(
+    state: &Arc<AppState>,
+    agent_id: &str,
+) -> Option<String> {
+    if let Ok(Some(json)) = state
+        .kv_store
+        .kv_get("workload_attestations", agent_id)
+        .await
+    {
+        if let Ok(att) = serde_json::from_str::<workload_attestation::WorkloadAttestation>(&json) {
+            if !att.stack_fingerprint.is_empty() {
+                return Some(att.stack_fingerprint);
+            }
+        }
+    }
+    state
+        .kv_store
+        .kv_get("agent_stacks", agent_id)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|s| {
+            serde_json::from_str::<super::stack_attest::AgentStack>(&s)
+                .ok()
+                .map(|st| st.fingerprint())
+        })
+        .filter(|f| !f.is_empty())
+}
+
 /// Launch an agent's runtime process on its resolved compute target and
 /// record the resulting workload attestation (G10 + M19.4).
 ///
@@ -490,6 +531,53 @@ pub(crate) async fn spawn_agent_core(
     // fails to create, the just-created agent record and its token are
     // deleted (see both rollback paths below), so a failed spawn leaves no
     // orphaned entities.
+    // identity-security.md §Task-Scoped JWT Claims — hard task-scope
+    // boundary (spawn surface): an agent principal may spawn onto a target
+    // task only when its own token authorizes that task — the target
+    // matching the caller's `task_id` claim, or the token carrying an
+    // explicit spawn scope (`repo:{name}:spawn` / `workspace:{id}:spawn`)
+    // covering the target task's repo/workspace (the same claim-level
+    // right the MCP gyre_spawn_worker path validates via
+    // validate_tool_scope). Without this check the spawn surface is
+    // contained only by the absence of 'spawn' from the Agent-role builtin
+    // ABAC allow — a policy default, not code. Human/system/orchestrator
+    // principals keep their existing rights (agent_task_claim is None for
+    // them). A target task that does not resolve skips this gate and fails
+    // in the existence check below with its normal error.
+    if let Some(claim) = auth.agent_task_claim() {
+        if req.task_id != claim {
+            let spawn_scope_covers = match state.tasks.find_by_id(&Id::new(&req.task_id)).await {
+                Ok(Some(task)) => {
+                    let repo_spawn_right = state
+                        .repos
+                        .find_by_id(&task.repo_id)
+                        .await
+                        .ok()
+                        .flatten()
+                        .map(|r| {
+                            auth.scope
+                                .iter()
+                                .any(|s| *s == format!("repo:{}:spawn", r.name))
+                        })
+                        .unwrap_or(false);
+                    let ws_spawn_right = auth
+                        .scope
+                        .iter()
+                        .any(|s| *s == format!("workspace:{}:spawn", task.workspace_id));
+                    repo_spawn_right || ws_spawn_right
+                }
+                // Missing task / lookup failure: the existence check
+                // below rejects the spawn — no scope decision needed.
+                _ => true,
+            };
+            if !spawn_scope_covers {
+                return Err(ApiError::Forbidden(format!(
+                    "agent token is scoped to task {claim}; cannot spawn onto task {}",
+                    req.task_id
+                )));
+            }
+        }
+    }
     // Verify repo exists
     let repo = state
         .repos
@@ -826,12 +914,43 @@ pub(crate) async fn spawn_agent_core(
 
     // Pre-mint a JWT carrying the worker's repo scope so `subject.repo_scope`
     // (§Attributes, source "Agent OIDC claim") is real on every request the
-    // agent makes, plus the `wl_image_hash` workload attestation claim
-    // resolved above. Further workload claims are attached via the workload
-    // attestation record (state.workload_attestations, queryable via
-    // GET /api/v1/agents/{id}/workload). Under §1 Token Scoping the mint also
-    // carries the full hierarchy context (tenant, workspace, repo) and the
-    // fine-grained `repo:{name}:write` scope list.
+    // agent makes, plus the workload claims resolved above/below. Under §1
+    // Token Scoping the mint also carries the full hierarchy context
+    // (tenant, workspace, repo) and the fine-grained `repo:{name}:write`
+    // scope list.
+    //
+    // identity-security.md §Task-Scoped JWT Claims — every fact knowable at
+    // mint time is embedded: `persona` (the spawn request's validated
+    // persona/persona_slug), `wl_compute_target` (the request's compute
+    // target id), `wl_hostname` (the remote compute target's host), and
+    // `wl_stack_hash` (the stored workload-attestation stack fingerprint —
+    // populated when the agent row already has an attested stack, e.g. a
+    // Ralph-loop re-spawn of the same agent row; a first-spawn agent has
+    // not attested a stack yet, so the claim is honestly absent — the
+    // spec table says "null if not attested"). A minted token is
+    // immutable: the fingerprint reaches the claim on the NEXT mint for
+    // the same agent row (`ralph_loop.rs` relaunch), never by rewriting
+    // this token — and the `agent_tokens` KV entry must keep matching
+    // the token string injected into the launched process (the auth
+    // chain matches presented tokens by exact string, auth.rs step 2),
+    // so a post-launch KV replacement would revoke the running agent's
+    // own credential. `wl_pid`/`wl_container_id` exist only after the
+    // process launch — the token must pre-exist the process it
+    // authenticates — so those facts live in the workload-attestation
+    // record (GET /api/v1/agents/{id}/workload) instead of this token.
+    let wl_compute_target = req.compute_target_id.clone();
+    let wl_hostname: Option<String> = match resolved_ct_entity.as_ref() {
+        Some(e) if e.target_type == ComputeTargetType::Ssh => {
+            e.config["host"].as_str().map(|h| h.to_string())
+        }
+        _ => None,
+    };
+    let wl_stack_hash: Option<String> =
+        stored_stack_fingerprint(state, &agent.id.to_string()).await;
+    let mint_persona = persona
+        .as_ref()
+        .map(|p| p.slug.clone())
+        .or_else(|| bare_persona.clone());
     let token = state
         .agent_signing_key
         .mint_worker_scoped(
@@ -844,9 +963,10 @@ pub(crate) async fn spawn_agent_core(
             &repo.workspace_id.to_string(),
             &req.repo_id,
             &repo.name,
-            // No persona input exists on the spawn request; workers run
-            // persona-less until a persona assignment mechanism exists.
-            None,
+            // The spawn request's validated persona (persona_slug resolved
+            // through the scope chain, or the validated bare persona name)
+            // — identity-security.md §Task-Scoped JWT Claims `persona`.
+            mint_persona.as_deref(),
             // identity-security.md attestation levels: 1=raw subprocess,
             // 2=CLI-managed, 3=Gyre-managed container with attestation.
             // Every spawn-minted JWT carries attestation_level (Task-Scoped
@@ -867,6 +987,9 @@ pub(crate) async fn spawn_agent_core(
                         ComputeTargetType::Kubernetes => 1,
                     }),
             ),
+            wl_compute_target,
+            wl_hostname,
+            wl_stack_hash,
             wl_image_hash,
         )
         .map_err(|e| ApiError::Internal(anyhow::anyhow!("agent token mint: {e}")))?;
@@ -2420,6 +2543,84 @@ pub async fn spawn_agent(
     Ok((StatusCode::CREATED, Json(resp)))
 }
 
+// ── Agent-lifecycle task-scope boundaries (identity-security.md
+// §Task-Scoped JWT Claims: "An agent cannot transition a task it was not
+// spawned for ... even if it holds a valid (non-expired) JWT") ──────────
+
+/// Completion boundary: an agent principal may only complete its own agent
+/// or an agent whose current task is covered by its `task_id` claim — the
+/// completion path transitions the target task to Review and opens its MR.
+/// Human/system/orchestrator principals are not restricted.
+fn require_agent_self_or_task_claim(
+    auth: &crate::auth::AuthenticatedAgent,
+    target: &Agent,
+) -> Result<(), ApiError> {
+    if let Some(claim) = auth.agent_task_claim() {
+        let own = auth.agent_id == target.id.to_string();
+        let task_covered = target
+            .current_task_id
+            .as_ref()
+            .is_some_and(|t| t.to_string() == claim);
+        if !own && !task_covered {
+            return Err(ApiError::Forbidden(format!(
+                "agent token is scoped to task {claim}; cannot complete agent {}",
+                target.id
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Termination boundary (stop/fail/status): an agent may terminate itself,
+/// never another task's workload or Task-scoped secrets — the token's task
+/// claim cannot cover destroying a different task's run.
+fn require_agent_self_only(
+    auth: &crate::auth::AuthenticatedAgent,
+    target: &Agent,
+) -> Result<(), ApiError> {
+    if auth.agent_task_claim().is_some() && auth.agent_id != target.id.to_string() {
+        return Err(ApiError::Forbidden(format!(
+            "agent token is scoped to task {}; cannot terminate agent {}",
+            auth.agent_task_claim().unwrap_or_default(),
+            target.id
+        )));
+    }
+    Ok(())
+}
+
+/// Tenant containment for ABAC-exempt agent-lifecycle routes (standing
+/// invariant: every route that runs without middleware ABAC must enforce
+/// per-handler authorization). The loaded entity's tenant is compared
+/// against the caller's; the bootstrap system principal is exempt (it
+/// created the tenant, mirroring `resolve_repo_by_slug`'s fallback).
+async fn require_agent_tenant_containment(
+    state: &Arc<AppState>,
+    auth: &crate::auth::AuthenticatedAgent,
+    agent: &Agent,
+) -> Result<(), ApiError> {
+    if auth.is_system_principal() {
+        return Ok(());
+    }
+    let workspace = state
+        .workspaces
+        .find_by_id(&agent.workspace_id)
+        .await
+        .map_err(ApiError::Internal)?
+        .ok_or_else(|| {
+            ApiError::NotFound(format!(
+                "workspace {} for agent {} not found",
+                agent.workspace_id, agent.id
+            ))
+        })?;
+    if auth.tenant_id != workspace.tenant_id.to_string() {
+        return Err(ApiError::Forbidden(format!(
+            "agent {} belongs to another tenant",
+            agent.id
+        )));
+    }
+    Ok(())
+}
+
 /// Create the completion MR for an agent (agent-runtime.md §1 Phase 6 step 1).
 ///
 /// Shared by the REST `POST /agents/:id/complete` handler and the MCP
@@ -2656,10 +2857,22 @@ pub(crate) async fn acknowledge_agent_inbox(state: &AppState, agent_id: &Id, rea
 /// 1. Creates a MergeRequest (source->target)
 /// 2. Transitions task status to Review
 /// 3. Transitions agent status to Idle
-#[instrument(skip(state, req), fields(agent_id = %id, branch = %req.branch))]
+///
+/// identity-security.md §Task-Scoped JWT Claims — hard task-scope boundary:
+/// the completion path transitions the target agent's task to Review and
+/// opens its completion MR, so an agent principal may only complete its own
+/// agent or an agent whose task is covered by its `task_id` claim (the same
+/// boundary the MCP twin `gyre_agent_complete` enforces self-only). The
+/// seeded 'agent-scoped-access' builtin ALLOWS the 'complete' action for
+/// Agent-role subjects on resource type '*', so without this per-handler
+/// check an agent JWT spawned for task A can complete task B's agent under
+/// DEFAULT configuration. Human/system/orchestrator principals are
+/// unaffected.
+#[instrument(skip(state, auth, req), fields(agent_id = %id, branch = %req.branch))]
 pub async fn complete_agent(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    auth: crate::auth::AuthenticatedAgent,
     Json(req): Json<CompleteAgentRequest>,
 ) -> Result<(StatusCode, Json<MrResponse>), ApiError> {
     let mut agent = state
@@ -2667,6 +2880,7 @@ pub async fn complete_agent(
         .find_by_id(&Id::new(&id))
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("agent {id} not found")))?;
+    require_agent_self_or_task_claim(&auth, &agent)?;
 
     let (mr, created) = create_mr_for_completion(
         &state,
@@ -2966,16 +3180,26 @@ pub async fn record_agent_usage(
 /// POST /api/v1/agents/:id/fail
 ///
 /// Marks an agent as Failed (non-recoverable error). Idempotent.
-#[instrument(skip(state), fields(agent_id = %id))]
+///
+/// Per-handler authorization (standing invariant for ABAC-exempt routes —
+/// this route sits in scripts/abac-route-registry-exemptions.txt, so no
+/// middleware policy runs): the caller must be contained in the target
+/// agent's tenant, and an agent principal may only fail its own agent
+/// (identity-security.md §Task-Scoped JWT Claims — failing another task's
+/// agent terminates its workload and revokes its Task-scoped secrets).
+#[instrument(skip(state, auth), fields(agent_id = %id))]
 pub async fn fail_agent(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    auth: crate::auth::AuthenticatedAgent,
 ) -> Result<StatusCode, ApiError> {
     let mut agent = state
         .agents
         .find_by_id(&Id::new(&id))
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("agent {id} not found")))?;
+    require_agent_tenant_containment(&state, &auth, &agent).await?;
+    require_agent_self_only(&auth, &agent)?;
 
     // Already-terminal guard (task-093 review): a failed/stopped/dead agent
     // is a corpse — re-failing it must not re-run the budget decrement,
@@ -3105,16 +3329,26 @@ pub async fn fail_agent(
 /// POST /api/v1/agents/:id/stop
 ///
 /// Marks an agent as Stopped (operator/orchestrator initiated). Idempotent.
-#[instrument(skip(state), fields(agent_id = %id))]
+///
+/// Per-handler authorization (standing invariant for ABAC-exempt routes —
+/// this route sits in scripts/abac-route-registry-exemptions.txt, so no
+/// middleware policy runs): the caller must be contained in the target
+/// agent's tenant, and an agent principal may only stop its own agent
+/// (identity-security.md §Task-Scoped JWT Claims — stopping another task's
+/// agent terminates its workload and revokes its Task-scoped secrets).
+#[instrument(skip(state, auth), fields(agent_id = %id))]
 pub async fn stop_agent(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    auth: crate::auth::AuthenticatedAgent,
 ) -> Result<StatusCode, ApiError> {
     let mut agent = state
         .agents
         .find_by_id(&Id::new(&id))
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("agent {id} not found")))?;
+    require_agent_tenant_containment(&state, &auth, &agent).await?;
+    require_agent_self_only(&auth, &agent)?;
 
     if matches!(
         agent.status,
@@ -3504,6 +3738,25 @@ mod tests {
     use std::sync::Arc;
     use tower::ServiceExt;
 
+    /// Hand-rolled principal for direct handler calls where the auth
+    /// extractor is not in play (same shape as orchestrator.rs's
+    /// `auth_in_tenant`).
+    fn plain_auth(agent_id: &str) -> crate::auth::AuthenticatedAgent {
+        crate::auth::AuthenticatedAgent {
+            agent_id: agent_id.to_string(),
+            user_id: None,
+            roles: vec![gyre_domain::UserRole::Admin],
+            tenant_id: "default".to_string(),
+            workspace_id: None,
+            repo_id: None,
+            scope: Vec::new(),
+            jwt_claims: None,
+            bearer_token: None,
+            deprecated_token_auth: false,
+            impersonation: None,
+        }
+    }
+
     fn app() -> Router {
         crate::api::api_router().with_state(test_state())
     }
@@ -3547,6 +3800,7 @@ mod tests {
                     .method("POST")
                     .uri("/api/v1/tasks")
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -3563,8 +3817,12 @@ mod tests {
         task_id: &str,
         branch: &str,
     ) -> (Router, serde_json::Value) {
+        // The name is derived from the branch so a test that spawns more
+        // than one agent (e.g. the task-scope boundary probes) does not
+        // trip spawn_agent_core's duplicate-agent-name 400 — every call
+        // site uses a distinct branch.
         let body = serde_json::json!({
-            "name": "worker-1",
+            "name": format!("worker-{}", branch.replace('/', "-")),
             "repo_id": repo_id,
             "task_id": task_id,
             "branch": branch,
@@ -4137,6 +4395,7 @@ mod tests {
             let (code, body) = complete_agent(
                 axum::extract::State(state.clone()),
                 axum::extract::Path(agent_id.clone()),
+                plain_auth("system"),
                 axum::Json(CompleteAgentRequest {
                     branch: "feat/r19".to_string(),
                     title: "R19 feature".to_string(),
@@ -4405,6 +4664,7 @@ mod tests {
                     .method("POST")
                     .uri(format!("/api/v1/agents/{agent_id}/complete"))
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -4437,6 +4697,7 @@ mod tests {
                     .method("POST")
                     .uri(format!("/api/v1/agents/{agent_id}/complete"))
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -4475,6 +4736,7 @@ mod tests {
                     .method("POST")
                     .uri(format!("/api/v1/agents/{agent_id}/complete"))
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -4507,12 +4769,358 @@ mod tests {
                     .method("POST")
                     .uri("/api/v1/agents/no-such/complete")
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// AC (task-263, identity-security.md §Task-Scoped JWT Claims): a
+    /// valid, non-expired agent JWT spawned for task A gets 403 on
+    /// POST /agents/{task-B-agent}/complete — task B NOT transitioned to
+    /// Review, no completion MR created — and the same boundary holds for
+    /// /stop and /fail (target agent status unchanged, its Task-scoped
+    /// secrets not revoked). Completing its own agent works and revokes
+    /// the token: replaying the same jti gets 401 while exp is still in
+    /// the future, and the jti is present in the durable revoked_tokens
+    /// table. The operator (global token) keeps the stop right.
+    #[tokio::test]
+    async fn agent_jwt_task_scope_boundary_on_lifecycle_endpoints() {
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let (app, repo_id) = create_repo(app).await;
+        let (app, task_a) = create_task(app, "Boundary task A").await;
+        let (app, task_b) = create_task(app, "Boundary task B").await;
+        let (app, json_a) = do_spawn(app, &repo_id, &task_a, "feat/scope-a").await;
+        let (app, json_b) = do_spawn(app, &repo_id, &task_b, "feat/scope-b").await;
+        let agent_a = json_a["agent"]["id"].as_str().unwrap().to_string();
+        let agent_b = json_b["agent"]["id"].as_str().unwrap().to_string();
+        let token_a = json_a["token"].as_str().unwrap().to_string();
+        let token_b = json_b["token"].as_str().unwrap().to_string();
+
+        // A Task-scoped secret for task B: a successful foreign stop/fail
+        // would revoke it, a 403 must leave it in place.
+        let task_b_secret = gyre_common::Secret {
+            id: Id::new("sec-task-b"),
+            name: "EPHEMERAL_DB".to_string(),
+            scope: gyre_common::SecretScope::Task,
+            scope_id: task_b.clone(),
+            secret_type: gyre_common::SecretType::Ephemeral,
+            created_by: "system".to_string(),
+            created_at: 1000,
+            expires_at: None,
+            last_rotated_at: None,
+            tenant_id: "default".to_string(),
+        };
+        state
+            .secrets
+            .create(&task_b_secret, b"task-b-value")
+            .await
+            .unwrap();
+
+        // ── complete: 403, task B untouched, no MR ──────────────────────
+        let body = serde_json::json!({
+            "branch": "feat/scope-b",
+            "title": "hijacked completion",
+            "target_branch": "main",
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/agents/{agent_b}/complete"))
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {token_a}"))
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let task_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/tasks/{task_b}"))
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(body_json(task_resp).await["status"], "in_progress");
+        let mrs = state.merge_requests.list().await.unwrap();
+        assert!(
+            mrs.iter()
+                .all(|m| m.author_agent_id.as_ref() != Some(&Id::new(&agent_b))),
+            "no completion MR may be created for task B's agent"
+        );
+
+        // ── stop / fail: 403, agent B still Active, secret intact ────────
+        for uri in [
+            format!("/api/v1/agents/{agent_b}/stop"),
+            format!("/api/v1/agents/{agent_b}/fail"),
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(&uri)
+                        .header("authorization", format!("Bearer {token_a}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::FORBIDDEN, "uri: {uri}");
+        }
+        let agent_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/agents/{agent_b}"))
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(body_json(agent_resp).await["status"], "active");
+        let scoped = state
+            .secrets
+            .list_by_scope(gyre_common::SecretScope::Task, &task_b, "default")
+            .await
+            .unwrap();
+        assert_eq!(scoped.len(), 1, "task B's secret must not be revoked");
+
+        // ── self-completion passes the boundary and revokes the token ────
+        let body = serde_json::json!({
+            "branch": "feat/scope-a",
+            "title": "Task A done",
+            "target_branch": "main",
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/agents/{agent_a}/complete"))
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {token_a}"))
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let task_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/tasks/{task_a}"))
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(body_json(task_resp).await["status"], "review");
+
+        // The jti is in the durable revocation table ...
+        let jti = state
+            .agent_signing_key
+            .extract_jti_unverified(&token_a)
+            .expect("spawn-minted token carries a jti");
+        assert!(state.spawn_log.is_token_revoked(&jti).await.unwrap());
+        // ... and replaying the same jti gets 401 even though exp is an
+        // hour out (the default TTL is 3600 s).
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/agents/{agent_a}/complete"))
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {token_a}"))
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        // ── the operator (global token) keeps the stop right ─────────────
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/agents/{agent_b}/stop"))
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        // Agent B's own token is revoked by its legitimate stop — the
+        // boundary denied the FOREIGN caller, not the teardown itself.
+        let jti_b = state
+            .agent_signing_key
+            .extract_jti_unverified(&token_b)
+            .unwrap();
+        assert!(state.spawn_log.is_token_revoked(&jti_b).await.unwrap());
+    }
+
+    /// AC (task-263): POST /api/v1/agents/spawn onto task B is denied for
+    /// an agent principal whose token carries neither a matching task_id
+    /// claim nor a spawn scope covering task B's repo/workspace; spawning
+    /// onto the caller's own task passes the claim boundary.
+    #[tokio::test]
+    async fn agent_jwt_cannot_spawn_onto_foreign_task() {
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let (app, repo_id) = create_repo(app).await;
+        let (app, task_a) = create_task(app, "Spawn boundary A").await;
+        let (app, task_b) = create_task(app, "Spawn boundary B").await;
+        let (app, json_a) = do_spawn(app, &repo_id, &task_a, "feat/spawn-a").await;
+        let token_a = json_a["token"].as_str().unwrap().to_string();
+
+        // Task B, same repo — tier containment alone would allow it; the
+        // task-claim boundary must not.
+        let body = serde_json::json!({
+            "name": "foreign-spawn",
+            "repo_id": repo_id,
+            "task_id": task_b,
+            "branch": "feat/evil",
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/agents/spawn")
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {token_a}"))
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        // Task B was not reassigned nor advanced by the denied spawn.
+        let task_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/tasks/{task_b}"))
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let tj = body_json(task_resp).await;
+        assert_eq!(tj["status"], "backlog");
+        assert!(
+            tj["assigned_to"].is_null(),
+            "task B must not be assigned by the denied spawn"
+        );
+
+        // Spawning onto the caller's own task passes the boundary (the
+        // claim matches).
+        let body = serde_json::json!({
+            "name": "own-task-respawn",
+            "repo_id": repo_id,
+            "task_id": task_a,
+            "branch": "feat/respawn",
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/agents/spawn")
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {token_a}"))
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+    }
+
+    /// AC (task-263): decoding a spawn-minted agent JWT shows the specced
+    /// Task-Scoped JWT Claims — sub='agent:<uuid>', aud='gyre', jti,
+    /// task_id, spawned_by, persona (requested at spawn),
+    /// attestation_level, wl_compute_target (compute_target_id was set on
+    /// the spawn request), and the 3600 s default TTL. A first-spawn agent
+    /// has not attested a stack yet, so the stack-hash claims are honestly
+    /// absent — see `respawn_mint_carries_stored_stack_fingerprint` for
+    /// the populated form.
+    #[tokio::test]
+    async fn spawn_minted_jwt_carries_task_scoped_claims() {
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        seed_spawn_persona(&state, "security", "be vigilant").await;
+        let (app, repo_id) = create_repo(app).await;
+        let (app, task_id) = create_task(app, "Claims task").await;
+        let (app, ct_id) = create_compute_target(app, "claims-ct", false).await;
+        let (_app, json) = do_spawn_with_persona(
+            app,
+            "claims-worker",
+            &repo_id,
+            &task_id,
+            "feat/claims",
+            Some(&ct_id),
+            "security",
+        )
+        .await;
+        let agent_id = json["agent"]["id"].as_str().unwrap().to_string();
+        let token = json["token"].as_str().unwrap().to_string();
+
+        let claims = state
+            .agent_signing_key
+            .validate(&token, &state.base_url)
+            .expect("spawn-minted JWT must validate against the forge key");
+        assert_eq!(
+            claims.sub,
+            format!("agent:{agent_id}"),
+            "sub is agent:<uuid>"
+        );
+        assert_eq!(claims.aud, "gyre", "aud is the specced default");
+        assert!(!claims.jti.is_empty(), "jti is minted");
+        assert_eq!(claims.task_id, task_id);
+        assert_eq!(
+            claims.spawned_by, "system",
+            "global-token spawner is 'system'"
+        );
+        assert_eq!(
+            claims.persona.as_deref(),
+            Some("security"),
+            "persona comes from the spawn request's validated persona_slug"
+        );
+        assert_eq!(
+            claims.attestation_level,
+            Some(3),
+            "Container compute target → level 3"
+        );
+        assert_eq!(
+            claims.wl_compute_target.as_deref(),
+            Some(ct_id.as_str()),
+            "wl_compute_target carries the request's compute target id"
+        );
+        assert_eq!(claims.exp - claims.iat, 3600, "default TTL is 3600 s");
+        assert!(
+            claims.wl_stack_hash.is_none() && claims.stack_hash.is_none(),
+            "a first-spawn agent has no attested stack — the claim is absent, \
+             never invented"
+        );
     }
 
     // ─── Auto-emitted analytics events (analytics.md §Auto-Emitted Events) ────
@@ -4654,6 +5262,7 @@ mod tests {
                     .method("POST")
                     .uri(format!("/api/v1/agents/{agent_id}/complete"))
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -4701,6 +5310,7 @@ mod tests {
                     .method("POST")
                     .uri(format!("/api/v1/agents/{agent_id}/complete"))
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -4833,6 +5443,10 @@ mod tests {
                     .method("POST")
                     .uri(format!("/api/v1/agents/{agent_id}/complete"))
                     .header("content-type", "application/json")
+                    // task-263: complete takes an auth extractor now (agent
+                    // task-scope boundary) — the operator token keeps the
+                    // inbox-cleanup behavior under test reachable.
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -4951,6 +5565,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri(format!("/api/v1/agents/{agent_id}/fail"))
+                    .header("authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -5007,6 +5622,7 @@ mod tests {
                     .method("POST")
                     .uri(format!("/api/v1/agents/{agent_id}/complete"))
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -5034,6 +5650,7 @@ mod tests {
                     .method("POST")
                     .uri(format!("/api/v1/agents/{agent_id}/complete"))
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -5061,7 +5678,7 @@ mod tests {
         let ev = &events[0];
         assert_eq!(ev.resource_id.as_deref(), Some(agent_id));
         assert_eq!(ev.agent_id.as_ref().map(|id| id.as_str()), Some(agent_id));
-        assert_eq!(ev.detail["name"], "worker-1");
+        assert_eq!(ev.detail["name"], "worker-feat-audit-spawn");
         assert_eq!(ev.detail["task_id"], task_id);
         assert_eq!(ev.detail["compute_target"], "local");
         assert_eq!(ev.detail["branch"], "feat/audit-spawn");
@@ -5093,6 +5710,7 @@ mod tests {
                     .method("POST")
                     .uri(format!("/api/v1/agents/{agent_id}/complete"))
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -5147,6 +5765,7 @@ mod tests {
                     .method("POST")
                     .uri(format!("/api/v1/agents/{agent_id}/complete"))
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -5269,6 +5888,7 @@ mod tests {
                     .method("POST")
                     .uri(format!("/api/v1/agents/{agent_id}/complete"))
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -5383,6 +6003,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri(format!("/api/v1/agents/{agent_id}/stop"))
+                    .header("authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -5503,6 +6124,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri(format!("/api/v1/agents/{agent_id}/fail"))
+                    .header("authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -5568,6 +6190,7 @@ mod tests {
                     .method("POST")
                     .uri(format!("/api/v1/agents/{agent_id}/complete"))
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -5584,6 +6207,7 @@ mod tests {
                     .method("POST")
                     .uri(format!("/api/v1/agents/{agent_id}/complete"))
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -6231,6 +6855,7 @@ mod tests {
                     .method("POST")
                     .uri("/api/v1/tasks")
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )

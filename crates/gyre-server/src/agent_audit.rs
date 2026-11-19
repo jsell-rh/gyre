@@ -239,6 +239,15 @@ pub async fn emit_reassigned(
 /// longer authenticate) and emits an `AgentTokenRevoked` audit event carrying
 /// the token's `jti`. The token is read before deletion so its JWT ID can be
 /// attributed; tokens that were never JWTs (UUID fallback) record a null jti.
+///
+/// The `jti` is additionally written to the durable `revoked_tokens` SQL
+/// table via [`gyre_ports::SpawnLogRepository::revoke_token`]
+/// (identity-security.md §Task-Scoped JWT Claims — Revocation: "the `jti`
+/// is written to the revocation table ... Tokens cannot be un-revoked").
+/// The KV removal is the immediate live gate; the SQL row is the record
+/// that survives KV rebuilds and is checked before expiry validation on
+/// every agent-token authentication. The table has no delete path — a
+/// written row is permanent.
 pub async fn revoke_agent_token(state: &AppState, agent: &Agent, reason: &str) {
     let agent_id = agent.id.to_string();
     let token = state
@@ -251,6 +260,24 @@ pub async fn revoke_agent_token(state: &AppState, agent: &Agent, reason: &str) {
     let jti = token
         .as_deref()
         .and_then(|t| state.agent_signing_key.extract_jti_unverified(t));
+    if let Some(jti) = jti.as_deref() {
+        // Durability is a security requirement here, but the KV removal
+        // above has already taken effect — a failed table write is logged
+        // loudly rather than failing the caller's teardown, and the
+        // in-memory/SQL state converges on the next revocation.
+        if let Err(e) = state
+            .spawn_log
+            .revoke_token(jti, &agent_id, now_secs())
+            .await
+        {
+            tracing::error!(
+                agent_id = %agent_id,
+                jti = %jti,
+                error = %e,
+                "failed to write jti to the durable revoked_tokens table"
+            );
+        }
+    }
     emit_token_revoked(state, agent, jti, reason).await;
 }
 
