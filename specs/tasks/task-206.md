@@ -2,10 +2,10 @@
 title: "Implement meta-spec preview mode: real agent preview runs with branches, diffs, and cleanup"
 spec_ref: "meta-spec-reconciliation.md §5 Preview Mode: The Fast Iteration Loop"
 depends_on: []
-progress: ready-for-review
+progress: not-started
 coverage_sections:
   - "meta-spec-reconciliation.md §5 Preview Mode: The Fast Iteration Loop"
-commits: ["c57f9a7714088e5b48e873ff1a7d6e66fcd446d6", "5a5477757c5d32f09a050d3a8613936a35797efb", "bb18260d29dafbc6a6389d7cb57009422f1e4eca", "f0e87a7d93b99d359c5a609f5777fa3f0a3ec696", "d603b9f0337d784cd313afc2ac34315957815d52", "6f55459cd8681c009117305386410a225fb126e5", "0513d409453bd1a863640aeb8cd6f7c21e989aa1", "c1a709ba62490cf3661b06b6ea6b72308488ebf4", "a4d8bd712ed166b78311ce648a70c58791082ea1", "2f10e8d134c1911f52b07400d7becabb910dbe21", "7cad12616cd28f691664cac1922337c9f5d72bef", "683da5a1afe0bb249a8fa0aa3e84e65006d9cde2", "f4ee98ba5521f5b8e973ae3172481dec4f2d34de", "8212fa5d945070afac1e859a96e1caae27af950c", "05c06fde1c501cd1f9f5ab5b729c1ec2a1ba2860", "cc3080ff119b5084d507330e038aafb30ee5a0d5", "69488298e887e8c4c76ea5a48f3ce01c10d175c6", "c33a86e2ce9c93de50a97ff3e7644a861cef17d6", "1622b73cdf7e36d32299a4010462b9b1c046eab9", "c8f9fed9abef048df4abf83d4a86e1407a17b9db", "001ec52dd65e890637751d40ecb1a64743a4934d", "a31a731a262c62f7c85202cbca727fe9d9633646", "2c1ddfe60be7f19c843d833e7eead308c3585c8f"]
+commits: []
 ---
 
 ## Spec Excerpt
@@ -124,13 +124,3 @@ These are workspace-scoped; the spec specifies the global routes `POST /api/v1/m
 - Read `crates/gyre-server/src/api/mr.rs` (or wherever the MR diff endpoint lives) for the git diff plumbing to reuse for preview diffs.
 - Read `docs/server-config.md` for config-knob conventions before adding the preview budget and GC TTL settings.
 - Follow conventional commits; run `cargo test -p gyre-server` and `bash scripts/check-arch.sh` before completing.
-
-## Shipped
-
-Preview mode (meta-spec-reconciliation.md §5) is a real agent run path, implemented and independently review-approved across the commits recorded in `commits:`: `POST /api/v1/meta-specs/preview` spawns one real `Active` agent per target on `preview/{preview_id}/{slug}` branches with real worktrees and short-lived JWTs (202 response exactly per spec shape); the draft travels in the agent process env (`GYRE_META_SPEC_DRAFT_KIND`/`GYRE_META_SPEC_DRAFT_CONTENT`, `GYRE_SPEC_PATH`) and the agent runner builds the prompt with the draft meta-spec as governing context over the target spec; skip-ceremony is enforced (no task assignment, no gates, no MR, no merge queue, no provenance, no `Idle`, REST/MCP escape routes refuse preview callers); completion tears down worktree and token, leaving the branch for `GET .../preview/{preview_id}` status + diff; `DELETE` and the `meta_spec_preview_gc` background job (TTL `GYRE_META_SPEC_PREVIEW_TTL_HOURS`, default 24 h) clean up branches, worktrees, agents, and kv records; the preview budget slot release is exactly-once across every generic terminal path; the hollow structural-impact implementation and the workspace-scoped routes were fully removed (clean cutover); docs updated (`docs/api-reference.md`, `docs/server-config.md`).
-
-### Rebase-repair round (869bcf1f, merge f95bdb57)
-
-Integrated the approved source (a90a437) onto the task-261 head 4e88f183 (SPIFFE workload attestation). The single conflict in `docs/api-reference.md` was resolved by combining both sides: task-206's usage self-report contract + stop/fail preview-refusal rows, and task-261's SVID heartbeat row (the workload/attest/`/.well-known/spiffe/keys.json` rows merged cleanly from the base). No source-code conflicts; behavior of both tasks preserved.
-
-Evidence on the merged head f95bdb57: `SKIP_WEB_BUILD=1 cargo check -p gyre-server` -> exit 0 (7m12s, no semantic conflicts between the preview spawn path and the SVID attestation changes); `python3 scripts/check-rustfmt-diff.py 4e88f183` -> clean (34 files); `check-arch.sh`, `check-abac-route-registry.sh`, `check-mcp-write-tools.sh`, `check-abac-exempt-handlers.sh` -> all exit 0; `npx vitest run src/__tests__/MetaSpecs.test.js src/__tests__/EditorSplit.test.js` -> 178 passed. `cargo test -p gyre-server` and the remaining server test suite stay with the independent verifier (sandbox 4 GiB build budget) — the full `preview_` suite plus `preview_budget_enumeration_failure_fails_closed`, `stale_abort_releases_preview_slot_exactly_once`, and `meta_spec_preview_gc_job_registered` are the server tests to execute there.
