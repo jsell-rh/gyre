@@ -243,6 +243,13 @@ pub struct AppState {
     /// Ed25519 signing key for Gyre's built-in OIDC provider (M18).
     /// Used to mint and verify agent JWTs returned by POST /api/v1/agents/spawn.
     pub agent_signing_key: Arc<auth::AgentSigningKey>,
+    /// Retained public material of every signing key ever active on this
+    /// deployment (message-bus.md §Edge Cases "Signature key rotation"):
+    /// `GET /.well-known/jwks.json` serves these entries — minus the
+    /// active key's kid — so messages signed before a key rotation remain
+    /// verifiable by key_id. Durable in DB-backed deployments; empty in
+    /// pure in-memory mode, where the key itself is fresh per boot.
+    pub signing_key_history: Vec<auth::HistoricalSigningKey>,
     /// Merge attestation bundle verification (agent-gates.md §Part 3
     /// Verification). Stateless — holds only the forge key handle.
     pub attestation_verifier: Arc<dyn gyre_ports::AttestationVerifier>,
@@ -1125,11 +1132,174 @@ pub fn configured_repos_path() -> std::path::PathBuf {
 pub const AGENT_SIGNING_KEY_KV_NAMESPACE: &str = "server_identity";
 pub const AGENT_SIGNING_KEY_KV_KEY: &str = "agent_signing_key_pkcs8_b64";
 
-/// Resolve the forge Ed25519 signing key for this boot:
+/// KV key (same `server_identity` namespace) holding the retained public
+/// material of every signing key that has ever been active on this
+/// deployment (message-bus.md §Edge Cases "Signature key rotation"):
+/// a JSON array of `{kid, public_key_b64}` entries. JWKS serves every
+/// entry whose kid is not the active key's, so messages signed before a
+/// rotation remain verifiable by key_id. Only public material is stored
+/// here — the private key slot (`AGENT_SIGNING_KEY_KV_KEY`) is untouched
+/// by rotation bookkeeping.
+pub const AGENT_SIGNING_KEY_HISTORY_KV_KEY: &str = "agent_signing_key_history";
+
+/// Load the retained signing-key history from durable storage. An
+/// unreadable or malformed entry is skipped with a warning (that kid stops
+/// resolving in JWKS) rather than aborting the boot; a missing entry is a
+/// first rotation-free boot and yields an empty history.
+fn load_signing_key_history(
+    sqlite_db: &Option<Arc<gyre_adapters::SqliteStorage>>,
+    pg_db: &Option<Arc<gyre_adapters::PgStorage>>,
+) -> Vec<auth::HistoricalSigningKey> {
+    let raw: anyhow::Result<Option<String>> = if let Some(pg) = pg_db {
+        pg.kv_get_sync(
+            AGENT_SIGNING_KEY_KV_NAMESPACE,
+            AGENT_SIGNING_KEY_HISTORY_KV_KEY,
+        )
+    } else if let Some(sqlite) = sqlite_db {
+        sqlite.kv_get_sync(
+            AGENT_SIGNING_KEY_KV_NAMESPACE,
+            AGENT_SIGNING_KEY_HISTORY_KV_KEY,
+        )
+    } else {
+        return Vec::new();
+    };
+    let raw = match raw {
+        Ok(Some(v)) => v,
+        Ok(None) => return Vec::new(),
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "could not read the signing-key history; JWKS will serve only the active key this boot"
+            );
+            return Vec::new();
+        }
+    };
+
+    #[derive(serde::Deserialize)]
+    struct HistoryEntry {
+        kid: String,
+        public_key_b64: String,
+    }
+
+    let entries: Vec<HistoryEntry> = match serde_json::from_str(&raw) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "signing-key history is malformed; JWKS will serve only the active key this boot"
+            );
+            return Vec::new();
+        }
+    };
+
+    let mut history = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let bytes = match B64
+            .decode(entry.public_key_b64.trim())
+            .map_err(|e| format!("base64: {e}"))
+            .and_then(|b| {
+                if b.len() == 32 {
+                    Ok(b)
+                } else {
+                    Err(format!(
+                        "expected 32 Ed25519 public-key bytes, got {}",
+                        b.len()
+                    ))
+                }
+            }) {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::warn!(
+                    kid = %entry.kid,
+                    error = %e,
+                    "skipping unreadable signing-key history entry"
+                );
+                continue;
+            }
+        };
+        let key = auth::HistoricalSigningKey::from_public_key_bytes(bytes);
+        if key.kid != entry.kid {
+            tracing::warn!(
+                stored_kid = %entry.kid,
+                derived_kid = %key.kid,
+                "skipping signing-key history entry whose kid does not match its public key"
+            );
+            continue;
+        }
+        history.push(key);
+    }
+    history
+}
+
+/// Ensure the active key's public material is present in the retained
+/// history and persist the updated history. Every key that has ever been
+/// active ends up exactly once in this set; at serve time JWKS filters out
+/// the active kid, so what remains is precisely the historical keys.
+/// Rotation chains (K1 → K2 → K3) accumulate: boot K2 appends K2 to a set
+/// that already holds K1, boot K3 appends K3 — JWKS on the K3 boot serves
+/// K1 and K2 alongside the active K3. Best-effort with a loud warning on
+/// write failure (old kids stop resolving after this boot's rotation).
+fn retain_active_key_in_history(
+    sqlite_db: &Option<Arc<gyre_adapters::SqliteStorage>>,
+    pg_db: &Option<Arc<gyre_adapters::PgStorage>>,
+    mut history: Vec<auth::HistoricalSigningKey>,
+    active: &auth::AgentSigningKey,
+) -> Vec<auth::HistoricalSigningKey> {
+    if history.iter().any(|k| k.kid == active.kid) {
+        return history;
+    }
+    history.push(auth::HistoricalSigningKey::from_public_key_bytes(
+        active.public_key_bytes.clone(),
+    ));
+
+    #[derive(serde::Serialize)]
+    struct HistoryEntry<'a> {
+        kid: &'a str,
+        public_key_b64: String,
+    }
+    let entries: Vec<HistoryEntry> = history
+        .iter()
+        .map(|k| HistoryEntry {
+            kid: &k.kid,
+            public_key_b64: B64.encode(&k.public_key_bytes),
+        })
+        .collect();
+    let encoded = serde_json::to_string(&entries)
+        .unwrap_or_else(|e| panic!("signing-key history must serialize (plain strings): {e}"));
+
+    let store_result = if let Some(pg) = pg_db {
+        pg.kv_set_sync(
+            AGENT_SIGNING_KEY_KV_NAMESPACE,
+            AGENT_SIGNING_KEY_HISTORY_KV_KEY,
+            &encoded,
+        )
+    } else if let Some(sqlite) = sqlite_db {
+        sqlite.kv_set_sync(
+            AGENT_SIGNING_KEY_KV_NAMESPACE,
+            AGENT_SIGNING_KEY_HISTORY_KV_KEY,
+            &encoded,
+        )
+    } else {
+        Ok(())
+    };
+    if let Err(e) = store_result {
+        tracing::warn!(
+            error = %e,
+            "could not persist the signing-key history; signatures made before a rotation will not verify after a restart"
+        );
+    }
+    history
+}
+
+/// Resolve the forge Ed25519 signing key for this boot, along with the
+/// retained public-key history JWKS serves after rotations (see
+/// `AGENT_SIGNING_KEY_HISTORY_KV_KEY`). Resolution order:
 ///
 /// 1. `GYRE_AGENT_SIGNING_KEY` (base64 PKCS#8 DER, v1 or v2) — explicit
-///    operator provisioning; takes precedence and is never overwritten in the
-///    DB, so rotation is a deliberate operator act. Invalid material is a
+///    operator provisioning; takes precedence and the private material is
+///    never written to the DB (only its public key joins the retained
+///    history, which is the specced rotation-visibility behavior), so
+///    rotation is a deliberate operator act. Invalid material is a
 ///    hard startup error: silently falling back to a different key would
 ///    break every signature the operator expects to verify.
 /// 2. The key persisted in the durable KV store (PostgreSQL or SQLite,
@@ -1137,10 +1307,14 @@ pub const AGENT_SIGNING_KEY_KV_KEY: &str = "agent_signing_key_pkcs8_b64";
 /// 3. A freshly generated key, persisted for the next boot. In pure
 ///    in-memory mode (no DB) the key is fresh per boot, matching the
 ///    process-lifetime scope of everything else in that mode.
+///
+/// The returned history contains every key ever active on this deployment
+/// (including the active one); JWKS filters the active kid out at serve
+/// time.
 fn load_or_persist_agent_signing_key(
     sqlite_db: &Option<Arc<gyre_adapters::SqliteStorage>>,
     pg_db: &Option<Arc<gyre_adapters::PgStorage>>,
-) -> Arc<auth::AgentSigningKey> {
+) -> (Arc<auth::AgentSigningKey>, Vec<auth::HistoricalSigningKey>) {
     // 1. Operator-provisioned key.
     if let Ok(encoded) = std::env::var("GYRE_AGENT_SIGNING_KEY") {
         let der = B64
@@ -1153,7 +1327,58 @@ fn load_or_persist_agent_signing_key(
             kid = %key.kid,
             "using operator-provisioned agent signing key from GYRE_AGENT_SIGNING_KEY"
         );
-        return Arc::new(key);
+        // Rotation bookkeeping. The retained history normally already holds
+        // the previous active key (every DB-backed boot adds its key). One
+        // case does not: a deployment that predates history retention has
+        // its previous key only in the current slot — fold that key into
+        // the history so this rotation keeps its kid resolvable in JWKS.
+        // Then make sure this boot's key joins the history too, so its kid
+        // keeps resolving if the operator rotates onward later.
+        let mut history = load_signing_key_history(sqlite_db, pg_db);
+        let persisted_current: anyhow::Result<Option<String>> = if let Some(pg) = pg_db {
+            pg.kv_get_sync(AGENT_SIGNING_KEY_KV_NAMESPACE, AGENT_SIGNING_KEY_KV_KEY)
+        } else if let Some(sqlite) = sqlite_db {
+            sqlite.kv_get_sync(AGENT_SIGNING_KEY_KV_NAMESPACE, AGENT_SIGNING_KEY_KV_KEY)
+        } else {
+            Ok(None)
+        };
+        match persisted_current {
+            Ok(Some(encoded)) => {
+                match B64
+                    .decode(encoded.trim())
+                    .map_err(|e| format!("base64: {e}"))
+                    .and_then(|der| auth::AgentSigningKey::from_pkcs8(&der))
+                {
+                    Ok(previous) if previous.kid != key.kid => {
+                        if !history.iter().any(|h| h.kid == previous.kid) {
+                            tracing::info!(
+                                kid = %previous.kid,
+                                "retaining the previous signing key in JWKS history after rotation"
+                            );
+                            history.push(auth::HistoricalSigningKey::from_public_key_bytes(
+                                previous.public_key_bytes.clone(),
+                            ));
+                        }
+                    }
+                    Ok(_) => { /* same key re-provisioned — no rotation */ }
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            "persisted agent signing key is unreadable; its kid cannot be retained in JWKS history"
+                        );
+                    }
+                }
+            }
+            Ok(None) => { /* first boot with this DB — nothing to retain */ }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "could not read the persisted agent signing key; the pre-rotation kid cannot be retained in JWKS history"
+                );
+            }
+        }
+        let history = retain_active_key_in_history(sqlite_db, pg_db, history, &key);
+        return (Arc::new(key), history);
     }
 
     // 2. Key persisted in the durable KV store.
@@ -1176,7 +1401,13 @@ fn load_or_persist_agent_signing_key(
                     kid = %key.kid,
                     "loaded persisted agent signing key (local-mode commit signatures remain verifiable across restarts)"
                 );
-                return Arc::new(key);
+                let history = retain_active_key_in_history(
+                    sqlite_db,
+                    pg_db,
+                    load_signing_key_history(sqlite_db, pg_db),
+                    &key,
+                );
+                return (Arc::new(key), history);
             }
             Err(e) => {
                 // Unreadable stored material: regenerate and overwrite below,
@@ -1191,13 +1422,14 @@ fn load_or_persist_agent_signing_key(
         Ok(None) => { /* first boot with this DB — generate below */ }
         Err(e) => {
             // Read failed (transient DB trouble): keep this boot's key
-            // process-local and do NOT overwrite storage, so a transient
-            // failure cannot destroy the existing key.
+            // process-local and do NOT overwrite storage (including the
+            // key history), so a transient failure cannot destroy the
+            // existing key.
             tracing::warn!(
                 error = %e,
                 "could not read persisted agent signing key; using a process-local key for this boot"
             );
-            return Arc::new(auth::AgentSigningKey::generate());
+            return (Arc::new(auth::AgentSigningKey::generate()), Vec::new());
         }
     }
 
@@ -1225,7 +1457,13 @@ fn load_or_persist_agent_signing_key(
             "could not persist the agent signing key; local-mode commit signatures will not verify after a restart"
         );
     }
-    key
+    let history = retain_active_key_in_history(
+        sqlite_db,
+        pg_db,
+        load_signing_key_history(sqlite_db, pg_db),
+        &key,
+    );
+    (key, history)
 }
 
 pub fn build_state(
@@ -1443,11 +1681,16 @@ pub fn build_state(
 
     // Load or persist the forge's Ed25519 signing key first: both the
     // AppState field and the attestation verifier (which re-derives the
-    // gate agents' keys from the same material) share it.
-    let agent_signing_key = load_or_persist_agent_signing_key(&sqlite_db, &pg_db);
+    // gate agents' keys from the same material) share it. The retained
+    // public-key history keeps pre-rotation signatures verifiable via
+    // JWKS (message-bus.md §Edge Cases "Signature key rotation").
+    let (agent_signing_key, signing_key_history) =
+        load_or_persist_agent_signing_key(&sqlite_db, &pg_db);
     // identity-security.md §Task-Scoped JWT Claims: aud is `gyre`, or
     // GYRE_OIDC_AUDIENCE when the operator configured one. Carried on
     // the key so every mint and every validation agree on the audience.
+    // The audience is mint/validation metadata, not key material, so the
+    // override keeps the kid (and the retained history) consistent.
     let agent_signing_key = {
         let audience = std::env::var("GYRE_OIDC_AUDIENCE")
             .ok()
@@ -1486,6 +1729,10 @@ pub fn build_state(
         message_broadcast_tx,
         kv_store: store!(dyn KvJsonStore, mem::MemKvStore::default()),
         agent_signing_key: agent_signing_key.clone(),
+        // Retained signing-key history (see the loader): public material of
+        // every key ever active on this deployment; JWKS serves the entries
+        // whose kid is not the active key's.
+        signing_key_history,
         // Attestation bundle verification protocol (agent-gates.md §Part 3
         // Verification): the forge-key verifier backing
         // POST /api/v1/attestations/verify and `gyre verify-attestation`.
