@@ -54,9 +54,30 @@ fn directed_body(agent_id: &str, pad_len: usize) -> Vec<u8> {
     .unwrap()
 }
 
+/// Create the target agent plus its workspace record.
+///
+/// The send path resolves the target agent's tenant from its workspace
+/// record (message-bus.md §Scoping Rules rule 1, delivered by task-248)
+/// and REJECTS Agent-directed sends whose scope cannot be resolved
+/// (fail-closed). This file predates that guard and originally created
+/// only the agent row, so every Directed send here failed the rule-1
+/// resolution with 403. Tenant "default" matches the global test token's
+/// system principal tenant, so same-tenant sends succeed; assertion
+/// strength elsewhere is unchanged.
 async fn create_agent(state: &Arc<gyre_server::AppState>, agent_id: &str, workspace_id: &str) {
+    let ws_id = Id::new(workspace_id);
+    if state.workspaces.find_by_id(&ws_id).await.unwrap().is_none() {
+        let ws = gyre_domain::Workspace::new(
+            ws_id.clone(),
+            Id::new("default"),
+            format!("Workspace {workspace_id}"),
+            workspace_id,
+            0,
+        );
+        state.workspaces.create(&ws).await.unwrap();
+    }
     let mut agent = Agent::new(Id::new(agent_id), agent_id, 0);
-    agent.workspace_id = Id::new(workspace_id);
+    agent.workspace_id = ws_id;
     state.agents.create(&agent).await.unwrap();
 }
 
