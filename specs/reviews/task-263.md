@@ -53,3 +53,28 @@ Verifier must run (test-target compilation exceeds this sandbox's budget; wrappe
 - `cargo test -p gyre-server respawn_mint_carries_stored_stack_fingerprint` (ralph_loop::tests).
 - Pre-existing suites in every touched file (abac_middleware, agents, compose, discover, merge_requests, orchestrator, repos, spawn, tasks, constraint_check, gate_executor, rbac, mcp, git_http, auth, agent_audit) plus the spec-approval e2e (`agent_only_requires_exact_stack_hash_match_e2e`) — the ~54 test builders that gained `Authorization` headers must all still pass, proving non-agent principals are not locked out.
 - Full workspace suite + Clippy per standard verification.
+
+## Round 2 (candidate `a17d641b`, base `b381514b`)
+
+Verdict: **needs-revision** — one finding (F2: the `sub` format change breaks the federated SPIFFE SVID session binding; a pre-existing federation test is red at the candidate). Everything else in the task contract verified clean by independent source inspection plus mechanical checks.
+
+Probes run (evidence: `/tmp/stage/review-evidence/round-a17d641b-evidence.md`, `round-a17d641b-findings.txt`):
+
+- `git diff --stat b381514b..a17d641b` (24 files, +2815/−62); full diff read of every touched file.
+- `git diff 0ef2e11d..a17d641b -- crates/` → empty (no Rust source changed after the last implementer `cargo check` round).
+- `scripts/check-arch.sh`, `check-abac-route-registry.sh`, `check-abac-exempt-handlers.sh`, `check-inert-enforcement.sh`, `check-mem-port-contracts.sh` — all exit 0.
+- gyre-server test execution deferred to the verifier (4 GiB budget rule).
+
+Verified clean this round:
+
+- **F1 repair (stack-hash mechanism) is real**: `spawn_agent_core` resolves the session stack evidence ONCE pre-launch (`spiffe::resolve_session_stack_evidence` — registered `agent_stacks` fingerprint, else SHA-256 over the server-authorized launch config) and binds the SAME value to the JWT `wl_stack_hash`/`stack_hash` claims, the session SVID, and the launch-written workload-attestation record; `spawn_minted_jwt_carries_task_scoped_claims` asserts mint == stored record on the FIRST spawn, `respawn_mint_carries_stored_stack_fingerprint` on re-spawn. The spec-registry stack-pinning consumer's input is live on every session.
+- **F2 repair (git-http repo identity) is real**: the repo-tier arm of `authorize_repo_access` requires `auth.repo_id == repo.id` in addition to the name-matched scope entry; `agent_push_cross_workspace_same_name_repo_rejected` proves the cross-workspace same-name denial with a positive control.
+- Layer-2 claims (sub/aud/jti/task_id/spawned_by/persona/attestation_level/wl_hostname-from-compute-target/wl_compute_target/wl_image_hash, TTL 3600 s), live audience validation (same-key wrong/absent-aud kill test), jti revocation wiring (durable SQL table via `SpawnLogRepository::revoke_token` — SQLite + Postgres + mem adapters all implement it; `jti_revocation_denial` before signature/expiry on the REST extractor and the WS path; no un-revoke path), and the full by-effect enforcement sweep (REST tasks/lifecycle/spawn, MCP task+MR tools, git push, compose, archive, admin control surfaces; secrets creation is admin-gated; out-of-scope statements recorded) — all verified in source with real-router tests and positive controls proving non-agent principals keep their rights (user JWTs carry `scope` as a String, so `is_gyre_agent_jwt()` cannot misclassify them).
+
+Findings:
+
+- [-] **F2 (code regression / red test): the `sub = agent:<uuid>` mint change breaks the federated SPIFFE SVID session binding (task-262, coverage row 7 "implemented").** Production session SVIDs name the session by the BARE agent uuid (`launch_agent_process` → `issue_session_svid(state, &ctx.agent.id.to_string(), …)`, spawn.rs ~2040; same form at spawn.rs:461, api/agents.rs:785, mcp.rs:11452), while the JWT mint now sets `sub = agent:<uuid>`. The federated verifier binds the SVID to the caller's JWT `sub` with an exact string comparison (api/federation.rs:99 → spiffe_federation.rs:190-197 `ExpectedIdentity { session_id: caller_sub }` → gyre-spiffe verify.rs:269). With a remote instance running this candidate, every legitimate `POST /api/v1/federation/spiffe/attest` fails 403 (session mismatch) — federated workload verification is broken at runtime for any upgraded issuer. The pre-existing HTTP-level probe `federated_agent_two_configuration_probe` mints its caller token with the REAL `AgentSigningKey::mint("fed-session-1", …)` (sub now `agent:fed-session-1`) against a peer SVID issued for session `fed-session-1` and asserts 200 — **this test is red at the candidate**; it was never observed because all gyre-server test execution was deferred to the verifier. (The spiffe_federation.rs unit tests hand-craft `sub` values to match hand-issued SVIDs and cannot catch producer/consumer drift.) Repair: restore the documented invariant `/agent/{role}/session/{jwt sub}` (spiffe_federation.rs:39) — either issue the session SVID with the sub-form session id (`agent:<uuid>`), or normalize `caller_sub` at the federated binding — keeping the HTTP probe driving the real mint on both sides so the invariant cannot drift again. Reproduce: `cargo test -p gyre-server federated_agent_two_configuration_probe`.
+
+Minor (non-blocking): `jti_revocation_denial` fails open on a `revoked_tokens` lookup error (KV removal remains the live gate — documented in-code); sigstore's Fulcio subject now records `agent:<uuid>` (cosmetic; fulcio falls back to local per task-107).
+
+Verifier must additionally run: `cargo test -p gyre-server federated_agent_two_configuration_probe`, `cargo test -p gyre-server api::federation::`, `cargo test -p gyre-server spiffe_federation::` — expected RED on the first until F2 is repaired.
