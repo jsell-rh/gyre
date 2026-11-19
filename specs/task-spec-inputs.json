@@ -2027,6 +2027,34 @@
         "Source Control",
         "External Repository Mirroring"
       ]
+    },
+    "backlog/d5679654c745172ab4f3fe87": {
+      "file": "specs/development/agent-workflow.md",
+      "heading": [
+        "Agent Development Workflow Requirements",
+        "Immediate Feedback"
+      ]
+    },
+    "backlog/346ce862de4b15352f0239c7": {
+      "file": "specs/development/agent-workflow.md",
+      "heading": [
+        "Agent Development Workflow Requirements",
+        "Parallel Work via Worktrees"
+      ]
+    },
+    "backlog/4a3b61a03d2e9cd037d33c0c": {
+      "file": "specs/development/agent-workflow.md",
+      "heading": [
+        "Agent Development Workflow Requirements",
+        "PRs as the Collaboration Primitive"
+      ]
+    },
+    "backlog/5d7c43ad773e272f9c6f6e44": {
+      "file": "specs/development/agent-workflow.md",
+      "heading": [
+        "Agent Development Workflow Requirements",
+        "Fix the Environment, Not the Agent"
+      ]
     }
   },
   "bindings": {
@@ -2788,6 +2816,18 @@
     ],
     "Spec gap spec-36fad8fcafe7b73a2b6f2d0e / mirror-namespace-isolation / b580b93c564f": [
       "backlog/09c28182c53ccd934aa3b93a"
+    ],
+    "Spec gap spec-4c39ca6ea3e71ce8a53398f3 / pre-pr-local-verification / d30f233daf86": [
+      "backlog/d5679654c745172ab4f3fe87"
+    ],
+    "Spec gap spec-4c39ca6ea3e71ce8a53398f3 / terminal-worktree-cleanup / d30f233daf86": [
+      "backlog/346ce862de4b15352f0239c7"
+    ],
+    "Spec gap spec-4c39ca6ea3e71ce8a53398f3 / pr-protection-and-hygiene / d30f233daf86": [
+      "backlog/4a3b61a03d2e9cd037d33c0c"
+    ],
+    "Spec gap spec-4c39ca6ea3e71ce8a53398f3 / interrupt-ledger-hardening-gate / d30f233daf86": [
+      "backlog/5d7c43ad773e272f9c6f6e44"
     ]
   }
 }
