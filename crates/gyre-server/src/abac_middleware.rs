@@ -5692,6 +5692,9 @@ pub mod tests {
                 None,
                 None,
                 None,
+                None,
+                None,
+                None,
             )
             .unwrap();
         // Register it so the auth extractor resolves the agent identity.
@@ -5926,6 +5929,9 @@ pub mod tests {
                 Some("repo-orchestrator"),
                 Some(3),
                 None,
+                None,
+                None,
+                None,
             )
             .unwrap();
         let weak = state
@@ -5942,6 +5948,9 @@ pub mod tests {
                 "repo-1",
                 None,
                 Some(1),
+                None,
+                None,
+                None,
                 None,
             )
             .unwrap();
@@ -7307,6 +7316,9 @@ pub mod tests {
                 None,
                 None,
                 None,
+                None,
+                None,
+                None,
             )
             .unwrap();
         state
@@ -7399,6 +7411,9 @@ pub mod tests {
                 "ws-agent-scope",
                 "repo-scope-a",
                 "repo-repo-scope-a",
+                None,
+                None,
+                None,
                 None,
                 None,
                 None,

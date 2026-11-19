@@ -3618,6 +3618,7 @@ mod tests {
                     .method("PUT")
                     .uri("/api/v1/tasks/task-api-gen")
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )

@@ -2361,7 +2361,11 @@ mod tests {
                 .unwrap();
 
         let code =
-            crate::api::spawn::fail_agent(State(state.clone()), Path(repo_orch.id.to_string()))
+            crate::api::spawn::fail_agent(
+                State(state.clone()),
+                Path(repo_orch.id.to_string()),
+                auth_in_tenant("t1"),
+            )
                 .await
                 .unwrap();
         assert_eq!(code, StatusCode::OK);
@@ -2402,7 +2406,11 @@ mod tests {
                 .await
                 .unwrap();
 
-        let code = crate::api::spawn::stop_agent(State(state.clone()), Path(agent.id.to_string()))
+        let code = crate::api::spawn::stop_agent(
+            State(state.clone()),
+            Path(agent.id.to_string()),
+            auth_in_tenant("t1"),
+        )
             .await
             .unwrap();
         assert_eq!(code, StatusCode::OK);
@@ -2526,11 +2534,11 @@ mod tests {
                 .unwrap();
 
         let id = agent.id.to_string();
-        let code = crate::api::spawn::stop_agent(State(state.clone()), Path(id.clone()))
+        let code = crate::api::spawn::stop_agent(State(state.clone()), Path(id.clone()), auth_in_tenant("t1"))
             .await
             .unwrap();
         assert_eq!(code, StatusCode::OK);
-        let code = crate::api::spawn::fail_agent(State(state.clone()), Path(id.clone()))
+        let code = crate::api::spawn::fail_agent(State(state.clone()), Path(id.clone()), auth_in_tenant("t1"))
             .await
             .unwrap();
         assert_eq!(code, StatusCode::OK);
@@ -2594,7 +2602,11 @@ mod tests {
         state.agents.update(&aged).await.unwrap();
         crate::stale_agents::run_once(&state).await.unwrap();
 
-        let code = crate::api::spawn::fail_agent(State(state.clone()), Path(agent.id.to_string()))
+        let code = crate::api::spawn::fail_agent(
+            State(state.clone()),
+            Path(agent.id.to_string()),
+            auth_in_tenant("t1"),
+        )
             .await
             .unwrap();
         assert_eq!(code, StatusCode::OK);

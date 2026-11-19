@@ -6874,8 +6874,9 @@ specs:
             .expect("gate agent token must be a server-minted JWT");
         assert_eq!(
             claims.sub,
-            agent.id.as_str(),
-            "the token subject must be the gate agent itself"
+            format!("agent:{}", agent.id.as_str()),
+            "the token subject must be the gate agent itself (agent:<uuid>, \
+             identity-security.md §Task-Scoped JWT Claims)"
         );
         assert_eq!(
             claims.scope,

@@ -227,10 +227,19 @@ pub const VALIDATION_REPORT_SCOPE: &str = "validation:report";
 /// server validates these on every tool call.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct AgentJwtClaims {
-    /// Subject — the agent's UUID.
+    /// Subject — `agent:<uuid>` (identity-security.md §Task-Scoped JWT
+    /// Claims). Downstream identity strings that need the bare UUID strip
+    /// the `agent:` prefix; the claim itself always carries it so external
+    /// OIDC verifiers see the specced subject form.
     pub sub: String,
     /// Issuer — the server's base URL.
     pub iss: String,
+    /// Audience — `gyre` (or `GYRE_OIDC_AUDIENCE` when configured).
+    /// Validated on every self-minted agent-token validation
+    /// (identity-security.md §Task-Scoped JWT Claims: `aud` is part of the
+    /// Layer-2 token contract, not an optional decoration).
+    #[serde(default)]
+    pub aud: String,
     /// Issued-at (Unix epoch seconds).
     pub iat: u64,
     /// Expiry (Unix epoch seconds).
@@ -291,6 +300,12 @@ pub struct AgentJwtClaims {
     /// Stack fingerprint hash at spawn time (G10). The spec's `stack_hash`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wl_stack_hash: Option<String>,
+    /// Alias for `wl_stack_hash` — the identity-security.md §Task-Scoped
+    /// JWT Claims reference table carries both spellings; both are
+    /// populated from the same stored workload-attestation stack
+    /// fingerprint by the mint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stack_hash: Option<String>,
     // -- M19.4: Container workload claims -------------------------------------
     /// Container ID when the agent was spawned via ContainerTarget (M19.4).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -308,6 +323,7 @@ pub struct AgentJwtClaims {
 /// local-mode record would report `valid:false` (false integrity alarm). The
 /// public key is exposed via `GET /.well-known/jwks.json` so external
 /// verifiers can validate tokens.
+#[derive(Clone)]
 pub struct AgentSigningKey {
     pub encoding_key: jsonwebtoken::EncodingKey,
     pub decoding_key: jsonwebtoken::DecodingKey,
@@ -317,9 +333,18 @@ pub struct AgentSigningKey {
     pub kid: String,
     /// Raw PKCS#8 bytes retained for signing arbitrary data (attestation bundles).
     pkcs8_bytes: Vec<u8>,
+    /// Audience minted into every agent JWT and required at validation
+    /// (identity-security.md §Task-Scoped JWT Claims: `gyre`, or
+    /// `GYRE_OIDC_AUDIENCE` when configured). Carried on the key so mint
+    /// and validation cannot drift apart.
+    audience: String,
     /// Raw 32-byte public key for external verification.
     pub public_key_bytes: Vec<u8>,
 }
+
+/// Default audience for self-minted agent JWTs (identity-security.md
+/// §Task-Scoped JWT Claims: `gyre`, overridable via `GYRE_OIDC_AUDIENCE`).
+pub const DEFAULT_AGENT_JWT_AUDIENCE: &str = "gyre";
 
 /// Derive a stable key id from the public key bytes. The kid must be a pure
 /// function of the key material (not a random UUID) so that a key loaded
@@ -346,6 +371,18 @@ impl AgentSigningKey {
         let pkcs8 =
             Ed25519KeyPair::generate_pkcs8(&rng).expect("Ed25519 key generation must succeed");
         Self::from_pkcs8(pkcs8.as_ref()).expect("freshly generated PKCS#8 must be valid")
+    }
+
+    /// The configured JWT audience (`gyre` unless `GYRE_OIDC_AUDIENCE`
+    /// overrides it). Applied to every subsequent mint and validation.
+    pub fn with_audience(mut self, audience: impl Into<String>) -> Self {
+        self.audience = audience.into();
+        self
+    }
+
+    /// The audience this key mints and validates.
+    pub fn audience(&self) -> &str {
+        &self.audience
     }
 
     /// Reconstruct the key pair from PKCS#8 DER bytes (e.g. loaded from the
@@ -398,6 +435,7 @@ impl AgentSigningKey {
             kid,
             pkcs8_bytes: pkcs8.to_vec(),
             public_key_bytes: pub_key_bytes.to_vec(),
+            audience: DEFAULT_AGENT_JWT_AUDIENCE.to_string(),
         })
     }
 
@@ -460,10 +498,15 @@ impl AgentSigningKey {
     }
 
     /// Validate a self-issued agent JWT, returning its claims on success.
+    ///
+    /// Audience validation is live (identity-security.md §Task-Scoped JWT
+    /// Claims): the token must carry the audience this key mints. A token
+    /// with a wrong or absent `aud` fails validation even when its
+    /// signature is valid.
     pub fn validate(&self, token: &str, expected_issuer: &str) -> Result<AgentJwtClaims, String> {
         let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::EdDSA);
         validation.set_issuer(&[expected_issuer]);
-        validation.validate_aud = false;
+        validation.set_audience(&[&self.audience]);
         jsonwebtoken::decode::<AgentJwtClaims>(token, &self.decoding_key, &validation)
             .map(|td| td.claims)
             .map_err(|e| format!("agent JWT validation: {e}"))
@@ -501,8 +544,9 @@ impl AgentSigningKey {
             .unwrap_or_default()
             .as_secs();
         let claims = AgentJwtClaims {
-            sub: agent_id.to_string(),
+            sub: format!("agent:{agent_id}"),
             iss: issuer.to_string(),
+            aud: self.audience.clone(),
             iat: now,
             exp: now + ttl_secs,
             scope: vec![format!("repo:{repo_name}:write")],
@@ -518,6 +562,8 @@ impl AgentSigningKey {
             wl_pid,
             wl_hostname,
             wl_compute_target,
+            // Both specced spellings carry the same stored fingerprint.
+            stack_hash: wl_stack_hash.clone(),
             wl_stack_hash,
             wl_container_id,
             wl_image_hash,
@@ -588,8 +634,9 @@ impl AgentSigningKey {
             vec![format!("repo:{name}:write"), format!("repo:{name}:spawn")]
         };
         let claims = AgentJwtClaims {
-            sub: agent_id.to_string(),
+            sub: format!("agent:{agent_id}"),
             iss: issuer.to_string(),
+            aud: self.audience.clone(),
             iat: now,
             exp: now + ttl_secs,
             scope,
@@ -605,6 +652,7 @@ impl AgentSigningKey {
             wl_pid: None,
             wl_hostname: None,
             wl_compute_target: None,
+            stack_hash: None,
             wl_stack_hash: None,
             wl_container_id: None,
             wl_image_hash: None,
@@ -625,9 +673,17 @@ impl AgentSigningKey {
     /// Workers always carry `workspace_id` + `repo_id` claims so ABAC subject
     /// attributes (`subject.repo_scope`, §Attributes "Agent OIDC claim") are
     /// real for every request the agent makes. Unlike orchestrator JWTs there
-    /// is no `orchestrator_type` claim. `wl_image_hash` carries the resolved
-    /// image digest (agent-runtime.md §3, best-effort: `None` when the image
-    /// runtime could not resolve it).
+    /// is no `orchestrator_type` claim. Workload claims are populated from
+    /// the real spawn-time facts whenever they exist at mint time:
+    /// `wl_compute_target` (the request's compute target id), `wl_hostname`
+    /// (remote compute-target host), `wl_stack_hash` (the stored
+    /// workload-attestation stack fingerprint, when the agent already has
+    /// one — e.g. a Ralph-loop re-spawn), and `wl_image_hash` (the resolved
+    /// image digest, agent-runtime.md §3, best-effort: `None` when the image
+    /// runtime could not resolve it). `wl_pid`/`wl_container_id` exist only
+    /// after the process launch — the token must pre-exist the process it
+    /// authenticates — so they are minted `None` and recorded in the
+    /// workload-attestation record instead.
     ///
     /// §1 Token Scoping: the worker's fine-grained scope list
     /// (`["repo:{repo_name}:write"]`), `tenant_id`, and the hierarchy claims
@@ -647,6 +703,9 @@ impl AgentSigningKey {
         repo_name: &str,
         persona: Option<&str>,
         attestation_level: Option<u8>,
+        wl_compute_target: Option<String>,
+        wl_hostname: Option<String>,
+        wl_stack_hash: Option<String>,
         wl_image_hash: Option<String>,
     ) -> Result<String, String> {
         self.mint_with_workload(
@@ -664,9 +723,9 @@ impl AgentSigningKey {
             // is the widened `u32` form (platform-model.md §1 Token Scoping).
             attestation_level.map(|level| level as u32),
             None,
-            None,
-            None,
-            None,
+            wl_hostname,
+            wl_compute_target,
+            wl_stack_hash,
             None,
             wl_image_hash,
         )
@@ -706,8 +765,9 @@ impl AgentSigningKey {
             .unwrap_or_default()
             .as_secs();
         let claims = AgentJwtClaims {
-            sub: agent_id.to_string(),
+            sub: format!("agent:{agent_id}"),
             iss: issuer.to_string(),
+            aud: self.audience.clone(),
             iat: now,
             exp: now + ttl_secs,
             scope: vec![scope.to_string()],
@@ -723,6 +783,7 @@ impl AgentSigningKey {
             wl_pid: None,
             wl_hostname: None,
             wl_compute_target: None,
+            stack_hash: None,
             wl_stack_hash: None,
             wl_container_id: None,
             wl_image_hash: None,
@@ -839,6 +900,40 @@ pub struct ImpersonationJwtClaims {
 }
 
 // -- Security helpers ---------------------------------------------------------
+
+/// Durable jti-revocation check for an agent JWT
+/// (identity-security.md §Task-Scoped JWT Claims — Revocation).
+///
+/// The `revoked_tokens` SQL table (keyed by the token's `jti`) is the
+/// durable record written when an agent's run ends
+/// (`agent_audit::revoke_agent_token`); the `agent_tokens` KV entry is the
+/// live gate. This lookup runs BEFORE signature/expiry validation so a
+/// revoked jti rejects the request even while `exp` is still in the future.
+///
+/// The unverified `jti` extraction is fail-closed in the security-relevant
+/// direction: a forged non-revoked `jti` still has to pass full EdDSA
+/// validation afterward — the extraction can only add a rejection, never
+/// remove one. A table lookup error warns and falls through to the KV +
+/// signature gates (the KV removal is the immediate enforcement; the table
+/// is the cross-restart record).
+async fn jti_revocation_denial(state: &Arc<AppState>, token: &str) -> Option<&'static str> {
+    if !token.starts_with("ey") {
+        return None; // legacy UUID token — no jti, KV-gated only
+    }
+    let jti = state.agent_signing_key.extract_jti_unverified(token)?;
+    match state.spawn_log.is_token_revoked(&jti).await {
+        Ok(true) => Some("Agent token has been revoked"),
+        Ok(false) => None,
+        Err(e) => {
+            tracing::warn!(
+                jti = %jti,
+                error = %e,
+                "revoked_tokens lookup failed; the agent_tokens KV entry remains the live gate"
+            );
+            None
+        }
+    }
+}
 
 /// Compare two tokens in constant time to prevent timing attacks.
 pub(crate) fn tokens_equal(a: &str, b: &str) -> bool {
@@ -1098,6 +1193,51 @@ impl AuthenticatedAgent {
     /// attacker cannot forge (their key/JWT resolves to their own user id).
     pub fn is_system_principal(&self) -> bool {
         self.agent_id == "system" && self.user_id.is_none()
+    }
+
+    /// True when the caller authenticated via a Gyre-minted agent JWT —
+    /// the verified claims carry a non-empty fine-grained `scope` list
+    /// (platform-model.md §1 Token Scoping). Global tokens, API keys,
+    /// Keycloak JWTs, and legacy UUID agent tokens do not.
+    pub fn is_gyre_agent_jwt(&self) -> bool {
+        self.jwt_claims
+            .as_ref()
+            .and_then(|c| c.get("scope"))
+            .and_then(|s| s.as_array())
+            .is_some_and(|arr| !arr.is_empty())
+    }
+
+    /// The caller's `task_id` JWT claim when the caller is a worker-tier
+    /// Gyre agent JWT — the task-scoped principal class the
+    /// identity-security.md §Task-Scoped JWT Claims hard boundary applies
+    /// to.
+    ///
+    /// Orchestrator JWTs are exempt: their `task_id` claim carries the
+    /// orchestrator's own agent id (they are not bound to a task — see
+    /// `mint_orchestrator`), so they would never match a target task and
+    /// the check would lock orchestrators out of surfaces they own.
+    /// Orchestrator tier containment is enforced by their
+    /// `workspace:{id}`/`repo:{name}` scope claims instead
+    /// (`validate_tool_scope`, `authorize_repo_access`). Gate-agent
+    /// capability tokens are not exempt: their `task_id` carries the gate
+    /// id, which matches no task, so they cannot mutate task-owned
+    /// resources — exactly the read-only contract task-134 gives them.
+    pub fn agent_task_claim(&self) -> Option<&str> {
+        let claims = self.jwt_claims.as_ref()?;
+        if !self.is_gyre_agent_jwt() {
+            return None;
+        }
+        if claims
+            .get("orchestrator_type")
+            .and_then(|v| v.as_str())
+            .is_some()
+        {
+            return None;
+        }
+        claims
+            .get("task_id")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
     }
 }
 
@@ -1418,6 +1558,20 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedAgent {
                 .find(|(_, t)| t.as_str() == token)
                 .map(|(id, _)| id.clone())
             {
+                // identity-security.md §Revocation: durable jti lookup runs
+                // BEFORE signature/expiry validation — a revoked jti rejects
+                // the request even while exp is still in the future.
+                if let Some(reason) = jti_revocation_denial(state, token).await {
+                    record_auth_failure(
+                        state,
+                        "agent_jwt",
+                        "agent token has been revoked",
+                        forensic_ip,
+                        forensic_ua,
+                    )
+                    .await;
+                    return Err((StatusCode::UNAUTHORIZED, reason).into_response());
+                }
                 // JWT tokens: additionally validate signature and expiry.
                 let jwt_claims = if token.starts_with("ey") {
                     match state.agent_signing_key.validate(token, &state.base_url) {
@@ -1745,6 +1899,19 @@ pub async fn authenticate_token(
             .find(|(_, t)| t.as_str() == token)
             .map(|(id, _)| id.clone())
         {
+            // identity-security.md §Revocation: durable jti lookup runs
+            // BEFORE signature/expiry validation.
+            if let Some(reason) = jti_revocation_denial(state, token).await {
+                record_auth_failure(
+                    state,
+                    "agent_jwt",
+                    "agent token has been revoked",
+                    None,
+                    None,
+                )
+                .await;
+                return Err(reason);
+            }
             let jwt_claims = if token.starts_with("ey") {
                 match state.agent_signing_key.validate(token, &state.base_url) {
                     Ok(agent_claims) => serde_json::to_value(&agent_claims).ok(),
@@ -2975,6 +3142,201 @@ mod tests {
         assert_eq!(e.detail["rejection_reason"], "invalid token");
         assert_eq!(e.outcome, gyre_domain::AuditOutcome::Failure);
         assert!(e.agent_id.is_none(), "rejected caller has no identity");
+    }
+
+    /// identity-security.md §Task-Scoped JWT Claims: the spawn mint
+    /// (mint_worker_scoped) must produce the specced claim set — sub
+    /// `agent:<uuid>`, aud `gyre`, jti, task_id, spawned_by, persona,
+    /// attestation_level, and both stack-hash spellings carrying the same
+    /// stored fingerprint — with the specced default TTL of 3600 s.
+    #[test]
+    fn agent_jwt_mints_specced_task_scoped_claims() {
+        let key = AgentSigningKey::generate();
+        let issuer = "http://localhost:3000";
+        let token = key
+            .mint_worker_scoped(
+                "worker-42",
+                "TASK-007",
+                "user:jsell",
+                issuer,
+                3600,
+                "t1",
+                "ws-1",
+                "repo-1",
+                "gyre",
+                Some("security"),
+                Some(2),
+                Some("ct-docker-1".to_string()),
+                Some("ssh-host-1".to_string()),
+                Some("sha256:abc123def456".to_string()),
+                Some("sha256:image".to_string()),
+            )
+            .expect("mint must succeed");
+        let claims = key
+            .validate(&token, issuer)
+            .expect("fresh minted token must validate");
+        assert_eq!(claims.sub, "agent:worker-42", "sub is agent:<uuid>");
+        assert_eq!(claims.aud, "gyre", "aud is the specced default");
+        assert!(!claims.jti.is_empty(), "jti is minted");
+        assert_eq!(claims.task_id, "TASK-007");
+        assert_eq!(claims.spawned_by, "user:jsell");
+        assert_eq!(claims.persona.as_deref(), Some("security"));
+        assert_eq!(claims.attestation_level, Some(2));
+        assert_eq!(
+            claims.wl_compute_target.as_deref(),
+            Some("ct-docker-1"),
+            "wl_compute_target carries the request's compute target id"
+        );
+        assert_eq!(claims.wl_hostname.as_deref(), Some("ssh-host-1"));
+        assert_eq!(
+            claims.stack_hash.as_deref(),
+            Some("sha256:abc123def456"),
+            "stack_hash carries the stored fingerprint"
+        );
+        assert_eq!(
+            claims.wl_stack_hash, claims.stack_hash,
+            "both specced spellings carry the same fingerprint"
+        );
+        assert_eq!(claims.wl_image_hash.as_deref(), Some("sha256:image"));
+        assert_eq!(
+            claims.exp - claims.iat, 3600,
+            "TTL is the specced default (3600 s)"
+        );
+    }
+
+    /// AC: "A token minted with a wrong/absent aud fails agent-token
+    /// validation (audience validation is live, not disabled)."
+    #[test]
+    fn agent_jwt_audience_validation_is_live() {
+        let key = AgentSigningKey::generate();
+        let issuer = "http://localhost:3000";
+        let token = key
+            .mint("agent-1", "task-1", "system", issuer, 3600, "t1", "ws-1", "repo-1", "repo-1")
+            .expect("mint must succeed");
+        assert!(key.validate(&token, issuer).is_ok());
+
+        // Hand-encoded claims signed by the SAME key — only the audience
+        // differs — must be rejected.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let mint_raw = |aud: Option<String>| {
+            let claims = super::AgentJwtClaims {
+                sub: "agent:agent-1".to_string(),
+                iss: issuer.to_string(),
+                aud: aud.unwrap_or_default(),
+                iat: now,
+                exp: now + 3600,
+                scope: vec!["repo:repo-1:write".to_string()],
+                jti: "jti-aud-probe".to_string(),
+                task_id: "task-1".to_string(),
+                spawned_by: "system".to_string(),
+                tenant_id: "t1".to_string(),
+                workspace_id: Some("ws-1".to_string()),
+                repo_id: Some("repo-1".to_string()),
+                orchestrator_type: None,
+                persona: None,
+                attestation_level: Some(1),
+                wl_pid: None,
+                wl_hostname: None,
+                wl_compute_target: None,
+                stack_hash: None,
+                wl_stack_hash: None,
+                wl_container_id: None,
+                wl_image_hash: None,
+            };
+            let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::EdDSA);
+            header.kid = Some(key.kid.clone());
+            jsonwebtoken::encode(&header, &claims, &key.encoding_key).unwrap()
+        };
+        let wrong_aud = mint_raw(Some("someone-else".to_string()));
+        let err = key
+            .validate(&wrong_aud, issuer)
+            .expect_err("wrong aud must fail validation");
+        assert!(err.contains("InvalidAudience"), "got: {err}");
+        let no_aud = mint_raw(None);
+        let err = key
+            .validate(&no_aud, issuer)
+            .expect_err("absent aud must fail validation");
+        assert!(err.contains("InvalidAudience"), "got: {err}");
+    }
+
+    /// AC: after the jti is written to the durable revoked_tokens table,
+    /// replaying the token gets 401 even though exp is in the future and
+    /// the KV entry is still present — the table lookup precedes expiry
+    /// validation.
+    #[tokio::test]
+    async fn revoked_jti_rejects_token_before_expiry() {
+        let state = test_state();
+        let token = state
+            .agent_signing_key
+            .mint(
+                "agent-jti-1",
+                "task-1",
+                "system",
+                &state.base_url,
+                3600,
+                "t1",
+                "ws-1",
+                "repo-1",
+                "repo-1",
+            )
+            .expect("mint must succeed");
+        state
+            .kv_store
+            .kv_set("agent_tokens", "agent-jti-1", token.clone())
+            .await
+            .unwrap();
+        let app = Router::new()
+            .route("/protected", get(authenticated_handler))
+            .with_state(state.clone());
+        // Before revocation the token authenticates.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/protected")
+                    .header("Authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Write the jti to the durable revocation table (what
+        // agent_audit::revoke_agent_token does on completion/stop).
+        let jti = state
+            .agent_signing_key
+            .extract_jti_unverified(&token)
+            .expect("minted token carries a jti");
+        state
+            .spawn_log
+            .revoke_token(&jti, "agent-jti-1", 1)
+            .await
+            .unwrap();
+        assert!(state.spawn_log.is_token_revoked(&jti).await.unwrap());
+
+        // Replay: 401 even though the KV entry is intact and exp is an
+        // hour out — the jti table lookup runs before expiry validation.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/protected")
+                    .header("Authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        let events = audit_events_of(&state, "auth_failure").await;
+        let e = events
+            .iter()
+            .find(|e| e.detail["rejection_reason"] == "agent token has been revoked")
+            .expect("revocation rejection recorded");
+        assert_eq!(e.detail["token_kind"], "agent_jwt");
     }
 
     #[tokio::test]
@@ -4247,6 +4609,7 @@ mod tests {
         let claims = crate::auth::AgentJwtClaims {
             sub: "agent-xyz".to_string(),
             iss: remote_url.to_string(),
+            aud: "gyre".to_string(),
             iat: now - 7200,
             exp: now - 3600,
             scope: vec!["repo:remote-repo:write".to_string()],
@@ -4262,6 +4625,7 @@ mod tests {
             wl_pid: None,
             wl_hostname: None,
             wl_compute_target: None,
+            stack_hash: None,
             wl_stack_hash: None,
             wl_container_id: None,
             wl_image_hash: None,

@@ -138,9 +138,18 @@ async fn resolve_repo_by_slug(
 /// can restrict but not expand it.
 ///
 /// - The system principal (bootstrap token) is allowed.
-/// - Agent tokens and other principals without a user identity are allowed:
-///   agents are scoped to their repos at spawn time and their pushes run
-///   through the gate chain; membership is a human-authorization concept.
+/// - Gyre-minted agent JWTs (identity-security.md §Task-Scoped JWT Claims:
+///   "write to a repo it was not assigned") must hold the target repo in
+///   their token's scope list: a repo-tier token needs
+///   `repo:{repo}:write`/`repo:{repo}:spawn` on the target repo's NAME; a
+///   workspace-tier token needs `workspace:{ws}:read`/`workspace:{ws}:spawn`
+///   covering the repo's workspace. Scope entries name repos by name while
+///   git routes address them by workspace-slug + name — both are written by
+///   the same mint.
+/// - Other principals without a user identity (legacy UUID agent tokens)
+///   are allowed: they predate claim scoping and carry no scope list to
+///   enforce; agents are scoped to their repos at spawn time and their
+///   pushes run through the gate chain.
 /// - Global TenantAdmins are allowed (tenant-wide administration).
 /// - Every other user principal MUST hold a membership in the repo's
 ///   workspace whose effective role (workspace role capped by any per-repo
@@ -151,7 +160,66 @@ async fn authorize_repo_access(
     repo: &gyre_domain::Repository,
     perm: gyre_domain::RepoPermission,
 ) -> Result<(), Box<Response>> {
-    if auth.is_system_principal() || auth.user_id.is_none() {
+    if auth.is_system_principal() {
+        return Ok(());
+    }
+    if auth.user_id.is_none() {
+        if auth.is_gyre_agent_jwt() {
+            let write_right = matches!(perm, gyre_domain::RepoPermission::Write);
+            let repo_scope_ok = auth.scope.iter().any(|s| {
+                let Some(rest) = s.strip_prefix("repo:") else {
+                    return false;
+                };
+                let Some((name, right)) = rest.rsplit_once(':') else {
+                    return false;
+                };
+                name == repo.name
+                    && match right {
+                        // A spawn right implies write (the orchestrator owns
+                        // the repo's loop) — the same implication
+                        // `check_repo_scope` applies on the MCP surface.
+                        "write" => true,
+                        "spawn" => true,
+                        "read" => !write_right,
+                        _ => false,
+                    }
+            });
+            let ws_scope_ok = auth.scope.iter().any(|s| {
+                let Some(rest) = s.strip_prefix("workspace:") else {
+                    return false;
+                };
+                let Some((id, right)) = rest.rsplit_once(':') else {
+                    return false;
+                };
+                id == repo.workspace_id.to_string()
+                    && match right {
+                        "spawn" => true,
+                        "read" => !write_right,
+                        _ => false,
+                    }
+            });
+            if !repo_scope_ok && !ws_scope_ok {
+                warn!(
+                    agent_id = %auth.agent_id,
+                    repo_id = %repo.id,
+                    repo_name = %repo.name,
+                    permission = perm.as_str(),
+                    scopes = ?auth.scope,
+                    "git http 403: agent token's repo scope does not cover the target repo"
+                );
+                return Err(Box::new(
+                    (
+                        StatusCode::FORBIDDEN,
+                        format!(
+                            "repo access denied: agent token scope does not cover \
+                             repository '{}' in this workspace",
+                            repo.name
+                        ),
+                    )
+                        .into_response(),
+                ));
+            }
+        }
         return Ok(());
     }
     if auth.roles.contains(&gyre_domain::UserRole::Admin) {
@@ -5475,6 +5543,101 @@ mod tests {
             TEST_REPO_NAME.to_string(),
             repo_path_str,
         )
+    }
+
+    /// AC (task-263, identity-security.md §Task-Scoped JWT Claims: an
+    /// agent cannot "write to a repo it was not assigned"): a git push to
+    /// a repo not in the agent token's scope list is rejected —
+    /// authorize_repo_access no longer admits every user_id.is_none()
+    /// principal unconditionally. A token scoped to the target repo (and
+    /// non-agent principals, covered by every pre-existing push test)
+    /// keep access.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn agent_push_outside_token_repo_scope_rejected() {
+        let (app, state, _tmp, ws_slug, repo_name, _repo_path) = git_app_with_repo().await;
+
+        let mint_worker = |agent_id: &str, repo_id: &str, repo_name: &str| {
+            state.agent_signing_key.mint_worker_scoped(
+                agent_id,
+                "task-git-1",
+                "system",
+                &state.base_url,
+                3600,
+                "default",
+                "ws-test",
+                repo_id,
+                repo_name,
+                None,
+                Some(1),
+                None,
+                None,
+                None,
+                None,
+            )
+        };
+
+        // Worker JWT scoped to a DIFFERENT repo (repo:other-repo:write).
+        let token = mint_worker("agent-git-scope", "repo-other", "other-repo").unwrap();
+        state
+            .kv_store
+            .kv_set("agent_tokens", "agent-git-scope", token.clone())
+            .await
+            .unwrap();
+
+        // Push advertisement: 403 for the out-of-scope agent.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/git/{ws_slug}/{repo_name}/info/refs?service=git-receive-pack"
+                    ))
+                    .header("Authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // The push itself is rejected before any pack processing.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/git/{ws_slug}/{repo_name}/git-receive-pack"))
+                    .header("Authorization", format!("Bearer {token}"))
+                    .header("content-type", "application/x-git-receive-pack-request")
+                    .body(Body::from("0000".to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // A worker JWT scoped to THIS repo passes the access check — the
+        // denial above is the scope mismatch, not agent principals
+        // generally. The advertisement proceeds to real git plumbing.
+        let own_token = mint_worker("agent-git-own", "repo-1", &repo_name).unwrap();
+        state
+            .kv_store
+            .kv_set("agent_tokens", "agent-git-own", own_token.clone())
+            .await
+            .unwrap();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/git/{ws_slug}/{repo_name}/info/refs?service=git-receive-pack"
+                    ))
+                    .header("Authorization", format!("Bearer {own_token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 
     /// task-129 §Audit Integration (review round 5): the push-time

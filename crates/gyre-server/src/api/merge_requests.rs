@@ -260,9 +260,18 @@ fn parse_review_decision(s: &str) -> Result<ReviewDecision, ApiError> {
 
 // ── Handlers ─────────────────────────────────────────────────────────────────
 
-#[instrument(skip(state, req), fields(source = %req.source_branch, target = %req.target_branch))]
+#[instrument(skip(state, auth, req), fields(source = %req.source_branch, target = %req.target_branch))]
+/// POST /api/v1/merge-requests
+///
+/// identity-security.md §Task-Scoped JWT Claims — MR-creation boundary:
+/// an agent principal may only open MRs inside its task scope — the MR's
+/// repository must be the repo of the caller's `task_id` claim (or the
+/// token's signed `repo_id` claim when the task row no longer resolves),
+/// not merely a repo its tier can reach. Non-agent principals are
+/// unaffected.
 pub async fn create_mr(
     State(state): State<Arc<AppState>>,
+    auth: crate::auth::AuthenticatedAgent,
     Json(req): Json<CreateMrRequest>,
 ) -> Result<(StatusCode, Json<MrResponse>), ApiError> {
     // Validate spec_ref SHA if provided ("path@sha" format, SHA must be 40-char hex).
@@ -292,6 +301,30 @@ pub async fn create_mr(
         .find_by_id(&repo_id)
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("repository {repo_id} not found")))?;
+    // Agent task-scope boundary (see handler doc): resolve the caller's
+    // task claim to its real repo; fall back to the signed repo_id claim
+    // when the task row is gone. Fail closed on neither matching.
+    if let Some(claim) = auth.agent_task_claim() {
+        let allowed_repo = state
+            .tasks
+            .find_by_id(&Id::new(claim))
+            .await
+            .ok()
+            .flatten()
+            .map(|t| t.repo_id.to_string())
+            .or_else(|| auth.repo_id.clone())
+            .ok_or_else(|| {
+                ApiError::Forbidden(
+                    "agent token carries no repo scope for MR creation".to_string(),
+                )
+            })?;
+        if repo.id.to_string() != allowed_repo {
+            return Err(ApiError::Forbidden(format!(
+                "agent token is scoped to task {claim}; cannot open an MR in repository {}",
+                repo.id
+            )));
+        }
+    }
     let mut mr = MergeRequest::new(
         new_id(),
         repo_id.clone(),
@@ -1558,6 +1591,7 @@ mod tests {
                     .method("POST")
                     .uri("/api/v1/merge-requests")
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -1586,6 +1620,103 @@ mod tests {
         let json = body_json(resp).await;
         assert_eq!(json["status"], "open");
         assert_eq!(json["title"], "Add feature");
+    }
+
+    /// AC (task-263, identity-security.md §Task-Scoped JWT Claims: an
+    /// agent cannot "open MRs outside its task scope"): MR creation checks
+    /// the caller's `task_id` claim, not only repo scope — a worker token
+    /// whose task lives in repo-1 is denied an MR in repo-2 even though a
+    /// bare repo-scope check would compare against its signed repo claim.
+    /// The claim's own repo passes; non-agent principals (every test
+    /// above) are unaffected.
+    #[tokio::test]
+    async fn agent_jwt_cannot_create_mr_outside_task_scope() {
+        let state = test_state();
+        seed_repo(&state).await;
+        // A second repo in the same workspace, plus the worker's task row
+        // in repo-1 (what the claim resolves to).
+        let repo2 = gyre_domain::Repository::new(
+            gyre_common::Id::new("repo-2"),
+            gyre_common::Id::new("ws1"),
+            "repo-2",
+            "/repos/repo-2",
+            1000,
+        );
+        state.repos.create(&repo2).await.unwrap();
+        let mut task = gyre_domain::Task::new(Id::new("task-mr-1"), "MR scope task", 1000);
+        task.workspace_id = gyre_common::Id::new("ws1");
+        task.repo_id = gyre_common::Id::new("repo-1");
+        state.tasks.create(&task).await.unwrap();
+
+        let token = state
+            .agent_signing_key
+            .mint_worker_scoped(
+                "agent-mr-scope",
+                "task-mr-1",
+                "system",
+                &state.base_url,
+                3600,
+                "default",
+                "ws1",
+                "repo-1",
+                "repo-1",
+                None,
+                Some(1),
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        state
+            .kv_store
+            .kv_set("agent_tokens", "agent-mr-scope", token.clone())
+            .await
+            .unwrap();
+        let app = crate::api::api_router().with_state(state);
+
+        // MR in repo-2 → 403 (outside the claim's task scope).
+        let body = serde_json::json!({
+            "repository_id": "repo-2",
+            "title": "out of scope",
+            "source_branch": "feat/x",
+            "target_branch": "main"
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/merge-requests")
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // MR in the claim's own repo passes the boundary.
+        let body = serde_json::json!({
+            "repository_id": "repo-1",
+            "title": "in scope",
+            "source_branch": "feat/x",
+            "target_branch": "main"
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/merge-requests")
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
     }
 
     #[tokio::test]
@@ -2928,6 +3059,7 @@ mod tests {
                     .method("POST")
                     .uri("/api/v1/merge-requests")
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -2961,6 +3093,7 @@ mod tests {
                     .method("POST")
                     .uri("/api/v1/merge-requests")
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -2985,6 +3118,7 @@ mod tests {
                     .method("POST")
                     .uri("/api/v1/merge-requests")
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -3111,6 +3245,7 @@ mod tests {
                         .method("POST")
                         .uri("/api/v1/merge-requests")
                         .header("content-type", "application/json")
+                        .header("authorization", "Bearer test-token")
                         .body(Body::from(serde_json::to_vec(&body).unwrap()))
                         .unwrap(),
                 )
@@ -3434,6 +3569,7 @@ mod tests {
                     .method("POST")
                     .uri("/api/v1/merge-requests")
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
