@@ -2,7 +2,7 @@
 title: "WebSocket replay correctness: newest-1000 window and strictly-greater last_seen boundary"
 spec_ref: "Spec gap spec-c62aac6701125cb09e0c736c / ws-replay-window / 60b177f85a11"
 depends_on: []
-progress: ready-for-review
+progress: complete
 commits: ["e1c299d4b026ca2f9016a95a236cbd18d60bfaee"]
 ---
 
