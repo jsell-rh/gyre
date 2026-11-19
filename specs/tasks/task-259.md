@@ -3,7 +3,7 @@ title: "Mirror namespace isolation: mirrors/{forge}/{owner}/{repo} storage names
 spec_ref: "Spec gap spec-36fad8fcafe7b73a2b6f2d0e / mirror-namespace-isolation / b580b93c564f"
 depends_on: []
 progress: ready-for-review
-commits: ["0bf540aef508b63a1a0586cf60ee24a1f0a96ae6", "5678d534c97d16dcf469ae3dce58c59dbc74e2c9", "0c941afffd04123229e084a8fcb34359299929c4", "9057fc8f06b699202bd4cb1dd9070198fc94059d"]
+commits: ["9057fc8f06b699202bd4cb1dd9070198fc94059d", "0bf540aef508b63a1a0586cf60ee24a1f0a96ae6"]
 ---
 
 ## Required behavior
