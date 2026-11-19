@@ -640,3 +640,237 @@ async fn message_endpoints_and_ws_replay_survive_restart_on_sqlite() {
 
     unsafe { std::env::remove_var("GYRE_DATABASE_URL") };
 }
+
+// ── WebSocket replay window contract on the wired SQLite adapter (task-250) ──
+//
+// message-bus.md §Delivery/WebSocket: the replay delivers persisted
+// Event-tier messages with created_at > last_seen (strictly greater), the
+// NEWEST 1000 across all subscribed workspaces combined, oldest-first, plus
+// exactly one ReplayCatchUp{truncated:true} when more than 1000 qualified.
+// The in-crate ws.rs tests prove the same contract on the mem-backed
+// AppState; this test proves it on the production SQLite path.
+
+/// Connect to the server's /ws endpoint and authenticate with the shared
+/// token, returning the authenticated stream.
+async fn authed_ws(
+    port: u16,
+) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>> {
+    let ws_url = format!("ws://127.0.0.1:{port}/ws");
+    let (mut stream, _resp) = tokio_tungstenite::connect_async(&ws_url)
+        .await
+        .expect("connect to /ws");
+    stream
+        .send(WsFrame::Text(
+            json!({ "type": "Auth", "token": TOKEN }).to_string(),
+        ))
+        .await
+        .unwrap();
+    let auth_result = next_ws_json(&mut stream, Duration::from_secs(5))
+        .await
+        .expect("AuthResult frame");
+    assert_eq!(auth_result["type"], "AuthResult");
+    assert_eq!(auth_result["success"], true, "WS auth must succeed");
+    stream
+}
+
+/// Ping/Pong fence: the socket message loop handles one client message at a
+/// time, and the Subscribe handler emits the whole replay window (plus the
+/// catch-up signal) synchronously before returning to the loop. A Ping sent
+/// after the Subscribe therefore fences the complete replay response —
+/// every frame received before the Pong is the entire Subscribe output.
+async fn fenced_replay_frames(
+    stream: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+) -> Vec<serde_json::Value> {
+    stream
+        .send(WsFrame::Text(
+            json!({ "type": "Ping", "timestamp": 0 }).to_string(),
+        ))
+        .await
+        .unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let mut frames = Vec::new();
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        assert!(
+            !remaining.is_zero(),
+            "timed out waiting for the Pong fence — incomplete replay response"
+        );
+        let frame = tokio::time::timeout(remaining, stream.next())
+            .await
+            .expect("timed out waiting for the Pong fence")
+            .expect("socket must stay open")
+            .expect("frame must be ok");
+        if let WsFrame::Text(text) = frame {
+            let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+            if v.get("type").and_then(|t| t.as_str()) == Some("Pong") {
+                return frames;
+            }
+            frames.push(v);
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ws_replay_newest_window_and_strict_boundary_on_sqlite() {
+    let _env = ENV_LOCK.lock().await;
+    let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("gyre-replay.db");
+    let db_url = format!("sqlite://{}", db_path.display());
+
+    let server = Server::start(&db_url).await;
+
+    // Workspace via the public API (tenant "default" — the shared-token
+    // caller's tenant, so Subscribe's per-workspace authorization accepts it).
+    let ws_resp = server
+        .post(
+            "/api/v1/workspaces",
+            json!({ "name": "replay-sqlite-ws", "tenant_id": "default" }),
+        )
+        .await;
+    assert_eq!(ws_resp.status(), 201, "workspace create must succeed");
+    let ws_id = ws_resp.json::<serde_json::Value>().await.unwrap()["id"]
+        .as_str()
+        .expect("workspace id")
+        .to_string();
+
+    // 1001 Event-tier messages with distinct created_at, seeded through the
+    // production-wired SQLite MessageRepository, plus one Directed
+    // (agent-inbox) message newer than everything else — replay is
+    // Event-tier only, so it must never appear.
+    let base_ts = 1_700_000_000u64;
+    for i in 0..=1000u64 {
+        server
+            .state
+            .messages
+            .store(&make_workspace_event(
+                &format!("replay-m-{i:04}"),
+                &ws_id,
+                MessageKind::TaskCreated,
+                base_ts + i,
+            ))
+            .await
+            .unwrap();
+    }
+    server
+        .state
+        .messages
+        .store(&make_directed(
+            "replay-directed",
+            "replay-sqlite-agent",
+            &ws_id,
+            base_ts + 5_000,
+        ))
+        .await
+        .unwrap();
+
+    // ── Newest-1000 window + truncation signal (last_seen = 0). ──────────
+    let mut ws = authed_ws(server.port).await;
+    ws.send(WsFrame::Text(
+        json!({
+            "type": "Subscribe",
+            "scopes": [{ "workspace_id": ws_id }],
+            "last_seen": 0
+        })
+        .to_string(),
+    ))
+    .await
+    .unwrap();
+    let frames = fenced_replay_frames(&mut ws).await;
+
+    let mut messages = Vec::new();
+    let mut catchups = Vec::new();
+    for f in frames {
+        match f.get("type").and_then(|t| t.as_str()) {
+            Some("ReplayCatchUp") => catchups.push(f),
+            Some(other) => panic!("unexpected control frame in replay response: {other}"),
+            None => messages.push(f),
+        }
+    }
+
+    assert_eq!(
+        messages.len(),
+        1000,
+        "replay must deliver exactly the newest 1000 of the 1001 seeded events"
+    );
+    assert_eq!(
+        catchups.len(),
+        1,
+        "more than 1000 qualified: exactly one ReplayCatchUp must be sent"
+    );
+    assert_eq!(catchups[0]["truncated"], json!(true));
+
+    let ids: Vec<&str> = messages
+        .iter()
+        .map(|m| m["id"].as_str().expect("message id"))
+        .collect();
+    assert!(
+        ids.contains(&"replay-m-1000"),
+        "the NEWEST message must be inside the replay window"
+    );
+    assert!(
+        !ids.contains(&"replay-m-0000"),
+        "the oldest message must be the one dropped when truncating"
+    );
+    assert!(
+        !ids.contains(&"replay-directed"),
+        "Directed (agent-inbox) messages must be excluded from replay"
+    );
+    // The window is exactly the newest 1000, delivered oldest-first.
+    let expected: Vec<String> = (1..=1000).map(|i| format!("replay-m-{i:04}")).collect();
+    assert_eq!(
+        ids.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+        expected,
+        "the window must be the newest 1000 messages, delivered oldest-first"
+    );
+    let created: Vec<u64> = messages
+        .iter()
+        .map(|m| m["created_at"].as_u64().expect("created_at"))
+        .collect();
+    assert!(
+        created.windows(2).all(|w| w[0] <= w[1]),
+        "replay must be delivered oldest-first"
+    );
+
+    // ── Strict boundary: last_seen == the newest message's created_at. ───
+    // The inclusive (>=) since-filter re-delivered the boundary message on
+    // every reconnect; the replay contract is strictly greater, so the
+    // replay stream must be empty here.
+    let mut ws = authed_ws(server.port).await;
+    ws.send(WsFrame::Text(
+        json!({
+            "type": "Subscribe",
+            "scopes": [{ "workspace_id": ws_id }],
+            "last_seen": base_ts + 1000
+        })
+        .to_string(),
+    ))
+    .await
+    .unwrap();
+    let frames = fenced_replay_frames(&mut ws).await;
+    assert!(
+        frames.is_empty(),
+        "a message created exactly at last_seen must NOT be replayed (got {} frames)",
+        frames.len()
+    );
+
+    // ── last_seen 1ms below the newest: exactly the newest is replayed. ──
+    let mut ws = authed_ws(server.port).await;
+    ws.send(WsFrame::Text(
+        json!({
+            "type": "Subscribe",
+            "scopes": [{ "workspace_id": ws_id }],
+            "last_seen": base_ts + 999
+        })
+        .to_string(),
+    ))
+    .await
+    .unwrap();
+    let frames = fenced_replay_frames(&mut ws).await;
+    assert_eq!(frames.len(), 1, "only the strictly-newer message qualifies");
+    assert_eq!(frames[0]["id"], "replay-m-1000");
+
+    server.stop().await;
+    unsafe { std::env::remove_var("GYRE_DATABASE_URL") };
+}
