@@ -65,28 +65,33 @@ Steps performed in order: health check → create tenant → create admin user
 (skipped in `--dev`) + API key saved to `~/.gyre/config` → create workspace →
 register repo (bare repo initialized server-side) → register + pre-approve the
 four built-in personas (workspace-orchestrator, repo-orchestrator,
-accountability, security) → repository import and spec registry sync →
+accountability, security) → repository import and spec registry sync (when a
+local manifest is available) →
 default gates (`cargo test`, `cargo clippy`, `scripts/check-arch.sh`, detected
 from `--repo-path`) → spawn the repo orchestrator → print summary with all
 IDs, the one-time API key, and URLs.
 
 To import Gyre itself, point `--repo-path` at a local Gyre Git checkout with
-at least one commit. When `specs/manifest.yaml` exists there (including when
-created by `--starter-kit`), bootstrap pushes the checkout's `HEAD` and its
-history to the Gyre-hosted `main`, then syncs the spec registry from the
-server. Commit the changes you want to import first. If starter-kit paths have
-pending changes, bootstrap stages those paths and creates a local commit that
-also includes any changes already staged. Without a manifest, bootstrap skips
-the push and still uses the checkout to detect default gates.
+at least one commit. `--starter-kit` requires `--repo-path` and creates
+`specs/manifest.yaml` there if it is missing. Without `--starter-kit`,
+bootstrap skips import if you omit `--repo-path` or the checkout lacks a
+manifest. A supplied path is still used to detect default gates.
 
-If `main` still points to the server's empty seed (a root commit with an empty
-tree), bootstrap can replace it using a lease tied to the seed commit it
-inspected. If `main` is missing, a normal push creates it. On a repeat run, a
-matching `HEAD` needs no branch update, and a checkout ahead of Gyre `main`
-fast-forwards it. If Gyre `main` contains commits missing from the checkout,
-such as changes merged on the server, bootstrap refuses the push, reports the
-import failure, and continues. Pull from or rebase onto Gyre `main` before
-retrying.
+When the manifest exists, bootstrap pushes the checkout's `HEAD` and its
+history to Gyre's `main`, then syncs the server's spec registry. Commit the
+changes you want to import first. If existing starter-kit paths have pending
+changes, bootstrap stages them and makes a local commit. Any unrelated changes
+already staged can be included in that commit and pushed with it.
+
+A normal push creates a missing `main` or fast-forwards it when the checkout
+is ahead. A matching `HEAD` needs no branch update. To replace the server's
+empty seed, bootstrap uses a force-with-lease pinned to the inspected commit
+SHA. Any parentless commit with an empty tree qualifies for this replacement,
+regardless of who created it. For any other `main` with commits missing from
+the checkout, such as changes merged on the server, bootstrap refuses the
+push. Bootstrap reports import failures and continues. If the checkout shares
+history with the intended Gyre repository, pull from or rebase onto its
+`main` before retrying a refused push.
 
 The run is resumable: re-running `gyre bootstrap` with the same names reuses
 already-created resources (tenant, workspace, repo, personas are matched by
