@@ -3,7 +3,7 @@ title: "Message send-path guards: scope validation, mem store contract, WS ackno
 spec_ref: "Spec gap spec-c62aac6701125cb09e0c736c / message-send-path-guards / 60b177f85a11"
 depends_on: []
 progress: ready-for-review
-commits: ["873d0821ca7a33501c178303bdc618a1802ccbb6", "9dd4a1f0f07930760dddf8036a9fede6bbafb44c", "955c134a8c669070c3b936eac55f0e5e3f448418"]
+commits: ["955c134a8c669070c3b936eac55f0e5e3f448418", "9dd4a1f0f07930760dddf8036a9fede6bbafb44c", "873d0821ca7a33501c178303bdc618a1802ccbb6", "3bb9c9bd4099810d8583ab647018a5a41297f8c2"]
 ---
 
 ## Required behavior
@@ -123,80 +123,68 @@ Canonical spec: `specs/system/message-bus.md`. Source: `4127964001113dda08e48524
 
 ## Shipped
 
-All five send-path guard deviations from the Message Envelope and Scoping Rules
-sections are implemented in production code (checkpoints 955c134a and 9dd4a1f0,
-plus the round-4 fail-closed repair 873d0821):
+All five send-path guard deviations from the Message Envelope and Scoping
+Rules sections are implemented in production code (commits 955c134a,
+9dd4a1f0, the round-4 fail-closed repair 873d0821, and the round-5 test
+repair 3bb9c9bd).
 
 ### Behavior
 
 1. **Scopeless-message guard** — `emit_scoped_event` (crates/gyre-server/src/lib.rs),
-   the shared body of the internal `emit_event`/`emit_tenant_event` family, returns
-   `Err` and logs at error level when `destination != Broadcast &&
-   workspace_id.is_none()`; the message is never constructed, stored, or broadcast.
-2. **Mem store contract** — `MemMessageRepository::store` (crates/gyre-server/src/mem.rs)
-   returns `Err` on `workspace_id: None` (Broadcast/scopeless messages are never
-   persisted), matching the SQLite/PostgreSQL `message_to_new_row` contract. All
-   three send paths (REST, MCP, internal emitter) skip `store()` for Broadcast
-   destinations.
-3. **WS `acknowledged` exclusion** — both WebSocket Message serialization sites
-   (live bus-delivery arm and Subscribe replay arm in crates/gyre-server/src/ws.rs)
-   serialize through `ws_message_payload`, which strips `acknowledged` with the same
-   manual-removal pattern as `send_response`. GET inbox responses keep the field.
+   the shared body of the internal `emit_event`/`emit_tenant_event` family,
+   returns `Err` and logs at error level when `destination != Broadcast &&
+   workspace_id.is_none()`; the message is never constructed, stored, or
+   broadcast.
+2. **Mem store contract** — `MemMessageRepository::store`
+   (crates/gyre-server/src/mem.rs) returns `Err` on `workspace_id: None`,
+   matching the SQLite/PostgreSQL `message_to_new_row` contract. All send
+   paths skip `store()` for Broadcast destinations.
+3. **WS `acknowledged` exclusion** — both WebSocket Message serialization
+   sites (live bus-delivery arm and Subscribe replay arm in
+   crates/gyre-server/src/ws.rs) serialize through `ws_message_payload`,
+   which strips `acknowledged` with the same manual-removal pattern as
+   `send_response`. GET inbox responses keep the field.
 4. **Origin table** — `origin_from_auth` (crates/gyre-server/src/api/messages.rs)
    derives origin from the auth mechanism threaded through
-   `AuthenticatedAgent.auth_mechanism` (set by the extractor on every auth path):
-   global `GYRE_AUTH_TOKEN` → Server; API key / OIDC user JWT / impersonation →
-   `User(user_id)`; agent token / federated JWT → `Agent(sub)`. Role membership no
-   longer grants Server origin, so Admin-role API-key/OIDC callers are subject to
-   the `server_only()` 403 gate and the rule-3 membership check; the separate
-   rule-6 Admin-role check still lets them target Broadcast, and the global token
-   keeps full forge authority.
-5. **Rule-1 tenant isolation, fail-closed** — both the REST send handler
-   (crates/gyre-server/src/api/messages.rs) and the mirrored MCP path
-   (`handle_message_send` in crates/gyre-server/src/mcp.rs) load the target agent's
-   workspace record on every `Destination::Agent(id)` send and compare its tenant
-   with the caller's verified tenant; mismatch is rejected 403 (nothing stored or
-   broadcast), including for Server-origin global-token callers. Per the round-4
-   review repair (finding 641317c7efca4e4099f2d312186e3a03), an unresolvable
-   workspace record (dangling agent after the non-cascading workspace delete) no
-   longer skip-and-logs — it rejects the send fail-closed (403 / tool error
-   "cannot be resolved; tenant isolation cannot be verified"; lookup `Err`
-   propagates as 500 / tool error), because an indeterminable tenant scope must
-   not allow a message through. Tests that previously seeded agents without
-   workspace records (queue_depth_enforcement_429 and siblings via
-   `create_agent_in_workspace`, the ws-mcp/ws-bc/ws-schema MCP tests, and
-   api_integration's agent_messages_send_and_receive bootstrap workspace) now
-   seed the workspace rows their scope resolution needs.
+   `AuthenticatedAgent.auth_mechanism` (set by the extractor on every auth
+   path): global `GYRE_AUTH_TOKEN` → Server; API key / OIDC user JWT →
+   `User(user_id)`; agent token / federated JWT → `Agent(sub)`. Admin-role
+   API-key/OIDC callers resolve to User origin (server_only 403 gate and
+   rule-3 membership check apply to them); the separate rule-6 Admin-role
+   check still lets them target Broadcast; the global token keeps full forge
+   authority.
+5. **Rule-1 tenant isolation, fail-closed** — the REST send handler and the
+   mirrored MCP `handle_message_send` load the target agent's workspace
+   record on every `Destination::Agent(id)` send and compare its tenant with
+   the caller's verified tenant; mismatch rejects 403 (nothing stored or
+   broadcast), including Server-origin global-token callers. An unresolvable
+   workspace record rejects fail-closed rather than skip-and-log (round-4
+   repair 873d0821).
 
-Coverage rows 5, 9, 10 in specs/coverage/system/message-bus.md updated with
-source evidence (row 10 now records the fail-closed unresolvable-scope
-rejection and the new test names).
+### Round-5 repair (3bb9c9bd)
+
+Review finding F1: `admin_api_key_broadcast_allowed_non_admin_rejected` used
+kind `task_created` for its Broadcast probes — a `server_only()` kind whose
+403 gate runs before the Broadcast guard — so under the origin-table fix
+(Admin API-key → User origin) neither probe could reach the guard it was
+testing. Both probes now use `Custom("rule6_broadcast_probe")` (Event tier,
+`server_only() == false`), with an in-test comment documenting the
+constraint. Production code unchanged; specs/coverage/system/message-bus.md
+row 10 notes the probe-kind constraint.
 
 ### Test evidence
 
-Fourteen focused tests cover every acceptance criterion plus the round-4
-repair (see /tmp/stage/review-evidence/task-248-evidence.md for the full list
-and verifier invocation): `emit_scoped_event_rejects_scopeless_non_broadcast_message`,
-`mem_store_rejects_scopeless_message`, `ws_live_delivery_strips_acknowledged`,
-`ws_subscribe_replay_strips_acknowledged`, `get_inbox_still_includes_acknowledged`,
-`admin_api_key_cannot_forge_server_only_kind`,
-`admin_oidc_user_cannot_forge_server_only_kind`,
-`admin_api_key_directed_send_requires_workspace_membership`,
-`global_token_keeps_server_origin_and_broadcast_authority`,
-`admin_api_key_broadcast_allowed_non_admin_rejected`,
-`cross_tenant_directed_send_rejected_for_server_origin`,
-`mcp_message_send_cross_tenant_rejected`, and the round-4 pins
-`unresolvable_target_workspace_rejects_send` (REST) and
-`mcp_message_send_unresolvable_target_workspace_rejected` (MCP), each asserting
-403/tool error with nothing stored or broadcast when the target's workspace
-record cannot be resolved.
-
-### Deferred verification
-
-The sandbox build budget blocks gyre-server test-binary compilation, so the
-tests above were type-checked locally (`cargo check -p gyre-server --tests`
-exit 0 at 873d0821) but must be executed by the independent verifier; the exact
-invocations are recorded in /tmp/stage/review-evidence/task-248-evidence.md.
-`cargo fmt` applied to the task's Rust additions;
-`scripts/check-fail-open-ref-resolution.sh`, `check-inert-enforcement.sh`,
-and `check-mem-port-contracts.sh` pass locally.
+Fourteen focused tests cover every acceptance criterion (full list and
+verifier invocation in /tmp/stage/review-evidence/task-248-evidence.md).
+Executed in this sandbox: `cargo fmt -p gyre-server -- --check` (clean),
+`SKIP_WEB_BUILD=1 cargo check -p gyre-server --tests` (exit 0), and the
+gyre-common premise tests (`server_only_returns_false_for_directed_telemetry_custom`,
+`tier_event` — Custom is Event tier and not server_only). gyre-server test
+compilation exceeds the sandbox 4 GiB budget and is deferred to the
+independent verifier, which must run:
+`cargo test -p gyre-server --lib admin_api_key_broadcast_allowed_non_admin_rejected`
+(expect: Admin API-key Broadcast probe → 201 via the rule-6 role check;
+non-Admin member probe → 403 "Broadcast destination requires Server origin
+or Admin role") plus the other thirteen focused tests listed in the evidence
+file. No gyre-server test has been executed in this sandbox — that execution
+is pending independent verification, not claimed.
