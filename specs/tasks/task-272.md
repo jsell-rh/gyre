@@ -367,7 +367,7 @@ Published the reviewed plan for specs/development/agent-workflow.md exactly as
 independently approved: created specs/tasks/task-268.md (pre-PR local
 verification), task-269.md (terminal worktree cleanup, depends on task-258),
 task-270.md (PR protection and hygiene), task-271.md (interrupt ledger and
-hardening gate), registered specs/spec-inputs.json bindings, and left every
+hardening gate), registered specs/task-spec-inputs.json backlog section bindings, and left every
 new task not-started. No existing task, spec, coverage status, product file or
 gate was changed; task creation is not implementation.
 
@@ -377,7 +377,7 @@ The Development controller job failed at candidate head 3ce004e3 (run
 44511400952, PR 878): test_dev_cargo_clean's
 `test_rebuilds_current_checkout_and_retains_dependency_artifacts` lost its
 sentinel because it sat next to the member's own test executable, which the CI
-toolchain reports under `target/debug/build/gyre_cache_probe/<hash>/out/` — a
+toolchain reports under `target/debug/build/gyre_cache_probe/<hash>/out/`, a
 tree `cargo clean -p` legitimately removes. The probe now tracks a real path
 dependency (`gyre_cache_dep`) instead of a sentinel: its artifacts must stay on
 disk and be reported fresh on every helper cycle (retention), and the member's
