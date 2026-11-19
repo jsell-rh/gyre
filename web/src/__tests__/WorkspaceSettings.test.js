@@ -625,13 +625,21 @@ describe('WorkspaceSettings', () => {
     // expiry countdown on pending rows, revoke only for Pending (the
     // endpoint 409s on terminal statuses).
     it('renders invitation status and expiry, with revoke only for pending rows', async () => {
+      // Pin the clock: invitationExpiry() recomputes Date.now() at render
+      // time, so an unpinned +1800s fixture floors to 29m once the suite is
+      // slow enough to cross a minute boundary (observed in CI). Freezing
+      // both reads keeps the exact "Expires in 30m" assertion deterministic
+      // without loosening it.
+      const pinnedNow = 1700000000000;
+      const dateNow = vi.spyOn(Date, 'now').mockReturnValue(pinnedNow);
+      try {
       api.workspaceMembers.mockResolvedValue({ members: [] });
       api.workspaceInvitations.mockResolvedValue({
         invitations: [
           {
             id: 'inv-1', workspace_id: 'ws-1', user_id: 'u-5', invited_by: 'u-1',
             role: 'Developer', status: 'Pending',
-            expires_at: Math.floor(Date.now() / 1000) + 6 * 86400,
+            expires_at: Math.floor(pinnedNow / 1000) + 6 * 86400,
             created_at: 1700000000, accepted_at: null,
           },
           {
@@ -643,7 +651,7 @@ describe('WorkspaceSettings', () => {
           {
             id: 'inv-3', workspace_id: 'ws-1', user_id: 'u-7', invited_by: 'u-1',
             role: 'Developer', status: 'Pending',
-            expires_at: Math.floor(Date.now() / 1000) + 30 * 60,
+            expires_at: Math.floor(pinnedNow / 1000) + 30 * 60,
             created_at: 1700000000, accepted_at: null,
           },
         ],
@@ -666,6 +674,9 @@ describe('WorkspaceSettings', () => {
       // Terminal row: no expiry countdown and no revoke action.
       expect(container.querySelector('[data-testid="invitation-expiry-inv-2"]')).toBeNull();
       expect(container.querySelector('[data-testid="revoke-invitation-inv-2"]')).toBeNull();
+      } finally {
+        dateNow.mockRestore();
+      }
     });
 
     it('shows member table with role select and remove action', async () => {
