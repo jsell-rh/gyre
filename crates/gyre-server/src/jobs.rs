@@ -864,4 +864,36 @@ mod tests {
         let all = registry.all_history().await;
         assert_eq!(all.len(), 2);
     }
+
+    /// §5 preview GC registration: `start_job_registry` must register the
+    /// `meta_spec_preview_gc` job (name, default interval, enabled) with the
+    /// handler bound to the real preview GC sweep — triggering it runs
+    /// `meta_specs::run_once` and records a successful cycle, not a stub.
+    #[tokio::test]
+    async fn meta_spec_preview_gc_job_registered() {
+        let state = test_state();
+        start_job_registry(Arc::clone(&state)).await;
+
+        let jobs = state.job_registry.list_jobs().await;
+        let job = jobs
+            .iter()
+            .find(|j| j.name == "meta_spec_preview_gc")
+            .expect("meta_spec_preview_gc must be registered by start_job_registry");
+        assert!(job.enabled, "the preview GC job must be enabled");
+        assert_eq!(
+            job.interval_secs, 3600,
+            "default GC interval must be 1 hour (GYRE_META_SPEC_PREVIEW_GC_INTERVAL_SECS unset)"
+        );
+
+        // Handler binding: the trigger must execute the real sweep against
+        // the state (an empty store sweeps cleanly and records success).
+        state
+            .job_registry
+            .trigger("meta_spec_preview_gc", Arc::clone(&state))
+            .await
+            .unwrap();
+        let history = state.job_registry.history("meta_spec_preview_gc").await;
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].status, "success");
+    }
 }
