@@ -35,7 +35,7 @@ Config file is stored at `~/.gyre/config` (JSON):
 }
 ```
 
-### Bootstrap (platform-model.md §8)
+### Bootstrap ([Platform Model §8](../specs/system/platform-model.md#8-bootstrap--first-run))
 
 ```bash
 # Full non-dev bootstrap: tenant, admin user, workspace, repo, built-in
@@ -66,32 +66,41 @@ Steps performed in order: health check → create tenant → create admin user
 register repo (bare repo initialized server-side) → register + pre-approve the
 four built-in personas (workspace-orchestrator, repo-orchestrator,
 accountability, security) → repository import and spec registry sync (when a
-local manifest is available) →
-default gates (`cargo test`, `cargo clippy`, `scripts/check-arch.sh`, detected
-from `--repo-path`) → spawn the repo orchestrator → print summary with all
-IDs, the one-time API key, and URLs.
+local manifest is available) → configure default gates → spawn the repo
+orchestrator → print summary with all IDs, the one-time API key, and URLs.
 
 To import Gyre itself, point `--repo-path` at a local Gyre Git checkout with
-at least one commit. `--starter-kit` requires `--repo-path` and creates
-`specs/manifest.yaml` there if it is missing. Without `--starter-kit`,
-bootstrap skips import if you omit `--repo-path` or the checkout lacks a
-manifest. A supplied path is still used to detect default gates.
+at least one commit. Bootstrap skips import if you omit `--repo-path` or the
+checkout lacks `specs/manifest.yaml`. Platform Model §8 promises a fallback
+manifest. Without `--starter-kit`, the CLI leaves a missing manifest unwritten.
+`--starter-kit` requires an explicit `--repo-path`, and starter-kit write errors
+abort bootstrap.
+
+With `--repo-path`, bootstrap configures `cargo test --all` and
+`cargo clippy --all-targets -- -D warnings` if `Cargo.toml` exists, and
+`bash scripts/check-arch.sh` if that script exists. Gate detection does not
+require a manifest.
 
 When the manifest exists, bootstrap pushes the checkout's `HEAD` and its
-history to Gyre's `main`, then syncs the server's spec registry. Commit the
-changes you want to import first. If existing starter-kit paths have pending
-changes, bootstrap stages them and makes a local commit. Any unrelated changes
-already staged can be included in that commit and pushed with it.
+history to the target Gyre repo's `main`, then syncs the spec registry from
+the server repo's default branch. Commit the changes you want to import
+first. If existing starter-kit paths have pending changes, bootstrap stages
+them and makes a local commit. Any unrelated changes already staged can be
+included in that commit and pushed with it.
 
 A normal push creates a missing `main` or fast-forwards it when the checkout
-is ahead. A matching `HEAD` needs no branch update. To replace the server's
-empty seed, bootstrap uses a force-with-lease pinned to the inspected commit
-SHA. Any parentless commit with an empty tree qualifies for this replacement,
-regardless of who created it. For any other `main` with commits missing from
-the checkout, such as changes merged on the server, bootstrap refuses the
-push. Bootstrap reports import failures and continues. If the checkout shares
-history with the intended Gyre repository, pull from or rebase onto its
-`main` before retrying a refused push.
+is ahead. A matching `HEAD` needs no branch update and still triggers a sync.
+If `main` points to a parentless commit with an empty tree and that commit
+is outside the checkout's history, bootstrap treats it as a seed and
+replaces it using a force-with-lease pinned to the inspected commit SHA.
+For any other `main` with commits missing from the checkout, such as changes
+merged on the server, bootstrap refuses the push. It reports failures in the
+push-and-sync step and continues.
+
+After a refused push, fetch `main` from the intended Gyre repo and integrate
+it into the local branch you intend to import. Fast-forward if that branch
+is behind. If it has diverged, merge the fetched `main`. Reserve rebasing for
+unpublished commits. Then rerun bootstrap from that branch.
 
 The run is resumable: re-running `gyre bootstrap` with the same names reuses
 already-created resources (tenant, workspace, repo, personas are matched by
