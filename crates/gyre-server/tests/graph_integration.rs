@@ -28,6 +28,11 @@ impl Ctx {
         let port = listener.local_addr().unwrap().port();
         let base_url = format!("http://127.0.0.1:{port}");
 
+        // task-264: production's default signing mode is keyless Fulcio;
+        // this harness drives pushes/merges with non-JWT dev tokens, so it
+        // explicitly opts into local forge-key signing (the documented
+        // operator opt-in). Keyless/fail-loud signing has its own suites.
+        unsafe { std::env::set_var("GYRE_SIGNING_MODE", "local") };
         let state = build_state(TOKEN, &base_url, None);
         abac_middleware::seed_builtin_policies(&state)
             .await
@@ -48,6 +53,8 @@ impl Ctx {
         let port = listener.local_addr().unwrap().port();
         let base_url = format!("http://127.0.0.1:{port}");
 
+        // task-264: see Ctx::new — explicit local-signing opt-in.
+        unsafe { std::env::set_var("GYRE_SIGNING_MODE", "local") };
         let base_state = build_state(TOKEN, &base_url, None);
         let mut s = (*base_state).clone();
         s.llm = Some(Arc::new(MockLlmPortFactory::echo()) as Arc<dyn LlmPortFactory>);
@@ -746,6 +753,9 @@ async fn test_push_triggers_graph_extraction() {
     let base_url = format!("http://127.0.0.1:{port}");
     let api = format!("{base_url}/api/v1");
 
+    // task-264: see Ctx::new — explicit local-signing opt-in (this test
+    // pushes real commits through git-receive-pack).
+    unsafe { std::env::set_var("GYRE_SIGNING_MODE", "local") };
     let state = gyre_server::build_state(token, &base_url, None);
     abac_middleware::seed_builtin_policies(&state)
         .await

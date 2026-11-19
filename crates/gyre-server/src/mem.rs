@@ -23,7 +23,7 @@ use gyre_ports::{
     UserWorkspaceStateRepository, WorkspaceRepository, WorktreeRepository,
 };
 #[cfg(test)]
-use gyre_ports::{GitOpsPort, JjChange, JjOpsPort};
+use gyre_ports::{GitOpsPort, JjChange, JjNewChange, JjOpsPort};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -408,8 +408,14 @@ impl JjOpsPort for NoopJjOps {
         Ok(())
     }
 
-    async fn jj_new(&self, _repo_path: &str, _description: &str) -> Result<String> {
-        Ok("noop-change-id".to_string())
+    async fn jj_new(&self, _repo_path: &str, _description: &str) -> Result<JjNewChange> {
+        Ok(JjNewChange {
+            change_id: "noop-change-id".to_string(),
+            // Distinct from the NoopJjOps squash SHA so both surfaces can
+            // be exercised against the same repo in one test without
+            // colliding on the (repo_id, commit_sha) signature key.
+            commit_id: "0000000000000000000000000000000000000001".to_string(),
+        })
     }
 
     async fn jj_describe(
@@ -526,8 +532,11 @@ impl JjOpsPort for ConfigurableJjOps {
         Ok(())
     }
 
-    async fn jj_new(&self, _repo_path: &str, _description: &str) -> Result<String> {
-        Ok("cfg-change-id".to_string())
+    async fn jj_new(&self, _repo_path: &str, _description: &str) -> Result<JjNewChange> {
+        Ok(JjNewChange {
+            change_id: "cfg-change-id".to_string(),
+            commit_id: "0000000000000000000000000000000000000002".to_string(),
+        })
     }
 
     async fn jj_describe(
@@ -5050,6 +5059,24 @@ pub fn test_state_with_jj_ops(jj_ops: Arc<dyn gyre_ports::JjOpsPort>) -> Arc<cra
     state
 }
 
+/// Build an AppState with a custom RekorClient for tests that need to
+/// control/observe transparency-log submission of merge attestation
+/// bundles (task-264).
+#[cfg(test)]
+pub fn test_state_with_rekor(rekor: Arc<dyn gyre_ports::RekorClient>) -> Arc<crate::AppState> {
+    let (workspaces, policies, ws_store) = shared_workspace_policy_pair(false);
+    let mut state = test_state_inner(
+        Arc::new(NoopGitOps),
+        workspaces,
+        policies,
+        ws_store,
+        TestStateOverrides::default(),
+    );
+    let s = Arc::get_mut(&mut state).expect("test state is uniquely owned");
+    s.rekor = rekor;
+    state
+}
+
 /// Ensure a workspace record exists so server-originated emissions resolve a
 /// real tenant.
 ///
@@ -5414,13 +5441,19 @@ fn test_state_inner(
     );
     // Mirror production wiring (lib.rs): attestation bundles are stored
     // through the AttestationStorage port over the same audit repository,
-    // and Rekor is the no-op client.
+    // and Rekor is the real HTTP client (task-264) — left UNCONFIGURED in
+    // tests (no GYRE_REKOR_URL) so no test ever contacts a transparency
+    // log; submissions fail explicitly, exactly like an unconfigured
+    // production deployment.
     let attestation_storage: Arc<dyn gyre_ports::AttestationStorage> = Arc::new(
         gyre_adapters::MergeAttestationStorage::new(Arc::clone(&audit)),
     );
-    let rekor: Arc<dyn gyre_ports::RekorClient> = Arc::new(gyre_adapters::NoopRekorClient);
 
     let forge_key = Arc::new(crate::auth::AgentSigningKey::generate());
+    let rekor: Arc<dyn gyre_ports::RekorClient> = Arc::new(gyre_adapters::HttpRekorClient::new(
+        None,
+        forge_key.public_key_pem(),
+    ));
 
     Arc::new(crate::AppState {
         auth_token: "test-token".to_string(),
@@ -5494,7 +5527,16 @@ fn test_state_inner(
         key_bindings: Arc::new(MemKeyBindingRepository::default()),
         trusted_issuers: vec![],
         commit_signatures: Arc::new(MemCommitSignatureRepository::default()),
-        signing_config: crate::commit_signatures::SigningConfig::default(),
+        // task-264: production's default signing mode is keyless Fulcio;
+        // the shared test fixture EXPLICITLY configures local forge-key
+        // signing (the documented operator opt-in) so tests exercise the
+        // signing surfaces without a reachable Fulcio. Fulcio-mode
+        // behavior has its own tests that override this config.
+        signing_config: crate::commit_signatures::SigningConfig {
+            mode: crate::commit_signatures::SigningMode::Local,
+            fulcio_url: "https://fulcio.invalid".to_string(),
+            rekor_url: "https://rekor.invalid".to_string(),
+        },
         remote_jwks_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         trusted_proxies: crate::trusted_proxy::TrustedProxies::default(),
         tunnel_store: Arc::new(Mutex::new(HashMap::new())),
