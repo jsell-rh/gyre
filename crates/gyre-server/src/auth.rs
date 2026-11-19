@@ -3199,7 +3199,8 @@ mod tests {
         );
         assert_eq!(claims.wl_image_hash.as_deref(), Some("sha256:image"));
         assert_eq!(
-            claims.exp - claims.iat, 3600,
+            claims.exp - claims.iat,
+            3600,
             "TTL is the specced default (3600 s)"
         );
     }
@@ -3211,7 +3212,9 @@ mod tests {
         let key = AgentSigningKey::generate();
         let issuer = "http://localhost:3000";
         let token = key
-            .mint("agent-1", "task-1", "system", issuer, 3600, "t1", "ws-1", "repo-1", "repo-1")
+            .mint(
+                "agent-1", "task-1", "system", issuer, 3600, "t1", "ws-1", "repo-1", "repo-1",
+            )
             .expect("mint must succeed");
         assert!(key.validate(&token, issuer).is_ok());
 

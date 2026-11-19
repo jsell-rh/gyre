@@ -314,9 +314,7 @@ pub async fn create_mr(
             .map(|t| t.repo_id.to_string())
             .or_else(|| auth.repo_id.clone())
             .ok_or_else(|| {
-                ApiError::Forbidden(
-                    "agent token carries no repo scope for MR creation".to_string(),
-                )
+                ApiError::Forbidden("agent token carries no repo scope for MR creation".to_string())
             })?;
         if repo.id.to_string() != allowed_repo {
             return Err(ApiError::Forbidden(format!(

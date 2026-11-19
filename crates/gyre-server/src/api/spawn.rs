@@ -407,10 +407,12 @@ pub(crate) async fn stored_stack_fingerprint(
     state: &Arc<AppState>,
     agent_id: &str,
 ) -> Option<String> {
-    if let Ok(Some(json)) = state.kv_store.kv_get("workload_attestations", agent_id).await {
-        if let Ok(att) =
-            serde_json::from_str::<workload_attestation::WorkloadAttestation>(&json)
-        {
+    if let Ok(Some(json)) = state
+        .kv_store
+        .kv_get("workload_attestations", agent_id)
+        .await
+    {
+        if let Ok(att) = serde_json::from_str::<workload_attestation::WorkloadAttestation>(&json) {
             if !att.stack_fingerprint.is_empty() {
                 return Some(att.stack_fingerprint);
             }
@@ -544,31 +546,30 @@ pub(crate) async fn spawn_agent_core(
     // in the existence check below with its normal error.
     if let Some(claim) = auth.agent_task_claim() {
         if req.task_id != claim {
-            let spawn_scope_covers =
-                match state.tasks.find_by_id(&Id::new(&req.task_id)).await {
-                    Ok(Some(task)) => {
-                        let repo_spawn_right = state
-                            .repos
-                            .find_by_id(&task.repo_id)
-                            .await
-                            .ok()
-                            .flatten()
-                            .map(|r| {
-                                auth.scope
-                                    .iter()
-                                    .any(|s| *s == format!("repo:{}:spawn", r.name))
-                            })
-                            .unwrap_or(false);
-                        let ws_spawn_right = auth
-                            .scope
-                            .iter()
-                            .any(|s| *s == format!("workspace:{}:spawn", task.workspace_id));
-                        repo_spawn_right || ws_spawn_right
-                    }
-                    // Missing task / lookup failure: the existence check
-                    // below rejects the spawn — no scope decision needed.
-                    _ => true,
-                };
+            let spawn_scope_covers = match state.tasks.find_by_id(&Id::new(&req.task_id)).await {
+                Ok(Some(task)) => {
+                    let repo_spawn_right = state
+                        .repos
+                        .find_by_id(&task.repo_id)
+                        .await
+                        .ok()
+                        .flatten()
+                        .map(|r| {
+                            auth.scope
+                                .iter()
+                                .any(|s| *s == format!("repo:{}:spawn", r.name))
+                        })
+                        .unwrap_or(false);
+                    let ws_spawn_right = auth
+                        .scope
+                        .iter()
+                        .any(|s| *s == format!("workspace:{}:spawn", task.workspace_id));
+                    repo_spawn_right || ws_spawn_right
+                }
+                // Missing task / lookup failure: the existence check
+                // below rejects the spawn — no scope decision needed.
+                _ => true,
+            };
             if !spawn_scope_covers {
                 return Err(ApiError::Forbidden(format!(
                     "agent token is scoped to task {claim}; cannot spawn onto task {}",
@@ -932,12 +933,13 @@ pub(crate) async fn spawn_agent_core(
     // (GET /api/v1/agents/{id}/workload) instead of this token.
     let wl_compute_target = req.compute_target_id.clone();
     let wl_hostname: Option<String> = match resolved_ct_entity.as_ref() {
-        Some(e) if e.target_type == ComputeTargetType::Ssh => e.config["host"]
-            .as_str()
-            .map(|h| h.to_string()),
+        Some(e) if e.target_type == ComputeTargetType::Ssh => {
+            e.config["host"].as_str().map(|h| h.to_string())
+        }
         _ => None,
     };
-    let wl_stack_hash: Option<String> = stored_stack_fingerprint(state, &agent.id.to_string()).await;
+    let wl_stack_hash: Option<String> =
+        stored_stack_fingerprint(state, &agent.id.to_string()).await;
     let mint_persona = persona
         .as_ref()
         .map(|p| p.slug.clone())
@@ -5075,11 +5077,18 @@ mod tests {
             .agent_signing_key
             .validate(&token, &state.base_url)
             .expect("spawn-minted JWT must validate against the forge key");
-        assert_eq!(claims.sub, format!("agent:{agent_id}"), "sub is agent:<uuid>");
+        assert_eq!(
+            claims.sub,
+            format!("agent:{agent_id}"),
+            "sub is agent:<uuid>"
+        );
         assert_eq!(claims.aud, "gyre", "aud is the specced default");
         assert!(!claims.jti.is_empty(), "jti is minted");
         assert_eq!(claims.task_id, task_id);
-        assert_eq!(claims.spawned_by, "system", "global-token spawner is 'system'");
+        assert_eq!(
+            claims.spawned_by, "system",
+            "global-token spawner is 'system'"
+        );
         assert_eq!(
             claims.persona.as_deref(),
             Some("security"),

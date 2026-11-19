@@ -311,10 +311,7 @@ pub async fn get_task(
 /// an agent principal (worker-tier, task-bound JWT) may only mutate the
 /// task its token names. Returns 403 on mismatch; non-agent principals
 /// (users, system, orchestrators) pass through untouched.
-fn require_task_claim(
-    auth: &crate::auth::AuthenticatedAgent,
-    task: &Task,
-) -> Result<(), ApiError> {
+fn require_task_claim(auth: &crate::auth::AuthenticatedAgent, task: &Task) -> Result<(), ApiError> {
     if let Some(claim) = auth.agent_task_claim() {
         if task.id.to_string() != claim {
             return Err(ApiError::Forbidden(format!(
@@ -539,7 +536,10 @@ mod tests {
     /// Mint a worker JWT bound to `task_id` and register it in
     /// agent_tokens so the auth extractor resolves the agent principal
     /// (task-263 task-scope boundary probes).
-    async fn agent_token_for_task(state: &std::sync::Arc<crate::AppState>, task_id: &str) -> String {
+    async fn agent_token_for_task(
+        state: &std::sync::Arc<crate::AppState>,
+        task_id: &str,
+    ) -> String {
         let token = state
             .agent_signing_key
             .mint_worker_scoped(

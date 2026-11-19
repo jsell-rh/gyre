@@ -776,13 +776,12 @@ pub(crate) async fn relaunch_agent_session(
     // those facts belong to the not-yet-launched process and are recorded
     // in the fresh workload-attestation record after the launch below.
     let wl_hostname: Option<String> = match resolved_ct_entity.as_ref() {
-        Some(e) if e.target_type == gyre_domain::ComputeTargetType::Ssh => e.config["host"]
-            .as_str()
-            .map(|h| h.to_string()),
+        Some(e) if e.target_type == gyre_domain::ComputeTargetType::Ssh => {
+            e.config["host"].as_str().map(|h| h.to_string())
+        }
         _ => None,
     };
-    let wl_stack_hash =
-        crate::api::spawn::stored_stack_fingerprint(state, agent.id.as_str()).await;
+    let wl_stack_hash = crate::api::spawn::stored_stack_fingerprint(state, agent.id.as_str()).await;
     let token = state
         .agent_signing_key
         .mint_worker_scoped(
