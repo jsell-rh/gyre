@@ -1380,26 +1380,26 @@ mod tests {
         // TASK-273: /admin/audit serves the DURABLE audit repository
         // (tenant-scoped, free-text searchable) — not the in-memory
         // telemetry buffer.
-        state
-            .audit
-            .record(&gyre_domain::AuditEvent::new(
-                gyre_common::Id::new("audit-1"),
-                gyre_domain::AuditEventType::from_str("run_started"),
-                Some(gyre_common::Id::new("agent-1")),
-                None,
-                None,
-                Some(ws_id.clone()),
-                None,
-                "agent".to_string(),
-                Some("agent-1".to_string()),
-                gyre_domain::AuditOutcome::Success,
-                serde_json::json!({ "description": "Test event" }),
-                None,
-                None,
-                1000,
-            ))
-            .await
-            .unwrap();
+        let mut audit_ev = gyre_domain::AuditEvent::new(
+            gyre_common::Id::new("audit-1"),
+            gyre_domain::AuditEventType::from_str("run_started"),
+            Some(gyre_common::Id::new("agent-1")),
+            None,
+            None,
+            Some(ws_id.clone()),
+            None,
+            "agent".to_string(),
+            Some("agent-1".to_string()),
+            gyre_domain::AuditOutcome::Success,
+            serde_json::json!({ "description": "Test event" }),
+            None,
+            None,
+            1000,
+        );
+        // Caller-scoped row (the static test token resolves as tenant
+        // "default") — the endpoint filters by the caller's tenant.
+        audit_ev.tenant_id = Some("default".to_string());
+        state.audit.record(&audit_ev).await.unwrap();
 
         let app = api_router().with_state(state);
         let resp = app
@@ -1447,7 +1447,10 @@ mod tests {
         };
         // Same tenant as the test-token principal ("default"), plus an
         // other-tenant event that must never be visible, plus a legacy
-        // NULL-tenant event that remains visible.
+        // NULL-tenant event that is likewise invisible to a tenant-scoped
+        // admin query (unattributed rows are visible to unscoped internal
+        // reads only — never attributed to a tenant they did not come
+        // from; gyre-domain AuditEvent::tenant_id contract).
         state
             .audit
             .record(&mk(
@@ -1489,7 +1492,7 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let json = body_json(resp).await;
-        assert_eq!(json["count"], 2, "other-tenant events must be invisible");
+        assert_eq!(json["count"], 1, "other-tenant and NULL-tenant events must be invisible");
         let ids: Vec<&str> = json["events"]
             .as_array()
             .unwrap()
@@ -1497,14 +1500,14 @@ mod tests {
             .map(|e| e["id"].as_str().unwrap())
             .collect();
         assert!(ids.contains(&"ev-own"));
-        assert!(ids.contains(&"ev-legacy"));
+        assert!(!ids.contains(&"ev-legacy"), "unattributed rows are not this tenant's");
     }
 
     #[tokio::test]
     async fn admin_audit_free_text_search() {
         let state = test_state();
         let mk = |id: &str, detail: serde_json::Value| {
-            gyre_domain::AuditEvent::new(
+            let mut ev = gyre_domain::AuditEvent::new(
                 gyre_common::Id::new(id),
                 gyre_domain::AuditEventType::from_str("run_started"),
                 Some(gyre_common::Id::new("agent-1")),
@@ -1519,7 +1522,11 @@ mod tests {
                 None,
                 None,
                 1000,
-            )
+            );
+            // Caller-scoped row: the endpoint filters by the caller's
+            // tenant ("default" for the static test token).
+            ev.tenant_id = Some("default".to_string());
+            ev
         };
         state
             .audit
@@ -1597,7 +1604,7 @@ mod tests {
     async fn admin_audit_filters_by_agent_id() {
         let state = test_state();
         let mk = |id: &str, agent: &str| {
-            gyre_domain::AuditEvent::new(
+            let mut ev = gyre_domain::AuditEvent::new(
                 gyre_common::Id::new(id),
                 gyre_domain::AuditEventType::from_str("run_started"),
                 Some(gyre_common::Id::new(agent)),
@@ -1612,7 +1619,10 @@ mod tests {
                 None,
                 None,
                 1000,
-            )
+            );
+            // Caller-scoped row (tenant "default" for the test token).
+            ev.tenant_id = Some("default".to_string());
+            ev
         };
         state.audit.record(&mk("e1", "agent-x")).await.unwrap();
         state.audit.record(&mk("e2", "agent-y")).await.unwrap();

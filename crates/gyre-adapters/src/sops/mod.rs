@@ -17,24 +17,33 @@
 //! }
 //! ```
 //!
-//! Format fidelity (verified against the sops v3.9.4 source):
+//! Format fidelity (verified against the fetched getsops/sops v3.9.4
+//! source, and by cross-implementation tests — see
+//! `sops_decrypt_accepts_independent_implementation_vector`):
 //!
 //! - **Data key**: 32 random bytes. Wrapped with age (age-encryption.org/v1,
 //!   X25519 recipient stanza) and stored ASCII-armored in
 //!   `sops.age[0].enc` — exactly what sops's `age` key source stores — so
 //!   the document is decryptable with the sops CLI given the identity
-//!   (`sops -d --age`, or the `age` CLI on the unwrapped stanza).
+//!   (`sops -d`, or the `age` CLI on the unwrapped stanza).
 //! - **Value**: AES-256-GCM under the data key with a random 32-byte IV
 //!   (sops uses GCM with `nonceSize = 32`, not the GCM default 12),
 //!   additional data `"data:"` (the tree path of the single `data` key,
 //!   colon-joined with a trailing colon), ciphertext and 16-byte tag
 //!   base64-encoded separately in the `ENC[...]` string, `type:str`
 //!   (sops's binary envelope encrypts raw bytes as a string value).
-//! - **MAC**: SHA-512 over the decrypted value bytes (the sops tree-walk
-//!   hash of all values; a single-value document hashes its one value),
-//!   formatted as uppercase hex, then itself encrypted as an `ENC[...]`
-//!   string with the data key and the RFC 3339 `lastmodified` timestamp as
-//!   additional data. Decryption verifies the MAC (fail closed).
+//! - **MAC**: SHA-512 over the decrypted VALUE bytes — sops v3.9.4's
+//!   `Tree.Encrypt`/`Tree.Decrypt` (sops.go) does
+//!   `hash.Write(ToBytes(value))` per non-comment leaf and key paths
+//!   NEVER enter the hash, so a single-value binary envelope hashes its
+//!   one value — formatted as uppercase hex (`%X`), then itself encrypted
+//!   as an `ENC[...]` string with the data key and the RFC 3339
+//!   `lastmodified` string as additional data (cmd/sops/common/common.go
+//!   `Encrypter`: `cipher.Encrypt(mac, dataKey,
+//!   LastModified.Format(time.RFC3339))`). Decryption verifies the MAC
+//!   (fail closed), exactly as `sops -d` does (Decrypter:
+//!   `cipher.Decrypt(metadata.mac, dataKey, lastmodified)` compared
+//!   against the recomputed tree hash).
 //!
 //! The legacy pre-SOPS storage format (ring AES-256-GCM with a 12-byte
 //! nonce in the `nonce` column) is transparently decryptable and

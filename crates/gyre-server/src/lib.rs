@@ -905,7 +905,9 @@ impl AppState {
 /// Global authentication middleware for all `/api/v1/` routes.
 ///
 /// Rejects any request without a valid `Authorization: Bearer <token>` header
-/// with `401 Unauthorized`. The `/api/v1/version` endpoint is public.
+/// with `401 Unauthorized`. The `/api/v1/version` endpoint and the OAuth
+/// callback redirect target (`/api/v1/oauth/claude-max/callback`, whose
+/// single-use state row is the per-handler capability) are public.
 /// ABAC middleware runs after this and enforces finer-grained policy checks.
 async fn require_auth_middleware(
     axum::extract::State(state): axum::extract::State<Arc<AppState>>,
@@ -915,7 +917,19 @@ async fn require_auth_middleware(
     use axum::response::IntoResponse;
 
     // /api/v1/version is intentionally public.
-    if req.uri().path() == "/api/v1/version" {
+    //
+    // /api/v1/oauth/claude-max/callback is the provider's redirect target
+    // for the admin-initiated Claude Max enrollment (admin-panel.md
+    // §Credential Management): the user's browser follows the redirect
+    // with NO Gyre credentials, so it cannot pass this gate. The
+    // single-use, expiring state row persisted at enrollment IS the
+    // per-handler capability — `claude_max_callback` validates it
+    // (unknown / expired / replayed states are rejected) before anything
+    // is exchanged or stored. Same trust model as the invitation
+    // magic-link routes; the ABAC resolver carries a matching
+    // RouteResourceMapping::exempt entry.
+    let path = req.uri().path();
+    if path == "/api/v1/version" || path == "/api/v1/oauth/claude-max/callback" {
         return next.run(req).await;
     }
 

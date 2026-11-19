@@ -2180,12 +2180,14 @@ fn audit_entry_matches(e: &AuditEvent, filter: &AuditQueryFilter) -> bool {
         && filter.outcome.is_none_or(|o| e.outcome == o)
         && filter.since.is_none_or(|s| e.timestamp >= s)
         && filter.until.is_none_or(|u| e.timestamp <= u)
-        // Tenant scoping: the caller's tenant, with legacy NULL-tenant rows
-        // (recorded before the column existed) still visible — the same
-        // semantics the SQL adapters enforce.
-        && filter.tenant_id.as_ref().is_none_or(|t| {
-            e.tenant_id.as_ref().is_none_or(|et| et == t)
-        })
+        // Tenant scoping: the caller's tenant only. Unattributed legacy
+        // rows (NULL tenant) are visible to unscoped internal reads only —
+        // never attributed to a tenant they did not come from — the same
+        // semantics the SQL adapters enforce (strict equality).
+        && filter
+            .tenant_id
+            .as_ref()
+            .is_none_or(|t| e.tenant_id.as_deref() == Some(t.as_str()))
         // Free-text search over the detail payload (case-insensitive),
         // matching the SQL adapters' LIKE semantics.
         && filter.q.as_ref().is_none_or(|q| {
