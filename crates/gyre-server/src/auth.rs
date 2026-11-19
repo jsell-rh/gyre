@@ -405,6 +405,19 @@ impl HistoricalSigningKey {
     }
 }
 
+/// The JWT subject for an agent session (identity-security.md
+/// §Task-Scoped JWT Claims): `agent:<uuid>`.
+///
+/// Single source of truth for the subject form: every Layer-2 mint embeds
+/// it as `sub`, and Layer-1 SVID issuance (spiffe.rs
+/// `issue_session_svid`) uses it as the SPIFFE ID session segment, so the
+/// documented binding invariant `/agent/{role}/session/{jwt sub}`
+/// (spiffe_federation.rs) holds by direct string comparison — a federated
+/// verifier never normalizes either side.
+pub fn agent_subject(agent_id: &str) -> String {
+    format!("agent:{agent_id}")
+}
+
 impl AgentSigningKey {
     /// Generate a fresh Ed25519 key pair.
     pub fn generate() -> Self {
@@ -588,7 +601,7 @@ impl AgentSigningKey {
             .unwrap_or_default()
             .as_secs();
         let claims = AgentJwtClaims {
-            sub: format!("agent:{agent_id}"),
+            sub: agent_subject(agent_id),
             iss: issuer.to_string(),
             aud: self.audience.clone(),
             iat: now,
@@ -678,7 +691,7 @@ impl AgentSigningKey {
             vec![format!("repo:{name}:write"), format!("repo:{name}:spawn")]
         };
         let claims = AgentJwtClaims {
-            sub: format!("agent:{agent_id}"),
+            sub: agent_subject(agent_id),
             iss: issuer.to_string(),
             aud: self.audience.clone(),
             iat: now,
@@ -809,7 +822,7 @@ impl AgentSigningKey {
             .unwrap_or_default()
             .as_secs();
         let claims = AgentJwtClaims {
-            sub: format!("agent:{agent_id}"),
+            sub: agent_subject(agent_id),
             iss: issuer.to_string(),
             aud: self.audience.clone(),
             iat: now,

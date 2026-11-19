@@ -85,7 +85,9 @@ pub struct SpawnAgentResponse {
     /// environment variables and presents it on the attestation path.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub svid_pem: Option<String>,
-    /// The session's SPIFFE ID (`spiffe://{trust-domain}/agent/{role}/session/{id}`).
+    /// The session's SPIFFE ID
+    /// (`spiffe://{trust-domain}/agent/{role}/session/{jwt sub}`, the
+    /// session segment being the agent's JWT subject `agent:<uuid>`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub spiffe_id: Option<String>,
     /// Whether the compute-target process launch succeeded

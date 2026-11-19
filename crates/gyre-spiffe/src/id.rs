@@ -20,7 +20,10 @@ pub struct SpiffeId {
 pub struct AgentPath {
     /// Role segment (persona slug or orchestrator tier, e.g. `worker`).
     pub role: String,
-    /// Session id segment — the agent (session) id the SVID was issued for.
+    /// Session id segment — the session's JWT subject for Gyre-minted
+    /// sessions (`agent:<uuid>`; see gyre-server `auth::agent_subject`),
+    /// so a federated verifier can bind it to the caller's `sub` by
+    /// direct string comparison.
     pub session_id: String,
 }
 

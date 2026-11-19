@@ -1035,7 +1035,8 @@ mod tests {
         let foreign = foreign_ca
             .issue_svid(
                 &gyre_spiffe::SpiffeId::parse(&format!(
-                    "spiffe://attacker.example/agent/test-persona/session/{id}"
+                    "spiffe://attacker.example/agent/test-persona/session/{}",
+                    crate::auth::agent_subject(&id)
                 ))
                 .expect("foreign SPIFFE ID must parse"),
                 gyre_spiffe::BASE_SVID_TTL_SECS,

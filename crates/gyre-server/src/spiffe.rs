@@ -295,7 +295,9 @@ fn bounded_http_client() -> anyhow::Result<reqwest::Client> {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SvidRecord {
     pub agent_id: String,
-    /// SPIFFE ID of the session (URI SAN of the leaf).
+    /// SPIFFE ID of the session (URI SAN of the leaf). The session
+    /// segment is the session's JWT subject (`agent:<uuid>`) — see
+    /// `issue_session_svid`.
     pub spiffe_id: String,
     /// Role segment of the SPIFFE ID path.
     pub role: String,
@@ -397,6 +399,15 @@ pub fn agent_role(
 /// resolved compute target and stack evidence) — SVID issuance is gated on
 /// that spawn-time authorization evidence, so the runtime proves it runs
 /// on authorized infrastructure.
+///
+/// The SPIFFE ID session segment is the session's JWT subject
+/// (`agent:<uuid>`, see `crate::auth::agent_subject`) — the same `sub` the
+/// Layer-2 mint embeds for this agent — so the documented binding
+/// invariant `/agent/{role}/session/{jwt sub}` (spiffe_federation.rs,
+/// identity-security.md §Federation) holds exactly: a federated verifier
+/// binds the presented SVID to the caller's JWT `sub` by direct string
+/// comparison, with no normalization on either side. The KV record stays
+/// keyed by the bare agent id (the local lookup key everywhere else).
 pub async fn issue_session_svid(
     state: &AppState,
     agent_id: &str,
@@ -404,9 +415,10 @@ pub async fn issue_session_svid(
     compute_target: &str,
     stack_fingerprint: &str,
 ) -> Result<SessionSvid, anyhow::Error> {
+    let session_id = crate::auth::agent_subject(agent_id);
     let issued = state
         .spiffe
-        .issue_for_session(role, agent_id)
+        .issue_for_session(role, &session_id)
         .await
         .map_err(|e| anyhow::anyhow!("SVID issuance for agent {agent_id}: {e}"))?;
     let record = SvidRecord {
