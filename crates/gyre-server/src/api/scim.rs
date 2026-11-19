@@ -136,11 +136,15 @@ pub struct ScimUserRequest {
     pub enterprise: ScimEnterprise,
 }
 
-/// RFC 7644 §3.5.2 PATCH request body.
+/// RFC 7644 §3.5.2 PATCH request body. The spec's member name is
+/// `Operations` (capital O); serde must accept that exact key, not only the
+/// camelCase form — with `#[serde(default)]` a missed key silently
+/// deserializes an empty operation list and every PatchOp body becomes a
+/// no-op that still returns 200.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ScimPatchRequest {
-    #[serde(default)]
+    #[serde(default, alias = "Operations")]
     operations: Vec<ScimPatchOp>,
 }
 
