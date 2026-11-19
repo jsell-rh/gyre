@@ -3,7 +3,7 @@ title: "Agent JWT claims completion and hard task-scope boundary (by-effect enfo
 spec_ref: "Spec gap spec-31d3ae72e12e22c52442e309 / agent-jwt-claims-task-scope / b60edce5bc49"
 depends_on: [task-130]
 progress: ready-for-review
-commits: ["f338cfc164c3a775de95a520e6ca09d2eec00b39", "37f458b9b33f62b3a85ea82193afdead4b28e4d1", "42dad97a5b9daf8ed4204c8a272884d741bee052", "544b2755ea961f0764abb0d8c3cb9d1ea214f358", "585d459ed97d7d585397d3587f386221b8c96f28", "88f9a006a2d6983173200f08c850ece61072f49c", "5cdce3aadee6da0de408e8e4e83b2666fdf11f12", "356184ee46d2363835f9b71df07a2facde5cd895"]
+commits: ["356184ee46d2363835f9b71df07a2facde5cd895", "5cdce3aadee6da0de408e8e4e83b2666fdf11f12", "88f9a006a2d6983173200f08c850ece61072f49c", "585d459ed97d7d585397d3587f386221b8c96f28", "544b2755ea961f0764abb0d8c3cb9d1ea214f358", "42dad97a5b9daf8ed4204c8a272884d741bee052", "37f458b9b33f62b3a85ea82193afdead4b28e4d1", "f338cfc164c3a775de95a520e6ca09d2eec00b39"]
 ---
 
 ## Required behavior
