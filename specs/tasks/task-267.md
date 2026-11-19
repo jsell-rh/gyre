@@ -785,4 +785,29 @@ Publish exactly the independently reviewed missing-work plan below. Only create 
 
 ## Shipped
 
-Task definitions and explicit bindings only; no product implementation claimed.
+Published the independently reviewed missing-work plan for `specs/system/identity-security.md` (plan `8e132f42330e3bc1b1fb491a64d1396c0f3190a1457ecee8ef489f18b26cea9e`): task definitions and explicit section bindings only — no product implementation claimed.
+
+### What was created
+
+- `specs/tasks/task-261.md` (spiffe-workload-attestation) — X.509-SVIDs replacing the G10 local scheme; covers sections 9d623241914634d94371c864, 16fb4f5c865aa918b828b94e.
+- `specs/tasks/task-262.md` (spiffe-federation) — SPIFFE trust-bundle exchange; depends on task-261; covers 05e06b05e91abddea8707d41.
+- `specs/tasks/task-263.md` (agent-jwt-claims-task-scope) — claims completion plus by-effect task-scope enforcement sweep; depends on task-130; covers 91f35f78880c4d70c32342ee, 5576c3d85b41c8482ee8b1ee.
+- `specs/tasks/task-264.md` (sigstore-layer3-completion) — every commit signed, keyless default, no silent fallback, real Rekor; depends on task-107; covers 68b06ebc09a7c8d49aa516d0.
+- `specs/tasks/task-265.md` (scim-users-lifecycle) — PATCH, deactivation, enterprise extension, middleware wiring; covers e88b0643650de3d8f271012a, 2cf8a1c0fbde5c0d82e85317, b2b37ae05e75a44a9117ceca.
+- `specs/tasks/task-266.md` (scim-groups-workspace-mapping) — Groups endpoints and group-to-workspace role mapping; depends on task-265; covers 6273edccbcca379f21b54f97.
+- `specs/task-spec-inputs.json` — exact section bindings for all six tasks; all 10 audited gap sections of the document are covered exactly once; the 5 context/satisfied sections are intentionally unbound.
+
+Each task doc carries the reviewed required behavior, acceptance criteria (unticked), verification intent (negative probe), and discovery evidence verbatim; all six remain `progress: not-started` per the acceptance criteria.
+
+### Merge resolution
+
+The branch history includes a merge of the concurrently merged task-260 publication (source-control backlog, 25497b9e) which conflicted in `specs/task-spec-inputs.json` where both publications appended distinct backlog entries. Resolved as the union: both the identity-security and source-control entries are present, the file is valid JSON, and the resolved key set equals the union of both parents' key sets (verified programmatically; no entry lost from either side).
+
+### Verification evidence
+
+- Programmatic comparison of each task doc against the embedded reviewed plan: title, required behavior, every acceptance criterion, negative probe, dependency frontmatter, and `not-started` progress all match exactly.
+- All `backlog/{section-id}` entries resolve to existing headings in `specs/system/identity-security.md`.
+- Duplicate-work scan: every prior task touching SPIFFE/SCIM/Sigstore surfaces is `complete` (task-107 Sigstore stack and task-130 token scoping are declared dependencies, not duplicates); no other active task covers these sections.
+- Diff vs base 321615ec touches only `specs/tasks/task-26*.md` and `specs/task-spec-inputs.json` — no product file, coverage status, spec requirement, or gate changed.
+- `scripts/test_pipeline_spec_backlog.py` (40 tests) and `scripts/test_pipeline_requirements.py` (23 tests) pass against the updated registry.
+- Evidence artifacts saved under `/tmp/stage/review-evidence/`.
