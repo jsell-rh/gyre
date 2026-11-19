@@ -2,7 +2,7 @@
 title: "Agent-to-commit tracking at session granularity: session persistence, branch lifecycle, dirty state, file/commit queries, and time-travel"
 spec_ref: "Spec gap spec-36fad8fcafe7b73a2b6f2d0e / agent-session-commit-tracking / b580b93c564f"
 depends_on: []
-progress: not-started
+progress: ready-for-review
 commits: ["50452ac5318beaf98f0ff6a5b63557f02c0543b3"]
 ---
 
@@ -28,6 +28,89 @@ Update the relevant coverage rows only after implementing the behavior, with con
 ## Discovery evidence
 
 Canonical spec: `specs/system/source-control.md`. Source: `fb1424fbac55cd23cb08606f4cd667a96f4dbc43`; plan: `e7d4e79257be81eda6ddf1029e79d17654ad24d2acc5ff2425ebf4e133acd4b0`.
+
+## Shipped
+
+Source implemented in 50452ac5, merged with main at 45e8f9f6; this
+checkpoint finalizes formatting (cargo fmt clean), commit attribution, and
+records verification evidence.
+
+- Session persistence: new `SessionRepository` port (gyre-ports) implemented
+  by the SQLite adapter (migration `2026-11-14-000067_agent_sessions`), the
+  PostgreSQL adapter, and the mem adapter, with duplicate-id and
+  missing-row failure constraints guarded identically in all adapters; wired
+  into AppState via the existing `store!` pattern. Sessions start at agent
+  spawn (api/spawn.rs) and at each Ralph-loop fresh-context respawn
+  (ralph_loop.rs `relaunch_agent_session`), and end on every termination
+  path (complete_agent, fail_agent, stale-agent Dead transition in
+  stale_agents.rs).
+- Session-to-commit mapping: `AgentCommit` carries `session_id` +
+  `files_changed`; `record_pushed_commits` and POST
+  `/repos/:id/commits/record` resolve the pushing agent's currently-open
+  session and stamp it (NULL when none — never a fabricated id). New
+  chronological GET `/repos/:id/agent-sessions` and GET
+  `/repos/:id/agent-sessions/:sid/commits` queries.
+- Branch lifecycle: GET `/repos/:id/agents/:aid/branch-lifecycle` returns
+  the spawn-time branch, the current branch resolved at termination via a
+  real `git rev-parse` lookup in the agent's worktree (never the spawn value
+  copied forward), and all observed commits.
+- Dirty state: every termination path runs a real `git status --porcelain`
+  in the agent's worktree (dirty flag + uncommitted paths); a
+  missing/inaccessible worktree records dirty=NULL plus `dirty_detail` —
+  never a silent clean.
+- Commit-based queries: `files_changed` recorded per pushed commit at push
+  time (`git diff-tree --no-commit-id --name-only -r --root`); by-file
+  (exact path) and by-commit-SHA session queries returning sessions and
+  agents.
+- Time-travel: GET `/repos/:id/agent-sessions/:sid/state` reconstructs the
+  repo during [started_at, ended_at] via `git log --all --after/--before`
+  against the real object store, plus the completion snapshot resolved from
+  `refs/agents/{agent-id}/snapshots/{n}` (tree sha + files).
+
+All new routes are registered in the ABAC resolver (repo resource); all
+state is DB-backed so sessions and session-stamped commits survive a
+server restart.
+
+### Verification evidence
+
+- `cargo check -p gyre-server --tests`: PASS (9m14s).
+- `cargo test -p gyre-domain`: 570 + 8 passed.
+- `cargo test -p gyre-adapters`: 588 passed, 6 ignored (pre-existing
+  daemon-gated container/ssh/llm tests); the new session and agent_commit
+  contract tests all pass — `create_and_find_by_agent_chronological`,
+  `create_duplicate_id_fails`, `find_by_id_and_repo`, `find_open_by_agent`,
+  `update_missing_session_fails`, `update_termination_state_round_trip`,
+  `find_by_session_chronological`, `session_and_files_round_trip`.
+- `cargo fmt --check`: clean.
+- Mechanical gates clean (no new exemptions):
+  check-mem-port-contracts, check-abac-route-registry,
+  check-abac-exempt-handlers, check-in-memory-state-stores,
+  check-migration-versions, check-migration-sql-portability,
+  check-forged-scope-fields, check-fail-open-ref-resolution, check-arch,
+  check-scope-literal-defaults, check-fabricated-scope-defaults,
+  check-relative-path-defaults, check-byte-slice-truncation,
+  check-inert-enforcement.
+- Logs saved under /tmp/stage/review-evidence/.
+
+### Deferred to the independent verifier
+
+Per the build-budget rule, the gyre-server test-binary build runs in the
+verifier. Execute:
+
+    cargo test -p gyre-server agent_sessions
+    cargo test -p gyre-server api::agent_tracking
+
+These directly cover the acceptance criteria:
+`two_session_attribution`, `by_file_and_by_commit_queries`,
+`branch_lifecycle_view`, `session_state_time_travel`,
+`end_session_records_dirty_state_from_real_worktree`,
+`end_session_clean_worktree_records_clean`,
+`end_session_missing_worktree_records_unknown_not_clean`,
+`end_session_resolves_moved_branch_not_spawn_branch`,
+`end_session_without_open_session_is_noop`,
+`files_changed_for_commit_lists_real_paths`,
+`time_travel_window_and_snapshot_from_real_repo`, plus the pre-existing
+`record_commit_and_list` / `list_commits_filter_by_agent` handler tests.
 
 [
   {
