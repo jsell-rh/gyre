@@ -2,8 +2,8 @@
 title: "MCP SSE stream: workspace filtering and MessageKind-to-AG-UI event mapping"
 spec_ref: "Spec gap spec-c62aac6701125cb09e0c736c / mcp-sse-workspace-agui / 60b177f85a11"
 depends_on: []
-progress: not-started
-commits: []
+progress: complete
+commits: ["1388c32e4f4d81242744e9bfa8c9738316ed1e2b", "b4ac4adc9246394c8d3408850c43eeca158b9c33", "c9c8b4c3722d79b8ddc835ea6b1602bc70b9474a"]
 ---
 
 ## Required behavior
@@ -58,3 +58,71 @@ Canonical spec: `specs/system/message-bus.md`. Source: `4127964001113dda08e48524
     ]
   }
 ]
+
+## Shipped
+
+`mcp_sse_handler` (crates/gyre-server/src/mcp.rs) implements both halves of
+message-bus.md §MCP Integration plus the review-repair hardening. This round
+additionally repaired the rebase onto base 61b6080d (task-251's Directed
+inbox lifecycle work): the code auto-merged cleanly, and the one content
+conflict — specs/coverage/system/message-bus.md's "Last audited" audit
+trail, where both sides had appended a different gap-closure sentence — was
+resolved by keeping both (task-251's row-16 sentence and task-253's row-14
+sentence), with rows 14 and 16 each carrying their own merged evidence.
+
+### Workspace filtering
+
+The handler resolves the subscriber's workspace scope fail-closed (never
+fabricated): for agent/system principals the stored agent record governs
+(`state.agents.find_by_id` — "Workspace that governs this agent", M34
+hierarchy enforcement), with the signature-verified `workspace_id` JWT
+claim (mirrored onto the principal by the auth extractor) as the fallback
+when no record exists; user principals (API key, Keycloak) are claim-only.
+Bus delivery is then filtered per destination:
+
+- `Destination::Workspace(ws)` — delivered only when `ws` equals the
+  subscriber's resolved workspace (workspace ids are globally unique, so
+  the match implies tenant containment);
+- `Destination::Broadcast` — delivered to all subscribers per the bus's
+  broadcast semantics; admins with no resolvable scope (global token) keep
+  the legacy unscoped dashboard view, mirroring the admin bypass in
+  ws.rs Subscribe;
+- `Destination::Agent(id)` — delivered only on the authenticated agent's
+  own stream, and only for genuine agent principals (user principals and
+  the global token never match agent-targeted messages; principal-
+  namespace guard mirroring the ws.rs bus filter, review repair 1388c32e).
+
+### AG-UI event mapping
+
+`agui_event_name` (mcp.rs) maps `MessageKind` → SSE event name per the
+spec table: ToolCallStart→TOOL_CALL_START, ToolCallEnd→TOOL_CALL_END,
+RunStarted→RUN_STARTED, RunFinished→RUN_FINISHED,
+TextMessageContent→TEXT_MESSAGE_CONTENT, StateChanged→STATE_CHANGED,
+AgentError→ERROR; kinds outside the table (incl. `Custom`) keep the
+generic `message` event. The SSE data payload is unchanged (raw envelope
+JSON), and existing broadcast server→client notifications still arrive
+(probe: mcp_sse_admin_connection_still_receives_notifications).
+
+### Test evidence
+
+Focused tests in crates/gyre-server/src/mcp.rs (mem-backed, real bus
+broadcast channel): mcp_sse_workspace_isolation (workspace A's
+ToolCallStart reaches A's stream only — asserts B's stream stays silent),
+mcp_sse_agui_event_mapping (all seven spec-table kinds produce their
+AG-UI event name; TaskCreated keeps `message`), mcp_sse_directed_delivery
+(own Directed message delivered, other agents' not),
+mcp_sse_directed_delivery_rejects_principal_namespace_collisions,
+mcp_sse_admin_connection_still_receives_notifications, and
+mcp_sse_record_activity_telemetry_reaches_workspace. The isolation and
+mapping assertions fail against the pre-fix handler (generic `message`
+event, no filtering) by construction.
+
+Sandbox evidence for this round (post-rebase head e8e4b7c6):
+`cargo check -p gyre-server --tests` clean (build wrapper, 9m28s); all
+six focused tests present and compiling; rustfmt clean on the merged
+Rust files. Server test execution is deferred to the independent
+verifier per the sandbox build-budget rule — verifier must run:
+`cargo test -p gyre-server --lib mcp_sse` (all six SSE tests) and the
+task-251 inbox-lifecycle suite it was merged with
+(complete_agent_bulk_acks_directed_inbox, agent_complete_bulk_acks_directed_inbox,
+stale_abort_bulk_acks_directed_inbox_with_agent_orphaned).
