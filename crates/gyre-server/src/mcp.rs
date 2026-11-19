@@ -244,13 +244,15 @@ fn tool_definitions() -> Value {
             },
             {
                 "name": "gyre_agent_heartbeat",
-                "description": "Send a heartbeat for an agent to keep it alive.",
+                "description": "Send a heartbeat for an agent to keep it alive. The heartbeat carries the session's X.509-SVID (GYRE_SVID_PEM) for workload-identity verification (identity-security.md Layer 1) — a heartbeat without a valid SVID is rejected.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "agent_id": { "type": "string", "description": "Agent ID" }
+                        "agent_id": { "type": "string", "description": "Agent ID" },
+                        "svid": { "type": "string", "description": "The session's X.509-SVID chain (PEM, leaf first) — the content of the GYRE_SVID_PEM environment variable" },
+                        "stack_fingerprint": { "type": "string", "description": "The workload's current stack fingerprint (GYRE_STACK_HASH environment variable), when set" }
                     },
-                    "required": ["agent_id"]
+                    "required": ["agent_id", "svid"]
                 }
             },
             {
@@ -2138,12 +2140,36 @@ async fn handle_agent_heartbeat(state: &AppState, args: &Value) -> Value {
         Some(a) => a.to_string(),
         None => return tool_error("missing required field: agent_id"),
     };
+    // identity-security.md Layer 1: the heartbeat carries the session's
+    // X.509-SVID, verified fail-closed against the published trust bundle
+    // (same surface as PUT /agents/{id}/heartbeat and POST /attest — no
+    // bypass variant). A heartbeat without a valid SVID is rejected.
+    let svid = match get_str(args, "svid") {
+        Some(s) => s.to_string(),
+        None => {
+            return tool_error(
+                "missing required field: svid — present the session's X.509-SVID                  (the GYRE_SVID_PEM environment variable) on every heartbeat",
+            )
+        }
+    };
+    let stack_fingerprint = get_str(args, "stack_fingerprint")
+        .unwrap_or_default()
+        .to_string();
     match state.agents.find_by_id(&Id::new(&agent_id)).await {
         Ok(Some(mut agent)) => {
-            agent.heartbeat(now_secs());
-            match state.agents.update(&agent).await {
-                Ok(()) => tool_result(format!("Heartbeat recorded for agent {agent_id}")),
-                Err(e) => tool_error(format!("Failed to update agent: {e}")),
+            match crate::spiffe::attest_session(state, &agent_id, &svid, &stack_fingerprint).await {
+                Ok(_) => {
+                    agent.heartbeat(now_secs());
+                    match state.agents.update(&agent).await {
+                        Ok(()) => tool_result(format!(
+                            "Heartbeat recorded for agent {agent_id} (workload identity verified)"
+                        )),
+                        Err(e) => tool_error(format!("Failed to update agent: {e}")),
+                    }
+                }
+                Err(reason) => {
+                    tool_error(format!("Workload-identity verification failed: {reason}"))
+                }
             }
         }
         Ok(None) => tool_error(format!("Agent not found: {agent_id}")),
@@ -11416,10 +11442,31 @@ concepts:
         let (foreign_id, _foreign_token) = register_worker(&state, "w-hb-x", "r-x").await;
         let app = crate::build_router(state.clone());
 
+        // The heartbeat surface verifies the session's X.509-SVID
+        // (identity-security.md Layer 1, task-261): seed the worker's
+        // SVID-backed record through the issuance path and present the
+        // issued chain + bound stack fingerprint on the self heartbeat.
+        let svid = crate::spiffe::issue_session_svid(
+            &state,
+            &worker_id,
+            "worker",
+            "local",
+            "sha256:hb-test-stack",
+        )
+        .await
+        .expect("test SVID issuance must succeed");
+
         // Self heartbeat passes and records.
         let (_status, json) = mcp_post_with_token(
             app.clone(),
-            tool_call("gyre_agent_heartbeat", json!({ "agent_id": worker_id })),
+            tool_call(
+                "gyre_agent_heartbeat",
+                json!({
+                    "agent_id": worker_id,
+                    "svid": svid.record.chain_pem,
+                    "stack_fingerprint": "sha256:hb-test-stack",
+                }),
+            ),
             &token,
         )
         .await;
@@ -11427,10 +11474,19 @@ concepts:
         let text = json["result"]["content"][0]["text"].as_str().unwrap();
         assert!(text.contains("Heartbeat recorded"), "got: {text}");
 
-        // Foreign agent: denied pre-dispatch, naming the target.
+        // Foreign agent: denied pre-dispatch, naming the target. The denial
+        // is a scope decision made before the handler runs — it must not
+        // depend on (or be bypassable by) the payload's SVID presentation.
         let (_status, json) = mcp_post_with_token(
             app.clone(),
-            tool_call("gyre_agent_heartbeat", json!({ "agent_id": foreign_id })),
+            tool_call(
+                "gyre_agent_heartbeat",
+                json!({
+                    "agent_id": foreign_id,
+                    "svid": svid.record.chain_pem,
+                    "stack_fingerprint": "sha256:hb-test-stack",
+                }),
+            ),
             &token,
         )
         .await;

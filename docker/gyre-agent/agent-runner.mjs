@@ -432,7 +432,13 @@ try {
             ...(token ? { Authorization: `Bearer ${token}` } : {}),
             'Content-Type': 'application/json',
           },
-          body: JSON.stringify({ pid: process.pid }),
+          // identity-security.md Layer 1: the heartbeat carries the
+          // session's X.509-SVID for fail-closed workload-identity
+          // verification (GYRE_SVID_PEM is injected at spawn).
+          body: JSON.stringify({
+            svid: process.env.GYRE_SVID_PEM || '',
+            stack_fingerprint: process.env.GYRE_STACK_HASH || '',
+          }),
         });
         if (!resp.ok) console.warn(`[heartbeat] failed: ${resp.status}`);
       } catch (e) {

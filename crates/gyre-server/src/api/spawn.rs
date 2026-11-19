@@ -79,6 +79,15 @@ pub struct SpawnAgentResponse {
     /// SHA256 of the workspace's meta-spec set at spawn time, for provenance (M32).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub meta_spec_set_sha: Option<String>,
+    /// The session's X.509-SVID chain (PEM, leaf first; identity-security.md
+    /// Layer 1). Public certificate material — the workload also receives it
+    /// (with the private key) in its `GYRE_SVID_PEM` / `GYRE_SVID_KEY`
+    /// environment variables and presents it on the attestation path.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub svid_pem: Option<String>,
+    /// The session's SPIFFE ID (`spiffe://{trust-domain}/agent/{role}/session/{id}`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spiffe_id: Option<String>,
     /// Whether the compute-target process launch succeeded
     /// (agent-runtime.md §1 Phase 7 spawn-failure handling). False means
     /// the agent record exists but no process is running.
@@ -420,10 +429,55 @@ pub(crate) async fn launch_agent_workload(
     resolved_target_config: Option<super::compute::ComputeTargetConfig>,
     command: String,
     args: Vec<String>,
-    container_env: std::collections::HashMap<String, String>,
+    mut container_env: std::collections::HashMap<String, String>,
     work_dir: String,
     compute_target_label: String,
+    spiffe_role: &str,
 ) -> Result<Option<String>, ApiError> {
+    // identity-security.md Layer 1: issue the session's X.509-SVID before
+    // dispatch so the workload receives it in its environment
+    // (GYRE_SVID_PEM / GYRE_SVID_KEY / GYRE_SPIFFE_ID). Issuance is gated
+    // on the spawn-time authorization evidence this path already holds
+    // (post-ABAC spawn, resolved compute target, stack evidence below); a
+    // failed issuance fails the launch closed — an unattested workload is
+    // never spawned silently.
+    // Stack evidence: a manifest-declared stack (GYRE_STACK_HASH already in
+    // the environment, e.g. a gate's `stack_hash`) wins; otherwise resolve
+    // from the session's authorized launch configuration.
+    let stack_evidence = match container_env.get("GYRE_STACK_HASH") {
+        Some(existing) if !existing.is_empty() => existing.clone(),
+        _ => {
+            crate::spiffe::resolve_session_stack_evidence(
+                state,
+                &agent.id.to_string(),
+                &compute_target_label,
+                None,
+                None,
+                Some(spiffe_role),
+            )
+            .await
+        }
+    };
+    let svid = crate::spiffe::issue_session_svid(
+        state,
+        &agent.id.to_string(),
+        spiffe_role,
+        &compute_target_label,
+        &stack_evidence,
+    )
+    .await
+    .map_err(ApiError::Internal)?;
+    // The gate workload presents this stack fingerprint on the attestation
+    // path (same contract as the spawn path's GYRE_STACK_HASH injection).
+    container_env.insert("GYRE_STACK_HASH".to_string(), stack_evidence.clone());
+    let svid_record = &svid.record;
+    container_env.insert("GYRE_SPIFFE_ID".to_string(), svid_record.spiffe_id.clone());
+    container_env.insert("GYRE_SVID_PEM".to_string(), svid_record.chain_pem.clone());
+    // The SVID private key is handed to the workload (the SVID = leaf +
+    // key, per the SPIFFE X.509-SVID specification); the server retains
+    // only the record above.
+    container_env.insert("GYRE_SVID_KEY".to_string(), svid.private_key_pem.clone());
+
     let dispatch = dispatch_agent_launch(
         state,
         agent,
@@ -435,31 +489,19 @@ pub(crate) async fn launch_agent_workload(
     )
     .await?;
 
-    // G10 + M19.4: Create workload attestation now that we know the PID /
-    // container ID.
-    let att = {
-        // Retrieve the stack hash recorded by the agent (M14.1), if any.
-        let stack_hash = state
-            .kv_store
-            .kv_get("agent_stacks", &agent.id.to_string())
-            .await
-            .ok()
-            .flatten()
-            .and_then(|s| {
-                serde_json::from_str::<super::stack_attest::AgentStack>(&s)
-                    .ok()
-                    .map(|st| st.fingerprint())
-            })
-            .unwrap_or_default();
-        workload_attestation::attest_agent_with_container(
-            &agent.id.to_string(),
-            dispatch.pid,
-            &compute_target_label,
-            &stack_hash,
-            dispatch.container_id.clone(),
-            dispatch.container_image.clone(),
-        )
-    };
+    // Workload attestation record (M19.4 metadata + the session's SVID
+    // identity). Metadata only — verification is the SVID surface in
+    // `spiffe::verify_workload_identity`.
+    let att = workload_attestation::attest_agent_with_container(
+        &agent.id.to_string(),
+        dispatch.pid,
+        &compute_target_label,
+        &svid_record.stack_fingerprint,
+        dispatch.container_id.clone(),
+        dispatch.container_image.clone(),
+        Some(svid_record.spiffe_id.clone()),
+        Some(svid_record.serial.clone()),
+    );
     if let Ok(json) = serde_json::to_string(&att) {
         let _ = state
             .kv_store
@@ -826,12 +868,35 @@ pub(crate) async fn spawn_agent_core(
 
     // Pre-mint a JWT carrying the worker's repo scope so `subject.repo_scope`
     // (§Attributes, source "Agent OIDC claim") is real on every request the
-    // agent makes, plus the `wl_image_hash` workload attestation claim
-    // resolved above. Further workload claims are attached via the workload
-    // attestation record (state.workload_attestations, queryable via
-    // GET /api/v1/agents/{id}/workload). Under §1 Token Scoping the mint also
-    // carries the full hierarchy context (tenant, workspace, repo) and the
-    // fine-grained `repo:{name}:write` scope list.
+    // agent makes, plus the wl_* workload claims. The workload claims now
+    // reflect the SVID-backed attestation (identity-security.md Layer 1):
+    // `wl_stack_hash` is the SAME stack evidence the SVID issuance and the
+    // workload attestation record bind (it is read once here, before the
+    // launch, and reused below), `wl_compute_target` is the resolved
+    // authorized target, and `wl_hostname` the launch host. Further detail
+    // is queryable via GET /api/v1/agents/{id}/workload. Under §1 Token
+    // Scoping the mint also carries the full hierarchy context (tenant,
+    // workspace, repo) and the fine-grained `repo:{name}:write` scope list.
+    // Layer-1 stack evidence (identity-security.md): resolved ONCE here —
+    // the JWT `wl_stack_hash` claim, the SVID issuance, and the workload
+    // attestation record all carry this same value (see
+    // `spiffe::resolve_session_stack_evidence`).
+    let spawn_compute_target_label = resolved_ct_entity
+        .as_ref()
+        .map(|e| e.id.to_string())
+        .unwrap_or_else(|| "local".to_string());
+    let spawn_stack_evidence = crate::spiffe::resolve_session_stack_evidence(
+        state,
+        &agent.id.to_string(),
+        &spawn_compute_target_label,
+        resolved_ct_entity.as_ref(),
+        wl_image_hash.as_deref(),
+        bare_persona.as_deref(),
+    )
+    .await;
+    let wl_stack_hash = Some(spawn_stack_evidence.clone());
+    let wl_hostname = Some(crate::workload_attestation::read_hostname());
+    let wl_compute_target = Some(spawn_compute_target_label.clone());
     let token = state
         .agent_signing_key
         .mint_worker_scoped(
@@ -867,6 +932,9 @@ pub(crate) async fn spawn_agent_core(
                         ComputeTargetType::Kubernetes => 1,
                     }),
             ),
+            wl_hostname,
+            wl_compute_target,
+            wl_stack_hash,
             wl_image_hash,
         )
         .map_err(|e| ApiError::Internal(anyhow::anyhow!("agent token mint: {e}")))?;
@@ -1230,6 +1298,7 @@ pub(crate) async fn spawn_agent_core(
         state,
         &AgentLaunchCtx {
             agent: agent.clone(),
+            stack_fingerprint: spawn_stack_evidence.clone(),
             workspace: workspace.clone(),
             repo: repo.clone(),
             task: task.clone(),
@@ -1245,34 +1314,25 @@ pub(crate) async fn spawn_agent_core(
             is_interrogation,
         },
     )
-    .await;
+    .await
+    .map_err(|e| ApiError::Internal(anyhow::anyhow!("agent launch: {e:#}")))?;
     let spawned_pid = launch.pid;
     let spawned_container_id = launch.container_id;
     let spawned_container_image = launch.container_image;
-    // G10 + M19.4: Create workload attestation now that we know the PID / container ID.
-    let att = {
-        // Retrieve the stack hash recorded by the agent (M14.1), if any.
-        let stack_hash = state
-            .kv_store
-            .kv_get("agent_stacks", &agent.id.to_string())
-            .await
-            .ok()
-            .flatten()
-            .and_then(|s| {
-                serde_json::from_str::<super::stack_attest::AgentStack>(&s)
-                    .ok()
-                    .map(|st| st.fingerprint())
-            })
-            .unwrap_or_default();
-        workload_attestation::attest_agent_with_container(
-            &agent.id.to_string(),
-            spawned_pid,
-            &launch.compute_target_label,
-            &stack_hash,
-            spawned_container_id.clone(),
-            spawned_container_image.clone(),
-        )
-    };
+    // Workload attestation record: M19.4 launch metadata plus the
+    // session's SVID identity issued inside `launch_agent_process`. The
+    // stack fingerprint is the SAME value the JWT `wl_stack_hash` claim
+    // carries (bound to the SVID-backed attestation record).
+    let att = workload_attestation::attest_agent_with_container(
+        &agent.id.to_string(),
+        spawned_pid,
+        &launch.compute_target_label,
+        &spawn_stack_evidence,
+        spawned_container_id.clone(),
+        spawned_container_image.clone(),
+        launch.spiffe_id.clone(),
+        launch.svid_serial.clone(),
+    );
     if let Ok(json) = serde_json::to_string(&att) {
         let _ = state
             .kv_store
@@ -1364,6 +1424,8 @@ pub(crate) async fn spawn_agent_core(
         jj_change_id,
         container_id: spawned_container_id,
         meta_spec_set_sha,
+        svid_pem: launch.svid_pem,
+        spiffe_id: launch.spiffe_id,
         process_launched: launch.launched,
     })
 }
@@ -1796,6 +1858,10 @@ async fn dispatch_agent_launch(
 pub(crate) struct AgentLaunchCtx {
     /// The agent record (already persisted, already `Active`).
     pub agent: Agent,
+    /// The session's stack evidence (resolved once by the caller before
+    /// the JWT mint so the `wl_stack_hash` claim and the SVID issuance
+    /// bind the same value).
+    pub stack_fingerprint: String,
     /// The agent's workspace record (secret resolution, tenant scope).
     pub workspace: Option<gyre_domain::Workspace>,
     /// The repo the agent works in.
@@ -1845,6 +1911,15 @@ pub(crate) struct AgentLaunchResult {
     pub container_image: Option<String>,
     /// Label of the target the launch resolved to (attestation/audit).
     pub compute_target_label: String,
+    /// The session's SPIFFE ID (identity-security.md Layer 1), when SVID
+    /// issuance succeeded — feeds the workload attestation record and the
+    /// spawn response.
+    pub spiffe_id: Option<String>,
+    /// Leaf serial (hex) of the issued SVID.
+    pub svid_serial: Option<String>,
+    /// The issued SVID chain (PEM, leaf first) — surfaced in the spawn
+    /// response so the caller can present it on the attestation path.
+    pub svid_pem: Option<String>,
 }
 
 /// Launch the agent process on the resolved compute target and register it
@@ -1858,12 +1933,35 @@ pub(crate) struct AgentLaunchResult {
 pub(crate) async fn launch_agent_process(
     state: &Arc<AppState>,
     ctx: &AgentLaunchCtx,
-) -> AgentLaunchResult {
+) -> Result<AgentLaunchResult, ApiError> {
     let compute_target_label = ctx
         .resolved_ct_entity
         .as_ref()
         .map(|e| e.id.to_string())
         .unwrap_or_else(|| "local".to_string());
+
+    // identity-security.md Layer 1: issue the session's X.509-SVID before
+    // the environment is built so the workload receives it at start
+    // (GYRE_SVID_PEM / GYRE_SVID_KEY / GYRE_SPIFFE_ID, alongside its
+    // GYRE_AUTH_TOKEN). Issuance is gated on the spawn-time authorization
+    // evidence this path already holds (post-ABAC spawn, resolved compute
+    // target, registered stack evidence); a failed issuance fails the
+    // launch closed — an unattested workload is never spawned silently.
+    let spiffe_role = crate::spiffe::agent_role(
+        ctx.persona_name
+            .as_deref()
+            .or_else(|| ctx.persona.as_ref().map(|p| p.slug.as_str())),
+        &ctx.agent.orchestrator_type,
+    );
+    let svid = crate::spiffe::issue_session_svid(
+        state,
+        &ctx.agent.id.to_string(),
+        &spiffe_role,
+        &compute_target_label,
+        &ctx.stack_fingerprint,
+    )
+    .await
+    .map_err(ApiError::Internal)?;
 
     let resolved_target_config: Option<super::compute::ComputeTargetConfig> = ctx
         .resolved_ct_entity
@@ -1986,6 +2084,19 @@ pub(crate) async fn launch_agent_process(
         container_env.insert("GYRE_AGENT_ID".to_string(), agent.id.to_string());
         container_env.insert("GYRE_TASK_ID".to_string(), task.id.to_string());
         container_env.insert("GYRE_REPO_ID".to_string(), repo.id.to_string());
+        // Layer 1 workload identity (identity-security.md): the session's
+        // X.509-SVID. The workload presents GYRE_SVID_PEM on the
+        // attestation path (heartbeat/attest) for fail-closed
+        // workload-identity verification.
+        container_env.insert("GYRE_SPIFFE_ID".to_string(), svid.record.spiffe_id.clone());
+        container_env.insert("GYRE_SVID_PEM".to_string(), svid.record.chain_pem.clone());
+        // The SVID private key is handed to the workload (the SVID = leaf
+        // + key, per the SPIFFE X.509-SVID specification); the server
+        // retains only the issuance record.
+        container_env.insert("GYRE_SVID_KEY".to_string(), svid.private_key_pem.clone());
+        // The stack fingerprint the workload must present on the
+        // attestation path (bound to the SVID-backed record at issuance).
+        container_env.insert("GYRE_STACK_HASH".to_string(), ctx.stack_fingerprint.clone());
         // Ralph-loop position (agent-runtime.md §1 Phase 7 / §5 prompt
         // structure): 0 on first spawn, 1+ on every re-spawn so a fresh
         // session knows which iteration it is running.
@@ -2176,13 +2287,16 @@ pub(crate) async fn launch_agent_process(
         }
     };
 
-    AgentLaunchResult {
+    Ok(AgentLaunchResult {
         launched: dispatch.launched,
         pid: dispatch.pid,
         container_id: dispatch.container_id,
         container_image: dispatch.container_image,
         compute_target_label,
-    }
+        spiffe_id: Some(svid.record.spiffe_id.clone()),
+        svid_serial: Some(svid.record.serial.clone()),
+        svid_pem: Some(svid.record.chain_pem.clone()),
+    })
 }
 
 // ── Spawned-agent registration (agent-runtime.md §3) ─────────────────────────

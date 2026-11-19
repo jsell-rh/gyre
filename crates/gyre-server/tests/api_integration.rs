@@ -393,8 +393,30 @@ async fn agent_heartbeat() {
     let ctx = Ctx::new().await;
     let agent_id = create_agent(&ctx).await;
 
+    // The heartbeat surface verifies the session's X.509-SVID
+    // (identity-security.md Layer 1, task-261) fail-closed before any
+    // liveness is recorded. This agent was created directly (no spawn),
+    // so seed its SVID-backed record through the issuance path and
+    // present the issued chain PEM + bound stack fingerprint, exactly
+    // as a spawned workload does via GYRE_SVID_PEM / GYRE_STACK_HASH.
+    let svid = gyre_server::spiffe::issue_session_svid(
+        &ctx.state,
+        &agent_id,
+        "worker",
+        "local",
+        "sha256:integration-hb-stack",
+    )
+    .await
+    .expect("test SVID issuance must succeed");
+
     let resp = ctx
-        .put(&format!("/api/v1/agents/{agent_id}/heartbeat"), json!({}))
+        .put(
+            &format!("/api/v1/agents/{agent_id}/heartbeat"),
+            json!({
+                "svid": svid.record.chain_pem,
+                "stack_fingerprint": svid.record.stack_fingerprint,
+            }),
+        )
         .await;
     assert!(resp.status().is_success());
 }
