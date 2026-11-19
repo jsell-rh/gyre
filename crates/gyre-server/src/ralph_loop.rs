@@ -784,6 +784,21 @@ pub(crate) async fn relaunch_agent_session(
     .await;
     let wl_stack_hash = Some(respawn_stack_evidence.clone());
     let wl_compute_target = respawn_compute_target_label.clone();
+    // `wl_hostname` — same rule as the first-spawn mint
+    // (api/spawn.rs): the hostname of the COMPUTE TARGET, i.e. the
+    // configured remote host for an Ssh target — never the forge
+    // server's own hostname — the local host for local/Container
+    // spawns, and honestly absent for Kubernetes (no single host fact
+    // exists at mint time).
+    let wl_hostname = match resolved_ct_entity.as_ref() {
+        Some(e) if e.target_type == gyre_domain::ComputeTargetType::Ssh => e
+            .config
+            .get("host")
+            .and_then(|h| h.as_str())
+            .map(|h| h.to_string()),
+        Some(e) if e.target_type == gyre_domain::ComputeTargetType::Kubernetes => None,
+        _ => Some(crate::workload_attestation::read_hostname()),
+    };
     let token = state
         .agent_signing_key
         .mint_worker_scoped(
@@ -809,7 +824,7 @@ pub(crate) async fn relaunch_agent_session(
                         gyre_domain::ComputeTargetType::Kubernetes => 1,
                     }),
             ),
-            Some(crate::workload_attestation::read_hostname()),
+            wl_hostname,
             Some(wl_compute_target),
             wl_stack_hash,
             wl_image_hash,

@@ -920,7 +920,11 @@ pub(crate) async fn spawn_agent_core(
     // `wl_stack_hash` is the SAME stack evidence the SVID issuance and the
     // workload attestation record bind (it is read once here, before the
     // launch, and reused below), `wl_compute_target` is the resolved
-    // authorized target, and `wl_hostname` the launch host. Further detail
+    // authorized target, and `wl_hostname` the COMPUTE TARGET's host —
+    // for an Ssh spawn that is the configured remote host, not the forge
+    // server's own hostname (identity-security.md claims table: "Hostname
+    // of the compute target (present when spawned on remote target)").
+    // Further detail
     // is queryable via GET /api/v1/agents/{id}/workload. Under §1 Token
     // Scoping the mint also carries the full hierarchy context (tenant,
     // workspace, repo) and the fine-grained `repo:{name}:write` scope list.
@@ -949,7 +953,22 @@ pub(crate) async fn spawn_agent_core(
     )
     .await;
     let wl_stack_hash = Some(spawn_stack_evidence.clone());
-    let wl_hostname = Some(crate::workload_attestation::read_hostname());
+    // `wl_hostname` — the hostname of the compute target: the configured
+    // remote host for an Ssh target; the local host for local/Container
+    // spawns (the workload runs on this machine, so the forge hostname
+    // IS the compute-target hostname); honestly absent for Kubernetes
+    // (the workload runs in a cluster — no single host fact exists at
+    // mint time, and minting the forge hostname here would fabricate the
+    // compute target's identity).
+    let wl_hostname = match resolved_ct_entity.as_ref() {
+        Some(e) if e.target_type == ComputeTargetType::Ssh => e
+            .config
+            .get("host")
+            .and_then(|h| h.as_str())
+            .map(|h| h.to_string()),
+        Some(e) if e.target_type == ComputeTargetType::Kubernetes => None,
+        _ => Some(crate::workload_attestation::read_hostname()),
+    };
     let wl_compute_target = Some(spawn_compute_target_label.clone());
     let mint_persona = persona
         .as_ref()
@@ -5195,6 +5214,94 @@ mod tests {
             att.stack_fingerprint, wl_stack_hash,
             "the minted stack hash equals the stored workload-attestation \
              stack fingerprint"
+        );
+    }
+
+    /// task-263 review repair: `wl_hostname` is the hostname of the
+    /// COMPUTE TARGET (identity-security.md claims table: "Hostname of
+    /// the compute target (present when spawned on remote target)").
+    /// A merge round regressed the mint to read_hostname() — the FORGE
+    /// server's own hostname — for every spawn, so an Ssh spawn's token
+    /// named the forge host instead of the configured remote host,
+    /// fabricating the workload's location. This pins the Ssh arm: the
+    /// minted wl_hostname equals the compute target's configured host.
+    /// The remote is unreachable in the test environment — irrelevant
+    /// here, because the mint precedes the (best-effort) launch and
+    /// reads the CONFIGURED fact, not a live probe.
+    #[tokio::test]
+    async fn ssh_spawn_mints_configured_remote_host_as_wl_hostname() {
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let (app, ws_id) = create_workspace(app, "wl-hostname-ws").await;
+        let (app, repo_id) = create_repo_in_workspace(app, &ws_id).await;
+        let (app, task_id) = create_task(app, "wl_hostname task").await;
+
+        // SSH-typed compute target whose configured host is a remote
+        // worker machine — NOT this forge server.
+        let ct_body = serde_json::json!({
+            "name": "wl-hostname-ssh-target",
+            "target_type": "Ssh",
+            "config": {"user": "agent", "host": "worker-box", "port": 22},
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/compute-targets")
+                    .header("content-type", "application/json")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&ct_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::CREATED,
+            "ssh compute target create should succeed"
+        );
+        let ct_json = body_json(resp).await;
+        let ct_id = ct_json["id"].as_str().unwrap().to_string();
+
+        let body = serde_json::json!({
+            "name": "wl-hostname-worker",
+            "repo_id": repo_id,
+            "task_id": task_id,
+            "branch": "feat/wl-hostname",
+            "compute_target_id": ct_id,
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/agents/spawn")
+                    .header("content-type", "application/json")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::CREATED,
+            "ssh-target spawn should succeed (the mint precedes the \
+             best-effort launch), got {}",
+            resp.status()
+        );
+        let json = body_json(resp).await;
+        let token = json["token"].as_str().unwrap();
+
+        let claims = state
+            .agent_signing_key
+            .validate(&token, &state.base_url)
+            .expect("spawn-minted JWT must validate against the forge key");
+        assert_eq!(
+            claims.wl_hostname.as_deref(),
+            Some("worker-box"),
+            "wl_hostname is the Ssh compute target's configured host, not \
+             the forge server's own hostname"
         );
     }
 
