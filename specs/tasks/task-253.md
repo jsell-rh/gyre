@@ -2,8 +2,8 @@
 title: "MCP SSE stream: workspace filtering and MessageKind-to-AG-UI event mapping"
 spec_ref: "Spec gap spec-c62aac6701125cb09e0c736c / mcp-sse-workspace-agui / 60b177f85a11"
 depends_on: []
-progress: ready-for-review
-commits: ["1388c32e4f4d81242744e9bfa8c9738316ed1e2b", "b4ac4adc9246394c8d3408850c43eeca158b9c33", "c9c8b4c3722d79b8ddc835ea6b1602bc70b9474a"]
+progress: not-started
+commits: []
 ---
 
 ## Required behavior
@@ -58,78 +58,3 @@ Canonical spec: `specs/system/message-bus.md`. Source: `4127964001113dda08e48524
     ]
   }
 ]
-
-## Shipped
-
-`mcp_sse_handler` (crates/gyre-server/src/mcp.rs) implements both halves of
-message-bus.md §MCP Integration plus the review-repair hardening. This round
-closed out the checkpoint: the DIRTY merge against base 05024b3e (task-254's
-message edge cases — 64KB send limit, JWKS historical-key serving) was
-resolved in 6bd3c362 (the single content conflict was again the
-message-bus.md "Last audited" audit trail; both gap-closure sentences kept,
-rows 14 and 16 each carrying their own merged evidence), source commit
-attribution was re-recorded, and the merged tree type-checks clean.
-
-### Workspace filtering
-
-The handler resolves the subscriber's workspace scope fail-closed (never
-fabricated): for agent/system principals the stored agent record governs
-(`state.agents.find_by_id` — "Workspace that governs this agent", M34
-hierarchy enforcement), with the signature-verified `workspace_id` JWT
-claim (mirrored onto the principal by the auth extractor) as the fallback
-when no record exists; user principals (API key, Keycloak) are claim-only.
-Bus delivery is then filtered per destination:
-
-- `Destination::Workspace(ws)` — delivered only when `ws` equals the
-  subscriber's resolved workspace (workspace ids are globally unique, so
-  the match implies tenant containment);
-- `Destination::Broadcast` — delivered to all subscribers per the bus's
-  broadcast semantics; admins with no resolvable scope (global token) keep
-  the legacy unscoped dashboard view, mirroring the admin bypass in
-  ws.rs Subscribe;
-- `Destination::Agent(id)` — delivered only on the authenticated agent's
-  own stream, and only for genuine agent principals (user principals and
-  the global token never match agent-targeted messages; principal-
-  namespace guard mirroring the ws.rs bus filter, review repair 1388c32e).
-
-### AG-UI event mapping
-
-`agui_event_name` (mcp.rs) maps `MessageKind` → SSE event name per the
-spec table: ToolCallStart→TOOL_CALL_START, ToolCallEnd→TOOL_CALL_END,
-RunStarted→RUN_STARTED, RunFinished→RUN_FINISHED,
-TextMessageContent→TEXT_MESSAGE_CONTENT, StateChanged→STATE_CHANGED,
-AgentError→ERROR; kinds outside the table (incl. `Custom`) keep the
-generic `message` event. The SSE data payload is unchanged (raw envelope
-JSON), and existing broadcast server→client notifications still arrive
-(probe: mcp_sse_admin_connection_still_receives_notifications).
-
-### Test evidence
-
-Focused tests in crates/gyre-server/src/mcp.rs (mem-backed, real bus
-broadcast channel): mcp_sse_workspace_isolation (workspace A's
-ToolCallStart reaches A's stream only — asserts B's stream stays silent),
-mcp_sse_agui_event_mapping (all seven spec-table kinds produce their
-AG-UI event name; TaskCreated keeps `message`), mcp_sse_directed_delivery
-(own Directed message delivered, other agents' not),
-mcp_sse_directed_delivery_rejects_principal_namespace_collisions,
-mcp_sse_admin_connection_still_receives_notifications, and
-mcp_sse_record_activity_telemetry_reaches_workspace. The isolation and
-mapping assertions fail against the pre-fix handler (generic `message`
-event, no filtering) by construction.
-
-### This round's sandbox evidence (merged head 2442de2c)
-
-- `cargo check -p gyre-server --tests` clean via the build wrapper
-  (10m16s, exit 0 — log: /tmp/stage/review-evidence/task-253-cargo-check.log):
-  task-253's mcp.rs handler + six SSE tests compile against task-254's
-  merged changes (auth.rs HistoricalSigningKey, oidc.rs JWKS history,
-  api/mod.rs route body limit, lib.rs signing-key history).
-- rustfmt --check clean on crates/gyre-server/src/mcp.rs; no new Rust
-  files were added by this task (mcp.rs is the only Rust file touched).
-- Attribution re-recorded via the controller script: commits
-  c9c8b4c3 (SSE filter + AG-UI mapping + tests), b4ac4adc (clippy repair),
-  1388c32e (principal-namespace guard repair).
-
-Server test execution is deferred to the independent verifier per the
-sandbox build-budget rule — verifier must run:
-`cargo test -p gyre-server --lib mcp_sse` (all six SSE tests).
