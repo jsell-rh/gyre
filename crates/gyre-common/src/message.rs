@@ -287,6 +287,18 @@ impl MessageKind {
         )
     }
 
+    /// Broadcast-only kinds (message-bus.md §Broadcast-only kinds):
+    /// `DataSeeded` and `QueueUpdated` are server-only AND storage-exempt —
+    /// they flow through the in-memory broadcast channel only and never hit
+    /// `MessageRepository::store()`. Send paths must short-circuit storage
+    /// for these kinds regardless of destination: a row of these kinds must
+    /// never be persisted, even when addressed to a Workspace destination.
+    /// On the wire they use `Destination::Broadcast` with `workspace_id:
+    /// None` and carry no payload.
+    pub fn broadcast_only(&self) -> bool {
+        matches!(self, MessageKind::DataSeeded | MessageKind::QueueUpdated)
+    }
+
     /// Returns the tier for this kind.
     /// Custom defaults to Event tier.
     pub fn tier(&self) -> MessageTier {
@@ -1302,6 +1314,25 @@ mod tests {
         assert!(!MessageKind::TaskAssignment.server_only());
         assert!(!MessageKind::ToolCallStart.server_only());
         assert!(!MessageKind::Custom("foo".to_string()).server_only());
+    }
+
+    // ── Broadcast-only kinds (message-bus.md §Broadcast-only kinds) ─────
+
+    #[test]
+    fn broadcast_only_returns_true_for_dataseeded_queueupdated_only() {
+        // Exactly the two spec-named broadcast-only kinds — and no others:
+        // every Event-tier builtin is server_only, but only DataSeeded and
+        // QueueUpdated are storage-exempt, so a send path that keys its
+        // storage short-circuit on broadcast_only() must not skip storage
+        // for any other kind.
+        assert!(MessageKind::DataSeeded.broadcast_only());
+        assert!(MessageKind::QueueUpdated.broadcast_only());
+        assert!(!MessageKind::AgentCreated.broadcast_only());
+        assert!(!MessageKind::MrMerged.broadcast_only());
+        assert!(!MessageKind::MergeQueuePaused.broadcast_only());
+        assert!(!MessageKind::TaskAssignment.broadcast_only());
+        assert!(!MessageKind::ToolCallStart.broadcast_only());
+        assert!(!MessageKind::Custom("data_seeded".to_string()).broadcast_only());
     }
 
     #[test]
