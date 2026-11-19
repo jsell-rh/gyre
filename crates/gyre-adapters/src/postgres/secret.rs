@@ -141,10 +141,7 @@ fn kv_set(conn: &mut PgConnection, namespace: &str, key: &str, value: &str) -> R
         ))
         .on_conflict((kv_store::namespace, kv_store::key))
         .do_update()
-        .set((
-            kv_store::value_json.eq(value),
-            kv_store::updated_at.eq(now),
-        ))
+        .set((kv_store::value_json.eq(value), kv_store::updated_at.eq(now)))
         .execute(conn)?;
     Ok(())
 }
@@ -371,9 +368,12 @@ impl SecretRepository for PgStorage {
                 .optional()?;
             match row {
                 None => Ok(None),
-                Some((encrypted_value, nonce)) => {
-                    Ok(Some(decrypt_at_rest(&mut conn, &encrypted_value, &nonce, &id)?))
-                }
+                Some((encrypted_value, nonce)) => Ok(Some(decrypt_at_rest(
+                    &mut conn,
+                    &encrypted_value,
+                    &nonce,
+                    &id,
+                )?)),
             }
         })
         .await?

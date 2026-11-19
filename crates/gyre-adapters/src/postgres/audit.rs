@@ -373,7 +373,10 @@ fn detail_matches(row: &AuditEventRow, term: &str) -> bool {
 /// compressed rows (decompressed + matched in the adapter, since the
 /// compressed payload is not LIKE-able). Paging keeps the result correct
 /// without an unbounded scan.
-fn query_rows(conn: &mut diesel::PgConnection, filter: &AuditQueryFilter) -> Result<Vec<AuditEvent>> {
+fn query_rows(
+    conn: &mut diesel::PgConnection,
+    filter: &AuditQueryFilter,
+) -> Result<Vec<AuditEvent>> {
     let needs_q = filter
         .q
         .as_deref()

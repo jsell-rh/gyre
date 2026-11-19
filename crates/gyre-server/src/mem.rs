@@ -16,12 +16,12 @@ use gyre_domain::{BranchInfo, CommitInfo, DiffResult, MergeResult};
 use gyre_ports::{
     AgentCommitRepository, AgentInstanceRepository, AgentRepository, AnalyticsQueryFilter,
     AnalyticsRepository, ApiKeyRepository, AuditQueryFilter, AuditRepository, BudgetRepository,
-    BudgetUsageRepository, CostRepository, DependencyRepository, JobRunRepository,
-    KvJsonStore, LlmConfigRepository, MergeQueueRepository, MergeRequestRepository,
-    MetaSpecSetRepository, NetworkPeerRepository, OAuthStateRepository, PersonaRepository,
-    RepoRepository, ReviewRepository, RolloutPolicyRepository, SpawnLogEntry, SpawnLogRepository,
-    TaskRepository, TenantMetaSpecSetRepository, TenantRepository, UserRepository,
-    UserWorkspaceStateRepository, WorkspaceRepository, WorktreeRepository,
+    BudgetUsageRepository, CostRepository, DependencyRepository, JobRunRepository, KvJsonStore,
+    LlmConfigRepository, MergeQueueRepository, MergeRequestRepository, MetaSpecSetRepository,
+    NetworkPeerRepository, OAuthStateRepository, PersonaRepository, RepoRepository,
+    ReviewRepository, RolloutPolicyRepository, SpawnLogEntry, SpawnLogRepository, TaskRepository,
+    TenantMetaSpecSetRepository, TenantRepository, UserRepository, UserWorkspaceStateRepository,
+    WorkspaceRepository, WorktreeRepository,
 };
 #[cfg(test)]
 use gyre_ports::{GitOpsPort, JjChange, JjOpsPort};
@@ -7467,9 +7467,17 @@ impl JobRunRepository for MemJobRunRepository {
         Ok(())
     }
 
-    async fn list_by_job(&self, job_name: &str, limit: usize) -> Result<Vec<gyre_ports::JobRunRecord>> {
+    async fn list_by_job(
+        &self,
+        job_name: &str,
+        limit: usize,
+    ) -> Result<Vec<gyre_ports::JobRunRecord>> {
         let runs = self.runs.lock().await;
-        let mut matching: Vec<_> = runs.iter().filter(|r| r.job_name == job_name).cloned().collect();
+        let mut matching: Vec<_> = runs
+            .iter()
+            .filter(|r| r.job_name == job_name)
+            .cloned()
+            .collect();
         matching.sort_by(|a, b| b.started_at.cmp(&a.started_at).then(b.id.cmp(&a.id)));
         matching.truncate(limit);
         Ok(matching)
@@ -7488,11 +7496,7 @@ impl JobRunRepository for MemJobRunRepository {
         let before = runs.len();
         // Only FINISHED rows older than the cutoff are removed; running
         // rows are never deleted.
-        runs.retain(|r| {
-            r.finished_at
-                .map(|f| f >= cutoff_secs)
-                .unwrap_or(true)
-        });
+        runs.retain(|r| r.finished_at.map(|f| f >= cutoff_secs).unwrap_or(true));
         Ok((before - runs.len()) as u64)
     }
 }
@@ -7582,7 +7586,10 @@ impl AgentInstanceRepository for MemAgentInstanceRepository {
         Ok(())
     }
 
-    async fn find_by_agent(&self, agent_id: &str) -> Result<Option<gyre_ports::AgentInstanceRecord>> {
+    async fn find_by_agent(
+        &self,
+        agent_id: &str,
+    ) -> Result<Option<gyre_ports::AgentInstanceRecord>> {
         Ok(self.instances.lock().await.get(agent_id).cloned())
     }
 
