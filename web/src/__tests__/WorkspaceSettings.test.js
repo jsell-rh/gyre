@@ -638,17 +638,20 @@ describe('WorkspaceSettings', () => {
     it('renders invitation status and expiry, with revoke only for pending rows', async () => {
       // Date.now() is frozen so the seeded expiry and the render-time
       // countdown agree exactly (a second of wall-clock drift would render
-      // "29m", not "30m").
+      // "29m", not "30m"); the +30s slack on each seeded expiry keeps the
+      // whole-minute floor stable.
       const nowMs = 1735689600000;
       dateNowSpy = vi.spyOn(Date, 'now').mockReturnValue(nowMs);
-      const nowSecs = Math.floor(nowMs / 1000);
       api.workspaceMembers.mockResolvedValue({ members: [] });
       api.workspaceInvitations.mockResolvedValue({
         invitations: [
           {
             id: 'inv-1', workspace_id: 'ws-1', user_id: 'u-5', invited_by: 'u-1',
             role: 'Developer', status: 'Pending',
-            expires_at: nowSecs + 6 * 86400,
+            // +30s slack: the countdown floors whole minutes from
+            // Date.now() at render time, so an exact 6d boundary would race
+            // the next wall-clock second and flake to "5d".
+            expires_at: Math.floor(Date.now() / 1000) + 6 * 86400 + 30,
             created_at: 1700000000, accepted_at: null,
           },
           {
@@ -660,7 +663,12 @@ describe('WorkspaceSettings', () => {
           {
             id: 'inv-3', workspace_id: 'ws-1', user_id: 'u-7', invited_by: 'u-1',
             role: 'Developer', status: 'Pending',
-            expires_at: nowSecs + 30 * 60,
+            // Sub-hour pending row: the countdown renders whole minutes, not raw
+            // seconds ("Expires in 30m", never "1800m"). +30s slack keeps the
+            // minute floor at 30 regardless of when the row renders — an exact
+            // 30m boundary races the next wall-clock second and flakes to 29m
+            // (observed in the task-249 verification run).
+            expires_at: Math.floor(Date.now() / 1000) + 30 * 60 + 30,
             created_at: 1700000000, accepted_at: null,
           },
         ],
