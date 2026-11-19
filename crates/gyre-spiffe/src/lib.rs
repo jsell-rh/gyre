@@ -36,6 +36,6 @@ pub use bundle::{parse_trust_bundle, trust_bundle_jwks};
 pub use ca::{TrustDomainCa, BASE_SVID_TTL_SECS};
 pub use id::{agent_spiffe_id, AgentPath, SpiffeId};
 pub use verify::{
-    verify_svid, verify_svid_for_record_id, ExpectedIdentity, VerifiedSvid, VerificationError,
+    verify_svid, verify_svid_for_record_id, ExpectedIdentity, VerificationError, VerifiedSvid,
     CHAIN_PEM_LABEL,
 };

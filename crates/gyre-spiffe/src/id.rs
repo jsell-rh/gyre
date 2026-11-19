@@ -32,38 +32,47 @@ impl SpiffeId {
     /// hyphens, underscores), and the path must be non-empty, absolute,
     /// and free of `.`/`..` segments, query strings, and fragments.
     pub fn parse(s: &str) -> Result<Self, IdError> {
-        let rest = s
-            .strip_prefix("spiffe://")
-            .ok_or(IdError::Malformed("SPIFFE ID must start with spiffe://".to_string()))?;
+        let rest = s.strip_prefix("spiffe://").ok_or(IdError::Malformed(
+            "SPIFFE ID must start with spiffe://".to_string(),
+        ))?;
         // Split trust domain from path. `?`/`#` are not allowed anywhere.
         if rest.contains('?') || rest.contains('#') {
-            return Err(IdError::Malformed("SPIFFE ID must not contain ? or #".to_string()));
+            return Err(IdError::Malformed(
+                "SPIFFE ID must not contain ? or #".to_string(),
+            ));
         }
         let (td, path) = match rest.split_once('/') {
             Some((td, path)) => (td, path),
             None => (rest, ""),
         };
         if td.is_empty() {
-            return Err(IdError::Malformed("trust domain must not be empty".to_string()));
+            return Err(IdError::Malformed(
+                "trust domain must not be empty".to_string(),
+            ));
         }
-        if !td
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '.' || c == '-' || c == '_')
-        {
+        if !td.chars().all(|c| {
+            c.is_ascii_lowercase() || c.is_ascii_digit() || c == '.' || c == '-' || c == '_'
+        }) {
             return Err(IdError::Malformed(
                 "trust domain characters must be lowercase letters, digits, '.', '-', '_' (per the SPIFFE ID specification)"
                     .to_string(),
             ));
         }
         if path.is_empty() {
-            return Err(IdError::Malformed("SPIFFE ID path must not be empty".to_string()));
+            return Err(IdError::Malformed(
+                "SPIFFE ID path must not be empty".to_string(),
+            ));
         }
         let segments: Vec<String> = path.split('/').map(|s| s.to_string()).collect();
         if segments.iter().any(|s| s.is_empty()) {
-            return Err(IdError::Malformed("SPIFFE ID path must not have empty segments".to_string()));
+            return Err(IdError::Malformed(
+                "SPIFFE ID path must not have empty segments".to_string(),
+            ));
         }
         if segments.iter().any(|s| s == "." || s == "..") {
-            return Err(IdError::Malformed("SPIFFE ID path must not contain '.' or '..' segments".to_string()));
+            return Err(IdError::Malformed(
+                "SPIFFE ID path must not contain '.' or '..' segments".to_string(),
+            ));
         }
         Ok(Self {
             trust_domain: td.to_string(),
@@ -78,7 +87,9 @@ impl SpiffeId {
     /// produced URI round-trips through [`SpiffeId::parse`].
     pub fn agent(trust_domain: &str, role: &str, session_id: &str) -> Result<Self, IdError> {
         if trust_domain.is_empty() {
-            return Err(IdError::Malformed("trust domain must not be empty".to_string()));
+            return Err(IdError::Malformed(
+                "trust domain must not be empty".to_string(),
+            ));
         }
         for (segment, name) in [(role, "role"), (session_id, "session id")] {
             if segment.is_empty() {
@@ -142,7 +153,10 @@ mod tests {
         let p = id.agent_path().unwrap();
         assert_eq!(p.role, "worker");
         assert_eq!(p.session_id, "abc-123");
-        assert_eq!(id.to_string(), "spiffe://gyre.example.com/agent/worker/session/abc-123");
+        assert_eq!(
+            id.to_string(),
+            "spiffe://gyre.example.com/agent/worker/session/abc-123"
+        );
     }
 
     #[test]

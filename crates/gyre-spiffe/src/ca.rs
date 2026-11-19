@@ -77,7 +77,10 @@ impl TrustDomainCa {
         // The SPIFFE X.509-SVID specification forbids EKUs on signing CAs.
         params.extended_key_usages = vec![];
         let mut dn = DistinguishedName::new();
-        dn.push(DnType::CommonName, format!("Gyre trust-domain CA ({trust_domain})"));
+        dn.push(
+            DnType::CommonName,
+            format!("Gyre trust-domain CA ({trust_domain})"),
+        );
         params.distinguished_name = dn;
         let not_before = OffsetDateTime::now_utc() - time::Duration::minutes(5);
         let not_after = OffsetDateTime::now_utc() + time::Duration::days(3650);
@@ -85,7 +88,11 @@ impl TrustDomainCa {
         params.not_after = not_after;
         let cert = params.self_signed(&key)?;
         let cert_der = cert.der().to_vec();
-        Ok(Self { key, cert, cert_der })
+        Ok(Self {
+            key,
+            cert,
+            cert_der,
+        })
     }
 
     /// Reconstruct the CA from persisted material.
@@ -136,7 +143,8 @@ impl TrustDomainCa {
     /// Serialize for persistence.
     pub fn serialize(&self) -> SerializedCa {
         SerializedCa {
-            key_pkcs8_b64: base64::engine::general_purpose::STANDARD.encode(self.key.serialize_der()),
+            key_pkcs8_b64: base64::engine::general_purpose::STANDARD
+                .encode(self.key.serialize_der()),
             cert_pem: self.cert.pem(),
         }
     }
@@ -154,8 +162,7 @@ impl TrustDomainCa {
     /// Issue an X.509-SVID for `spiffe_id`, valid for `ttl_secs` from now.
     pub fn issue_svid(&self, spiffe_id: &SpiffeId, ttl_secs: u64) -> anyhow::Result<IssuedSvid> {
         let not_before = OffsetDateTime::now_utc() - time::Duration::minutes(5);
-        let not_after =
-            OffsetDateTime::now_utc() + time::Duration::seconds(ttl_secs.max(1) as i64);
+        let not_after = OffsetDateTime::now_utc() + time::Duration::seconds(ttl_secs.max(1) as i64);
         self.issue_svid_with_validity(spiffe_id, not_before, not_after)
     }
 
@@ -171,12 +178,10 @@ impl TrustDomainCa {
         let mut params = CertificateParams::default();
         // SPIFFE X.509-SVID: exactly one SAN — the URI SAN holding the
         // SPIFFE ID. No DNS/IP/email SANs, no other name forms.
-        params.subject_alt_names = vec![SanType::URI(
-            spiffe_id
-                .to_string()
-                .try_into()
-                .map_err(|e| anyhow::anyhow!("SPIFFE ID is not a valid IA5String: {e:?}"))?,
-        )];
+        params.subject_alt_names =
+            vec![SanType::URI(spiffe_id.to_string().try_into().map_err(
+                |e| anyhow::anyhow!("SPIFFE ID is not a valid IA5String: {e:?}"),
+            )?)];
         // Leaf is NOT a CA.
         params.is_ca = IsCa::NoCa;
         params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
@@ -252,9 +257,13 @@ mod tests {
         assert_eq!(svid.chain_pem.matches("BEGIN CERTIFICATE").count(), 2);
 
         let anchors = vec![ca.cert_der().to_vec()];
-        let verified =
-            verify_svid(&svid.chain_pem, &anchors, &expected_for(&id), std::time::SystemTime::now())
-                .unwrap();
+        let verified = verify_svid(
+            &svid.chain_pem,
+            &anchors,
+            &expected_for(&id),
+            std::time::SystemTime::now(),
+        )
+        .unwrap();
         assert_eq!(verified.spiffe_id, id);
         assert_eq!(verified.serial, svid.serial);
         assert!(verified.not_after > verified.not_before);
@@ -274,10 +283,13 @@ mod tests {
         let svid2 = restored.issue_svid(&id, BASE_SVID_TTL_SECS).unwrap();
         let anchors = vec![restored.cert_der().to_vec()];
         for svid in [&svid1, &svid2] {
-            assert!(
-                verify_svid(&svid.chain_pem, &anchors, &expected_for(&id), std::time::SystemTime::now())
-                    .is_ok()
-            );
+            assert!(verify_svid(
+                &svid.chain_pem,
+                &anchors,
+                &expected_for(&id),
+                std::time::SystemTime::now()
+            )
+            .is_ok());
         }
     }
 

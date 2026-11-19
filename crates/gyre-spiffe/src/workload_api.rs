@@ -126,9 +126,7 @@ impl WorkloadApiTransport for GrpcWorkloadApi {
             let mut grpc = tonic::client::Grpc::new(channel);
             // The Workload API requires the `workload.spiffe.io` header on
             // every call; unknown/absent metadata is rejected.
-            let mut request = tonic::Request::new(tokio_stream::iter([
-                FetchX509SvidRequest {},
-            ]));
+            let mut request = tonic::Request::new(tokio_stream::iter([FetchX509SvidRequest {}]));
             request.metadata_mut().insert(
                 "workload.spiffe.io",
                 "true".parse().expect("static header value parses"),
@@ -164,8 +162,12 @@ impl WorkloadApiTransport for GrpcWorkloadApi {
 pub fn decode_response(response: &X509SvidResponse) -> Result<Vec<WorkloadApiSvid>> {
     let mut out = Vec::new();
     for svid in &response.svids {
-        crate::id::SpiffeId::parse(&svid.spiffe_id)
-            .with_context(|| format!("Workload API returned malformed SPIFFE ID {:?}", svid.spiffe_id))?;
+        crate::id::SpiffeId::parse(&svid.spiffe_id).with_context(|| {
+            format!(
+                "Workload API returned malformed SPIFFE ID {:?}",
+                svid.spiffe_id
+            )
+        })?;
         // Split the DER chain into PEM blocks (leaf first).
         let mut pems = Vec::new();
         let mut rest: &[u8] = &svid.x509_svid;
@@ -174,7 +176,10 @@ pub fn decode_response(response: &X509SvidResponse) -> Result<Vec<WorkloadApiSvi
                 .with_context(|| "Workload API returned an unparseable certificate chain")?;
             let consumed = rest.len() - remaining.len();
             let cert_der = &rest[..consumed];
-            pems.push(pem::encode(&pem::Pem::new("CERTIFICATE", cert_der.to_vec())));
+            pems.push(pem::encode(&pem::Pem::new(
+                "CERTIFICATE",
+                cert_der.to_vec(),
+            )));
             rest = remaining;
         }
         if pems.is_empty() {
@@ -247,20 +252,32 @@ mod tests {
         let id = crate::id::SpiffeId::agent("example.org", "worker", "s-1").unwrap();
         let svid = ca.issue_svid(&id, 60).unwrap();
         let leaf_der = pem::parse(&svid.leaf_pem).unwrap().contents().to_vec();
-        let key_der = pem::parse(&svid.private_key_pem).unwrap().contents().to_vec();
+        let key_der = pem::parse(&svid.private_key_pem)
+            .unwrap()
+            .contents()
+            .to_vec();
 
-        let wire = hand_encode_response(&[("spiffe://example.org/agent/worker/session/s-1",
-                                            &leaf_der, &key_der)]);
+        let wire = hand_encode_response(&[(
+            "spiffe://example.org/agent/worker/session/s-1",
+            &leaf_der,
+            &key_der,
+        )]);
         let decoded: X509SvidResponse =
             prost::Message::decode(wire.as_slice()).expect("wire bytes decode");
         assert_eq!(decoded.svids.len(), 1);
-        assert_eq!(decoded.svids[0].spiffe_id, "spiffe://example.org/agent/worker/session/s-1");
+        assert_eq!(
+            decoded.svids[0].spiffe_id,
+            "spiffe://example.org/agent/worker/session/s-1"
+        );
         assert_eq!(decoded.svids[0].x509_svid, leaf_der);
 
         let transport = FakeTransport(decoded);
         let svids = decode_response(&transport.fetch_x509_svid().await.unwrap()).unwrap();
         assert_eq!(svids.len(), 1);
-        assert_eq!(svids[0].spiffe_id, "spiffe://example.org/agent/worker/session/s-1");
+        assert_eq!(
+            svids[0].spiffe_id,
+            "spiffe://example.org/agent/worker/session/s-1"
+        );
         assert!(svids[0].chain_pem.contains("BEGIN CERTIFICATE"));
         assert!(svids[0].private_key_pem.contains("BEGIN PRIVATE KEY"));
     }

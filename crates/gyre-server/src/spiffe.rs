@@ -81,7 +81,11 @@ pub struct SpiffeService {
 
 impl SpiffeService {
     /// Build the local-mode service around a Gyre-operated CA.
-    pub fn local(trust_domain: String, ca: TrustDomainCa, svid_ttl_secs: u64) -> anyhow::Result<Self> {
+    pub fn local(
+        trust_domain: String,
+        ca: TrustDomainCa,
+        svid_ttl_secs: u64,
+    ) -> anyhow::Result<Self> {
         let bundle = trust_bundle_jwks(&[ca.cert_pem()]);
         Ok(Self {
             trust_domain,
@@ -199,8 +203,8 @@ impl SpiffeService {
             .map_err(|e| format!("trust bundle body unreadable: {e}"))?;
         // Fail closed on anything that is not a valid SPIFFE bundle — a
         // garbage document must never become the anchor.
-        let value: serde_json::Value = serde_json::from_str(&json)
-            .map_err(|e| format!("trust bundle is not JSON: {e}"))?;
+        let value: serde_json::Value =
+            serde_json::from_str(&json).map_err(|e| format!("trust bundle is not JSON: {e}"))?;
         parse_trust_bundle(&value)?;
         *guard = Some((Instant::now(), json.clone()));
         Ok(json)
@@ -370,7 +374,10 @@ pub async fn resolve_session_stack_evidence(
 
 /// The role segment of an agent session's SPIFFE ID: the persona slug when
 /// a persona is bound, else the orchestration tier.
-pub fn agent_role(persona: Option<&str>, orchestrator_type: &gyre_domain::OrchestratorType) -> String {
+pub fn agent_role(
+    persona: Option<&str>,
+    orchestrator_type: &gyre_domain::OrchestratorType,
+) -> String {
     match persona {
         Some(p) if !p.is_empty() => p.to_string(),
         _ => match orchestrator_type {
@@ -412,7 +419,12 @@ pub async fn issue_session_svid(
         issued_at: now_secs(),
         not_before: issued.not_before,
         not_after: issued.not_after,
-        source: if state.spiffe.workload_api_mode() { "workload-api" } else { "gyre-ca" }.to_string(),
+        source: if state.spiffe.workload_api_mode() {
+            "workload-api"
+        } else {
+            "gyre-ca"
+        }
+        .to_string(),
     };
     let json = serde_json::to_string(&record)?;
     state
@@ -658,7 +670,10 @@ mod tests {
     #[test]
     fn agent_role_prefers_persona() {
         use gyre_domain::OrchestratorType;
-        assert_eq!(agent_role(Some("security"), &OrchestratorType::Worker), "security");
+        assert_eq!(
+            agent_role(Some("security"), &OrchestratorType::Worker),
+            "security"
+        );
         assert_eq!(agent_role(None, &OrchestratorType::Worker), "worker");
         assert_eq!(
             agent_role(None, &OrchestratorType::RepoOrchestrator),

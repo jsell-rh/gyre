@@ -113,7 +113,9 @@ pub fn verify_svid_for_record_id(
         });
     }
     let spiffe_id = chain.spiffe_id;
-    let agent_path = spiffe_id.agent_path().ok_or(VerificationError::NotAgentPath)?;
+    let agent_path = spiffe_id
+        .agent_path()
+        .ok_or(VerificationError::NotAgentPath)?;
     Ok(VerifiedSvid {
         spiffe_id,
         agent_path,
@@ -174,7 +176,9 @@ fn verify_chain_and_extract_id(
         ));
     }
     if now_ts > leaf.validity.not_after.timestamp() {
-        return Err(VerificationError::Expired(leaf.validity.not_after.timestamp()));
+        return Err(VerificationError::Expired(
+            leaf.validity.not_after.timestamp(),
+        ));
     }
     if now_ts < signer.validity.not_before.timestamp()
         || now_ts > signer.validity.not_after.timestamp()
@@ -207,10 +211,9 @@ fn verify_chain_and_extract_id(
         1 => {}
         n => return Err(VerificationError::MultipleUriSans(n)),
     }
-    let spiffe_id = SpiffeId::parse(
-        &spiffe_id_str.expect("uri_count == 1 guarantees the SAN string"),
-    )
-    .map_err(|e| VerificationError::MalformedSpiffeId(e.to_string()))?;
+    let spiffe_id =
+        SpiffeId::parse(&spiffe_id_str.expect("uri_count == 1 guarantees the SAN string"))
+            .map_err(|e| VerificationError::MalformedSpiffeId(e.to_string()))?;
 
     Ok(ChainVerified {
         spiffe_id,
@@ -232,7 +235,9 @@ fn bind_to_expected(
             expected: expected.trust_domain.clone(),
         });
     }
-    let agent_path = spiffe_id.agent_path().ok_or(VerificationError::NotAgentPath)?;
+    let agent_path = spiffe_id
+        .agent_path()
+        .ok_or(VerificationError::NotAgentPath)?;
     if agent_path.session_id != expected.session_id {
         return Err(VerificationError::WrongSession {
             found: agent_path.session_id,
@@ -362,8 +367,7 @@ mod tests {
         let (ca, _, issued) = setup();
         let anchors = vec![ca.cert_der().to_vec()];
         for garbage in ["not a pem", "-----BEGIN CERTIFICATE-----\nAAAA"] {
-            let err =
-                verify_svid(garbage, &anchors, &issued.expected, now()).unwrap_err();
+            let err = verify_svid(garbage, &anchors, &issued.expected, now()).unwrap_err();
             assert_eq!(err, VerificationError::MalformedPem, "{garbage:?}");
         }
     }
@@ -417,7 +421,10 @@ mod tests {
             session_id: "session-42".to_string(),
         };
         let err = verify_svid(&future.chain_pem, &anchors, &expected, now()).unwrap_err();
-        assert_eq!(err, VerificationError::NotYetValid(not_before.unix_timestamp()));
+        assert_eq!(
+            err,
+            VerificationError::NotYetValid(not_before.unix_timestamp())
+        );
     }
 
     #[test]
@@ -432,8 +439,7 @@ mod tests {
             session_id: "session-42".to_string(),
         };
         let anchors = vec![ca.cert_der().to_vec()];
-        let err =
-            verify_svid(&issued.chain_pem, &anchors, &foreign_expected, now()).unwrap_err();
+        let err = verify_svid(&issued.chain_pem, &anchors, &foreign_expected, now()).unwrap_err();
         assert_eq!(
             err,
             VerificationError::ForeignTrustDomain {
@@ -497,10 +503,7 @@ mod tests {
         let tampered_pem = format!(
             "{}{}",
             pem::encode(&pem::Pem::new("CERTIFICATE", leaf_der)),
-            blocks
-                .iter()
-                .map(pem::encode)
-                .collect::<String>()
+            blocks.iter().map(pem::encode).collect::<String>()
         );
         let result = verify_svid(&tampered_pem, &anchors, &issued.expected, now());
         assert!(result.is_err(), "tampered leaf must not verify");

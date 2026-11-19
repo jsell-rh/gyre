@@ -65,8 +65,8 @@ pub fn parse_trust_bundle(bundle: &Value) -> Result<Vec<Vec<u8>>, String> {
 /// members, `x5c` chain, and a `kid` derived from the SPKI (stable across
 /// re-serialization of the same CA).
 fn ca_pem_to_jwk(pem_str: &str) -> Option<Value> {
-    use base64::Engine as _;
     use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
+    use base64::Engine as _;
     let der = pem::parse(pem_str).ok()?.contents().to_vec();
     let (_, cert) = x509_parser::parse_x509_certificate(&der).ok()?;
     let spki = cert.subject_pki.raw;

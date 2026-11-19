@@ -12,11 +12,11 @@ Implement Layer 1 of the identity stack with the specced existing protocol inste
 
 ## Acceptance Criteria
 
-- [x] A spawned agent session holds an X.509-SVID whose URI SAN is exactly spiffe://{trust-domain}/agent/{role}/session/{session-id} for that session, and the server's verification path validates the chain against the published trust bundle and extracts the SPIFFE ID.
-- [x] Workload-identity verification rejects, fail-closed: an SVID signed by a key not in the trust bundle, an expired/not-yet-valid SVID, an SVID whose SPIFFE ID names a different agent session or a foreign trust domain, and a request presenting no SVID.
-- [x] The trust bundle is served in SPIFFE bundle format at the well-known endpoint and is the sole verification anchor (verification never trusts self-reported metadata).
-- [x] The wl_* JWT claims remain embedded for spawned agents and the stack fingerprint they carry is bound to the SVID-backed attestation record.
-- [x] The G10 /proc-probe and skip-on-empty string comparison are no longer the workload-identity verification on this path (grep-level: no verification path succeeds on an unattested or tampered workload).
+- [ ] A spawned agent session holds an X.509-SVID whose URI SAN is exactly spiffe://{trust-domain}/agent/{role}/session/{session-id} for that session, and the server's verification path validates the chain against the published trust bundle and extracts the SPIFFE ID.
+- [ ] Workload-identity verification rejects, fail-closed: an SVID signed by a key not in the trust bundle, an expired/not-yet-valid SVID, an SVID whose SPIFFE ID names a different agent session or a foreign trust domain, and a request presenting no SVID.
+- [ ] The trust bundle is served in SPIFFE bundle format at the well-known endpoint and is the sole verification anchor (verification never trusts self-reported metadata).
+- [ ] The wl_* JWT claims remain embedded for spawned agents and the stack fingerprint they carry is bound to the SVID-backed attestation record.
+- [ ] The G10 /proc-probe and skip-on-empty string comparison are no longer the workload-identity verification on this path (grep-level: no verification path succeeds on an unattested or tampered workload).
 
 ## Verification intent
 
