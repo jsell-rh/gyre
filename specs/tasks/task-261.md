@@ -3,7 +3,7 @@ title: "SPIFFE workload attestation: X.509-SVIDs replace the G10 local scheme"
 spec_ref: "Spec gap spec-31d3ae72e12e22c52442e309 / spiffe-workload-attestation / b60edce5bc49"
 depends_on: []
 progress: ready-for-review
-commits: ["d9d97d4ee3f6d023997c3df053f89c0073484f6b", "2934153b307ad6f2cca32db758e134a375b8de90", "0c37ba3c1972849406c4c233579c4c2cd9ef8230", "14c63ffbd16a48b386fde1c63b18ff1af1e1e464", "ea0f207339d7f231560338d0e64b62302231de8a", "354a5e7a653431c98784ef3cb8326697b7998909", "c9a4d0337ef3aac273be09561d7548f82b2b51b8"]
+commits: ["aa32b0fa192eb647fe5fd84c0880b9a7c55c6680", "d9d97d4ee3f6d023997c3df053f89c0073484f6b", "2934153b307ad6f2cca32db758e134a375b8de90", "0c37ba3c1972849406c4c233579c4c2cd9ef8230", "14c63ffbd16a48b386fde1c63b18ff1af1e1e464", "ea0f207339d7f231560338d0e64b62302231de8a", "354a5e7a653431c98784ef3cb8326697b7998909", "c9a4d0337ef3aac273be09561d7548f82b2b51b8"]
 ---
 
 ## Required behavior
@@ -124,6 +124,22 @@ compare are deleted from the verification path).
   (JSON body built with jq/node for the multi-line PEM, same pattern as
   `docker/gyre-agent/entrypoint.sh`), so agents driven by these dev
   helpers no longer silently fail every heartbeat.
+
+### Verification repair round 3 (aa32b0fa, finding 3ee8be56)
+
+- Verification run (checks.sh, exit 1) failed on exactly one finding:
+  `crates/gyre-server/src/api/workload.rs:367: clippy::len_zero` (length
+  comparison to one) in `trust_bundle_served_at_well_known_location` —
+  every other gate in that run passed (rustfmt, arch lints, ABAC,
+  MCP write tools, migration checks, all script guards, web build).
+- Fix: `.len() >= 1` replaced with `!is_empty()` — clippy's own
+  suggested replacement; assertion strength and behavior identical.
+  rustfmt clean on the file; no other changed-line len()-comparison
+  exists on the branch (the two remaining repo matches pre-date the
+  base commit and are outside the changed-lines filter).
+- Sandbox note: gyre-server cold clippy belongs to the independent
+  verifier (4 GiB budget); evidence logged at
+  `/tmp/stage/review-evidence/task-261-clippy-len-zero-repair.log`.
 
 ### Rebase repair round (b8b023fb)
 
