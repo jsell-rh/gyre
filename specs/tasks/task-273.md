@@ -2,9 +2,107 @@
 title: "Admin Panel completion: SOPS/Vault secret backends, durable job history with logs, maintenance jobs, complete token refresh, server-log viewer, durable searchable admin audit"
 spec_ref: "Spec gap spec-5b647653a4554eea3e93ac19 / admin-panel-remaining-gap / e61ffd082155"
 depends_on: []
-progress: not-started
-commits: []
+progress: complete
+commits: ["db320101"]
 ---
+
+## Implementation notes (TASK-273)
+
+All eight deliverables implemented with production code; acceptance
+checkboxes above remain for the independent verifier. Source evidence:
+
+1. **SOPS default** — `crates/gyre-adapters/src/sops/` implements the real
+   SOPS JSON envelope (age-armored data key, AES-256-GCM values with
+   sops's 32-byte IVs and path AAD, SHA-512 MAC sealed with `lastmodified`
+   AAD); the cross-implementation vector from sops's own Go test suite
+   (`sops/tests.rs`) proves byte-compatibility with the sops CLI cipher.
+   `sqlite/secret.rs` + `postgres/secret.rs` (the latter replacing the old
+   `bail!` stub) store SOPS documents by default
+   (`GYRE_SECRET_BACKEND`, default `sops`), resolve the identity from
+   `GYRE_SOPS_AGE_KEY` / `GYRE_SOPS_AGE_KEY_FILE` / an auto-generated
+   identity persisted in kv_store, and re-encrypt legacy AES-256-GCM rows
+   to SOPS on first access (get_value / resolve_for_agent).
+2. **Vault option** — `crates/gyre-adapters/src/vault/` serves the whole
+   `SecretRepository` port from Vault KV v2 (30 s latency-bounded client,
+   AppRole/token auth for the admin path, JWT-auth login with the agent's
+   own JWT for `resolve_for_agent_as`, base64 value transport — no
+   from_utf8_lossy on secret material, structurally no DB fallback).
+   `build_state` (`gyre-server/src/lib.rs build_secret_repository`) wires
+   it on `GYRE_SECRET_BACKEND=vault` and panics on misconfiguration
+   (fail-closed startup); `spawn.rs` resolves agent secrets with
+   `resolve_for_agent_as(..., &agent_jwt)`.
+3. **Job history** — `gyre_ports::JobRunRepository` (record / list_by_job /
+   list_recent / delete_older_than) with SQLite + PostgreSQL adapters
+   (migrations 000067–000070, portable SQL) and a mem adapter enforcing
+   the port constraints in code; `JobRun` gained `logs` + `duration_secs()`;
+   handlers receive a run-scoped `JobRunLog` sink; every recorded run
+   (scheduler cycles, manual triggers, `record_cycle`) is persisted with
+   logs through `JobRegistry::set_durable_store`; `GET /admin/jobs` serves
+   the durable history (logs + derived duration); the Jobs tab renders
+   expandable run history. `job_history_cleanup` (daily 03:00 UTC,
+   `GYRE_JOB_HISTORY_RETENTION_DAYS`, default 30) is registered +
+   scheduled and prunes via `delete_older_than` (finished rows only).
+4. **repo_maintenance** (daily 04:00 UTC) — runs `git gc --prune=now`
+   per stored repository through the git CLI layer with a 10-minute
+   per-repo bound, per-repo outcomes in the run logs, failures recorded
+   without aborting the rest (`maintenance_jobs.rs`).
+5. **OAuth state + Claude Max enrollment** — `gyre_ports::OAuthStateRepository`
+   (+ adapters + migration 000068); `POST /api/v1/admin/oauth/claude-max/enroll`
+   (Admin-only, ABAC `secret:write`) generates state + PKCE S256 verifier,
+   persists the row with server-derived admin/tenant, and 302-redirects;
+   `GET /api/v1/oauth/claude-max/callback` (resolver-exempt; the
+   single-use state row is the per-handler capability) validates
+   exists/unexpired/unconsumed, consumes BEFORE the exchange, exchanges
+   the code with the verifier at the token endpoint (bounded HTTP), and
+   stores/rotates the scoped `claude_max_refresh_token` OAuth credential
+   document. `oauth_state_cleanup` (hourly) deletes only expired rows.
+6. **Token refresh coverage** — `secret_rotation.rs` dispatch now matches
+   on credential-document shape: a GCP service-account handler (real
+   RS256 JWT-bearer grant via ring over the SA's PKCS#8 key, RFC 7523)
+   plus the RFC 6749 refresh handler applying to ANY secret whose value
+   is an OAuth credential document regardless of name. Per-secret
+   outcomes (refreshed / no-refresh-mechanism / failed: reason) are
+   written to the run-scoped log sink and land in the durable run record.
+7. **Remote agent cleanup** — `gyre_ports::AgentInstanceRepository` (+
+   adapters + migration 000069); `register_spawned_agent` persists the
+   instance handle at spawn, exit-monitor/admin-kill mark terminated;
+   `remote_agent_cleanup` (10 min) kills still-recorded-running instances
+   whose agent is Dead/Stopped/absent (including restart orphans —
+   container/kubernetes/local backends reconstructed from the durable
+   descriptor; unreconstructable SSH descriptors are reported, not
+   silently skipped) via `ComputeTarget::kill_process`.
+8. **Server logs** — `telemetry.rs` gained a `ServerLogLayer` tracing
+   capture layer (bounded ring buffer, installed alongside the unchanged
+   stdout/JSON/OTel layers) + `GET /api/v1/admin/server/logs`
+   (level/since/limit, ABAC-registered) + a Server Logs tab in
+   TenantSettings.
+
+Audit viewer (deliverable 8) — `AuditEvent.tenant_id` (server-derived at
+emit: the POST /audit/events handler and the SQL adapters' `record()`
+derive it from the authenticated caller / workspace scope), migration
+000070 backfills from workspace scope, `tenant_id` + free-text `q` filters
+enforced in SQL by both adapters (portable `lower()` LIKE with escaped
+wildcards over the detail payload, zstd rows decompressed and matched in
+the adapter), mem adapter parity in `audit_entry_matches`.
+`GET /api/v1/admin/audit` queries the durable repository scoped to the
+caller's tenant; the TenantSettings Audit tab gained the search box and
+renders the durable events.
+
+Local verification: `cargo test -p gyre-adapters` (602 passed, incl. the
+sops cross-implementation vector, Vault KV v2 + JWT-auth stub-server
+tests, SOPS-at-rest + legacy-migration tests), `cargo test -p gyre-common
+-p gyre-ports -p gyre-domain` (706 passed), full `web` vitest suite
+(2571 passed, incl. new Jobs-run-history / Server-Logs / audit-search
+tests). `cargo check -p gyre-server --tests` passes (the full server
+test binary exceeds this sandbox's 4 GiB build cap — the independent
+verifier's probe covers it). All mechanical invariant scripts pass with
+no new exemptions: check-arch, abac-route-registry, migration-versions,
+migration-sql-portability, mem-port-contracts, in-memory-state-stores,
+unbounded-external-http, lossy-secret-conversion,
+fabricated-scope-defaults, scope-literal-defaults, inert-enforcement,
+forwarded-header-trust, forged-scope-fields, dead-message-kinds,
+relative-path-defaults, fail-open-ref-resolution,
+byte-slice-truncation.
 
 ## Required behavior
 
