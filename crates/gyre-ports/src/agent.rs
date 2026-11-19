@@ -11,6 +11,10 @@ pub trait AgentRepository: Send + Sync {
     async fn find_by_name(&self, name: &str) -> Result<Option<Agent>>;
     async fn list(&self) -> Result<Vec<Agent>>;
     async fn list_by_status(&self, status: &AgentStatus) -> Result<Vec<Agent>>;
+    /// Update an agent row in place. Persists every mutable field,
+    /// including `spawned_by` — attribution is lifecycle state (SCIM/user
+    /// deactivation clears it via update), not an immutable create-time
+    /// attribute.
     async fn update(&self, agent: &Agent) -> Result<()>;
     async fn delete(&self, id: &Id) -> Result<()>;
     async fn list_by_workspace(&self, workspace_id: &Id) -> Result<Vec<Agent>>;
