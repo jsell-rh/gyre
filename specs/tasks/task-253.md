@@ -2,8 +2,8 @@
 title: "MCP SSE stream: workspace filtering and MessageKind-to-AG-UI event mapping"
 spec_ref: "Spec gap spec-c62aac6701125cb09e0c736c / mcp-sse-workspace-agui / 60b177f85a11"
 depends_on: []
-progress: not-started
-commits: []
+progress: complete
+commits: ["1388c32e4f4d81242744e9bfa8c9738316ed1e2b", "b4ac4adc9246394c8d3408850c43eeca158b9c33", "c9c8b4c3722d79b8ddc835ea6b1602bc70b9474a"]
 ---
 
 ## Required behavior
@@ -58,3 +58,98 @@ Canonical spec: `specs/system/message-bus.md`. Source: `4127964001113dda08e48524
     ]
   }
 ]
+
+## Shipped
+
+`mcp_sse_handler` (crates/gyre-server/src/mcp.rs) implements both halves of
+message-bus.md §MCP Integration, plus the review-repair hardening of the
+directed-delivery filter.
+
+### Workspace filtering
+
+The handler resolves the subscriber's workspace scope fail-closed (never
+fabricated): for agent/system principals the stored agent record governs
+(`state.agents.find_by_id` — "Workspace that governs this agent", M34
+hierarchy enforcement), with the signature-verified `workspace_id` JWT
+claim (mirrored onto the principal by the auth extractor) as the fallback
+when no record exists; user principals (API key, Keycloak) are claim-only.
+Bus delivery is then filtered per destination:
+
+- `Destination::Workspace(ws)` — delivered only when `ws` equals the
+  subscriber's resolved workspace (workspace ids are globally unique, so
+  the match implies tenant containment);
+- `Destination::Broadcast` — delivered to all subscribers per the bus's
+  broadcast semantics; admins with no resolvable scope (global token) keep
+  the legacy unscoped dashboard view, mirroring the admin bypass in
+  ws.rs Subscribe;
+- `Destination::Agent(id)` — delivered only on the authenticated agent's
+  own stream, and only for genuine agent principals (see repair below).
+
+### AG-UI event mapping
+
+`agui_event_name` (mcp.rs) maps `MessageKind` → SSE event name per the spec
+table: ToolCallStart→TOOL_CALL_START, ToolCallEnd→TOOL_CALL_END,
+RunStarted→RUN_STARTED, RunFinished→RUN_FINISHED,
+TextMessageContent→TEXT_MESSAGE_CONTENT, StateChanged→STATE_CHANGED,
+AgentError→ERROR; kinds outside the table (incl. `Custom`) keep the generic
+`message` event. The SSE data payload is unchanged (raw envelope JSON).
+
+### Review repair — principal-namespace guard (1388c32e)
+
+The review round (abf3660c001147279a8e9a09cb758e1b) found that the
+directed-delivery arm compared the bus agent id against `auth.agent_id`
+without the principal-namespace guard the spec and the sibling WebSocket
+bus path require: API-key/Keycloak user principals carry a display
+name/username in `agent_id` (with `user_id` set), and the global token
+carries `agent_id: "system"` with the Admin role — under an id collision a
+user's SSE stream received another principal's Directed messages
+(task assignment/escalation payloads), potentially cross-tenant. The
+directed arm now requires a genuine agent principal
+(`auth.user_id.is_none() && !auth.roles.contains(&UserRole::Admin)`),
+mirroring the ws.rs bus filter exactly; user principals and the global
+token see agent inboxes through the REST/MCP read paths, not the bus.
+
+### Test evidence
+
+Six focused tests in the mcp.rs test module (in-process
+`tower::ServiceExt::oneshot` against `build_router(test_state())` — real
+router, real auth extractor with minted+registered agent JWTs / API-key
+user / global token, real broadcast bus; no TCP listener involved):
+
+- `mcp_sse_workspace_isolation` (AC1) — agents in different workspaces of
+  different tenants; a Workspace-scoped ToolCallStart to workspace A
+  reaches A's stream only. Fails against the pre-task handler.
+- `mcp_sse_agui_event_mapping` (AC2) — all seven spec-table kinds arrive
+  with their AG-UI event names (AgentError → ERROR); TaskCreated keeps
+  the default `message` name.
+- `mcp_sse_directed_delivery` (AC3) — a Directed message to the
+  authenticated agent is delivered; a Directed message to another agent
+  is not.
+- `mcp_sse_directed_delivery_rejects_principal_namespace_collisions`
+  (repair regression) — an API-key user whose display_name equals a real
+  agent's id receives nothing for that agent's Directed messages, and a
+  Directed message to an agent literally named "system" never lands on
+  the global-token admin stream. Fails against the pre-repair filter
+  (`aid.as_str() == agent_id` alone).
+- `mcp_sse_admin_connection_still_receives_notifications` (AC4) —
+  broadcast server→client notifications still arrive on the global-token
+  admin connection.
+- `mcp_sse_record_activity_telemetry_reaches_workspace` (AC5) — telemetry
+  emitted by the `gyre_record_activity` MCP tool surfaces on a same-
+  workspace subscriber's stream with the mapped AG-UI event name.
+
+### Local verification status
+
+`cargo check -p gyre-server --tests` passes at the merged head 28c922fc
+(rebase of this branch onto the task-250 base 321615ec; lib + test targets
+including the merged task-250 ws/message_persistence suites; output retained
+under /tmp/stage/review-evidence). Sandbox build budget blocks local
+`cargo test` compilation of gyre-server — the independent verifier must
+run:
+
+- `cargo test -p gyre-server mcp_sse`
+
+(all six tests above; the filter matches no other tests). The task-250
+replay suites now sharing this branch (`ws::tests::ws_replay`, and
+`ws_replay_newest_window_and_strict_boundary_on_sqlite` in
+message_persistence) are likewise deferred to the verifier.
