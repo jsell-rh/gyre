@@ -169,6 +169,36 @@ async fn main() -> Result<()> {
         Arc::clone(&state),
     );
 
+    // ── TASK-273 maintenance jobs (admin-panel.md §Background Jobs) ─────────
+
+    // Self-managing job history cleanup — daily 03:00 UTC.
+    jobs::spawn_job(
+        Arc::clone(&state.job_registry),
+        "job_history_cleanup".to_string(),
+        Arc::clone(&state),
+    );
+
+    // Global repository maintenance (git gc/prune/repack) — daily 04:00 UTC.
+    jobs::spawn_job(
+        Arc::clone(&state.job_registry),
+        "repo_maintenance".to_string(),
+        Arc::clone(&state),
+    );
+
+    // OAuth state cleanup — hourly.
+    jobs::spawn_job(
+        Arc::clone(&state.job_registry),
+        "oauth_state_cleanup".to_string(),
+        Arc::clone(&state),
+    );
+
+    // Remote agent cleanup (expired/orphaned instances) — every 10 min.
+    jobs::spawn_job(
+        Arc::clone(&state.job_registry),
+        "remote_agent_cleanup".to_string(),
+        Arc::clone(&state),
+    );
+
     // Background tasks.
     // Task-115 (agent-runtime.md §1 Phase 3): detect Delegation/Coordination
     // tasks and run repo orchestrators under per-repo registry locks.

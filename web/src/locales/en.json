@@ -2002,6 +2002,7 @@
       "audit": "Audit",
       "health": "Health",
       "jobs": "Jobs",
+      "logs": "Server Logs",
       "invitations": "Invitations"
     },
     "users": {
@@ -2105,7 +2106,28 @@
       "running": "Running…",
       "run_now": "Run now",
       "job_triggered": "Job \"{name}\" triggered",
-      "job_failed": "Failed to run job: {error}"
+      "job_failed": "Failed to run job: {error}",
+      "col_runs": "Recent Runs",
+      "runs_expand": "Show runs",
+      "runs_collapse": "Hide runs",
+      "run_duration": "Duration",
+      "run_logs": "Logs",
+      "run_no_logs": "No captured logs for this run.",
+      "runs_empty": "No recorded runs."
+    },
+    "logs": {
+      "title": "Server Logs",
+      "subtitle": "Recent server log events captured in a bounded in-process buffer. Filters: level, since, limit.",
+      "loading": "Loading server logs…",
+      "empty": "No log entries match the filters.",
+      "col_time": "Time",
+      "col_level": "Level",
+      "col_target": "Target",
+      "col_message": "Message",
+      "level": "Level",
+      "all_levels": "All levels",
+      "limit": "Limit",
+      "refresh": "Refresh"
     },
     "audit_event_types": {
       "tenant_created": "Tenant created",
@@ -2118,6 +2140,8 @@
       "job_run": "Job run"
     },
     "audit_empty": "No audit events found.",
+    "audit_search": "Search details…",
+    "audit_search_label": "Search",
     "audit_col_time": "Time",
     "audit_col_event": "Event",
     "audit_col_actor": "Actor",

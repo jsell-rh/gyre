@@ -370,6 +370,11 @@ pub async fn record_audit_event(
         user_agent,
         now_secs(),
     );
+    // TASK-273: tenant is derived server-side from the authenticated
+    // caller — a tenant_id is never accepted from the request body — so the
+    // durable admin trail is tenant-scoped at emit time.
+    let mut event = event;
+    event.tenant_id = Some(auth.tenant_id.clone());
     state.audit.record(&event).await?;
     // search.md §Searchable Entities: audit events are indexed on write
     // (event_type, details, path facets).
@@ -409,6 +414,8 @@ pub async fn query_audit_events(
         since: params.since,
         until: params.until,
         limit: params.limit.unwrap_or(100).min(1000),
+        q: None,
+        tenant_id: None,
     };
     let events = state.audit.query(&filter).await?;
     Ok(Json(

@@ -2395,13 +2395,20 @@ pub(crate) async fn launch_agent_process(
         let tenant_id = workspace.as_ref().map(|ws| ws.tenant_id.to_string());
         match tenant_id.as_deref() {
             Some(tenant) => {
+                // platform-model.md §7 / TASK-273: the agent's own freshly
+                // minted JWT authenticates the resolution — the Vault
+                // backend logs into Vault's JWT auth backend with it so
+                // Vault policies scope the returned secrets (agents never
+                // see server credentials); the database backends ignore
+                // the token and serve the scope cascade directly.
                 match state
                     .secrets
-                    .resolve_for_agent(
+                    .resolve_for_agent_as(
                         tenant,
                         &repo.workspace_id.to_string(),
                         repo.id.as_str(),
                         Some(task.id.as_str()),
+                        &token,
                     )
                     .await
                 {
@@ -2649,6 +2656,9 @@ async fn register_spawned_agent(
     resolved_target_config: &Option<super::compute::ComputeTargetConfig>,
 ) {
     let agent_id_str = agent.id.to_string();
+    // TASK-273: descriptor for the durable instance record, captured before
+    // the backend is moved into the in-memory registry.
+    let backend_descriptor = backend.target_type().to_string();
     state
         .process_registry
         .lock()
@@ -2659,6 +2669,32 @@ async fn register_spawned_agent(
         .lock()
         .await
         .insert(agent_id_str.clone(), std::sync::Arc::new(backend));
+
+    // TASK-273 (admin-panel.md §Remote agent cleanup): persist the spawned
+    // instance handle durably — the agent-instance store is the source of
+    // truth for orphan sweeps across server restarts; the in-memory maps
+    // above remain the fast path. Best-effort: a persistence failure is
+    // logged, never blocks the spawn (the instance still runs and is
+    // tracked in-memory for this process lifetime).
+    let instance_record = gyre_ports::AgentInstanceRecord {
+        agent_id: agent_id_str.clone(),
+        backend: backend_descriptor,
+        target_type: handle.target_type.clone(),
+        handle_id: handle.id.clone(),
+        pid: handle.pid,
+        spawned_at: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
+        terminated_at: None,
+        terminated_reason: None,
+    };
+    if let Err(e) = state.agent_instances.record_spawned(&instance_record).await {
+        tracing::warn!(
+            agent_id = %agent.id,
+            "persisting the agent-instance record failed (orphan sweep will not see it): {e:#}"
+        );
+    }
 
     // Background monitor: watch for process/container/Pod exit and update
     // agent status. Cloning the Arc'd state keeps the loop running after
@@ -2783,6 +2819,16 @@ async fn monitor_poll_once(state: &AppState, agent_id: &str) -> bool {
 /// Normal agents keep the Active→Idle transition (with task-scoped secret
 /// revocation, platform-model.md §7 teardown).
 pub(crate) async fn on_agent_process_exit(state: &AppState, agent_id: &str) {
+    // TASK-273: the durable instance record is marked terminated on
+    // clean exit (best-effort — the sweep treats still-recorded-running
+    // rows whose process is gone as reaping candidates anyway, but the
+    // explicit mark keeps the history accurate).
+    if let Err(e) = state.agent_instances.mark_terminated(agent_id, "clean_exit").await {
+        tracing::warn!(
+            agent_id,
+            "marking the agent instance terminated failed: {e:#}"
+        );
+    }
     if super::meta_specs::finish_preview_agent(state, agent_id).await {
         return;
     }

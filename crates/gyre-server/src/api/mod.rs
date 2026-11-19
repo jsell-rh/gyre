@@ -35,6 +35,7 @@ pub mod messages;
 pub mod meta_specs;
 pub mod mr_timeline;
 pub mod network;
+pub mod oauth;
 pub mod orchestrator;
 pub mod personas;
 pub mod policies;
@@ -137,6 +138,17 @@ pub fn api_router() -> Router<Arc<AppState>> {
 
     Router::new()
         .route("/api/v1/version", get(version::version_handler))
+        // Claude Max OAuth enrollment (admin-panel.md §Credential
+        // Management; TASK-273). The callback is resolver-exempt (provider
+        // redirect carries no auth) with per-handler state validation.
+        .route(
+            "/api/v1/admin/oauth/claude-max/enroll",
+            post(oauth::enroll_claude_max),
+        )
+        .route(
+            "/api/v1/oauth/claude-max/callback",
+            get(oauth::claude_max_callback),
+        )
         .route("/api/v1/activity", get(activity::activity_handler))
         // Repos
         .route(
@@ -615,6 +627,7 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route("/api/v1/admin/jobs", get(admin::admin_jobs))
         .route("/api/v1/admin/jobs/:name/run", post(admin::admin_run_job))
         .route("/api/v1/admin/audit", get(admin::admin_audit))
+        .route("/api/v1/admin/server/logs", get(admin::admin_server_logs))
         .route(
             "/api/v1/admin/orphaned-workspaces",
             get(admin::admin_orphaned_workspaces),

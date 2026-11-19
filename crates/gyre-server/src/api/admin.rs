@@ -86,17 +86,71 @@ pub struct JobInfo {
     pub status: String,
     pub interval_secs: u64,
     pub description: String,
-    pub recent_runs: Vec<crate::jobs::JobRun>,
+    pub recent_runs: Vec<JobRunResponse>,
+}
+
+/// One job run as served to the admin Jobs tab (admin-panel.md: history
+/// includes status, duration, failures and logs).
+#[derive(Serialize)]
+pub struct JobRunResponse {
+    pub id: String,
+    pub job_name: String,
+    pub started_at: u64,
+    pub finished_at: Option<u64>,
+    /// Derived duration in seconds (`None` while the run is unfinished).
+    pub duration_secs: Option<u64>,
+    pub status: String,
+    pub error: Option<String>,
+    /// Per-run captured log lines (run-scoped sink).
+    pub logs: Vec<String>,
+}
+
+impl From<crate::jobs::JobRun> for JobRunResponse {
+    fn from(run: crate::jobs::JobRun) -> Self {
+        let duration_secs = run.duration_secs();
+        Self {
+            id: run.id,
+            job_name: run.job_name,
+            started_at: run.started_at,
+            finished_at: run.finished_at,
+            duration_secs,
+            status: run.status,
+            error: run.error,
+            logs: run.logs,
+        }
+    }
 }
 
 /// GET /api/v1/admin/jobs — list background jobs with run history (Admin only).
+///
+/// TASK-273: history is served from the DURABLE `JobRunRepository` (with
+/// logs and derived duration); the in-memory registry ring is a fronting
+/// cache only.
 pub async fn admin_jobs(State(state): State<Arc<AppState>>) -> Json<Vec<JobInfo>> {
     let defs = state.job_registry.list_jobs().await;
     let mut jobs = Vec::with_capacity(defs.len());
     for def in defs {
-        let recent_runs = state.job_registry.history(&def.name).await;
+        // Durable history first (authoritative); fall back to the
+        // in-memory cache when the durable store has no rows for this job
+        // yet (e.g. pure-mem mode before any run was recorded).
+        let mut recent_runs: Vec<JobRunResponse> = state
+            .job_registry
+            .durable_history(&def.name, 20)
+            .await
+            .into_iter()
+            .map(JobRunResponse::from)
+            .collect();
+        if recent_runs.is_empty() {
+            recent_runs = state
+                .job_registry
+                .history(&def.name)
+                .await
+                .into_iter()
+                .map(JobRunResponse::from)
+                .collect();
+        }
         let status = recent_runs
-            .last()
+            .first()
             .map(|r| r.status.as_str())
             .unwrap_or("idle")
             .to_string();
@@ -305,37 +359,83 @@ pub async fn admin_update_retention(
 pub struct AuditQuery {
     pub agent_id: Option<String>,
     pub event_type: Option<String>,
+    pub workspace_id: Option<String>,
+    pub user_id: Option<String>,
+    pub repo_id: Option<String>,
+    pub resource_type: Option<String>,
+    /// Free-text search over the event detail payload (TASK-273:
+    /// admin-panel.md §Audit log viewer — searchable trail). Enforced in
+    /// SQL by the durable adapters, transparently decompressing
+    /// zstd-compressed details.
+    pub q: Option<String>,
     pub since: Option<u64>,
+    pub until: Option<u64>,
     pub limit: Option<usize>,
 }
 
 /// GET /api/v1/admin/audit — searchable activity log (Admin only).
+///
+/// TASK-273 (admin-panel.md §Audit log viewer — durable admin trail +
+/// free-text search): queries the DURABLE audit repository (not the
+/// in-memory TelemetryBuffer — a server restart must not lose the admin-
+/// visible trail), scoped to the authenticated caller's tenant (derived
+/// server-side, never client-supplied) with the same filter set
+/// `/audit/events` supports plus free-text `q` search.
 pub async fn admin_audit(
     State(state): State<Arc<AppState>>,
+    auth: crate::auth::AuthenticatedAgent,
     Query(q): Query<AuditQuery>,
-) -> Json<serde_json::Value> {
-    let since_ms = q.since.unwrap_or(0);
-    let lim = q.limit.unwrap_or(100);
-    let msgs = state.telemetry_buffer.list_all_since(since_ms, lim);
-    // Deserialize payload as ActivityEventData for backward-compatible response format.
-    let filtered: Vec<gyre_common::ActivityEventData> = msgs
-        .into_iter()
-        .filter_map(|m| {
-            m.payload.as_ref().and_then(|p| {
-                serde_json::from_value::<gyre_common::ActivityEventData>(p.clone()).ok()
-            })
-        })
-        .filter(|e| {
-            q.agent_id.as_deref().is_none_or(|id| e.agent_id == id)
-                && q.event_type
-                    .as_deref()
-                    .is_none_or(|et| e.event_type.as_str() == et)
-        })
-        .collect();
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let filter = gyre_ports::AuditQueryFilter {
+        agent_id: q.agent_id,
+        event_type: q.event_type,
+        workspace_id: q.workspace_id,
+        user_id: q.user_id,
+        repo_id: q.repo_id,
+        resource_type: q.resource_type,
+        outcome: None,
+        // Tenant scoping is derived from the authenticated caller — a
+        // tenant filter is never accepted from the query string.
+        tenant_id: Some(auth.tenant_id.clone()),
+        since: q.since,
+        until: q.until,
+        limit: q.limit.unwrap_or(100).min(1000),
+        q: q.q,
+    };
+    let events = state.audit.query(&filter).await.map_err(ApiError::Internal)?;
+    let count = events.len();
+    Ok(Json(serde_json::json!({
+        "events": events
+            .into_iter()
+            .map(crate::api::audit::AuditEventResponse::from)
+            .collect::<Vec<_>>(),
+        "count": count
+    })))
+}
 
-    let count = filtered.len();
+/// GET /api/v1/admin/server/logs — recent server log events from the
+/// bounded capture buffer (Admin only; admin-panel.md §Server Logs,
+/// TASK-273).
+#[derive(Deserialize)]
+pub struct ServerLogQuery {
+    /// Minimum level (TRACE|DEBUG|INFO|WARN|ERROR).
+    pub level: Option<String>,
+    /// Only events at/after this Unix epoch millisecond timestamp.
+    pub since: Option<u64>,
+    /// At most this many of the most recent matching entries (default
+    /// 200, capped at 5000 — the buffer bound).
+    pub limit: Option<usize>,
+}
+
+pub async fn admin_server_logs(
+    Query(q): Query<ServerLogQuery>,
+) -> Json<serde_json::Value> {
+    let limit = q.limit.unwrap_or(200).min(5000);
+    let entries = crate::telemetry::server_log_buffer()
+        .query(q.level.as_deref(), q.since, limit);
+    let count = entries.len();
     Json(serde_json::json!({
-        "events": filtered,
+        "entries": entries,
         "count": count
     }))
 }
@@ -418,6 +518,13 @@ pub(crate) async fn kill_agent(
         if let Err(e) = kill_result {
             tracing::warn!(agent_id = %id, "kill_process failed: {e}");
         }
+    }
+    // TASK-273: the durable instance record reflects the admin kill.
+    if let Err(e) = state.agent_instances.mark_terminated(&id, "admin_kill").await {
+        tracing::warn!(
+            agent_id = %id,
+            "marking the killed agent instance terminated failed: {e:#}"
+        );
     }
     // Fall back to the attested PID when no live process handle exists.
     if killed_pid.is_none() {
@@ -1264,19 +1371,29 @@ mod tests {
     async fn admin_audit_returns_events() {
         let state = test_state();
         let ws_id = test_workspace(&state).await;
+        // TASK-273: /admin/audit serves the DURABLE audit repository
+        // (tenant-scoped, free-text searchable) — not the in-memory
+        // telemetry buffer.
         state
-            .emit_telemetry(
-                ws_id,
-                gyre_common::message::MessageKind::StateChanged,
-                Some(serde_json::json!({
-                    "event_id": "test-event-1",
-                    "agent_id": "agent-1",
-                    "event_type": "state_changed",
-                    "description": "Test event",
-                    "timestamp": 1000u64,
-                })),
-            )
-            .await;
+            .audit
+            .record(&gyre_domain::AuditEvent::new(
+                gyre_common::Id::new("audit-1"),
+                gyre_domain::AuditEventType::from_str("run_started"),
+                Some(gyre_common::Id::new("agent-1")),
+                None,
+                None,
+                Some(ws_id.clone()),
+                None,
+                "agent".to_string(),
+                Some("agent-1".to_string()),
+                gyre_domain::AuditOutcome::Success,
+                serde_json::json!({ "description": "Test event" }),
+                None,
+                None,
+                1000,
+            ))
+            .await
+            .unwrap();
 
         let app = api_router().with_state(state);
         let resp = app
@@ -1292,7 +1409,145 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let json = body_json(resp).await;
         assert_eq!(json["count"], 1);
-        assert_eq!(json["events"][0]["event_id"], "test-event-1");
+        assert_eq!(json["events"][0]["id"], "audit-1");
+        assert_eq!(json["events"][0]["event_type"], "run_started");
+    }
+
+    #[tokio::test]
+    async fn admin_audit_tenant_scoped_and_free_text_searchable() {
+        // TASK-273: the admin trail is scoped to the caller's tenant
+        // (server-derived) and supports free-text search over the detail
+        // payload.
+        let state = test_state();
+        let mk = |id: &str, tenant: Option<&str>, detail: serde_json::Value| {
+            let mut ev = gyre_domain::AuditEvent::new(
+                gyre_common::Id::new(id),
+                gyre_domain::AuditEventType::from_str("run_started"),
+                Some(gyre_common::Id::new("agent-1")),
+                None,
+                None,
+                None,
+                None,
+                "agent".to_string(),
+                Some(id.to_string()),
+                gyre_domain::AuditOutcome::Success,
+                detail,
+                None,
+                None,
+                1000,
+            );
+            ev.tenant_id = tenant.map(str::to_string);
+            ev
+        };
+        // Same tenant as the test-token principal ("default"), plus an
+        // other-tenant event that must never be visible, plus a legacy
+        // NULL-tenant event that remains visible.
+        state
+            .audit
+            .record(&mk(
+                "ev-own",
+                Some("default"),
+                serde_json::json!({ "description": "deployed the payment service" }),
+            ))
+            .await
+            .unwrap();
+        state
+            .audit
+            .record(&mk(
+                "ev-other",
+                Some("tenant-other"),
+                serde_json::json!({ "description": "payment service of another tenant" }),
+            ))
+            .await
+            .unwrap();
+        state
+            .audit
+            .record(&mk(
+                "ev-legacy",
+                None,
+                serde_json::json!({ "description": "pre-migration row" }),
+            ))
+            .await
+            .unwrap();
+
+        let app = api_router().with_state(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/admin/audit")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["count"], 2, "other-tenant events must be invisible");
+        let ids: Vec<&str> = json["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["id"].as_str().unwrap())
+            .collect();
+        assert!(ids.contains(&"ev-own"));
+        assert!(ids.contains(&"ev-legacy"));
+
+    }
+
+    #[tokio::test]
+    async fn admin_audit_free_text_search() {
+        let state = test_state();
+        let mk = |id: &str, detail: serde_json::Value| {
+            gyre_domain::AuditEvent::new(
+                gyre_common::Id::new(id),
+                gyre_domain::AuditEventType::from_str("run_started"),
+                Some(gyre_common::Id::new("agent-1")),
+                None,
+                None,
+                None,
+                None,
+                "agent".to_string(),
+                Some(id.to_string()),
+                gyre_domain::AuditOutcome::Success,
+                detail,
+                None,
+                None,
+                1000,
+            )
+        };
+        state
+            .audit
+            .record(&mk(
+                "ev-pay",
+                serde_json::json!({ "description": "deployed the payment service" }),
+            ))
+            .await
+            .unwrap();
+        state
+            .audit
+            .record(&mk(
+                "ev-auth",
+                serde_json::json!({ "description": "rotated the auth keys" }),
+            ))
+            .await
+            .unwrap();
+
+        let app = api_router().with_state(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/admin/audit?q=PAYMENT")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["count"], 1, "case-insensitive free-text search");
+        assert_eq!(json["events"][0]["id"], "ev-pay");
     }
 
     #[tokio::test]
@@ -1315,6 +1570,8 @@ mod tests {
             )
             .await;
 
+        // The admin audit trail reads the durable audit repository, which
+        // contains no fabricated-scope rows.
         let app = api_router().with_state(state);
         let resp = app
             .oneshot(
@@ -1334,33 +1591,26 @@ mod tests {
     #[tokio::test]
     async fn admin_audit_filters_by_agent_id() {
         let state = test_state();
-        let ws_id = test_workspace(&state).await;
-        state
-            .emit_telemetry(
-                ws_id.clone(),
-                gyre_common::message::MessageKind::StateChanged,
-                Some(serde_json::json!({
-                    "event_id": "e1",
-                    "agent_id": "agent-x",
-                    "event_type": "run_started",
-                    "description": "From agent-x",
-                    "timestamp": 1000u64,
-                })),
+        let mk = |id: &str, agent: &str| {
+            gyre_domain::AuditEvent::new(
+                gyre_common::Id::new(id),
+                gyre_domain::AuditEventType::from_str("run_started"),
+                Some(gyre_common::Id::new(agent)),
+                None,
+                None,
+                None,
+                None,
+                "agent".to_string(),
+                Some(id.to_string()),
+                gyre_domain::AuditOutcome::Success,
+                serde_json::json!({ "description": "From {agent}" }),
+                None,
+                None,
+                1000,
             )
-            .await;
-        state
-            .emit_telemetry(
-                ws_id,
-                gyre_common::message::MessageKind::StateChanged,
-                Some(serde_json::json!({
-                    "event_id": "e2",
-                    "agent_id": "agent-y",
-                    "event_type": "run_started",
-                    "description": "From agent-y",
-                    "timestamp": 2000u64,
-                })),
-            )
-            .await;
+        };
+        state.audit.record(&mk("e1", "agent-x")).await.unwrap();
+        state.audit.record(&mk("e2", "agent-y")).await.unwrap();
 
         let app = api_router().with_state(state);
         let resp = app

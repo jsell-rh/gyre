@@ -4,6 +4,7 @@
 //! Domain logic depends only on these traits, never on concrete adapters.
 
 pub mod agent;
+pub mod agent_instance;
 pub mod agent_tracking;
 pub mod analytics;
 pub mod attestation_repo;
@@ -27,6 +28,7 @@ pub mod dependency_policy;
 pub mod git_ops;
 pub mod graph;
 pub mod invitation;
+pub mod job_run;
 pub mod jj_ops;
 pub mod key_binding_repo;
 pub mod kv_store;
@@ -39,6 +41,7 @@ pub mod meta_spec_repository;
 pub mod meta_spec_set;
 pub mod network;
 pub mod notification;
+pub mod oauth_state;
 pub mod policy;
 pub mod pre_accept;
 pub mod prompt_template;
@@ -74,6 +77,7 @@ pub mod workspace;
 pub mod workspace_membership;
 
 pub use agent::AgentRepository;
+pub use agent_instance::{AgentInstanceRecord, AgentInstanceRepository};
 pub use agent_tracking::{AgentCommitRepository, AgentSessionRepository, WorktreeRepository};
 pub use analytics::{AnalyticsGroupBy, AnalyticsQueryFilter, AnalyticsRepository, CostRepository};
 pub use attestation_repo::AttestationRepository;
@@ -98,6 +102,7 @@ pub use git_ops::GitOpsPort;
 pub use graph::GraphPort;
 pub use invitation::{TenantInvitationRepository, WorkspaceInvitationRepository};
 pub use jj_ops::{JjChange, JjNewChange, JjOpsPort, JjRebaseOutcome};
+pub use job_run::{JobRunRecord, JobRunRepository};
 pub use key_binding_repo::KeyBindingRepository;
 pub use kv_store::KvJsonStore;
 pub use llm::{
@@ -112,6 +117,7 @@ pub use meta_spec_repository::{MetaSpecBindingRepository, MetaSpecFilter, MetaSp
 pub use meta_spec_set::{MetaSpecSetRepository, TenantMetaSpecSetRepository};
 pub use network::NetworkPeerRepository;
 pub use notification::NotificationRepository;
+pub use oauth_state::{OAuthStateRecord, OAuthStateRepository};
 pub use policy::PolicyRepository;
 pub use pre_accept::{GateOutcome, PreAcceptGate, PushContext};
 pub use prompt_template::PromptRepository;

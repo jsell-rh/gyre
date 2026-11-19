@@ -172,6 +172,14 @@ pub struct AuditEvent {
     /// WebSocket or HTTP session.
     pub session_id: Option<String>,
     pub workspace_id: Option<Id>,
+    /// Tenant scope derived server-side from the acting identity at emit
+    /// (workspace owner for workspace-scoped events, the user's tenant
+    /// binding for user actions) — never client-supplied
+    /// (admin-panel.md §Audit Log Viewer). `None` on legacy rows created
+    /// before tenant scoping; those are visible to unscoped internal reads
+    /// only, never attributed to a tenant they did not come from.
+    #[serde(default)]
+    pub tenant_id: Option<String>,
     pub repo_id: Option<Id>,
     /// "agent", "task", "mr", "repo", "container", etc.
     pub resource_type: String,
@@ -207,6 +215,7 @@ impl AuditEvent {
             user_id,
             session_id,
             workspace_id,
+            tenant_id: None,
             repo_id,
             resource_type,
             resource_id,

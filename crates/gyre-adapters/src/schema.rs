@@ -318,6 +318,7 @@ diesel::table! {
         user_id -> Nullable<Text>,
         session_id -> Nullable<Text>,
         workspace_id -> Nullable<Text>,
+        tenant_id -> Nullable<Text>,
         repo_id -> Nullable<Text>,
         resource_type -> Text,
         resource_id -> Nullable<Text>,
@@ -327,6 +328,45 @@ diesel::table! {
         source_ip -> Nullable<Text>,
         user_agent -> Nullable<Text>,
         timestamp -> BigInt,
+    }
+}
+
+diesel::table! {
+    job_runs (id) {
+        id -> Text,
+        job_name -> Text,
+        started_at -> BigInt,
+        finished_at -> Nullable<BigInt>,
+        status -> Text,
+        error -> Nullable<Text>,
+        logs -> Text,
+    }
+}
+
+diesel::table! {
+    oauth_states (state) {
+        state -> Text,
+        tenant_id -> Text,
+        workspace_id -> Nullable<Text>,
+        initiated_by -> Text,
+        pkce_verifier -> Text,
+        created_at -> BigInt,
+        expires_at -> BigInt,
+        consumed -> Integer,
+        provider_config -> Text,
+    }
+}
+
+diesel::table! {
+    agent_instances (agent_id) {
+        agent_id -> Text,
+        backend -> Text,
+        target_type -> Text,
+        handle_id -> Text,
+        pid -> Nullable<Integer>,
+        spawned_at -> BigInt,
+        terminated_at -> Nullable<BigInt>,
+        terminated_reason -> Nullable<Text>,
     }
 }
 
@@ -952,6 +992,9 @@ diesel::allow_tables_to_appear_in_same_query!(
     key_bindings,
     chain_attestations,
     secrets,
+    job_runs,
+    oauth_states,
+    agent_instances,
     breaking_changes,
     dependency_policies,
     commit_signatures,

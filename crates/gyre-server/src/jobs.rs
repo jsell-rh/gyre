@@ -2,6 +2,14 @@
 //!
 //! Provides a registry for background jobs, a scheduler that runs them on fixed intervals,
 //! and a run-history store for the last N executions per job.
+//!
+//! TASK-273 (admin-panel.md §Background Jobs): run history is DURABLE —
+//! every recorded run is persisted through the `JobRunRepository` port
+//! (SQLite/PostgreSQL adapters; mem in pure-mem mode) with per-run captured
+//! log lines, and the in-memory ring is only a fronting cache. Handlers
+//! receive a run-scoped [`JobRunLog`] sink to write per-item outcomes
+//! (per-repo maintenance results, per-secret refresh outcomes, …) that land
+//! in both the durable record and the admin Jobs tab.
 
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -14,6 +22,10 @@ use tracing::{error, info};
 use crate::AppState;
 
 const MAX_HISTORY_PER_JOB: usize = 50;
+
+/// Default retention for the self-managing `job_history_cleanup` job
+/// (days), overridable via `GYRE_JOB_HISTORY_RETENTION_DAYS`.
+pub const JOB_HISTORY_RETENTION_DAYS_DEFAULT: u64 = 30;
 
 // ── Data structures ───────────────────────────────────────────────────────────
 
@@ -37,8 +49,68 @@ pub struct JobRun {
     pub job_name: String,
     pub started_at: u64,
     pub finished_at: Option<u64>,
+    /// Per-run captured log lines (run-scoped sink), in write order
+    /// (admin-panel.md: job history includes logs).
+    #[serde(default)]
+    pub logs: Vec<String>,
     pub status: String,
     pub error: Option<String>,
+}
+
+impl JobRun {
+    /// Derived run duration in seconds (`None` while the run is unfinished).
+    pub fn duration_secs(&self) -> Option<u64> {
+        self.finished_at
+            .map(|f| f.saturating_sub(self.started_at))
+    }
+
+    fn from_record(record: gyre_ports::JobRunRecord) -> Self {
+        Self {
+            id: record.id,
+            job_name: record.job_name,
+            started_at: record.started_at,
+            finished_at: record.finished_at,
+            logs: record.logs,
+            status: record.status,
+            error: record.error,
+        }
+    }
+
+    fn to_record(&self) -> gyre_ports::JobRunRecord {
+        gyre_ports::JobRunRecord {
+            id: self.id.clone(),
+            job_name: self.job_name.clone(),
+            started_at: self.started_at,
+            finished_at: self.finished_at,
+            status: self.status.clone(),
+            error: self.error.clone(),
+            logs: self.logs.clone(),
+        }
+    }
+}
+
+/// Run-scoped log sink handed to job handlers (admin-panel.md: job history
+/// includes logs). Lines written here are attached to the run's record and
+/// persisted with it. Cloneable and cheap to pass by value.
+#[derive(Clone, Default)]
+pub struct JobRunLog {
+    lines: Arc<Mutex<Vec<String>>>,
+}
+
+impl JobRunLog {
+    /// A fresh empty sink (used by the scheduler and tests).
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Append one log line to the run's record.
+    pub async fn log(&self, line: impl std::fmt::Display) {
+        self.lines.lock().await.push(line.to_string());
+    }
+
+    async fn take(&self) -> Vec<String> {
+        self.lines.lock().await.clone()
+    }
 }
 
 /// Liveness verdict for a background job (business-continuity.md §2:
@@ -78,7 +150,9 @@ impl JobLiveness {
 // ── Registry ──────────────────────────────────────────────────────────────────
 
 type JobHandler = Arc<
-    dyn Fn(Arc<AppState>) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send>> + Send + Sync,
+    dyn Fn(Arc<AppState>, JobRunLog) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send>>
+        + Send
+        + Sync,
 >;
 
 struct RegisteredJob {
@@ -90,6 +164,11 @@ struct RegisteredJob {
 #[derive(Clone, Default)]
 pub struct JobRegistry {
     inner: Arc<Mutex<RegistryInner>>,
+    /// Durable job-run store (TASK-273): when set (via
+    /// [`JobRegistry::set_durable_store`], called from
+    /// `start_job_registry`), every recorded run is persisted here and the
+    /// in-memory ring is only a fronting cache.
+    durable: Arc<Mutex<Option<Arc<dyn gyre_ports::JobRunRepository>>>>,
 }
 
 #[derive(Default)]
@@ -106,13 +185,20 @@ impl JobRegistry {
         Self::default()
     }
 
+    /// Attach the durable job-run store. Every run recorded afterwards is
+    /// persisted (best-effort: a persistence failure is logged, never fails
+    /// the job itself). Idempotent.
+    pub async fn set_durable_store(&self, store: Arc<dyn gyre_ports::JobRunRepository>) {
+        *self.durable.lock().await = Some(store);
+    }
+
     /// Register a job. Idempotent; re-registration overwrites the definition.
     pub async fn register<F, Fut>(&self, def: JobDefinition, handler: F)
     where
-        F: Fn(Arc<AppState>) -> Fut + Send + Sync + 'static,
+        F: Fn(Arc<AppState>, JobRunLog) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = anyhow::Result<()>> + Send + 'static,
     {
-        let handler: JobHandler = Arc::new(move |state| Box::pin(handler(state)));
+        let handler: JobHandler = Arc::new(move |state, log| Box::pin(handler(state, log)));
         let mut inner = self.inner.lock().await;
         inner
             .jobs
@@ -133,6 +219,22 @@ impl JobRegistry {
             .get(job_name)
             .map(|runs| runs.iter().cloned().collect())
             .unwrap_or_default()
+    }
+
+    /// DURABLE history for a specific job (newest-first, at most `limit`
+    /// rows), read through the attached `JobRunRepository`. Falls back to
+    /// the in-memory cache when no durable store is attached (pure-mem
+    /// mode before `start_job_registry` ran).
+    pub async fn durable_history(&self, job_name: &str, limit: usize) -> Vec<JobRun> {
+        let store = self.durable.lock().await.clone();
+        match store {
+            Some(store) => store
+                .list_by_job(job_name, limit)
+                .await
+                .map(|runs| runs.into_iter().map(JobRun::from_record).collect())
+                .unwrap_or_default(),
+            None => self.history(job_name).await,
+        }
     }
 
     /// Return the most recent run across all jobs.
@@ -160,8 +262,9 @@ impl JobRegistry {
 
         let run_id = uuid::Uuid::new_v4().to_string();
         let started_at = now_secs();
+        let log_sink = JobRunLog::new();
 
-        let result = handler(state).await;
+        let result = handler(state, log_sink.clone()).await;
 
         let finished_at = now_secs();
         let (status, error) = match &result {
@@ -176,6 +279,7 @@ impl JobRegistry {
             finished_at: Some(finished_at),
             status,
             error,
+            logs: log_sink.take().await,
         };
 
         self.record_run(job_name, run).await;
@@ -183,6 +287,17 @@ impl JobRegistry {
     }
 
     pub async fn record_run(&self, job_name: &str, run: JobRun) {
+        // Durable persistence first (authoritative store; TASK-273):
+        // best-effort — a persistence failure is logged but never fails
+        // the job that produced the run.
+        if let Some(store) = self.durable.lock().await.as_ref() {
+            if let Err(e) = store.record(&run.to_record()).await {
+                error!(
+                    job = %job_name,
+                    "persisting job run to the durable store failed: {e}"
+                );
+            }
+        }
         let mut inner = self.inner.lock().await;
         let history = inner.history.entry(job_name.to_string()).or_default();
         if history.len() == MAX_HISTORY_PER_JOB {
@@ -205,6 +320,7 @@ impl JobRegistry {
             finished_at: Some(now_secs()),
             status: status.to_string(),
             error,
+            logs: Vec::new(),
         };
         self.record_run(job_name, run).await;
     }
@@ -313,9 +429,10 @@ pub fn spawn_job(registry: Arc<JobRegistry>, job_name: String, state: Arc<AppSta
 
             let run_id = uuid::Uuid::new_v4().to_string();
             let started_at = now_secs();
+            let log_sink = JobRunLog::new();
 
             info!(job = %job_name, "running scheduled job");
-            let result = handler(state.clone()).await;
+            let result = handler(state.clone(), log_sink.clone()).await;
             let finished_at = now_secs();
 
             let (status, error) = match &result {
@@ -333,6 +450,7 @@ pub fn spawn_job(registry: Arc<JobRegistry>, job_name: String, state: Arc<AppSta
                 finished_at: Some(finished_at),
                 status,
                 error,
+                logs: log_sink.take().await,
             };
 
             registry.record_run(&job_name, run).await;
@@ -356,6 +474,14 @@ pub(crate) fn now_secs() -> u64 {
 pub async fn start_job_registry(state: Arc<AppState>) {
     let registry = Arc::clone(&state.job_registry);
 
+    // TASK-273 (admin-panel.md: "Full job history stored and visible"):
+    // attach the durable job-run store so every recorded run — scheduler
+    // cycles, manual triggers, and external loops' record_cycle calls — is
+    // persisted with logs. The in-memory ring becomes a fronting cache.
+    registry
+        .set_durable_store(Arc::clone(&state.job_runs))
+        .await;
+
     // Register merge_processor job
     registry
         .register(
@@ -366,7 +492,7 @@ pub async fn start_job_registry(state: Arc<AppState>) {
                 enabled: true,
                 run_at_utc_hour: None,
             },
-            |state| async move { crate::merge_processor::run_once(&state).await },
+            |state, _log| async move { crate::merge_processor::run_once(&state).await },
         )
         .await;
 
@@ -380,7 +506,7 @@ pub async fn start_job_registry(state: Arc<AppState>) {
                 enabled: true,
                 run_at_utc_hour: None,
             },
-            |state| async move { crate::stale_agents::run_once(&state).await },
+            |state, _log| async move { crate::stale_agents::run_once(&state).await },
         )
         .await;
 
@@ -394,7 +520,7 @@ pub async fn start_job_registry(state: Arc<AppState>) {
                 enabled: true,
                 run_at_utc_hour: Some(2),
             },
-            |state| async move { state.retention_store.run_cleanup(&state).await },
+            |state, _log| async move { state.retention_store.run_cleanup(&state).await },
         )
         .await;
 
@@ -412,7 +538,7 @@ pub async fn start_job_registry(state: Arc<AppState>) {
                 enabled: true,
                 run_at_utc_hour: None,
             },
-            |state| async move { crate::log_compression::run_once(&state).await.map(|_| ()) },
+            |state, _log| async move { crate::log_compression::run_once(&state).await.map(|_| ()) },
         )
         .await;
 
@@ -429,7 +555,7 @@ pub async fn start_job_registry(state: Arc<AppState>) {
                 enabled: true,
                 run_at_utc_hour: None,
             },
-            |state| async move { crate::api::budget::apply_rolling_24h_window(&state).await },
+            |state, _log| async move { crate::api::budget::apply_rolling_24h_window(&state).await },
         )
         .await;
 
@@ -443,7 +569,7 @@ pub async fn start_job_registry(state: Arc<AppState>) {
                 enabled: true,
                 run_at_utc_hour: None,
             },
-            |state| async move { crate::mirror_sync::run_once(&state).await },
+            |state, _log| async move { crate::mirror_sync::run_once(&state).await },
         )
         .await;
 
@@ -458,7 +584,7 @@ pub async fn start_job_registry(state: Arc<AppState>) {
                 enabled: true,
                 run_at_utc_hour: None,
             },
-            |state| async move { crate::speculative_merge::run_once(&state).await },
+            |state, _log| async move { crate::speculative_merge::run_once(&state).await },
         )
         .await;
 
@@ -474,7 +600,7 @@ pub async fn start_job_registry(state: Arc<AppState>) {
                 enabled: true,
                 run_at_utc_hour: None,
             },
-            |state| async move { crate::abandoned_branch::run_once(&state).await },
+            |state, _log| async move { crate::abandoned_branch::run_once(&state).await },
         )
         .await;
 
@@ -490,7 +616,7 @@ pub async fn start_job_registry(state: Arc<AppState>) {
                 enabled: true,
                 run_at_utc_hour: None,
             },
-            |state| async move { crate::spec_link_staleness::run_once(&state).await },
+            |state, _log| async move { crate::spec_link_staleness::run_once(&state).await },
         )
         .await;
 
@@ -508,7 +634,7 @@ pub async fn start_job_registry(state: Arc<AppState>) {
                 enabled: true,
                 run_at_utc_hour: None,
             },
-            |state| async move { crate::workspace_ownership::run_once(&state).await },
+            |state, _log| async move { crate::workspace_ownership::run_once(&state).await },
         )
         .await;
 
@@ -525,7 +651,7 @@ pub async fn start_job_registry(state: Arc<AppState>) {
                 enabled: true,
                 run_at_utc_hour: None,
             },
-            |state| async move { crate::trust_suggestion::run_once(&state).await },
+            |state, _log| async move { crate::trust_suggestion::run_once(&state).await },
         )
         .await;
 
@@ -541,7 +667,7 @@ pub async fn start_job_registry(state: Arc<AppState>) {
                 enabled: true,
                 run_at_utc_hour: None,
             },
-            |state| async move {
+            |state, _log| async move {
                 crate::message_dispatcher::run_message_expiry(&state)
                     .await
                     .map(|_| ())
@@ -565,7 +691,7 @@ pub async fn start_job_registry(state: Arc<AppState>) {
                 enabled: true,
                 run_at_utc_hour: None,
             },
-            |state| async move { crate::signal_chain::scheduler_run_once(&state).await },
+            |state, _log| async move { crate::signal_chain::scheduler_run_once(&state).await },
         )
         .await;
 
@@ -581,7 +707,7 @@ pub async fn start_job_registry(state: Arc<AppState>) {
                 enabled: true,
                 run_at_utc_hour: None,
             },
-            |state| async move { crate::dep_staleness::run_once(&state).await },
+            |state, _log| async move { crate::dep_staleness::run_once(&state).await },
         )
         .await;
 
@@ -597,7 +723,7 @@ pub async fn start_job_registry(state: Arc<AppState>) {
                 enabled: true,
                 run_at_utc_hour: None,
             },
-            |state| async move { crate::search_indexer::run_code_index_job(&state).await },
+            |state, _log| async move { crate::search_indexer::run_code_index_job(&state).await },
         )
         .await;
 
@@ -614,7 +740,7 @@ pub async fn start_job_registry(state: Arc<AppState>) {
                 enabled: true,
                 run_at_utc_hour: None,
             },
-            |state| async move { crate::prompt_assembly::detect_stale_pins(&state).await },
+            |state, _log| async move { crate::prompt_assembly::detect_stale_pins(&state).await },
         )
         .await;
 
@@ -630,7 +756,7 @@ pub async fn start_job_registry(state: Arc<AppState>) {
                 enabled: true,
                 run_at_utc_hour: None,
             },
-            |state| async move { crate::secret_rotation::run_once(&state).await },
+            |state, log| async move { crate::secret_rotation::run_once(&state, &log).await },
         )
         .await;
 
@@ -651,7 +777,7 @@ pub async fn start_job_registry(state: Arc<AppState>) {
                 enabled: true,
                 run_at_utc_hour: None,
             },
-            |state| async move {
+            |state, _log| async move {
                 crate::reconciliation::run_conformance_sweep(&state)
                     .await
                     .map(|_| ())
@@ -673,7 +799,7 @@ pub async fn start_job_registry(state: Arc<AppState>) {
                 enabled: true,
                 run_at_utc_hour: None,
             },
-            |state| async move {
+            |state, _log| async move {
                 crate::impersonation::expire_sessions(&state)
                     .await
                     .map(|_| ())
@@ -698,7 +824,7 @@ pub async fn start_job_registry(state: Arc<AppState>) {
                 enabled: true,
                 run_at_utc_hour: None,
             },
-            |state| async move { crate::email::run_digest_once(&state).await },
+            |state, _log| async move { crate::email::run_digest_once(&state).await },
         )
         .await;
 
@@ -744,6 +870,85 @@ pub async fn start_job_registry(state: Arc<AppState>) {
     // Schedulers are NOT spawned here — existing background tasks in main.rs handle
     // periodic execution. Handlers registered above enable on-demand triggering and
     // status tracking via POST /admin/jobs/{name}/run and GET /admin/jobs.
+
+    // ── TASK-273 maintenance jobs (admin-panel.md §Background Jobs) ─────────
+
+    // Self-managing job history cleanup: prunes durable job runs past the
+    // retention (GYRE_JOB_HISTORY_RETENTION_DAYS, default 30 days).
+    registry
+        .register(
+            JobDefinition {
+                name: "job_history_cleanup".to_string(),
+                description: "Prunes durable job-run history older than the configured \
+                     retention (GYRE_JOB_HISTORY_RETENTION_DAYS, default 30 days) — \
+                     self-managing (admin-panel.md §Background Jobs)"
+                    .to_string(),
+                interval_secs: 86400,
+                enabled: true,
+                run_at_utc_hour: Some(3),
+            },
+            |state, log| async move {
+                crate::maintenance_jobs::job_history_cleanup(state, log).await
+            },
+        )
+        .await;
+
+    // Global repository maintenance: git gc (prune + repack) for every
+    // stored repository, per-repo outcomes in the run logs.
+    registry
+        .register(
+            JobDefinition {
+                name: "repo_maintenance".to_string(),
+                description: "Runs git gc --prune=now (unreachable-object prune + repack) \
+                     in every stored repository; per-repo outcomes recorded in run logs \
+                     (admin-panel.md §Background Jobs)"
+                    .to_string(),
+                interval_secs: 86400,
+                enabled: true,
+                run_at_utc_hour: Some(4),
+            },
+            |state, log| async move { crate::maintenance_jobs::repo_maintenance(state, log).await },
+        )
+        .await;
+
+    // OAuth state cleanup: deletes expired authorization-request rows
+    // from the Claude Max enrollment flow.
+    registry
+        .register(
+            JobDefinition {
+                name: "oauth_state_cleanup".to_string(),
+                description: "Deletes expired OAuth authorization-request state rows \
+                     (admin-panel.md §Background Jobs)"
+                    .to_string(),
+                interval_secs: 3600,
+                enabled: true,
+                run_at_utc_hour: None,
+            },
+            |state, log| async move {
+                crate::maintenance_jobs::oauth_state_cleanup(state, log).await
+            },
+        )
+        .await;
+
+    // Remote agent cleanup: kills still-recorded-running instances whose
+    // agent is Dead/Stopped or absent (including restart orphans).
+    registry
+        .register(
+            JobDefinition {
+                name: "remote_agent_cleanup".to_string(),
+                description: "Kills recorded-running agent instances whose agent is \
+                     Dead/Stopped or absent, including orphans left by a server restart, \
+                     and marks them terminated (admin-panel.md §Background Jobs)"
+                    .to_string(),
+                interval_secs: 600,
+                enabled: true,
+                run_at_utc_hour: None,
+            },
+            |state, log| async move {
+                crate::maintenance_jobs::remote_agent_cleanup(state, log).await
+            },
+        )
+        .await;
 }
 
 #[cfg(test)]
@@ -763,7 +968,7 @@ mod tests {
                     enabled: true,
                     run_at_utc_hour: None,
                 },
-                |_state| async move { Ok(()) },
+                |_state, _log| async move { Ok(()) },
             )
             .await;
 
@@ -784,7 +989,7 @@ mod tests {
                     enabled: true,
                     run_at_utc_hour: None,
                 },
-                |_state| async move { Ok(()) },
+                |_state, _log| async move { Ok(()) },
             )
             .await;
 
@@ -810,7 +1015,7 @@ mod tests {
                     enabled: true,
                     run_at_utc_hour: None,
                 },
-                |_state| async move { Err(anyhow::anyhow!("intentional failure")) },
+                |_state, _log| async move { Err(anyhow::anyhow!("intentional failure")) },
             )
             .await;
 
@@ -844,7 +1049,7 @@ mod tests {
                     enabled: true,
                     run_at_utc_hour: None,
                 },
-                |_state| async move { Ok(()) },
+                |_state, _log| async move { Ok(()) },
             )
             .await;
 
@@ -874,7 +1079,7 @@ mod tests {
                         enabled: true,
                         run_at_utc_hour: None,
                     },
-                    |_state| async move { Ok(()) },
+                    |_state, _log| async move { Ok(()) },
                 )
                 .await;
         }

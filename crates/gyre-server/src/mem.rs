@@ -14,13 +14,14 @@ use gyre_domain::{
 #[cfg(test)]
 use gyre_domain::{BranchInfo, CommitInfo, DiffResult, MergeResult};
 use gyre_ports::{
-    AgentCommitRepository, AgentRepository, AgentSessionRepository, AnalyticsQueryFilter,
-    AnalyticsRepository, ApiKeyRepository, AuditQueryFilter, AuditRepository, BudgetRepository,
-    BudgetUsageRepository, CostRepository, DependencyRepository, KvJsonStore, LlmConfigRepository,
-    MergeQueueRepository, MergeRequestRepository, MetaSpecSetRepository, NetworkPeerRepository,
-    PersonaRepository, RepoRepository, ReviewRepository, RolloutPolicyRepository, SpawnLogEntry,
-    SpawnLogRepository, TaskRepository, TenantMetaSpecSetRepository, TenantRepository,
-    UserRepository, UserWorkspaceStateRepository, WorkspaceRepository, WorktreeRepository,
+    AgentCommitRepository, AgentInstanceRepository, AgentRepository, AgentSessionRepository,
+    AnalyticsQueryFilter, AnalyticsRepository, ApiKeyRepository, AuditQueryFilter, AuditRepository,
+    BudgetRepository, BudgetUsageRepository, CostRepository, DependencyRepository, JobRunRepository,
+    KvJsonStore, LlmConfigRepository, MergeQueueRepository, MergeRequestRepository,
+    MetaSpecSetRepository, NetworkPeerRepository, OAuthStateRepository, PersonaRepository,
+    RepoRepository, ReviewRepository, RolloutPolicyRepository, SpawnLogEntry, SpawnLogRepository,
+    TaskRepository, TenantMetaSpecSetRepository, TenantRepository, UserRepository,
+    UserWorkspaceStateRepository, WorkspaceRepository, WorktreeRepository,
 };
 #[cfg(test)]
 use gyre_ports::{GitOpsPort, JjChange, JjNewChange, JjOpsPort};
@@ -2168,6 +2169,23 @@ fn audit_entry_matches(e: &AuditEvent, filter: &AuditQueryFilter) -> bool {
         && filter.outcome.is_none_or(|o| e.outcome == o)
         && filter.since.is_none_or(|s| e.timestamp >= s)
         && filter.until.is_none_or(|u| e.timestamp <= u)
+        // Tenant scoping: the caller's tenant, with legacy NULL-tenant rows
+        // (recorded before the column existed) still visible — the same
+        // semantics the SQL adapters enforce.
+        && filter.tenant_id.as_ref().is_none_or(|t| {
+            e.tenant_id.as_ref().is_none_or(|et| et == t)
+        })
+        // Free-text search over the detail payload (case-insensitive),
+        // matching the SQL adapters' LIKE semantics.
+        && filter.q.as_ref().is_none_or(|q| {
+            let needle = q.to_lowercase();
+            let detail = e
+                .detail
+                .as_str()
+                .map(str::to_string)
+                .unwrap_or_else(|| e.detail.to_string());
+            detail.to_lowercase().contains(&needle)
+        })
 }
 
 #[async_trait]
@@ -6074,6 +6092,9 @@ fn test_state_inner(
             &mem_spec_ledger,
         )),
         secrets: secrets.unwrap_or_else(|| Arc::new(MemSecretRepository::default())),
+        job_runs: Arc::new(MemJobRunRepository::default()),
+        oauth_states: Arc::new(MemOAuthStateRepository::default()),
+        agent_instances: Arc::new(MemAgentInstanceRepository::default()),
         orchestrator_registry: crate::signal_chain::OrchestratorRegistry::new(),
         ws_tickets: crate::auth::WsTicketStore::new(),
     })
@@ -7924,6 +7945,160 @@ impl WorkspaceInvitationRepository for MemWorkspaceInvitationRepository {
     async fn delete(&self, id: &Id) -> Result<()> {
         self.store.lock().await.remove(id.as_str());
         Ok(())
+    }
+}
+
+// ── In-memory CommitSignatureRepository (identity-security.md §Layer 3) ──────
+
+// ── In-memory JobRunRepository (admin-panel.md §Background Jobs: durable
+// job-run history; TASK-273) ────────────────────────────────────────────────
+
+/// In-memory `JobRunRepository` for pure-mem mode and tests. Enforces the
+/// same semantics as the SQL adapters: newest-first listing, and
+/// `delete_older_than` only removes finished rows.
+#[derive(Default)]
+pub struct MemJobRunRepository {
+    runs: Arc<Mutex<Vec<gyre_ports::JobRunRecord>>>,
+}
+
+#[async_trait]
+impl JobRunRepository for MemJobRunRepository {
+    async fn record(&self, run: &gyre_ports::JobRunRecord) -> Result<()> {
+        let mut runs = self.runs.lock().await;
+        // Re-recording the same id replaces the row.
+        runs.retain(|r| r.id != run.id);
+        runs.push(run.clone());
+        Ok(())
+    }
+
+    async fn list_by_job(&self, job_name: &str, limit: usize) -> Result<Vec<gyre_ports::JobRunRecord>> {
+        let runs = self.runs.lock().await;
+        let mut matching: Vec<_> = runs.iter().filter(|r| r.job_name == job_name).cloned().collect();
+        matching.sort_by(|a, b| b.started_at.cmp(&a.started_at).then(b.id.cmp(&a.id)));
+        matching.truncate(limit);
+        Ok(matching)
+    }
+
+    async fn list_recent(&self, limit: usize) -> Result<Vec<gyre_ports::JobRunRecord>> {
+        let runs = self.runs.lock().await;
+        let mut all = runs.clone();
+        all.sort_by(|a, b| b.started_at.cmp(&a.started_at).then(b.id.cmp(&a.id)));
+        all.truncate(limit);
+        Ok(all)
+    }
+
+    async fn delete_older_than(&self, cutoff_secs: u64) -> Result<u64> {
+        let mut runs = self.runs.lock().await;
+        let before = runs.len();
+        // Only FINISHED rows older than the cutoff are removed; running
+        // rows are never deleted.
+        runs.retain(|r| {
+            r.finished_at
+                .map(|f| f >= cutoff_secs)
+                .unwrap_or(true)
+        });
+        Ok((before - runs.len()) as u64)
+    }
+}
+
+// ── In-memory OAuthStateRepository (admin-panel.md Claude Max enrollment;
+// TASK-273) ─────────────────────────────────────────────────────────────────
+
+/// In-memory `OAuthStateRepository` for pure-mem mode and tests. Enforces
+/// the port's failure constraints in code: duplicate states are rejected,
+/// `mark_consumed` fails for unknown rows.
+#[derive(Default)]
+pub struct MemOAuthStateRepository {
+    states: Arc<Mutex<Vec<gyre_ports::OAuthStateRecord>>>,
+}
+
+#[async_trait]
+impl OAuthStateRepository for MemOAuthStateRepository {
+    async fn create(&self, record: &gyre_ports::OAuthStateRecord) -> Result<()> {
+        let mut states = self.states.lock().await;
+        if states.iter().any(|s| s.state == record.state) {
+            anyhow::bail!("oauth state already exists");
+        }
+        states.push(record.clone());
+        Ok(())
+    }
+
+    async fn find_by_state(&self, state: &str) -> Result<Option<gyre_ports::OAuthStateRecord>> {
+        Ok(self
+            .states
+            .lock()
+            .await
+            .iter()
+            .find(|s| s.state == state)
+            .cloned())
+    }
+
+    async fn mark_consumed(&self, state: &str) -> Result<()> {
+        let mut states = self.states.lock().await;
+        let Some(row) = states.iter_mut().find(|s| s.state == state) else {
+            anyhow::bail!("oauth state {state} not found");
+        };
+        row.consumed = true;
+        Ok(())
+    }
+
+    async fn delete_expired_before(&self, cutoff_secs: u64) -> Result<u64> {
+        let mut states = self.states.lock().await;
+        let before = states.len();
+        states.retain(|s| s.expires_at >= cutoff_secs);
+        Ok((before - states.len()) as u64)
+    }
+}
+
+// ── In-memory AgentInstanceRepository (admin-panel.md remote agent cleanup;
+// TASK-273) ─────────────────────────────────────────────────────────────────
+
+/// In-memory `AgentInstanceRepository` for pure-mem mode and tests.
+/// Enforces the port's failure constraints in code: `mark_terminated` fails
+/// for unknown agents.
+#[derive(Default)]
+pub struct MemAgentInstanceRepository {
+    instances: Arc<Mutex<HashMap<String, gyre_ports::AgentInstanceRecord>>>,
+}
+
+#[async_trait]
+impl AgentInstanceRepository for MemAgentInstanceRepository {
+    async fn record_spawned(&self, record: &gyre_ports::AgentInstanceRecord) -> Result<()> {
+        self.instances
+            .lock()
+            .await
+            .insert(record.agent_id.clone(), record.clone());
+        Ok(())
+    }
+
+    async fn mark_terminated(&self, agent_id: &str, reason: &str) -> Result<()> {
+        let mut instances = self.instances.lock().await;
+        let Some(record) = instances.get_mut(agent_id) else {
+            anyhow::bail!("no instance record for agent {agent_id}");
+        };
+        record.terminated_at = Some(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+        );
+        record.terminated_reason = Some(reason.to_string());
+        Ok(())
+    }
+
+    async fn find_by_agent(&self, agent_id: &str) -> Result<Option<gyre_ports::AgentInstanceRecord>> {
+        Ok(self.instances.lock().await.get(agent_id).cloned())
+    }
+
+    async fn list_running(&self) -> Result<Vec<gyre_ports::AgentInstanceRecord>> {
+        Ok(self
+            .instances
+            .lock()
+            .await
+            .values()
+            .filter(|r| r.terminated_at.is_none())
+            .cloned()
+            .collect())
     }
 }
 

@@ -35,6 +35,7 @@ vi.mock('../lib/api.js', () => ({
     computeList: vi.fn().mockResolvedValue([]),
     budgetSummary: vi.fn().mockResolvedValue(null),
     adminAudit: vi.fn().mockResolvedValue([]),
+    adminServerLogs: vi.fn().mockResolvedValue({ entries: [], count: 0 }),
     adminHealth: vi.fn().mockResolvedValue(null),
     adminJobs: vi.fn().mockResolvedValue([]),
     workspaces: vi.fn().mockResolvedValue([]),
@@ -81,6 +82,7 @@ describe('TenantSettings', () => {
     api.computeList.mockResolvedValue([]);
     api.budgetSummary.mockResolvedValue(null);
     api.adminAudit.mockResolvedValue([]);
+    api.adminServerLogs.mockResolvedValue({ entries: [], count: 0 });
     api.adminHealth.mockResolvedValue(null);
     api.adminJobs.mockResolvedValue([]);
     api.adminRunJob.mockResolvedValue({});
@@ -676,6 +678,107 @@ describe('TenantSettings', () => {
     await waitFor(() => {
       const panel = container.querySelector('[data-testid="tenant-tab-jobs"]');
       expect(panel?.textContent).toContain('Jobs error');
+    }, { timeout: 3000 });
+  });
+
+  // TASK-273: persisted run history — status, duration, failures and
+  // captured logs render from the job's recent_runs.
+  it('Jobs tab expands persisted run history with duration and logs', async () => {
+    api.adminJobs.mockResolvedValue([
+      {
+        name: 'repo_maintenance',
+        schedule: 'daily 04:00 UTC',
+        status: 'success',
+        recent_runs: [
+          {
+            id: 'run-1',
+            started_at: 1790000000,
+            finished_at: 1790000045,
+            duration_secs: 45,
+            status: 'success',
+            error: null,
+            logs: ['repo alpha: ok (git gc --prune=now)', 'repo beta: ok (git gc --prune=now)'],
+          },
+          {
+            id: 'run-2',
+            started_at: 1789900000,
+            finished_at: 1789900010,
+            duration_secs: 10,
+            status: 'failed',
+            error: '1 of 2 repositories failed maintenance (see run logs)',
+            logs: ['repo gamma: FAILED — path /tmp/gone does not exist'],
+          },
+        ],
+      },
+    ]);
+    const { container } = render(TenantSettings);
+    container.querySelector('[data-testid="tenant-settings-tab-jobs"]')?.click();
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="jobs-table"]')).toBeTruthy();
+    }, { timeout: 3000 });
+    // Expand the run history by clicking the job row.
+    container.querySelector('[data-testid="jobs-table"] tbody tr')?.click();
+    await waitFor(() => {
+      const runs = container.querySelector('[data-testid="job-runs-repo_maintenance"]');
+      expect(runs).toBeTruthy();
+      expect(runs.textContent).toContain('45s');
+      expect(runs.textContent).toContain('git gc --prune=now');
+      expect(runs.textContent).toContain('failed');
+      expect(runs.textContent).toContain('1 of 2 repositories failed maintenance');
+    }, { timeout: 3000 });
+  });
+
+  // ── Server Logs tab (admin-panel.md §Server Logs; TASK-273) ───────────────
+  it('Server Logs tab loads adminServerLogs on tab switch', async () => {
+    const { container } = render(TenantSettings);
+    container.querySelector('[data-testid="tenant-settings-tab-logs"]')?.click();
+    await waitFor(() => {
+      expect(api.adminServerLogs).toHaveBeenCalled();
+    }, { timeout: 3000 });
+  });
+
+  it('Server Logs tab shows entries in table when data present', async () => {
+    api.adminServerLogs.mockResolvedValue({
+      entries: [
+        { timestamp_ms: 1790000000000, level: 'WARN', target: 'gyre_server::jobs', message: 'job failed' },
+        { timestamp_ms: 1790000001000, level: 'INFO', target: 'gyre_server::api', message: 'request handled' },
+      ],
+      count: 2,
+    });
+    const { container } = render(TenantSettings);
+    container.querySelector('[data-testid="tenant-settings-tab-logs"]')?.click();
+    await waitFor(() => {
+      const table = container.querySelector('[data-testid="server-logs-table"]');
+      expect(table).toBeTruthy();
+      expect(table.textContent).toContain('WARN');
+      expect(table.textContent).toContain('gyre_server::jobs');
+      expect(table.textContent).toContain('job failed');
+    }, { timeout: 3000 });
+  });
+
+  it('Server Logs tab shows empty state when no entries', async () => {
+    api.adminServerLogs.mockResolvedValue({ entries: [], count: 0 });
+    const { container } = render(TenantSettings);
+    container.querySelector('[data-testid="tenant-settings-tab-logs"]')?.click();
+    await waitFor(() => {
+      const panel = container.querySelector('[data-testid="tenant-tab-logs"]');
+      expect(panel?.textContent).toContain('No log entries');
+    }, { timeout: 3000 });
+  });
+
+  it('Audit tab free-text search passes q to the admin audit endpoint', async () => {
+    api.adminAudit.mockResolvedValue({ events: [], count: 0 });
+    const { container } = render(TenantSettings);
+    container.querySelector('[data-testid="tenant-settings-tab-audit"]')?.click();
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="audit-search-input"]')).toBeTruthy();
+    }, { timeout: 3000 });
+    const input = container.querySelector('[data-testid="audit-search-input"]');
+    input.value = 'payment';
+    await fireEvent.input(input);
+    await fireEvent.keyDown(input, { key: 'Enter' });
+    await waitFor(() => {
+      expect(api.adminAudit).toHaveBeenCalledWith(expect.objectContaining({ q: 'payment' }));
     }, { timeout: 3000 });
   });
 

@@ -959,6 +959,8 @@ pub async fn reindex_all(state: &AppState) -> Result<u64> {
         since: None,
         until: None,
         limit: REINDEX_EVENT_LIMIT,
+        q: None,
+        tenant_id: None,
     };
     for event in state.audit.query(&audit_filter).await? {
         index(state, audit_event_document(&event)).await;

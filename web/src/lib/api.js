@@ -250,6 +250,10 @@ export const api = {
     const qs = new URLSearchParams(params).toString();
     return request(`/admin/audit${qs ? '?' + qs : ''}`);
   },
+  adminServerLogs: (params = {}) => {
+    const qs = new URLSearchParams(params).toString();
+    return request(`/admin/server/logs${qs ? '?' + qs : ''}`);
+  },
   adminKillAgent: (id) =>
     request(`/admin/agents/${id}/kill`, { method: 'POST' }),
   adminReassignAgent: (id, targetAgentId) =>

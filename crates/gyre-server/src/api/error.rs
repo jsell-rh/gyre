@@ -27,6 +27,10 @@ pub enum ApiError {
     /// produced and no silent local-key fallback ran (task-264). The
     /// message names the active signing mode. HTTP 502.
     CommitSigningFailed(String),
+    /// An upstream provider (OAuth token endpoint, forge, …) failed
+    /// (HTTP 502) — the failure is not this server's fault, but the
+    /// request cannot be completed.
+    BadGateway(String),
     Internal(anyhow::Error),
 }
 
@@ -84,6 +88,7 @@ impl IntoResponse for ApiError {
             ApiError::CommitSigningRefused(msg) => (StatusCode::FORBIDDEN, msg),
             ApiError::CommitSigningFailed(msg) => (StatusCode::BAD_GATEWAY, msg),
             ApiError::TooManyRequests(msg) => (StatusCode::TOO_MANY_REQUESTS, msg),
+            ApiError::BadGateway(msg) => (StatusCode::BAD_GATEWAY, msg),
             ApiError::Internal(err) => {
                 tracing::error!("internal error: {err:#}");
                 (
@@ -108,7 +113,8 @@ impl std::fmt::Display for ApiError {
             | ApiError::TooManyRequests(m)
             | ApiError::UnsupportedMediaType(m)
             | ApiError::CommitSigningRefused(m)
-            | ApiError::CommitSigningFailed(m) => f.write_str(m),
+            | ApiError::CommitSigningFailed(m)
+            | ApiError::BadGateway(m) => f.write_str(m),
             ApiError::RateLimited(secs) => write!(f, "rate limit exceeded, retry after {secs}s"),
             ApiError::LlmUnavailable => f.write_str("llm unavailable"),
             ApiError::Internal(err) => write!(f, "internal error: {err:#}"),

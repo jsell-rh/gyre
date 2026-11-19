@@ -216,7 +216,7 @@ mod tests {
                     enabled: true,
                     run_at_utc_hour: None,
                 },
-                |_state| async move { Ok(()) },
+                |_state, _log| async move { Ok(()) },
             )
             .await;
         state.job_registry.mark_scheduled(name).await;
@@ -261,7 +261,7 @@ mod tests {
                     enabled: true,
                     run_at_utc_hour: Some(2),
                 },
-                |_state| async move { Ok(()) },
+                |_state, _log| async move { Ok(()) },
             )
             .await;
         state.job_registry.mark_scheduled("retention_cleanup").await;

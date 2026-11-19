@@ -27,6 +27,7 @@ pub mod sigstore;
 pub(crate) mod health;
 pub mod impersonation;
 pub mod jobs;
+pub mod maintenance_jobs;
 pub mod llm_defaults;
 pub mod llm_helpers;
 pub mod llm_rate_limit;
@@ -558,6 +559,17 @@ pub struct AppState {
     /// encrypted at rest in the adapter. Agent spawn resolves secrets through
     /// this and injects them as GYRE_CRED_* env vars for the cred-proxy sidecar.
     pub secrets: Arc<dyn gyre_ports::SecretRepository>,
+    /// Durable job-run history (admin-panel.md §Background Jobs: "Full job
+    /// history stored and visible" — status, duration, failures, logs). The
+    /// registry's in-memory history is a fronting cache; this store is
+    /// authoritative across restarts (TASK-273).
+    pub job_runs: Arc<dyn gyre_ports::JobRunRepository>,
+    /// Durable OAuth authorization-request state (admin-panel.md: Claude Max
+    /// enrollment via OAuth + PKCE; TASK-273).
+    pub oauth_states: Arc<dyn gyre_ports::OAuthStateRepository>,
+    /// Durable spawned agent-instance records (admin-panel.md: remote agent
+    /// cleanup of expired/orphaned instances; TASK-273).
+    pub agent_instances: Arc<dyn gyre_ports::AgentInstanceRepository>,
     /// Aggregated judgment ledger for user activity history (HSI §12).
     pub judgment_ledger: Arc<dyn gyre_ports::JudgmentLedgerRepository>,
     /// Orchestrator registry (agent-runtime.md §1 Phases 2–3): per-workspace
@@ -1710,6 +1722,47 @@ fn load_spiffe_service(
     )
 }
 
+/// Select and build the secret repository for `build_state`
+/// (admin-panel.md / platform-model.md §7 Storage Backend; TASK-273).
+///
+/// - `GYRE_SECRET_BACKEND=vault`: the [`gyre_ports::SecretRepository`]
+///   operations are served from Vault KV v2 (server token/AppRole for the
+///   admin write path, agent-JWT login for agent resolution). Misconfiguration
+///   fails startup — the server must not come up serving secrets from the
+///   wrong store.
+/// - Otherwise: the durable database store (SQLite/PostgreSQL; SOPS is the
+///   default at-rest format inside the adapter) or the mem store in
+///   pure-mem mode.
+fn build_secret_repository(
+    pg_db: &Option<Arc<gyre_adapters::PgStorage>>,
+    sqlite_db: &Option<Arc<gyre_adapters::SqliteStorage>>,
+) -> Arc<dyn gyre_ports::SecretRepository> {
+    let backend = std::env::var("GYRE_SECRET_BACKEND")
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    if backend == "vault" {
+        let config = gyre_adapters::vault::VaultConfig::from_env().unwrap_or_else(|e| {
+            panic!("GYRE_SECRET_BACKEND=vault is misconfigured: {e:#}")
+        });
+        let repo = gyre_adapters::vault::VaultSecretRepository::new(config.clone())
+            .unwrap_or_else(|e| panic!("failed to initialize the Vault client: {e:#}"));
+        tracing::info!(
+            addr = %config.addr,
+            kv_mount = %config.kv_mount,
+            "secret backend: Vault KV v2 (agents authenticate with their own JWT)"
+        );
+        return Arc::new(repo);
+    }
+    if let Some(d) = pg_db {
+        Arc::clone(d) as Arc<dyn gyre_ports::SecretRepository>
+    } else if let Some(d) = sqlite_db {
+        Arc::clone(d) as Arc<dyn gyre_ports::SecretRepository>
+    } else {
+        Arc::new(mem::MemSecretRepository::default()) as Arc<dyn gyre_ports::SecretRepository>
+    }
+}
+
 pub fn build_state(
     auth_token: &str,
     base_url: &str,
@@ -2304,9 +2357,18 @@ pub fn build_state(
             dyn gyre_ports::UserChannelPreferenceRepository,
             mem::MemUserChannelPreferenceRepository::default()
         ),
-        secrets: store!(
-            dyn gyre_ports::SecretRepository,
-            mem::MemSecretRepository::default()
+        secrets: build_secret_repository(&pg_db, &sqlite_db),
+        job_runs: store!(
+            dyn gyre_ports::JobRunRepository,
+            mem::MemJobRunRepository::default()
+        ),
+        oauth_states: store!(
+            dyn gyre_ports::OAuthStateRepository,
+            mem::MemOAuthStateRepository::default()
+        ),
+        agent_instances: store!(
+            dyn gyre_ports::AgentInstanceRepository,
+            mem::MemAgentInstanceRepository::default()
         ),
         judgment_ledger: store!(
             dyn gyre_ports::JudgmentLedgerRepository,

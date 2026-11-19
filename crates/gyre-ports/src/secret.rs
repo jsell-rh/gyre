@@ -62,4 +62,26 @@ pub trait SecretRepository: Send + Sync {
         repo_id: &str,
         task_id: Option<&str>,
     ) -> Result<Vec<(String, Vec<u8>)>>;
+
+    /// Agent-scoped resolution carrying the agent's own JWT
+    /// (platform-model.md §7 Storage Backend: with the Vault backend,
+    /// resolution authenticates to Vault with the agent's JWT via the
+    /// JWT auth backend, so Vault policies scope the returned secrets —
+    /// the server never applies its own credentials to an agent read).
+    ///
+    /// The default implementation ignores the JWT and delegates to
+    /// [`SecretRepository::resolve_for_agent`] (database-backed backends
+    /// apply the scope cascade themselves); the Vault backend overrides
+    /// it to perform the agent-authenticated read.
+    async fn resolve_for_agent_as(
+        &self,
+        tenant_id: &str,
+        workspace_id: &str,
+        repo_id: &str,
+        task_id: Option<&str>,
+        _agent_jwt: &str,
+    ) -> Result<Vec<(String, Vec<u8>)>> {
+        self.resolve_for_agent(tenant_id, workspace_id, repo_id, task_id)
+            .await
+    }
 }

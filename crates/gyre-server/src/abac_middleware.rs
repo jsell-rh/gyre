@@ -483,6 +483,7 @@ impl ResourceResolver {
                 RouteResourceMapping::api("/api/v1/admin/jobs", "admin", None),
                 RouteResourceMapping::api("/api/v1/admin/jobs/:name/run", "admin", Some("write")),
                 RouteResourceMapping::api("/api/v1/admin/audit", "admin", None),
+                RouteResourceMapping::api("/api/v1/admin/server/logs", "admin", None),
                 RouteResourceMapping::api("/api/v1/admin/orphaned-workspaces", "admin", None),
                 // Admin user impersonation (identity-security.md §Impersonation).
                 // Request/end are admin-only (`admin` resource →
@@ -548,6 +549,20 @@ impl ResourceResolver {
                 RouteResourceMapping::api("/api/v1/secrets", "secret", None),
                 RouteResourceMapping::api("/api/v1/secrets/:id", "secret", None),
                 RouteResourceMapping::api("/api/v1/secrets/:id/rotate", "secret", Some("write")),
+                // Claude Max OAuth enrollment (admin-panel.md §Credential
+                // Management; TASK-273): the initiation writes the eventual
+                // secret, so it evaluates as the secret resource's write
+                // action.
+                RouteResourceMapping::api(
+                    "/api/v1/admin/oauth/claude-max/enroll",
+                    "secret",
+                    Some("write"),
+                ),
+                // The provider redirect carries no Gyre credentials: the
+                // single-use state row IS the capability (per-handler
+                // authorization: unknown / expired / replayed states are
+                // rejected in the handler).
+                RouteResourceMapping::exempt("/api/v1/oauth/claude-max/callback"),
                 // ── Network ────────────────────────────────────────────────
                 RouteResourceMapping::api("/api/v1/network/peers", "network_peer", None),
                 RouteResourceMapping::api(
