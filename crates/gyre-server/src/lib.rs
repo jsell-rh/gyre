@@ -2801,14 +2801,19 @@ mod tests {
             .await;
         assert!(result.is_err(), "scopeless Agent message must be rejected");
 
-        let logs = logs.lock().unwrap();
+        // Clone the captured records out so the MutexGuard is confined to
+        // this statement — the test body contains later awaits, and holding
+        // a lock guard across an await point is the clippy::await_holding_lock
+        // defect class (a guard held while suspended can deadlock the
+        // capturing layer on another thread).
+        let captured: Vec<(tracing::Level, String)> = logs.lock().unwrap().clone();
         assert!(
-            logs.iter()
+            captured
+                .iter()
                 .any(|(level, msg)| *level == tracing::Level::ERROR
                     && msg.contains("workspace scope")),
-            "the guard must log at error level, captured: {logs:?}"
+            "the guard must log at error level, captured: {captured:?}"
         );
-        drop(logs);
 
         assert_eq!(
             counting.stores.load(std::sync::atomic::Ordering::SeqCst),
