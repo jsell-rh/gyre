@@ -3,7 +3,7 @@ title: "Mirror namespace isolation: mirrors/{forge}/{owner}/{repo} storage names
 spec_ref: "Spec gap spec-36fad8fcafe7b73a2b6f2d0e / mirror-namespace-isolation / b580b93c564f"
 depends_on: []
 progress: ready-for-review
-commits: ["0bf540aef508b63a1a0586cf60ee24a1f0a96ae6"]
+commits: ["0bf540aef508b63a1a0586cf60ee24a1f0a96ae6", "5678d534c97d16dcf469ae3dce58c59dbc74e2c9", "0c941afffd04123229e084a8fcb34359299929c4", "9057fc8f06b699202bd4cb1dd9070198fc94059d"]
 ---
 
 ## Required behavior
@@ -57,8 +57,8 @@ Canonical spec: `specs/system/source-control.md`. Source: `fb1424fbac55cd23cb086
 
 ## Shipped
 
-`create_mirror_repo` (crates/gyre-server/src/api/repos.rs) now stores every
-new mirror in an isolated namespace derived from its upstream URL:
+`create_mirror_repo` (crates/gyre-server/src/api/repos.rs) stores every new
+mirror in an isolated namespace derived from its upstream URL:
 `{repos_root}/{ws}/mirrors/{forge}/{owner}/{repo}.git`, per
 source-control.md §External Repository Mirroring. Native `create_repo` is
 byte-for-byte unchanged (its name validation still rejects `/`, so it can
@@ -93,16 +93,28 @@ never allocate under `mirrors/`).
   no migration. The SSRF https-only gate and the `(workspace_id, name)` DB
   identity rule are kept.
 
+### Review repair (this checkpoint)
+
+Independent review found one defect (F1): the new test
+`create_mirror_repo_maps_forge_hosts_into_namespace` posted both URL cases
+with the same `(workspace_id, name)`, so the second request deterministically
+hit `MemRepoRepository`'s `(workspace_id, name)` uniqueness bail → HTTP 500
+instead of the asserted 201. Fixed by giving each case its own name
+(`m-gitlab`, `m-example`); the name is not part of path derivation, so the
+namespace assertions are unchanged. Production code needed no change.
+
 ### Test evidence
 
-New/updated tests in the `repos.rs` tests module (compile-checked via
-`cargo check -p gyre-server --tests` and clippy-clean):
+Tests in the `repos.rs` tests module (compile-checked via
+`cargo check -p gyre-server --tests` — exit 0 — and `cargo fmt --check`
+clean; the gyre-server test binary exceeds this sandbox's 4 GiB build
+budget, so execution is deferred to the independent verifier):
 
-- `create_mirror_repo_returns_201` — updated to assert the record path is
+- `create_mirror_repo_returns_201` — asserts the record path is
   `{repos_root}/{ws}/mirrors/github/org/repo.git` and NOT the old flat
   `{ws}/{name}.git` namespace.
 - `create_mirror_repo_maps_forge_hosts_into_namespace` — gitlab and
-  other-host mapping.
+  other-host mapping (repaired: distinct name per case).
 - `create_mirror_repo_rejects_traversal_urls` — `..`, `%2F`, `.`, 3-segment,
   empty-path and `.git`-only URLs all 400; no row, no directory on disk.
 - `create_mirror_repo_rejects_duplicate_upstream_url` — 409 for same URL
@@ -115,24 +127,15 @@ New/updated tests in the `repos.rs` tests module (compile-checked via
   directory with refs are untouched; smart-HTTP
   `/git/{ws}/{name}/info/refs` returns 200.
 - `legacy_mirror_rows_sync_from_persisted_path` — a pre-change flat-path
-  mirror row with real storage syncs via its persisted path.
+  mirror row still fetches from its persisted path, no rewrite.
 - `derive_mirror_namespace_maps_forge_hosts` /
-  `derive_mirror_namespace_rejects_unsafe_urls` — unit battery over the
-  derivation (URL-parsing behaviors cross-checked against url 2.5.8 in a
-  standalone probe; see review evidence).
+  `derive_mirror_namespace_rejects_unsafe_urls` — unit battery for the
+  derivation and its fail-closed rules.
 
-### Deferred verification
+Verifier must run: `cargo test -p gyre-server --lib create_mirror_repo` and
+`cargo test -p gyre-server --lib derive_mirror_namespace`, plus the
+workspace gates it owns (`cargo test --all`, arch/CI checks).
 
-The gyre-server test binary exceeds this sandbox's 4 GiB build budget (the
-build wrapper defers gyre-server codegen to the independent verifier), so
-the tests above were type-checked and clippy-checked here but not executed.
-The verifier must run:
-
-- `cargo test -p gyre-server --lib api::repos::tests`
-- `cargo test -p gyre-server --lib derive_mirror_namespace`
-- `cargo test --all` (acceptance criterion)
-
-Mechanical gates run clean locally on the changed files:
-`check-byte-slice-truncation.sh`, `check-relative-path-defaults.sh`,
-`check-arch.sh`, `check-inert-enforcement.sh`, `check-mem-port-contracts.sh`,
-`check-conditional-test-guards.sh`, `check-aspirational-test-names.sh`.
+Coverage row `specs/coverage/system/source-control.md` §13 (External
+Repository Mirroring) updated to `implemented` with source evidence
+(commit 5678d534).
