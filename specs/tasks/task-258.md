@@ -2,8 +2,8 @@
 title: "Agent-to-commit tracking at session granularity: session persistence, branch lifecycle, dirty state, file/commit queries, and time-travel"
 spec_ref: "Spec gap spec-36fad8fcafe7b73a2b6f2d0e / agent-session-commit-tracking / b580b93c564f"
 depends_on: []
-progress: not-started
-commits: []
+progress: complete
+commits: ["ec0fbff49ca8ee5a7a21216e82ad56e110e8599b", "f7d9c3883dda4d544507d78d6f7590e339f9ab96", "dfcb500fa9dfcc496f67b5a52b3ff830c0a9c77c", "fff11b71fb5e9a7f3a113c61bbcccfbd79e1b295", "eff02cffb16bbc5ad1026478ff46d2062b5c6ceb", "50452ac5318beaf98f0ff6a5b63557f02c0543b3"]
 ---
 
 ## Required behavior
@@ -59,3 +59,76 @@ Canonical spec: `specs/system/source-control.md`. Source: `fb1424fbac55cd23cb086
     ]
   }
 ]
+
+## Shipped
+
+All five source-control.md §Agent-to-Commit Tracking bullets are real,
+persisted, queryable behavior on this branch (original implementation in
+50452ac5, fff11b71, eff02cff, dfcb500f; same-second lifecycle-commit
+ordering repair in f7d9c388; this round's session-list ordering repair in
+ec0fbff4):
+
+- **Session-to-commit mapping**: `AgentSessionRepository` port with
+  SQLite/PostgreSQL adapters over migration `000067_agent_sessions`, a
+  mem adapter with identical guards, and `store!` wiring. Sessions are
+  created at spawn and at each Ralph-loop fresh-context respawn, ended
+  on every termination path (complete_agent, fail_agent, stale Dead,
+  MCP gyre_agent_complete, admin kill); `AgentCommit.session_id` is
+  stamped from the pushing agent's open session in
+  record_pushed_commits and POST /repos/:id/commits/record (NULL when
+  none — never a fabricated id); chronological GET
+  /repos/:id/agent-sessions/:sid/commits.
+- **Branch lifecycle**: GET /repos/:id/agents/:aid/branch-lifecycle —
+  spawn-time branch, current branch resolved at termination via real
+  `git rev-parse --abbrev-ref HEAD`, all observed commits.
+- **Dirty state**: real `git status --porcelain` in the agent's
+  worktree at termination; missing worktrees record an explicit
+  unknown state, never a silent clean.
+- **Commit-based queries**: files_changed per pushed commit (real
+  `git diff-tree` at push time); GET /repos/:id/agent-sessions/
+  by-file?path= and by-commit?sha=.
+- **Time-travel**: GET /repos/:id/agent-sessions/:sid/state — commits
+  in [started_at, ended_at] via real `git log --after/--before` plus
+  the completion snapshot resolved from refs/agents/{id}/snapshots/{n}.
+
+### This round: CI repair (run 44611030853, PR head bdf87292)
+
+`ralph_loop::tests::respawn_opens_a_new_session` failed with
+"session 1 stays terminated" (left None, right Some(500)): the test's
+spawn session (manually terminated, ended_at=Some(500)) and its
+fresh-context respawn successor are created within one wall-clock
+second, and `AgentSessionRepository::find_by_agent` ordered sessions
+by (started_at, id) — second-granularity timestamps tie, and the
+random-UUID id tiebreak ordered the open respawn session first. The
+same determinism-defect class f7d9c388 fixed for lifecycle commits,
+but in the session-list query itself.
+
+Fix (ec0fbff4): break started_at ties by session window in ALL THREE
+adapters identically — an ended session predates a still-open session
+started in the same second (one agent's sessions are sequential
+context windows): ended_at ASC NULLS LAST via `is_null` (false sorts
+first on both SQLite and PostgreSQL), then ended_at, then the id as
+the final deterministic fallback. The port contract
+(gyre-ports/src/agent_tracking.rs) documents the tie-break.
+
+### Test evidence
+
+- `cargo test -p gyre-adapters sqlite::session`: 8/8 pass on this
+  exact head (ec0fbff4), including the new deterministic regression
+  tests `same_second_tie_orders_ended_session_before_open` and
+  `same_second_tie_between_ended_sessions_orders_by_ended_at`, whose
+  session ids deliberately contradict the window order so a bare id
+  tiebreak fails them. Source SHAs, commands, and output saved under
+  /tmp/stage/review-evidence.
+- `cargo check -p gyre-server` and `cargo clippy -p gyre-adapters -p
+  gyre-ports`: clean on this exact head (no new findings in touched
+  files).
+- `scripts/check-mem-port-contracts.sh`: clean.
+- gyre-server test builds are deferred to the independent verifier
+  (build-wrapper budget). Required probes:
+  `cargo nextest run -p gyre-server ralph_loop::tests::respawn_opens_a_new_session`
+  and
+  `cargo nextest run -p gyre-server agent_sessions` (includes the new
+  mem-backed `find_by_agent_same_second_tie_orders_by_session_window`),
+  plus the full `cargo nextest run --all` and the standing gate
+  scripts.

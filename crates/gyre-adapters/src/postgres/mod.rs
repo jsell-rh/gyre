@@ -43,6 +43,7 @@ pub mod review;
 pub mod rollout_policy;
 pub mod search;
 pub mod secret;
+pub mod session;
 pub mod spawn_log;
 pub mod spec_approval;
 pub mod spec_approval_event;
