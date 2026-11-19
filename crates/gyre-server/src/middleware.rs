@@ -289,6 +289,7 @@ mod tests {
             message_broadcast_tx: base.message_broadcast_tx.clone(),
             kv_store: base.kv_store.clone(),
             agent_signing_key: base.agent_signing_key.clone(),
+            spiffe: base.spiffe.clone(),
             signing_key_history: Vec::new(),
             attestation_verifier: base.attestation_verifier.clone(),
             agent_jwt_ttl_secs: base.agent_jwt_ttl_secs,

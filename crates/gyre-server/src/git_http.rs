@@ -8337,6 +8337,8 @@ specs:
             "",
             Some("container-abc".to_string()),
             Some("sha256:deadbeef".to_string()),
+            None,
+            None,
         );
         state
             .kv_store
