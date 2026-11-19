@@ -618,6 +618,107 @@ pub async fn diff(
     Ok(Json(result))
 }
 
+/// Mirror storage namespace segments derived from an upstream URL
+/// (source-control.md §External Repository Mirroring — mirror namespace
+/// isolation). A mirror is stored at
+/// `{repos_root}/{ws}/mirrors/{forge}/{owner}/{repo}.git` — a namespace
+/// native repos can never allocate, encoding the upstream forge identity.
+struct MirrorNamespace {
+    forge: String,
+    owner: String,
+    repo: String,
+}
+
+/// Validate one path segment derived from a mirror URL. Rejects anything
+/// that could let the derived path escape the `mirrors/` namespace: empty
+/// segments, `.`/`..` (and any embedded `..`), separators, and percent-
+/// encoded or otherwise non-filesystem-safe characters. Runs BEFORE any
+/// filesystem write (source-control.md mirror namespace isolation).
+fn validate_mirror_segment(segment: &str, what: &str) -> Result<(), ApiError> {
+    if segment.is_empty() {
+        return Err(ApiError::InvalidInput(format!(
+            "mirror URL {what} segment must not be empty"
+        )));
+    }
+    if segment == "." || segment.contains("..") {
+        return Err(ApiError::InvalidInput(format!(
+            "mirror URL {what} segment must not contain '..'"
+        )));
+    }
+    if !segment
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+    {
+        return Err(ApiError::InvalidInput(format!(
+            "mirror URL {what} segment contains forbidden characters \
+             (allowed: alphanumeric, '-', '_', '.')"
+        )));
+    }
+    Ok(())
+}
+
+/// Derive the mirror storage namespace from an https mirror URL: host
+/// `github.com` → `github`, `gitlab.com` → `gitlab`, any other host → a
+/// sanitized host-derived segment; owner/repo from the two URL path
+/// segments (an optional `.git` suffix on the repo segment is stripped).
+/// Fails closed on any URL shape that cannot be mapped to a provably safe
+/// namespace: raw `..` anywhere (checked before parsing, since the URL
+/// parser normalizes `/../` away), percent-encoded segments, wrong path
+/// segment count, missing host, or a non-https scheme.
+fn derive_mirror_namespace(url: &str) -> Result<MirrorNamespace, ApiError> {
+    if url.contains("..") {
+        return Err(ApiError::InvalidInput(
+            "mirror URL must not contain '..'".to_string(),
+        ));
+    }
+    let parsed = url::Url::parse(url)
+        .map_err(|e| ApiError::InvalidInput(format!("invalid mirror URL: {e}")))?;
+    if parsed.scheme() != "https" {
+        return Err(ApiError::InvalidInput(
+            "mirror URL must use https:// scheme".to_string(),
+        ));
+    }
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| ApiError::InvalidInput("mirror URL has no host".to_string()))?;
+    let forge = match host {
+        "github.com" => "github".to_string(),
+        "gitlab.com" => "gitlab".to_string(),
+        // Sanitized host-derived segment: keep filesystem-safe characters,
+        // replace everything else (IPv6 brackets, colons, ...) with '-'.
+        other => other
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                    c
+                } else {
+                    '-'
+                }
+            })
+            .collect(),
+    };
+    validate_mirror_segment(&forge, "host")?;
+
+    // owner/repo from the URL path segments: exactly two are required, so
+    // every mirror maps to the spec's mirrors/{forge}/{owner}/{repo} shape.
+    let path = parsed.path().trim_matches('/');
+    let segments: Vec<&str> = path.split('/').collect();
+    if segments.len() != 2 || segments.iter().any(|s| s.is_empty()) {
+        return Err(ApiError::InvalidInput(
+            "mirror URL path must be exactly /{owner}/{repo} (optionally with a .git suffix)"
+                .to_string(),
+        ));
+    }
+    let owner = segments[0].to_string();
+    let repo = segments[1]
+        .strip_suffix(".git")
+        .unwrap_or(segments[1])
+        .to_string();
+    validate_mirror_segment(&owner, "owner")?;
+    validate_mirror_segment(&repo, "repo")?;
+    Ok(MirrorNamespace { forge, owner, repo })
+}
+
 pub async fn create_mirror_repo(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateMirrorRequest>,
@@ -636,7 +737,54 @@ pub async fn create_mirror_repo(
             "mirror URL must use https:// scheme".to_string(),
         ));
     }
-    let repo_path = format!("{}/{}/{}.git", state.repos_root, req.workspace_id, req.name);
+    // Mirror namespace isolation (source-control.md §External Repository
+    // Mirroring): mirrors are stored under
+    // {repos_root}/{ws}/mirrors/{forge}/{owner}/{repo}.git instead of the
+    // native-repo namespace {repos_root}/{ws}/{name}.git. Every segment is
+    // validated BEFORE any filesystem write, so the derived path can never
+    // escape the mirrors/ namespace; unsafe URLs are rejected with a 4xx.
+    let ns = derive_mirror_namespace(&req.url)?;
+    let mirrors_root = std::path::Path::new(&state.repos_root)
+        .join(&req.workspace_id)
+        .join("mirrors");
+    let repo_path = mirrors_root
+        .join(&ns.forge)
+        .join(&ns.owner)
+        .join(format!("{}.git", ns.repo))
+        .to_string_lossy()
+        .into_owned();
+    // Canonical at rest: repos_root is canonicalized (absolute) at startup
+    // and every appended segment is a single validated filesystem-safe
+    // component, so the joined path is absolute and normalized.
+    //
+    // Namespace-isolation guard for the pre-clone stale-directory cleanup
+    // below: it may only ever remove paths under {repos_root}/{ws}/mirrors/.
+    // Unreachable with validated segments, but fails closed so a future
+    // refactor cannot widen the cleanup's blast radius onto native repos.
+    if !std::path::Path::new(&repo_path).starts_with(&mirrors_root) {
+        return Err(ApiError::Internal(anyhow::anyhow!(
+            "mirror path {repo_path} escapes the mirrors/ namespace"
+        )));
+    }
+
+    // A second mirror of the same upstream URL (or the same derived storage
+    // path, e.g. a different URL spelling of the same upstream) in this
+    // workspace must fail cleanly rather than silently share or overwrite
+    // the first mirror's storage.
+    for existing in state
+        .repos
+        .list_by_workspace(&Id::new(req.workspace_id.as_str()))
+        .await?
+    {
+        if existing.path == repo_path
+            || (existing.is_mirror && existing.mirror_url.as_deref() == Some(req.url.as_str()))
+        {
+            return Err(ApiError::Conflict(format!(
+                "workspace already mirrors {} (repo '{}')",
+                req.url, existing.name
+            )));
+        }
+    }
 
     let now = now_secs();
     let url = req.url;
@@ -660,11 +808,14 @@ pub async fn create_mirror_repo(
     };
     state.repos.create(&repo).await?;
 
-    // Clean up any stale directory left by a previously deleted repo with the same
-    // workspace + name. Without this, `git clone --mirror` fails with "already exists".
+    // Clean up any stale directory left by a previously deleted mirror with
+    // the same derived namespace path. Without this, `git clone --mirror`
+    // fails with "already exists". Scoped by the guard above: this can only
+    // ever remove paths under {repos_root}/{ws}/mirrors/ — it never touches
+    // a native repo's directory.
     let path = std::path::Path::new(&repo_path);
     if path.exists() {
-        tracing::info!("Removing stale repo directory before mirror clone: {repo_path}");
+        tracing::info!("Removing stale mirror directory before mirror clone: {repo_path}");
         if let Err(e) = tokio::fs::remove_dir_all(path).await {
             tracing::warn!("Failed to remove stale directory {repo_path}: {e}");
         }
@@ -961,6 +1112,8 @@ pub async fn sync_specs(
 mod tests {
     use crate::mem::test_state;
     use axum::{body::Body, Router};
+    use gyre_common::Id;
+    use gyre_domain::{BranchInfo, CommitInfo, DiffResult};
     use http::{Request, StatusCode};
     use tower::ServiceExt;
 
@@ -2145,13 +2298,15 @@ mod tests {
 
     #[tokio::test]
     async fn create_mirror_repo_returns_201() {
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
         let body = serde_json::json!({
             "workspace_id": "ws-mirror-test",
             "name": "my-mirror",
             "url": "https://github.com/org/repo.git",
             "interval_secs": 300
         });
-        let resp = app()
+        let resp = app
             .oneshot(
                 Request::builder()
                     .method("POST")
@@ -2166,5 +2321,746 @@ mod tests {
         let json = body_json(resp).await;
         assert_eq!(json["name"], "my-mirror");
         assert_eq!(json["is_mirror"], true);
+
+        // task-259 mirror namespace isolation: the record's storage path is
+        // {repos_root}/{ws}/mirrors/{forge}/{owner}/{repo}.git — NOT the
+        // native-repo namespace {repos_root}/{ws}/{name}.git.
+        let id = json["id"].as_str().unwrap();
+        let repo = state
+            .repos
+            .find_by_id(&Id::new(id))
+            .await
+            .unwrap()
+            .expect("mirror repo record must exist");
+        assert_eq!(
+            repo.path,
+            format!(
+                "{}/ws-mirror-test/mirrors/github/org/repo.git",
+                state.repos_root
+            )
+        );
+        // The old flat namespace is NOT used.
+        assert_ne!(
+            repo.path,
+            format!("{}/ws-mirror-test/my-mirror.git", state.repos_root)
+        );
+    }
+
+    #[tokio::test]
+    async fn create_mirror_repo_maps_forge_hosts_into_namespace() {
+        // github.com → github, gitlab.com → gitlab, any other https host →
+        // a sanitized host-derived segment; owner/repo from the URL path.
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let cases = [
+            (
+                "https://gitlab.com/acme/widgets.git",
+                "mirrors/gitlab/acme/widgets.git",
+            ),
+            (
+                "https://git.example.com/team/tooling",
+                "mirrors/git.example.com/team/tooling.git",
+            ),
+        ];
+        for (url, expected_tail) in cases {
+            let body = serde_json::json!({
+                "workspace_id": "ws-mirror-hosts",
+                "name": "m",
+                "url": url,
+            });
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/repos/mirror")
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::CREATED, "url {url}");
+            let json = body_json(resp).await;
+            let id = json["id"].as_str().unwrap();
+            let repo = state
+                .repos
+                .find_by_id(&Id::new(id))
+                .await
+                .unwrap()
+                .expect("mirror repo record must exist");
+            assert_eq!(
+                repo.path,
+                format!("{}/ws-mirror-hosts/{}", state.repos_root, expected_tail),
+                "url {url}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn create_mirror_repo_rejects_traversal_urls() {
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let unsafe_urls = [
+            // Raw dot-dot segment: a naive format!-concatenated path would
+            // resolve to {ws}/mirrors/github/../… and escape the namespace.
+            "https://github.com/../evil/repo.git",
+            // Embedded separator, percent-encoded.
+            "https://github.com/own%2Fer/repo.git",
+            // Dot segment.
+            "https://github.com/./repo.git",
+            // More than two path segments.
+            "https://gitlab.com/group/subgroup/repo.git",
+            // No path at all.
+            "https://github.com",
+            // Repo segment that strips to empty.
+            "https://github.com/octocat/.git",
+        ];
+        for url in unsafe_urls {
+            let body = serde_json::json!({
+                "workspace_id": "ws-mirror-trav",
+                "name": "trav",
+                "url": url,
+            });
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/repos/mirror")
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::BAD_REQUEST,
+                "traversal URL must be rejected with a 4xx: {url}"
+            );
+        }
+
+        // Rejected BEFORE any write: no repo row and no directory anywhere
+        // under the workspace's storage root.
+        let repos = state
+            .repos
+            .list_by_workspace(&Id::new("ws-mirror-trav"))
+            .await
+            .unwrap();
+        assert!(repos.is_empty(), "no mirror row may be created");
+        let ws_root = std::path::Path::new(&state.repos_root).join("ws-mirror-trav");
+        assert!(
+            !ws_root.exists(),
+            "no directory may be created for a rejected mirror URL"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_mirror_repo_rejects_duplicate_upstream_url() {
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let first = serde_json::json!({
+            "workspace_id": "ws-mirror-dup",
+            "name": "first",
+            "url": "https://github.com/octocat/Hello-World.git",
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/repos/mirror")
+                    .header("content-type", "application/json")
+                    .body(Body::from(first.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        // Same upstream URL under a different name: must fail cleanly
+        // rather than silently share the first mirror's storage.
+        let second = serde_json::json!({
+            "workspace_id": "ws-mirror-dup",
+            "name": "second",
+            "url": "https://github.com/octocat/Hello-World.git",
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/repos/mirror")
+                    .header("content-type", "application/json")
+                    .body(Body::from(second.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+
+        // Same derived storage path via a different URL spelling (no .git
+        // suffix): also a conflict, not silent storage sharing.
+        let third = serde_json::json!({
+            "workspace_id": "ws-mirror-dup",
+            "name": "third",
+            "url": "https://github.com/octocat/Hello-World",
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/repos/mirror")
+                    .header("content-type", "application/json")
+                    .body(Body::from(third.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+
+        // The first mirror's record and storage path are intact, and it is
+        // the only mirror row in the workspace.
+        let repos = state
+            .repos
+            .list_by_workspace(&Id::new("ws-mirror-dup"))
+            .await
+            .unwrap();
+        assert_eq!(repos.len(), 1);
+        assert_eq!(repos[0].name, "first");
+        assert_eq!(
+            repos[0].path,
+            format!(
+                "{}/ws-mirror-dup/mirrors/github/octocat/Hello-World.git",
+                state.repos_root
+            )
+        );
+    }
+
+    #[test]
+    fn derive_mirror_namespace_maps_forge_hosts() {
+        let ns =
+            super::derive_mirror_namespace("https://github.com/octocat/Hello-World.git").unwrap();
+        assert_eq!(ns.forge, "github");
+        assert_eq!(ns.owner, "octocat");
+        assert_eq!(ns.repo, "Hello-World");
+
+        let ns = super::derive_mirror_namespace("https://gitlab.com/acme/widgets.git").unwrap();
+        assert_eq!(ns.forge, "gitlab");
+        assert_eq!(ns.owner, "acme");
+        assert_eq!(ns.repo, "widgets");
+
+        // Other https hosts derive a sanitized host segment; a trailing
+        // slash or missing .git suffix still maps to the same namespace.
+        let ns = super::derive_mirror_namespace("https://git.example.com/team/tooling").unwrap();
+        assert_eq!(ns.forge, "git.example.com");
+        assert_eq!(ns.owner, "team");
+        assert_eq!(ns.repo, "tooling");
+
+        // Hosts with non-filesystem-safe characters sanitize to '-'.
+        // (IPv6 host_str is "[::1]" — brackets and colons all map to '-'.)
+        let ns = super::derive_mirror_namespace("https://[::1]/team/tooling.git").unwrap();
+        assert_eq!(ns.forge, "---1-");
+    }
+
+    #[test]
+    fn derive_mirror_namespace_rejects_unsafe_urls() {
+        let unsafe_urls = [
+            "https://github.com/../evil/repo.git",
+            "https://github.com/a/..b.git",
+            "https://github.com/own%2Fer/repo.git",
+            "https://github.com/octocat/Hello%2DWorld.git",
+            "https://github.com/./repo.git",
+            "https://github.com/a/b/c",
+            "https://github.com/a//b.git",
+            "https://github.com",
+            "https://github.com/octocat/.git",
+            "http://github.com/a/b.git",
+            "not-a-url",
+        ];
+        for url in unsafe_urls {
+            assert!(
+                super::derive_mirror_namespace(url).is_err(),
+                "URL must fail closed: {url}"
+            );
+        }
+    }
+
+    /// GitOpsPort double for mirror-namespace tests: records `clone_mirror`
+    /// / `fetch_mirror` calls and performs REAL git operations (`git clone
+    /// --mirror` from a local fixture repository, real `git fetch --all`),
+    /// so on-disk namespace assertions run against actual git storage
+    /// rather than stub directories. All other operations are no-ops.
+    struct MirrorRecordingGitOps {
+        /// (url, path) pairs passed to clone_mirror, in call order.
+        clone_calls: std::sync::Arc<parking_lot::Mutex<Vec<(String, String)>>>,
+        /// Paths passed to fetch_mirror, in call order.
+        fetch_calls: std::sync::Arc<parking_lot::Mutex<Vec<String>>>,
+        /// Local repository cloned from instead of the (unreachable in
+        /// tests) https URL.
+        fixture_path: String,
+    }
+
+    /// Recorded (url, path) pairs passed to clone_mirror, in call order.
+    type MirrorCloneCalls = std::sync::Arc<parking_lot::Mutex<Vec<(String, String)>>>;
+    /// Recorded paths passed to fetch_mirror, in call order.
+    type MirrorFetchCalls = std::sync::Arc<parking_lot::Mutex<Vec<String>>>;
+
+    impl MirrorRecordingGitOps {
+        fn new(fixture_path: &str) -> (Self, MirrorCloneCalls, MirrorFetchCalls) {
+            let clone_calls = std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
+            let fetch_calls = std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
+            (
+                Self {
+                    clone_calls: std::sync::Arc::clone(&clone_calls),
+                    fetch_calls: std::sync::Arc::clone(&fetch_calls),
+                    fixture_path: fixture_path.to_string(),
+                },
+                clone_calls,
+                fetch_calls,
+            )
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl gyre_ports::GitOpsPort for MirrorRecordingGitOps {
+        async fn init_bare(&self, _path: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn list_branches(&self, _repo_path: &str) -> anyhow::Result<Vec<BranchInfo>> {
+            Ok(vec![])
+        }
+
+        async fn commit_log(
+            &self,
+            _repo_path: &str,
+            _branch: &str,
+            _limit: usize,
+        ) -> anyhow::Result<Vec<CommitInfo>> {
+            Ok(vec![])
+        }
+
+        async fn diff(
+            &self,
+            _repo_path: &str,
+            _from: &str,
+            _to: &str,
+        ) -> anyhow::Result<DiffResult> {
+            Ok(DiffResult {
+                files_changed: 0,
+                insertions: 0,
+                deletions: 0,
+                patches: vec![],
+            })
+        }
+
+        async fn is_repo(&self, _path: &str) -> anyhow::Result<bool> {
+            Ok(true)
+        }
+
+        async fn can_merge(
+            &self,
+            _repo_path: &str,
+            _source: &str,
+            _target: &str,
+        ) -> anyhow::Result<bool> {
+            Ok(true)
+        }
+
+        async fn merge_branches(
+            &self,
+            _repo_path: &str,
+            _source: &str,
+            _target: &str,
+        ) -> anyhow::Result<gyre_domain::MergeResult> {
+            Ok(gyre_domain::MergeResult::Success {
+                merge_commit_sha: "0000000000000000000000000000000000000000".to_string(),
+            })
+        }
+
+        async fn create_worktree(
+            &self,
+            _repo_path: &str,
+            _worktree_path: &str,
+            _branch: &str,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn create_detached_worktree(
+            &self,
+            _repo_path: &str,
+            _worktree_path: &str,
+            _sha: &str,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn remove_worktree(
+            &self,
+            _repo_path: &str,
+            _worktree_path: &str,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn list_worktrees(&self, _repo_path: &str) -> anyhow::Result<Vec<String>> {
+            Ok(vec![])
+        }
+
+        async fn create_initial_commit(
+            &self,
+            _repo_path: &str,
+            _branch: &str,
+        ) -> anyhow::Result<String> {
+            Ok("0000000000000000000000000000000000000000".to_string())
+        }
+
+        async fn clone_mirror(&self, url: &str, path: &str) -> anyhow::Result<()> {
+            self.clone_calls
+                .lock()
+                .push((url.to_string(), path.to_string()));
+            let out = tokio::process::Command::new("git")
+                .args(["clone", "--mirror", &self.fixture_path, path])
+                .output()
+                .await?;
+            if !out.status.success() {
+                anyhow::bail!(
+                    "git clone --mirror failed: {}",
+                    String::from_utf8_lossy(&out.stderr)
+                );
+            }
+            Ok(())
+        }
+
+        async fn fetch_mirror(&self, path: &str) -> anyhow::Result<()> {
+            self.fetch_calls.lock().push(path.to_string());
+            let out = tokio::process::Command::new("git")
+                .args(["-C", path, "fetch", "--all"])
+                .output()
+                .await?;
+            if !out.status.success() {
+                anyhow::bail!(
+                    "git fetch --all failed: {}",
+                    String::from_utf8_lossy(&out.stderr)
+                );
+            }
+            Ok(())
+        }
+
+        async fn branch_exists(
+            &self,
+            _repo_path: &str,
+            _branch_name: &str,
+        ) -> anyhow::Result<bool> {
+            Ok(false)
+        }
+
+        async fn create_branch(
+            &self,
+            _repo_path: &str,
+            _branch_name: &str,
+            _from_ref: &str,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn write_file(
+            &self,
+            _repo_path: &str,
+            _branch: &str,
+            _file_path: &str,
+            _content: &[u8],
+            _message: &str,
+        ) -> anyhow::Result<String> {
+            Ok("0000000000000000000000000000000000000000".to_string())
+        }
+
+        async fn reset_branch(
+            &self,
+            _repo_path: &str,
+            _branch: &str,
+            _target_sha: &str,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn read_file(
+            &self,
+            _repo_path: &str,
+            _branch: &str,
+            _file_path: &str,
+        ) -> anyhow::Result<Option<Vec<u8>>> {
+            Ok(None)
+        }
+
+        async fn read_file_at_commit(
+            &self,
+            _repo_path: &str,
+            _sha: &str,
+            _file_path: &str,
+        ) -> anyhow::Result<Option<Vec<u8>>> {
+            Ok(None)
+        }
+
+        async fn revert_commit(
+            &self,
+            _repo_path: &str,
+            _branch: &str,
+            _sha_to_revert: &str,
+        ) -> anyhow::Result<gyre_domain::RevertResult> {
+            Ok(gyre_domain::RevertResult::Success {
+                revert_commit_sha: "0000000000000000000000000000000000000000".to_string(),
+            })
+        }
+    }
+
+    /// Create a real local git repository (one empty commit on main) to
+    /// mirror from in tests — the network is unavailable, so the recording
+    /// git-ops double clones from this fixture instead of the https URL.
+    fn git_fixture(dir: &std::path::Path) {
+        let ok = std::process::Command::new("git")
+            .args(["-C", dir.to_str().unwrap(), "init", "-b", "main"])
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok, "git init failed");
+        let ok = std::process::Command::new("git")
+            .args([
+                "-C",
+                dir.to_str().unwrap(),
+                "commit",
+                "--allow-empty",
+                "-m",
+                "init",
+            ])
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok, "git commit failed");
+    }
+
+    #[tokio::test]
+    async fn create_mirror_repo_isolates_storage_and_serves_smart_http() {
+        let fixture = tempfile::tempdir().unwrap();
+        git_fixture(fixture.path());
+        let (git_ops, clone_calls, _fetch_calls) =
+            MirrorRecordingGitOps::new(fixture.path().to_str().unwrap());
+        let state = crate::mem::test_state_with_git_ops(std::sync::Arc::new(git_ops));
+
+        // Workspace row so the smart-HTTP slug route can resolve the mirror.
+        let ws = gyre_domain::Workspace {
+            id: Id::new("ws-mirror-e2e"),
+            tenant_id: Id::new("default"),
+            name: "Mirror E2E".to_string(),
+            slug: "mirror-e2e".to_string(),
+            description: None,
+            budget: None,
+            max_repos: None,
+            max_agents_per_repo: None,
+            trust_level: gyre_domain::TrustLevel::Guided,
+            llm_model: None,
+            created_at: 0,
+            compute_target_id: None,
+        };
+        state.workspaces.create(&ws).await.unwrap();
+
+        let ws_root = std::path::Path::new(&state.repos_root).join("ws-mirror-e2e");
+
+        // A native repo's directory with a refs marker: creating the mirror
+        // must leave it byte-for-byte untouched.
+        let native_dir = ws_root.join("native.git");
+        std::fs::create_dir_all(native_dir.join("refs/heads")).unwrap();
+        std::fs::write(native_dir.join("refs/heads/main"), "native-ref-marker\n").unwrap();
+
+        // The OLD (pre-isolation) flat storage location for this mirror's
+        // name: the pre-clone stale-directory cleanup must no longer touch it.
+        let flat_dir = ws_root.join("Hello-World.git");
+        std::fs::create_dir_all(&flat_dir).unwrap();
+        std::fs::write(flat_dir.join("flat-marker"), "flat\n").unwrap();
+
+        // A stale directory INSIDE the mirrors/ namespace at the derived
+        // path: this one the cleanup is allowed to (and must) remove.
+        let derived = ws_root
+            .join("mirrors")
+            .join("github")
+            .join("octocat")
+            .join("Hello-World.git");
+        std::fs::create_dir_all(&derived).unwrap();
+        std::fs::write(derived.join("stale-marker"), "stale\n").unwrap();
+
+        let app = crate::api::api_router()
+            .route(
+                "/git/:workspace_slug/:repo_name/info/refs",
+                axum::routing::get(crate::git_http::git_info_refs),
+            )
+            .with_state(state.clone());
+
+        let body = serde_json::json!({
+            "workspace_id": "ws-mirror-e2e",
+            "name": "Hello-World",
+            "url": "https://github.com/octocat/Hello-World.git",
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/repos/mirror")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let json = body_json(resp).await;
+        let repo_id = json["id"].as_str().unwrap().to_string();
+
+        // The record's path and the on-disk storage are the isolated
+        // mirrors/{forge}/{owner}/{repo} namespace...
+        let repo = state
+            .repos
+            .find_by_id(&Id::new(repo_id.as_str()))
+            .await
+            .unwrap()
+            .expect("mirror repo record must exist");
+        assert_eq!(repo.path, derived.to_str().unwrap());
+        assert!(
+            derived.join("HEAD").exists(),
+            "real git mirror storage must exist at the derived path"
+        );
+        assert!(
+            !derived.join("stale-marker").exists(),
+            "stale dir inside mirrors/ must be removed before the clone"
+        );
+        // ...and the pre-isolation flat namespace is untouched.
+        assert!(
+            flat_dir.join("flat-marker").exists(),
+            "pre-isolation flat path must not be removed by mirror creation"
+        );
+        // The native repo's directory and refs are untouched.
+        assert_eq!(
+            std::fs::read_to_string(native_dir.join("refs/heads/main")).unwrap(),
+            "native-ref-marker\n"
+        );
+
+        // clone_mirror received the https URL and the derived path.
+        let calls = clone_calls.lock().clone();
+        assert_eq!(
+            calls,
+            vec![(
+                "https://github.com/octocat/Hello-World.git".to_string(),
+                derived.to_string_lossy().into_owned()
+            )]
+        );
+
+        // Cloneable via the existing smart-HTTP name route.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/git/mirror-e2e/Hello-World/info/refs?service=git-upload-pack")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "mirror must be cloneable via the smart-HTTP name route"
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_mirror_rows_sync_from_persisted_path() {
+        // Mirror rows created before namespace isolation keep their
+        // persisted (flat) paths: the sync endpoint fetches into repo.path
+        // unchanged, with no rewrite or migration.
+        let fixture = tempfile::tempdir().unwrap();
+        git_fixture(fixture.path());
+        let (git_ops, _clone_calls, fetch_calls) =
+            MirrorRecordingGitOps::new(fixture.path().to_str().unwrap());
+        let state = crate::mem::test_state_with_git_ops(std::sync::Arc::new(git_ops));
+
+        // Workspace row so post-sync spec-ledger handling can resolve it.
+        let ws = gyre_domain::Workspace {
+            id: Id::new("ws-legacy"),
+            tenant_id: Id::new("default"),
+            name: "Legacy".to_string(),
+            slug: "legacy".to_string(),
+            description: None,
+            budget: None,
+            max_repos: None,
+            max_agents_per_repo: None,
+            trust_level: gyre_domain::TrustLevel::Guided,
+            llm_model: None,
+            created_at: 0,
+            compute_target_id: None,
+        };
+        state.workspaces.create(&ws).await.unwrap();
+
+        // A pre-change mirror row: flat path, no mirrors/ segment, with
+        // real mirror storage cloned from the fixture at that path.
+        let legacy_path = std::path::Path::new(&state.repos_root)
+            .join("ws-legacy")
+            .join("legacy-mirror.git");
+        let ok = std::process::Command::new("git")
+            .args([
+                "clone",
+                "--mirror",
+                fixture.path().to_str().unwrap(),
+                legacy_path.to_str().unwrap(),
+            ])
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok, "git clone --mirror failed");
+
+        let mut repo = gyre_domain::Repository::new(
+            Id::new("repo-legacy-mirror"),
+            Id::new("ws-legacy"),
+            "legacy-mirror",
+            legacy_path.to_str().unwrap(),
+            0,
+        );
+        repo.is_mirror = true;
+        repo.mirror_url = Some("https://github.com/octocat/legacy-mirror.git".to_string());
+        state.repos.create(&repo).await.unwrap();
+
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/repos/repo-legacy-mirror/mirror/sync")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Sync fetched into the PERSISTED flat path — not a re-derived
+        // mirrors/ namespace.
+        assert_eq!(
+            fetch_calls.lock().clone(),
+            vec![legacy_path.to_string_lossy().into_owned()]
+        );
+        let updated = state
+            .repos
+            .find_by_id(&Id::new("repo-legacy-mirror"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(updated.last_mirror_sync.is_some());
     }
 }
