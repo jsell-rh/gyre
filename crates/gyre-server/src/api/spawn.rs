@@ -5295,7 +5295,7 @@ mod tests {
 
         let claims = state
             .agent_signing_key
-            .validate(&token, &state.base_url)
+            .validate(token, &state.base_url)
             .expect("spawn-minted JWT must validate against the forge key");
         assert_eq!(
             claims.wl_hostname.as_deref(),
