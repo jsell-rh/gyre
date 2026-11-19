@@ -35,11 +35,18 @@ Config file is stored at `~/.gyre/config` (JSON):
 }
 ```
 
-### Bootstrap (platform-model.md §8)
+### Bootstrap ([Platform Model §8](../specs/system/platform-model.md#8-bootstrap--first-run))
+
+Before running bootstrap with `--repo-path`, commit the changes you want to
+import. Use a clean checkout or review the Git index and pending changes to
+`specs/manifest.yaml`, `specs/index.md`, `specs/system/design-principles.md`,
+`AGENTS.md`, and `.prek.yaml`. When the manifest exists, bootstrap can stage
+changes to these paths if they exist, even without `--starter-kit`. Its plain
+`git commit` can include unrelated staged changes, and the resulting local
+commit can remain even if the push is refused.
 
 ```bash
-# Full non-dev bootstrap: tenant, admin user, workspace, repo, built-in
-# personas, default gates, and a repo orchestrator — one command.
+# Full non-dev bootstrap for importing a local Gyre checkout.
 gyre bootstrap \
   --tenant "Acme Corp" \
   --workspace "Platform Team" \
@@ -54,29 +61,67 @@ gyre bootstrap \
 # workspace "default"
 gyre bootstrap --dev
 
-# Also write a starter spec structure (specs/manifest.yaml, specs/index.md,
-# specs/system/design-principles.md, AGENTS.md, .prek.yaml) into --repo-path
-# (required: --starter-kit without --repo-path is an error — the kit must land
-# at an explicit path, never a cwd-relative default)
+# Also write missing starter-kit files into the required --repo-path.
 gyre bootstrap --dev --starter-kit --repo-path /home/user/code/myrepo
 ```
 
-Steps performed in order: health check → create tenant → create admin user
-(skipped in `--dev`) + API key saved to `~/.gyre/config` → create workspace →
-register repo (bare repo initialized server-side) → register + pre-approve the
-four built-in personas (workspace-orchestrator, repo-orchestrator,
-accountability, security) → spec registry check (syncs on first push) →
-default gates (`cargo test`, `cargo clippy`, `scripts/check-arch.sh`, detected
-from `--repo-path`) → spawn the repo orchestrator → print summary with all
-IDs, the one-time API key, and URLs.
+Bootstrap checks server health, creates or reuses the tenant, sets up the admin
+user outside `--dev`, and creates or reuses the workspace and repo. The server
+initializes new repos as bare repositories. Bootstrap registers and pre-approves
+the four built-in personas (workspace-orchestrator,
+repo-orchestrator, accountability, security). It then attempts repository import
+and spec registry sync when a local manifest is available, configures default
+gates, and requests a repo orchestrator. The summary reports the tenant,
+workspace, and repo IDs, the server URL, the clone URL if available, and the
+orchestrator status, including an already-active orchestrator or a launch
+failure. Bootstrap saves a newly issued admin API key to `~/.gyre/config` and
+prints it once in the summary when available.
 
-The run is resumable: re-running `gyre bootstrap` with the same names reuses
-already-created resources (tenant, workspace, repo, personas are matched by
-slug/name; the admin user's saved API key in `~/.gyre/config` is reused; a
-live repo orchestrator is kept rather than re-spawned). If a step still fails,
-the CLI reports which steps completed. The admin API key is shown exactly
-once. Auth token precedence: `--token` flag > `GYRE_AUTH_TOKEN` env var >
-`gyre-dev-token` default.
+To import Gyre itself, point `--repo-path` at a local Gyre Git checkout with
+at least one commit. Bootstrap checks for `specs/manifest.yaml` after optional
+starter-kit generation, so you can import a checkout that starts without a
+manifest by passing `--starter-kit`. Bootstrap skips import if you omit
+`--repo-path` or the manifest is still missing. Platform Model §8 promises a
+fallback manifest. The current CLI generates one only with `--starter-kit`,
+which requires an explicit `--repo-path`. Starter-kit write errors abort
+bootstrap.
+
+With `--repo-path`, bootstrap configures `cargo test --all` and
+`cargo clippy --all-targets -- -D warnings` if `Cargo.toml` exists, and
+`bash scripts/check-arch.sh` if that script exists. Gate detection does not
+require a manifest.
+
+When the manifest exists, bootstrap imports the whole committed tree at the
+checkout's `HEAD` and its history by pushing `HEAD` to the target Gyre repo's
+`main`. It then syncs the spec registry from the server repo's default branch.
+
+A normal push creates a missing `main` or fast-forwards it when the checkout
+is ahead. A matching `HEAD` needs no branch update and still triggers a sync.
+If `main` points to a parentless commit with an empty tree and that commit
+is outside the checkout's history, bootstrap treats it as a seed and
+replaces it using a force-with-lease pinned to the inspected commit SHA.
+For any other `main` with commits missing from the checkout, such as changes
+merged on the server, bootstrap refuses the push. It reports failures in the
+push-and-sync step and continues.
+
+After a refused push, fetch `main` from the intended Gyre repo and check for
+shared history with the branch you plan to import. If the branches share
+history, fast-forward if the local branch is behind or merge the fetched `main`
+if they have diverged. Reserve rebasing for unpublished commits. Then rerun
+bootstrap from that branch. If `main` has unrelated history and fails the seed
+check, bootstrap also refuses the push. Verify that you selected the intended
+Gyre repo and local checkout before retrying.
+
+Re-running `gyre bootstrap` with the same names reuses the tenant, workspace,
+repo, and personas by slug or name and keeps any active repo orchestrator.
+In non-dev mode, if admin creation returns `409 Conflict`, the CLI reads the
+saved token from `~/.gyre/config` and requires an exact match between the stored
+and bootstrap server URLs. It calls `GET /api/v1/users/me` with that token and
+checks that the returned username and tenant ID match the requested admin and
+target tenant before continuing with the saved token. Other admin creation
+errors stop bootstrap. Fatal errors tracked by bootstrap include the failed
+step and the steps that completed. Initial auth token precedence is `--token`
+flag > `GYRE_AUTH_TOKEN` env var > `gyre-dev-token` default.
 
 ---
 
