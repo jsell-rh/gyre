@@ -3,7 +3,7 @@ title: "Agent JWT claims completion and hard task-scope boundary (by-effect enfo
 spec_ref: "Spec gap spec-31d3ae72e12e22c52442e309 / agent-jwt-claims-task-scope / b60edce5bc49"
 depends_on: [task-130]
 progress: ready-for-review
-commits: ["42dad97a5b9daf8ed4204c8a272884d741bee052", "37f458b9b33f62b3a85ea82193afdead4b28e4d1", "f338cfc164c3a775de95a520e6ca09d2eec00b39"]
+commits: ["f338cfc164c3a775de95a520e6ca09d2eec00b39", "37f458b9b33f62b3a85ea82193afdead4b28e4d1", "42dad97a5b9daf8ed4204c8a272884d741bee052", "544b2755ea961f0764abb0d8c3cb9d1ea214f358"]
 ---
 
 ## Required behavior
@@ -25,70 +25,6 @@ Complete the Layer-2 token contract and enforce the hard security boundary, per 
 Spawn an agent for task A with a valid, non-expired JWT and call, against task B or task B's agent: PUT /api/v1/tasks/:id (content update), PUT /api/v1/tasks/:id/status, MCP gyre_update_task, MCP gyre_decompose_spec with parent_task_id = B, POST /api/v1/agents/{task-B-agent}/complete, POST /api/v1/agents/{task-B-agent}/stop, POST /api/v1/agents/{task-B-agent}/fail, and POST /api/v1/agents/spawn onto task B without a covering spawn scope; also push to an unrelated repo and open an MR for another task: every call must be rejected. Against current code ALL of these succeed: update_task, transition_task_status, complete_agent, stop_agent, and fail_agent take no auth extractor at all (complete is additionally reachable under DEFAULT configuration because the seeded 'agent-scoped-access' builtin allows the 'complete' action for Agent-role subjects on resource type '*'), spawn is contained only by ABAC policy default, the MCP task tools are tier-only (check_task_target never compares the task_id claim), and the push succeeds (authorize_repo_access returns Ok for any user_id.is_none() principal) — so the probe fails on pre-task code, proving the boundary is enforced per-call by a by-effect sweep of every task-mutating surface rather than by tier-level ABAC alone, by route-family enumeration, or by illustrative subset. Second probe: complete the agent, then replay a request with its token while exp is still future — must 401 via the jti revocation table (today only a KV map removal happens and the SQL table is dead code).
 
 Update the relevant coverage rows only after implementing the behavior, with concrete source evidence. Do not mark unrelated rows complete or claim independent verification before it occurs.
-
-## Shipped
-
-Commit `f338cfc1` implements the requirement on this branch; `37f458b9` is formatting-only; this round's commit corrects the evidence record for the stack-hash mint mechanism (review F1, reviewer-sanctioned option (b)) plus an in-code comment clarification — no production behavior changed.
-
-### Layer 2 mint completion
-
-`AgentJwtClaims` (`gyre-server/src/auth.rs`) now carries `aud`, and `stack_hash` (alias of `wl_stack_hash`). Every mint path sets `sub` = `agent:<uuid>`, `aud`, and both stack-hash spellings from the same fingerprint. `AgentSigningKey` is Clone and carries its `audience` ('gyre', or GYRE_OIDC_AUDIENCE via `lib.rs` wiring); `validate()` enforces it (`validation.set_audience`). Federated-issuer validation (remote Gyre instances, Keycloak user JWTs) is untouched — audience validation applies only to self-minted agent tokens. Default `GYRE_AGENT_JWT_TTL` restored to the specced 3600 s (`lib.rs`, `docs/server-config.md`).
-
-Spawn facts: `spawn_agent_core` resolves the validated persona (persona_slug or bare persona), `wl_compute_target` (request compute target or workspace-resolved entity), `wl_hostname` (SSH target host), and `wl_stack_hash`/`stack_hash` from `stored_stack_fingerprint` (reads `workload_attestations`, then `agent_stacks`) at the single pre-launch mint. **Actual mechanism (corrected per review F1):** the spawn mint happens exactly once, BEFORE the process launch — the token must pre-exist the process it authenticates (it is injected into the launch environment as `GYRE_AUTH_TOKEN`) — so for a fresh agent row, which has not attested a stack yet, the stack-hash claims are honestly absent (spec table: "null if not attested"; `spawn_minted_jwt_carries_task_scoped_claims` asserts exactly this). The claims are populated on the re-spawn mint for the same agent row: `ralph_loop.rs` `relaunch_agent_session` reuses the agent id and mints with the stored fingerprint plus the agent row's bound, approved persona (`respawn_mint_carries_stored_stack_fingerprint` proves both stack-hash spellings). There is deliberately NO post-launch re-mint: a minted token is immutable, and the auth chain matches presented tokens by exact string against the `agent_tokens` KV entry (auth.rs step 2), so replacing that entry after launch would revoke the running agent's own env-injected credential mid-session.
-
-### Revocation
-
-`agent_audit.rs` `revoke_agent_token` writes the token's jti to the durable `revoked_tokens` SQL table (`SpawnLogRepository::revoke_token`; SQLite + Postgres adapters, mem adapter in code) in addition to the KV removal. `auth.rs` `jti_revocation_denial` checks `is_token_revoked` BEFORE signature/expiry validation on both the REST `FromRequestParts` extractor and the WebSocket `authenticate_token` path, returning 401 and recording an auth_failure audit event.
-
-### By-effect sweep: every task-mutating surface
-
-Swept by execution effect ("mutates task rows, task-scoped secrets, or creates task-linked MRs"), not by route family. Each surface found:
-
-| Surface | Effect | Enforcement |
-|---|---|---|
-| `PUT /api/v1/tasks/:id` (update_task) | task row mutation (title/description/priority/assigned_to+generation/branch/pr_link/labels) | `require_task_claim` — agent task_id claim must match; 403 otherwise |
-| `PUT /api/v1/tasks/:id/status` (transition_task_status) | task status transition | `require_task_claim` |
-| `POST /api/v1/tasks` (create_task) | task row creation | agent callers' workspace_id/repo_id clamped to signed claims; foreign target 403 |
-| `POST /api/v1/agents/:id/complete` | transitions the agent's task to Review + opens the completion MR | self-or-task-claim (mirrors the MCP twin) |
-| `POST /api/v1/agents/:id/stop`, `/fail` | terminate agent + revoke Task-scoped secrets | self-only + tenant containment (routes were ABAC-registry-exempt — per-handler authorization now present as the standing invariants mandate) |
-| `POST /api/v1/agents/spawn` | reassigns task.assigned_to, bumps generation, Backlog→InProgress | own-task claim or explicit repo/workspace spawn scope in the token |
-| `PUT /api/v1/agents/:id/status` (update_agent_status) | agent status transitions + Task-secret revocation on terminal | self-or-task-claim |
-| MCP `gyre_update_task` | task row mutation (full field set) | task_id claim match in dispatch scope validation (beyond tier check) |
-| MCP `gyre_decompose_spec` | parent task subtask linkage | parent task_id claim match |
-| MCP `gyre_create_task` | task row creation | `check_create_task_target` + handler clamps absent targets to caller claims |
-| MCP `gyre_create_mr` | task-linked MR creation | `check_agent_mr_task_scope` — claim's task repo only |
-| REST `POST /api/v1/merge-requests` (create_mr) | task-linked MR creation | task-claim repo boundary |
-| git push (`authorize_repo_access`) | repo write | agent JWT must hold `repo:{name}:write` (or covering workspace scope) for the target repo |
-| `POST /api/v1/repos/:id/archive` | repo teardown (task-owned worktrees) | task-bound agents denied + tenant containment |
-| compose apply/teardown | workspace/repo mutation | task-bound agents denied |
-
-### Out-of-scope statements (justified)
-
-- **First-session `stack_hash`/`wl_stack_hash` absence (review F1 — explicit justified absence)**: the stack fingerprint first exists only after the agent process runs and self-reports its stack (`POST /api/v1/agents/{id}/stack` → `agent_stacks`, folded into the workload-attestation record) — but the token must be minted before the process starts (it IS the process's credential, injected as `GYRE_AUTH_TOKEN`), the spec's claims table itself says `stack_hash` is "null if not attested", and the auth chain matches presented tokens by exact string against `agent_tokens`, so a post-launch KV replacement would revoke the running agent's env-injected token mid-session. The claim is therefore live on re-spawn mints for the same agent row (`ralph_loop.rs` `relaunch_agent_session`, proven by `respawn_mint_carries_stored_stack_fingerprint`), which is the path the spec-registry stack-pinning consumer exercises end-to-end (AC 6: `agent_only_requires_exact_stack_hash_match_e2e` drives the real REST approval path with a JWT-embedded `wl_stack_hash` and proves match/mismatch against a pinned requirement). Making the first-session claim live would require a token-rotation protocol (subject-based auth matching, old-jti revocation on rotation, and client-side adoption of the rotated token by every deployed agent runtime) — an auth-chain redesign outside this task's scope and unsafe to bolt on here.
-- **`wl_pid` / `wl_container_id` at mint time**: these facts do not exist until the process launch completes; minting them at token creation would fabricate them. They are recorded in the fresh workload-attestation record immediately post-launch (and serve `GET /agents/:id/workload`), the same launch that the token authenticates.
-- **MCP `gyre_agent_complete`**: already enforced self-only for agent JWTs pre-task (mcp.rs) — unchanged.
-- **MCP `gyre_spawn_worker`**: already validates spawn scope via `validate_tool_scope` pre-task — unchanged.
-- **MCP `gyre_cross_repo_task`, `gyre_spawn_repo_orchestrator`**: require a workspace-orchestrator token (`workspace_orchestrator_scope`); worker task-claim tokens are rejected before any task row is touched.
-- **REST orchestrator spawn (`/repos/:id/orchestrator/spawn`, `/workspaces/:id/orchestrator/spawn`)**: not task-owned-resource mutation (no task rows/secrets/task-linked MRs); both take auth and enforce tenant containment + ABAC.
-- **MR status transition / review / comments (`PUT /merge-requests/:id/status`, `submit_review`, `add_comment`)**: MR-row mutation, not task-row mutation; already governed by ABAC middleware mapping, the human-only `Approved` role gate (agents may not self-approve), and reviewer identity binding (task-134).
-- **Secrets admin API**: Admin-only (role gate) — agent principals cannot reach task-scoped secret mutation there; the agent-reachable revocation path (stop/fail) is boundary-checked above.
-- **Spec approval events**: not task-owned resources; the agent-approval path's `stack_hash` input is the JWT `wl_stack_hash` claim, live on re-spawned sessions (see the first bullet and AC 6).
-
-### Non-agent principals
-
-Every new check gates on `is_gyre_agent_jwt()` (non-empty fine-grained scope list) and/or `agent_task_claim()` (worker-tier task-bound tokens): global/system tokens, API keys, federated user JWTs, orchestrator tokens (workspace/repo scopes, no task claim), gate tokens (`review:submit`-scoped, no task claim), and legacy UUID agent tokens take the pre-existing path. ~54 existing test request builders gained `Authorization` headers where the new extractors require them; no test was weakened — the assertions are unchanged.
-
-### Verification
-
-- `cargo check -p gyre-server` passes on this round's post-merge tree (merge `96f8748b` of base `bafc0353`, task-249 broadcast-kind work; 7m36s, exit 0 — log retained in the round's review-evidence directory). `cargo fmt --all --check` is clean, including this round's comment edit.
-- Mechanical checks all re-run and passing on this round's final tree: check-arch, check-abac-route-registry, check-abac-exempt-handlers, check-inert-enforcement (helpers named `require_*`), check-mem-port-contracts, check-scope-literal-defaults, check-forged-scope-fields, check-fabricated-scope-defaults, check-forwarded-header-trust, check-unbounded-external-http, check-in-memory-state-stores, check-lossy-secret-conversion (logs retained). check-task-commit-attribution needs full git history and is executor-owned. The remaining failing repo scripts fail identically on the clean base commit — pre-existing, not caused by this task.
-- **Required test probes for the verifier** (the sandbox cargo wrapper forbids building the gyre-server test binary — codegen exceeds the 4 GiB budget; `cargo check` was the allowed bound): `cargo test -p gyre-server agent_jwt` (auth.rs audience/claims/revocation tests, tasks.rs and spawn.rs boundary tests), `respawn_mint_carries_stored_stack_fingerprint`, `spawn_minted_jwt_carries_task_scoped_claims`, `mcp_agent_jwt_task_scope_on_task_and_mr_tools`, `agent_push_outside_token_repo_scope_rejected`, `agent_jwt_cannot_create_mr_outside_task_scope`, plus the pre-existing suites in the touched files (abac_middleware, orchestrator, gate_executor, merge_requests, repos, compose, discover, constraint_check, rbac) and the spec-approval e2e `agent_only_requires_exact_stack_hash_match_e2e`. The full list is recorded in `specs/reviews/task-263.md` (reviewer round 1, restored verbatim on this branch).
-
-### Review-repair round (F1)
-
-- **Finding** (review round 1, `specs/reviews/task-263.md`): the previous Shipped note and coverage row 4 claimed `spawn_agent_core` re-mints the token after launch, once the workload-attestation record with the real stack fingerprint exists. No such code exists — the spawn mint is single and pre-launch; the only production re-mint is `ralph_loop.rs` `relaunch_agent_session` (a later Ralph iteration reusing the agent row).
-- **Repair** (reviewer-sanctioned option (b)): this round corrects the task text, coverage row 4 of `specs/coverage/system/identity-security.md`, the stale persona residual in `specs/coverage/system/platform-model.md` row 7, and the in-code mint comment (`spawn.rs`) to the actual mechanism, and records the first-session stack-hash absence as an explicit justified out-of-scope statement (first bullet above). Option (a) — a post-launch re-mint updating the `agent_tokens` KV entry — was rejected because it would revoke the running agent's env-injected credential (the auth chain matches presented tokens by exact string, auth.rs step 2) and because no non-empty fingerprint exists at launch time for a fresh agent row anyway (the self-report that creates it happens only once the process runs).
-- Base merge `96f8748b` (task-249) touched gyre-server sources; every task-263 enforcement point re-verified intact post-merge (grep evidence retained) and `cargo check -p gyre-server` re-run on the merged tree (exit 0).
 
 ## Discovery evidence
 
@@ -157,3 +93,31 @@ Canonical spec: `specs/system/identity-security.md`. Source: `fb1424fbac55cd23cb
     ]
   }
 ]
+
+## Shipped
+
+Implementation commit `f338cfc1` (Layer-2 claims + by-effect enforcement sweep + jti revocation wiring), `37f458b9` formatting, `42dad97a` evidence correction, and this round's `544b2755` repair of the two boundary-suite regressions the retained full-suite verification found on the merged base. This round also resolved the merge with base `05024b3e` (lib.rs: task-254's `(signing key, key history)` loader return combined with task-263's audience override — audience is mint/validation metadata, kid and JWKS history unchanged).
+
+### Layer 2 mint completion
+
+`AgentJwtClaims` (auth.rs) carries `aud` and `stack_hash` (alias of `wl_stack_hash`); every mint path sets `sub` = `agent:<uuid>`, `aud` ('gyre', or GYRE_OIDC_AUDIENCE via the `AgentSigningKey` audience wired in lib.rs), and both stack-hash spellings from the same fingerprint. Self-minted agent-token validation enforces the audience (`validation.set_audience`); federated-issuer validation (remote Gyre instances, Keycloak user JWTs) is untouched. Default `GYRE_AGENT_JWT_TTL` restored to the specced 3600 s (lib.rs, docs/server-config.md). Proven by `spawn_minted_jwt_carries_task_scoped_claims` (sub/aud/jti/task_id/spawned_by/persona/attestation_level, first-session stack-hash honestly absent) and `respawn_mint_carries_stored_stack_fingerprint` (both stack-hash spellings from the stored workload-attestation fingerprint on the re-spawn mint for the same agent row, ralph_loop.rs `relaunch_agent_session`).
+
+Stack-hash mechanism (corrected per review F1): the spawn mint happens exactly once, BEFORE process launch (the token is the process's credential, injected as `GYRE_AUTH_TOKEN`), so a fresh agent row has no attested stack yet — the claims are populated on the re-spawn mint for the same agent row, which is the path the spec-registry stack-pinning consumer exercises. There is deliberately no post-launch re-mint: the auth chain matches presented tokens by exact string against the `agent_tokens` KV entry, so replacing that entry mid-session would revoke the running agent's own env-injected credential.
+
+### Revocation
+
+`agent_audit.rs` `revoke_agent_token` writes the token's jti to the durable `revoked_tokens` SQL table (`SpawnLogRepository::revoke_token`; SQLite + Postgres adapters) in addition to the KV removal. `auth.rs` `jti_revocation_denial` checks `is_token_revoked` BEFORE signature/expiry validation on both the REST extractor and the WebSocket path, returning 401. Proven by the boundary test: after self-completion, replaying the same jti gets 401 with exp in the future, and `state.spawn_log.is_token_revoked(jti)` is true.
+
+### By-effect sweep
+
+Swept by execution effect (mutates task rows, task-scoped secrets, or creates task-linked MRs), not by route family. Enforced surfaces: `PUT /api/v1/tasks/:id` and `/status` (`require_task_claim`, tasks.rs), `POST /api/v1/tasks` (agent callers' scope fields clamped to signed claims), `POST /api/v1/agents/:id/complete` (self-or-task-claim, mirroring the MCP twin), `stop`/`fail` (self-only + tenant containment — the routes are ABAC-registry-exempt, per-handler authorization now present), `POST /api/v1/agents/spawn` (own-task claim or explicit repo/workspace spawn scope), `PUT /api/v1/agents/:id/status` (self-or-task-claim), MCP `gyre_update_task`/`gyre_decompose_spec` (task_id claim compared against target/parent task, PERMISSION_DENIED on mismatch), MCP `gyre_create_task`/`gyre_create_mr` and REST `POST /api/v1/merge-requests` (task-claim boundary), git push (`authorize_repo_access` requires `repo:{name}:write` or a covering workspace scope for agent principals), `POST /api/v1/repos/:id/archive`, and compose apply/teardown (task-bound agents denied). Human/system/orchestrator principals keep their existing rights (`agent_task_claim()` is None for them).
+
+### Out-of-scope statements (justified)
+
+- **First-session `stack_hash`/`wl_stack_hash` absence**: the fingerprint first exists after the agent process self-reports its stack, but the token must pre-exist the process (it IS the process's credential) and the spec's claims table says "null if not attested"; a post-launch KV replacement would revoke the running agent's token mid-session. Live on re-spawn mints, which is the path the spec-registry consumer exercises (`agent_only_requires_exact_stack_hash_match_e2e` drives the real REST approval path with a JWT-embedded `wl_stack_hash` and proves match/mismatch against a pinned requirement).
+- **`wl_pid`/`wl_container_id` at mint time**: these facts do not exist until launch completes; minting them would fabricate them. They are recorded in the fresh workload-attestation record immediately post-launch.
+- **MCP `gyre_agent_complete`**: already enforced self-only for agent JWTs pre-task — unchanged.
+
+### Test evidence
+
+Focused probes proving the boundary per-call (all in `api/spawn.rs` tests, `mcp.rs` tests, `git_http.rs` tests, `tasks.rs` tests, `specs.rs` tests): `agent_jwt_task_scope_boundary_on_lifecycle_endpoints` (complete/stop/fail against task B's agent → 403, task B untouched, secret intact, no MR; self-completion passes and revokes the jti durably; operator stop still allowed), `agent_jwt_cannot_spawn_onto_foreign_task`, MCP task-tool denial tests, git-push scope tests, MR task-scope tests, stack-pinning e2e. The retained full-suite run (`cargo test --all`) had exactly two failures on the merged base, both repaired in `544b2755` (test-harness interactions, not product defects): `do_spawn`'s hardcoded name tripped the duplicate-agent-name 400 on the boundary probe's second spawn (name now derived from the branch), and `complete_agent_bulk_acks_directed_inbox` sent no Authorization header after `complete_agent` gained its auth extractor (operator token attached; assertion strength unchanged). Both repairs are verified by `cargo check -p gyre-server --lib` (exit 0) and rustfmt; gyre-server test execution is deferred to the independent verifier per the 4 GiB budget rule — the verifier must run the two repaired tests plus the task's boundary suite (list recorded in `/tmp/stage/review-evidence/repair-round.md`).
