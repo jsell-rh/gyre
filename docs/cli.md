@@ -114,9 +114,11 @@ Gyre repo and local checkout before retrying.
 
 The run is resumable: re-running `gyre bootstrap` with the same names reuses
 already-created resources (tenant, workspace, repo, personas are matched by
-slug or name). It verifies the admin user's saved API key in `~/.gyre/config`
-before reusing it and keeps any active repo orchestrator. Fatal errors tracked
-by bootstrap include the failed step and the steps that completed. Auth token
+slug or name) and keeps any active repo orchestrator. If admin creation returns
+`409 Conflict`, bootstrap looks for a saved API key in `~/.gyre/config` for the
+same server URL. It reuses the key only if `GET /api/v1/users/me` authenticates
+it as the requested username in the target tenant. Fatal errors tracked by
+bootstrap include the failed step and the steps that completed. Auth token
 precedence is `--token` flag > `GYRE_AUTH_TOKEN` env var > `gyre-dev-token`
 default.
 
