@@ -2,8 +2,8 @@
 title: "Message send-path guards: scope validation, mem store contract, WS acknowledged exclusion, auth-mechanism origin table, Agent-destination tenant isolation"
 spec_ref: "Spec gap spec-c62aac6701125cb09e0c736c / message-send-path-guards / 60b177f85a11"
 depends_on: []
-progress: not-started
-commits: ["955c134a8c669070c3b936eac55f0e5e3f448418"]
+progress: ready-for-review
+commits: ["955c134a8c669070c3b936eac55f0e5e3f448418", "9dd4a1f0f07930760dddf8036a9fede6bbafb44c"]
 ---
 
 ## Required behavior
@@ -120,3 +120,72 @@ Canonical spec: `specs/system/message-bus.md`. Source: `4127964001113dda08e48524
     ]
   }
 ]
+
+## Shipped
+
+All five send-path guard deviations from the Message Envelope and Scoping Rules
+sections are implemented in production code (checkpoint 955c134a, repaired and
+formatted in 9dd4a1f0):
+
+### Behavior
+
+1. **Scopeless-message guard** — `emit_scoped_event` (crates/gyre-server/src/lib.rs),
+   the shared body of the internal `emit_event`/`emit_tenant_event` family, returns
+   `Err` and logs at error level when `destination != Broadcast &&
+   workspace_id.is_none()`; the message is never constructed, stored, or broadcast.
+   `emit_tenant_event` documents Broadcast as its required destination and drops
+   (warn) on guard rejection.
+2. **Mem store contract** — `MemMessageRepository::store` (crates/gyre-server/src/mem.rs)
+   returns `Err` on `workspace_id: None` (Broadcast/scopeless messages are never
+   persisted), matching the SQLite/PostgreSQL `message_to_new_row` contract. All
+   three send paths (REST, MCP, internal emitter) skip `store()` for Broadcast
+   destinations.
+3. **WS `acknowledged` exclusion** — both WebSocket Message serialization sites
+   (live bus-delivery arm and Subscribe replay arm in crates/gyre-server/src/ws.rs)
+   serialize through `ws_message_payload`, which strips `acknowledged` with the same
+   manual-removal pattern as `send_response`. GET inbox responses keep the field.
+4. **Origin table** — `origin_from_auth` (crates/gyre-server/src/api/messages.rs)
+   derives origin from the auth mechanism threaded through
+   `AuthenticatedAgent.auth_mechanism` (new enum in crates/gyre-server/src/auth.rs,
+   set by the extractor on every auth path): global `GYRE_AUTH_TOKEN` → Server;
+   API key / OIDC user JWT / impersonation → `User(user_id)`; agent token /
+   federated JWT → `Agent(sub)`. Role membership no longer grants Server origin, so
+   Admin-role API-key/OIDC callers are subject to the `server_only()` 403 gate and
+   the rule-3 membership check; the separate rule-6 Admin-role check still lets
+   them target Broadcast, and the global token keeps full forge authority.
+5. **Rule-1 tenant isolation** — both the REST send handler
+   (crates/gyre-server/src/api/messages.rs) and the mirrored MCP path
+   (`handle_message_send` in crates/gyre-server/src/mcp.rs) load the target agent's
+   workspace record on every `Destination::Agent(id)` send and compare its tenant
+   with the caller's verified tenant; mismatch is rejected 403 (nothing stored or
+   broadcast), including for Server-origin global-token callers. Unresolvable
+   workspace records skip-and-log (established no-fabricated-scope pattern).
+
+Coverage rows 5, 9, 10 in specs/coverage/system/message-bus.md updated with
+source evidence.
+
+### Test evidence
+
+Twelve focused tests cover every acceptance criterion (see
+/tmp/stage/review-evidence/task-248-evidence.md for the full list and verifier
+invocation): `emit_scoped_event_rejects_scopeless_non_broadcast_message`,
+`mem_store_rejects_scopeless_message`, `ws_live_delivery_strips_acknowledged`,
+`ws_subscribe_replay_strips_acknowledged`, `get_inbox_still_includes_acknowledged`,
+`admin_api_key_cannot_forge_server_only_kind`,
+`admin_oidc_user_cannot_forge_server_only_kind`,
+`admin_api_key_directed_send_requires_workspace_membership`,
+`global_token_keeps_server_origin_and_broadcast_authority`,
+`admin_api_key_broadcast_allowed_non_admin_rejected`,
+`cross_tenant_directed_send_rejected_for_server_origin`,
+`mcp_message_send_cross_tenant_rejected`.
+
+### Deferred verification
+
+The sandbox build wrapper blocks gyre-server test-binary compilation (4 GiB
+model+build budget), so the twelve tests above were type-checked locally
+(`cargo check -p gyre-server --tests` exit 0) but must be executed by the
+independent verifier. The checkpoint's test code originally failed to compile
+(3 errors: `Value::is_bool`, `tracing::Event::level`, missing `SubscriberExt`
+import); those are repaired in 9dd4a1f0f07930760dddf8036a9fede6bbafb44c. `cargo fmt` applied to the task's Rust
+additions; `scripts/check-mem-port-contracts.sh`, `check-inert-enforcement.sh`,
+and `check-lossy-secret-conversion.sh` pass locally.
