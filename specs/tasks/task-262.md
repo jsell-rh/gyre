@@ -2,7 +2,7 @@
 title: "SPIFFE federation: trust-bundle exchange between Gyre instances"
 spec_ref: "Spec gap spec-31d3ae72e12e22c52442e309 / spiffe-federation / b60edce5bc49"
 depends_on: [task-261]
-progress: ready-for-review
+progress: complete
 commits: ["14773a01f43c4f161630c021523a53a3051251f2"]
 ---
 
