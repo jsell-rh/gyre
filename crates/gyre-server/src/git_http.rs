@@ -145,7 +145,15 @@ async fn resolve_repo_by_slug(
 ///   workspace-tier token needs `workspace:{ws}:read`/`workspace:{ws}:spawn`
 ///   covering the repo's workspace. Scope entries name repos by name while
 ///   git routes address them by workspace-slug + name — both are written by
-///   the same mint.
+///   the same mint. Because names are not unique across the workspaces of
+///   a tenant, the repo-tier arm derives identity from the SIGNED
+///   `repo_id` claim (it must equal the resolved repo's id) rather than
+///   from the scope list's name alone — the same id-precise rule
+///   `check_repo_target_by_id` applies on the MCP surface; a name-only
+///   match would grant push/read on a same-named repo in another
+///   workspace. The workspace-tier arm is id-precise by construction (the
+///   signed workspace scope id is compared against the resolved repo's
+///   real workspace id).
 /// - Other principals without a user identity (legacy UUID agent tokens)
 ///   are allowed: they predate claim scoping and carry no scope list to
 ///   enforce; agents are scoped to their repos at spawn time and their
@@ -166,24 +174,35 @@ async fn authorize_repo_access(
     if auth.user_id.is_none() {
         if auth.is_gyre_agent_jwt() {
             let write_right = matches!(perm, gyre_domain::RepoPermission::Write);
-            let repo_scope_ok = auth.scope.iter().any(|s| {
-                let Some(rest) = s.strip_prefix("repo:") else {
-                    return false;
-                };
-                let Some((name, right)) = rest.rsplit_once(':') else {
-                    return false;
-                };
-                name == repo.name
-                    && match right {
-                        // A spawn right implies write (the orchestrator owns
-                        // the repo's loop) — the same implication
-                        // `check_repo_scope` applies on the MCP surface.
-                        "write" => true,
-                        "spawn" => true,
-                        "read" => !write_right,
-                        _ => false,
-                    }
-            });
+            // Repo-tier identity comes from the signed `repo_id` claim, not
+            // from the scope list's repo NAME: names are unique only within
+            // a workspace, so a name-only match would admit a same-named
+            // repo in a DIFFERENT workspace of the tenant — a repo the token
+            // was not assigned (identity-security.md §Task-Scoped JWT
+            // Claims). Mirrors `check_repo_target_by_id` on the MCP surface.
+            // The workspace-tier arm below is already id-precise (it
+            // compares the signed workspace scope id against the resolved
+            // repo's real workspace id).
+            let repo_tier_ok = auth.repo_id.as_deref() == Some(&repo.id.to_string());
+            let repo_scope_ok = repo_tier_ok
+                && auth.scope.iter().any(|s| {
+                    let Some(rest) = s.strip_prefix("repo:") else {
+                        return false;
+                    };
+                    let Some((name, right)) = rest.rsplit_once(':') else {
+                        return false;
+                    };
+                    name == repo.name
+                        && match right {
+                            // A spawn right implies write (the orchestrator owns
+                            // the repo's loop) — the same implication
+                            // `check_repo_scope` applies on the MCP surface.
+                            "write" => true,
+                            "spawn" => true,
+                            "read" => !write_right,
+                            _ => false,
+                        }
+                });
             let ws_scope_ok = auth.scope.iter().any(|s| {
                 let Some(rest) = s.strip_prefix("workspace:") else {
                     return false;
@@ -5640,10 +5659,178 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
     }
 
-    /// task-129 §Audit Integration (review round 5): the push-time
-    /// attestation evaluation records its PolicyDecision to the audit
-    /// trail (evaluate_push_attestation_abac). Previously this path only
-    /// logged at tracing::info, so push-time evaluations were invisible to
+    /// Review repair (task-263, round cb56e5ba F2): a worker JWT scoped to
+    /// ws-1's repo `collide` must NOT reach a SAME-NAMED repo `collide` in
+    /// another workspace of the tenant — the repo-tier arm of
+    /// `authorize_repo_access` derives identity from the signed `repo_id`
+    /// claim, not from a name-only scope match. Pre-repair, the scope entry
+    /// `repo:collide:write` matched the ws-2 repo's NAME and granted
+    /// push/read on a repo the token was not assigned
+    /// (identity-security.md §Task-Scoped JWT Claims).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn agent_push_cross_workspace_same_name_repo_rejected() {
+        let tmp = TempDir::new().unwrap();
+        let state = test_state();
+
+        // Two workspaces in ONE tenant, each holding a repo named `collide`.
+        let mk_ws = |id: &str, slug: &str| Workspace {
+            id: Id::new(id),
+            tenant_id: Id::new("default"),
+            name: format!("ws {slug}"),
+            slug: slug.to_string(),
+            description: None,
+            budget: None,
+            max_repos: None,
+            max_agents_per_repo: None,
+            trust_level: gyre_domain::TrustLevel::Guided,
+            llm_model: None,
+            created_at: 0,
+            compute_target_id: None,
+        };
+        state
+            .workspaces
+            .create(&mk_ws("ws-c1", "ws-collide-one"))
+            .await
+            .unwrap();
+        state
+            .workspaces
+            .create(&mk_ws("ws-c2", "ws-collide-two"))
+            .await
+            .unwrap();
+
+        let mk_repo = |repo_id: &str, ws_id: &str, dir: &str| {
+            let repo_path = tmp.path().join(dir).join("collide.git");
+            std::fs::create_dir_all(&repo_path).unwrap();
+            let status = std::process::Command::new("git")
+                .arg("init")
+                .arg("--bare")
+                .arg(&repo_path)
+                .status()
+                .unwrap();
+            assert!(status.success(), "git init --bare failed");
+            Repository::new(
+                Id::new(repo_id),
+                Id::new(ws_id),
+                "collide",
+                repo_path.to_str().unwrap(),
+                0,
+            )
+        };
+        state
+            .repos
+            .create(&mk_repo("repo-c1", "ws-c1", "ws-one"))
+            .await
+            .unwrap();
+        state
+            .repos
+            .create(&mk_repo("repo-c2", "ws-c2", "ws-two"))
+            .await
+            .unwrap();
+
+        let app = Router::new()
+            .route(
+                "/git/:workspace_slug/:repo_name/info/refs",
+                get(git_info_refs),
+            )
+            .route(
+                "/git/:workspace_slug/:repo_name/git-upload-pack",
+                post(git_upload_pack),
+            )
+            .route(
+                "/git/:workspace_slug/:repo_name/git-receive-pack",
+                post(git_receive_pack),
+            )
+            .with_state(state.clone());
+
+        // Worker JWT spawned against ws-1's `collide`: signed claims pin
+        // repo_id=repo-c1 / workspace ws-c1, scope list names `collide`.
+        let token = state
+            .agent_signing_key
+            .mint_worker_scoped(
+                "agent-collide",
+                "task-collide-1",
+                "system",
+                &state.base_url,
+                3600,
+                "default",
+                "ws-c1",
+                "repo-c1",
+                "collide",
+                None,
+                Some(1),
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        state
+            .kv_store
+            .kv_set("agent_tokens", "agent-collide", token.clone())
+            .await
+            .unwrap();
+
+        // Push advertisement against ws-2's same-named repo: the scope
+        // NAME matches, but the signed repo_id claim does not — 403.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/git/ws-collide-two/collide/info/refs?service=git-receive-pack")
+                    .header("Authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // The push itself is rejected before any pack processing.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/git/ws-collide-two/collide/git-receive-pack")
+                    .header("Authorization", format!("Bearer {token}"))
+                    .header("content-type", "application/x-git-receive-pack-request")
+                    .body(Body::from("0000".to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // Read (clone advertisement) is denied on ws-2's repo too — the
+        // name-only match previously granted both directions.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/git/ws-collide-two/collide/info/refs?service=git-upload-pack")
+                    .header("Authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // Positive control: the SAME token reaches its own workspace's
+        // same-named repo — the denials above are the signed repo_id
+        // mismatch, not the token being unusable.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/git/ws-collide-one/collide/info/refs?service=git-receive-pack")
+                    .header("Authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
     /// GET /api/v1/policies/decisions.
     #[tokio::test]
     async fn push_attestation_abac_records_decision_to_audit_trail() {
