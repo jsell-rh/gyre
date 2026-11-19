@@ -1502,6 +1502,15 @@ mod tests {
             .unwrap();
 
         // Admin API key → Broadcast allowed (rule 6 role check).
+        //
+        // The probe kind MUST be a non-server_only Event-tier kind (a
+        // Custom kind): the server_only() 403 gate runs BEFORE the Broadcast
+        // guard, so a server_only probe (e.g. task_created) would be
+        // rejected there for the Admin API-key caller — which resolves to
+        // User origin under the auth-mechanism origin table — and the test
+        // would exercise the wrong gate. Custom kinds are Event tier with
+        // server_only() == false, so the only gate that can reject the
+        // non-Admin probe below is the Broadcast origin/role guard.
         let app = crate::api::api_router().with_state(state.clone());
         let (status, json) = post_message(
             app.clone(),
@@ -1509,8 +1518,8 @@ mod tests {
             "ws-b6",
             serde_json::json!({
                 "to": "broadcast",
-                "kind": "task_created",
-                "payload": {"task_id": "TASK-B6"}
+                "kind": "rule6_broadcast_probe",
+                "payload": {"probe": "rule6-admin"}
             }),
         )
         .await;
@@ -1523,8 +1532,8 @@ mod tests {
             "ws-b6",
             serde_json::json!({
                 "to": "broadcast",
-                "kind": "task_created",
-                "payload": {"task_id": "TASK-B6"}
+                "kind": "rule6_broadcast_probe",
+                "payload": {"probe": "rule6-non-admin"}
             }),
         )
         .await;
