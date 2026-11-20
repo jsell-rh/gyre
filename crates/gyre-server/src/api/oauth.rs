@@ -403,15 +403,15 @@ pub async fn claude_max_callback(
 
     // Idempotent re-enrollment: an existing secret at the same scope is
     // rewritten (value + metadata) instead of failing on the port's
-    // duplicate-(scope, name) constraint. The rewrite is a delete +
-    // create — the port's rotate() only touches value + last_rotated_at,
-    // so a rotate-only path would leave the OLD expires_at on the row and
-    // an already-expired re-enrolled credential would stay invisible to
-    // resolve_for_agent (which excludes expired secrets) for up to an
-    // hour until the refresh job extends it (review task-273). If the
-    // re-create fails after the delete, the original row is restored
-    // first — the existing credential must never be lost to a failed
-    // rewrite.
+    // duplicate-(scope, name) constraint. The rewrite is the port's
+    // single atomic `replace` — the port's `rotate()` only touches value +
+    // `last_rotated_at`, so a rotate-only path would leave the OLD
+    // expires_at on the row and an already-expired re-enrolled credential
+    // would stay invisible to resolve_for_agent (which excludes expired
+    // secrets) for up to an hour until the refresh job extends it (review
+    // task-273). A delete + create pair is never used here: a crash
+    // between the two would permanently lose the enrollment credential
+    // (review task-273).
     let existing = state
         .secrets
         .list_by_scope(scope, &scope_id, &record.tenant_id)
@@ -421,38 +421,14 @@ pub async fn claude_max_callback(
         .find(|s| s.name == CLAUDE_MAX_SECRET_NAME);
     match existing {
         Some(existing) => {
-            let old_value = state
-                .secrets
-                .get_value(&existing.id, &record.tenant_id)
-                .await
-                .map_err(ApiError::Internal)?
-                .ok_or_else(|| {
-                    ApiError::Internal(
-                        anyhow::anyhow!(
-                            "existing enrollment secret {} vanished before rewrite",
-                            existing.id
-                        )
-                        .into(),
-                    )
-                })?;
             let mut updated = existing.clone();
             updated.expires_at = Some(now + expires_in);
             updated.last_rotated_at = Some(now);
             state
                 .secrets
-                .delete(&existing.id, &record.tenant_id)
+                .replace(&updated, &value)
                 .await
                 .map_err(ApiError::Internal)?;
-            if let Err(e) = state.secrets.create(&updated, &value).await {
-                if let Err(restore_err) = state.secrets.create(&existing, &old_value).await {
-                    tracing::error!(
-                        secret_name = CLAUDE_MAX_SECRET_NAME,
-                        "restoring the enrollment secret after a failed rewrite failed: \
-                         {restore_err:#} (original create error: {e:#})"
-                    );
-                }
-                return Err(ApiError::Internal(e.into()));
-            }
         }
         None => {
             state

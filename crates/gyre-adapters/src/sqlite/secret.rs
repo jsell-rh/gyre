@@ -466,6 +466,42 @@ impl SecretRepository for SqliteStorage {
         Ok(())
     }
 
+    async fn replace(&self, secret: &Secret, value: &[u8]) -> Result<()> {
+        let mut conn = self.pool.get()?;
+        let (encrypted_value, nonce) = encrypt_at_rest(&mut conn, value)?;
+        // One UPDATE rewrites the whole row (metadata + value): a crash can
+        // never land between a delete and a create, so the credential is
+        // never lost to a rewrite (review task-273: no delete + create
+        // pairs on live credentials).
+        let rows = diesel::update(
+            secrets::table
+                .filter(secrets::id.eq(secret.id.as_str()))
+                .filter(secrets::tenant_id.eq(&secret.tenant_id)),
+        )
+        .set((
+            secrets::name.eq(&secret.name),
+            secrets::scope.eq(secret.scope.as_str()),
+            secrets::scope_id.eq(&secret.scope_id),
+            secrets::secret_type.eq(secret.secret_type.as_str()),
+            secrets::encrypted_value.eq(encrypted_value),
+            secrets::nonce.eq(nonce),
+            secrets::created_by.eq(&secret.created_by),
+            secrets::created_at.eq(secret.created_at as i64),
+            secrets::expires_at.eq(secret.expires_at.map(|t| t as i64)),
+            secrets::last_rotated_at.eq(secret.last_rotated_at.map(|t| t as i64)),
+            secrets::tenant_id.eq(&secret.tenant_id),
+        ))
+        .execute(&mut conn)?;
+        if rows == 0 {
+            anyhow::bail!(
+                "secret {} not found in tenant {}",
+                secret.id,
+                secret.tenant_id
+            );
+        }
+        Ok(())
+    }
+
     async fn resolve_for_agent(
         &self,
         tenant_id: &str,
