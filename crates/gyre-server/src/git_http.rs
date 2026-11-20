@@ -8756,10 +8756,7 @@ specs:
             .unwrap();
         let out = child.wait_with_output().unwrap();
         assert!(out.status.success(), "pack-objects failed");
-        assert!(
-            !out.stdout.is_empty(),
-            "pack-objects produced empty pack"
-        );
+        assert!(!out.stdout.is_empty(), "pack-objects produced empty pack");
         out.stdout
     }
 
