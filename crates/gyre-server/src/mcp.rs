@@ -5072,6 +5072,10 @@ pub async fn mcp_handler(
             // allowedTools is advisory — the server must not execute
             // task/MR/complete mutations for a preview agent. The branch push
             // is the entire deliverable; the run ends when the process exits.
+            // gyre_message_send / gyre_message_ack are in the same class: a
+            // preview agent injecting Directed-tier messages into production
+            // inboxes (or acking around the exit hook's bulk-ack) leaves a
+            // durable footprint that outlives the throwaway run.
             if is_agent_jwt(&auth)
                 && matches!(
                     tool_name,
@@ -5080,6 +5084,8 @@ pub async fn mcp_handler(
                         | "gyre_create_mr"
                         | "gyre_agent_complete"
                         | "conversation_upload"
+                        | "gyre_message_send"
+                        | "gyre_message_ack"
                 )
                 && crate::api::meta_specs::is_preview_agent(&state, &auth.agent_id).await
             {
@@ -5088,6 +5094,30 @@ pub async fn mcp_handler(
                     PERMISSION_DENIED,
                     format!(
                         "PERMISSION_DENIED: preview agent {auth_agent_id} may not call {tool_name} — preview runs skip task/MR/provenance ceremony",
+                        auth_agent_id = auth.agent_id
+                    ),
+                ));
+            }
+
+            // The liveness/telemetry tools stay available to a preview run's
+            // OWN agent (the preview prompt instructs self-heartbeat), but a
+            // preview agent may not target ANOTHER agent with them:
+            // heartbeating a real agent keeps it alive against stale-reaping,
+            // and record_activity injects telemetry attributed to the named
+            // agent. Self-targeting only — the scratch run may touch its own
+            // identity and nothing else.
+            if is_agent_jwt(&auth)
+                && matches!(tool_name, "gyre_agent_heartbeat" | "gyre_record_activity")
+                && get_str(&args, "agent_id")
+                    .map(|a| a != auth.agent_id)
+                    .unwrap_or(false)
+                && crate::api::meta_specs::is_preview_agent(&state, &auth.agent_id).await
+            {
+                return Json(JsonRpcResponse::err(
+                    id,
+                    PERMISSION_DENIED,
+                    format!(
+                        "PERMISSION_DENIED: preview agent {auth_agent_id} may not target another agent with {tool_name} — preview runs are scratch work scoped to their own agent",
                         auth_agent_id = auth.agent_id
                     ),
                 ));
@@ -11160,6 +11190,14 @@ concepts:
             ),
             ("gyre_agent_complete", json!({ "agent_id": agent_id })),
             ("conversation_upload", json!({ "data": "" })),
+            // Message tools (task-206 review F2): a preview agent injecting
+            // Directed-tier messages into production inboxes leaves a
+            // durable footprint that outlives the throwaway run.
+            (
+                "gyre_message_send",
+                json!({ "to": {"agent": "some-real-agent"}, "kind": "status_update", "payload": {} }),
+            ),
+            ("gyre_message_ack", json!({ "message_id": "m-1" })),
         ];
         for (tool, args) in ceremony_tools {
             let (_status, json) =
@@ -11183,7 +11221,7 @@ concepts:
             .await
             .unwrap();
         let (_status, json) = mcp_post_with_token(
-            app,
+            app.clone(),
             tool_call("gyre_agent_heartbeat", json!({ "agent_id": agent_id })),
             &token,
         )
@@ -11194,6 +11232,78 @@ concepts:
         assert!(
             !text.contains("preview agent"),
             "non-preview agent must not trip the preview guard; got: {text}"
+        );
+    }
+
+    /// Task-206 review F2: the identity-scoped tools (heartbeat,
+    /// record_activity) stay available to a preview run's OWN agent — the
+    /// preview prompt instructs self-heartbeat — but a preview agent may
+    /// not target ANOTHER agent with them (keeping a real agent alive
+    /// against stale-reaping, injecting telemetry attributed to it).
+    #[tokio::test]
+    async fn mcp_preview_agent_heartbeat_targets_only_self() {
+        let state = orch_state().await;
+        let (agent_id, token) = register_preview_agent(&state).await;
+        let app = crate::build_router(state.clone());
+
+        // Cross-target heartbeat: refused by the dispatch guard before the
+        // handler (so the SVID check is never reached).
+        let (_status, json) = mcp_post_with_token(
+            app.clone(),
+            tool_call(
+                "gyre_agent_heartbeat",
+                json!({ "agent_id": "real-agent-9", "svid": "x" }),
+            ),
+            &token,
+        )
+        .await;
+        let text = json["error"]["message"]
+            .as_str()
+            .or(json["result"]["content"][0]["text"].as_str())
+            .unwrap_or_default();
+        assert!(
+            text.contains("PERMISSION_DENIED") && text.contains("preview agent"),
+            "cross-target heartbeat must be denied for a preview agent; got: {text}"
+        );
+
+        // Cross-target record_activity: same refusal.
+        let (_status, json) = mcp_post_with_token(
+            app.clone(),
+            tool_call(
+                "gyre_record_activity",
+                json!({ "agent_id": "real-agent-9", "event_type": "RUN_STARTED", "description": "d" }),
+            ),
+            &token,
+        )
+        .await;
+        let text = json["error"]["message"]
+            .as_str()
+            .or(json["result"]["content"][0]["text"].as_str())
+            .unwrap_or_default();
+        assert!(
+            text.contains("PERMISSION_DENIED") && text.contains("preview agent"),
+            "cross-target record_activity must be denied for a preview agent; got: {text}"
+        );
+
+        // Self-target heartbeat passes the dispatch guard (it then fails
+        // SVID verification in the handler — a different, expected error,
+        // never the preview denial).
+        let (_status, json) = mcp_post_with_token(
+            app.clone(),
+            tool_call(
+                "gyre_agent_heartbeat",
+                json!({ "agent_id": agent_id, "svid": "x" }),
+            ),
+            &token,
+        )
+        .await;
+        let text = json["error"]["message"]
+            .as_str()
+            .or(json["result"]["content"][0]["text"].as_str())
+            .unwrap_or_default();
+        assert!(
+            !text.contains("preview agent"),
+            "self-target heartbeat must not trip the preview guard; got: {text}"
         );
     }
 
