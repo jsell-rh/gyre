@@ -23,6 +23,13 @@ use crate::AppState;
 
 const MAX_HISTORY_PER_JOB: usize = 50;
 
+/// Attempts (initial + retries) to persist one run to the durable store.
+const DURABLE_RECORD_ATTEMPTS: usize = 3;
+
+/// Backoff between durable-persist attempts (short: the job loop must not
+/// be stalled by a flapping store, only ride out a transient failure).
+const DURABLE_RECORD_BACKOFF: std::time::Duration = std::time::Duration::from_millis(250);
+
 /// Default retention for the self-managing `job_history_cleanup` job
 /// (days), overridable via `GYRE_JOB_HISTORY_RETENTION_DAYS`.
 pub const JOB_HISTORY_RETENTION_DAYS_DEFAULT: u64 = 30;
@@ -171,6 +178,11 @@ pub struct JobRegistry {
     /// `start_job_registry`), every recorded run is persisted here and the
     /// in-memory ring is only a fronting cache.
     durable: Arc<Mutex<Option<Arc<dyn gyre_ports::JobRunRepository>>>>,
+    /// Runs whose durable persistence failed every retry (review
+    /// task-273): keeps the degradation distinguishable from an
+    /// intentionally-empty durable history — a non-zero count means runs
+    /// exist only in the process-local cache and will vanish on restart.
+    durable_persist_failures: Arc<std::sync::atomic::AtomicU64>,
 }
 
 #[derive(Default)]
@@ -221,6 +233,15 @@ impl JobRegistry {
             .get(job_name)
             .map(|runs| runs.iter().cloned().collect())
             .unwrap_or_default()
+    }
+
+    /// Runs whose durable persistence failed every retry (review
+    /// task-273). Non-zero means run records exist only in the
+    /// process-local cache: a restart loses them, and the admin-visible
+    /// history is degraded even though jobs keep running.
+    pub fn durable_persist_failures(&self) -> u64 {
+        self.durable_persist_failures
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// DURABLE history for a specific job (newest-first, at most `limit`
@@ -297,15 +318,48 @@ impl JobRegistry {
     }
 
     pub async fn record_run(&self, job_name: &str, run: JobRun) {
-        // Durable persistence first (authoritative store; TASK-273):
-        // best-effort — a persistence failure is logged but never fails
-        // the job that produced the run.
+        // Durable persistence first (authoritative store; TASK-273). A
+        // transient storage failure is retried (bounded, short backoff);
+        // `record` is idempotent (same id replaces the row), so a retry
+        // after a partially-applied write cannot duplicate the run. When
+        // the retries are exhausted the failure is LOUD (error log +
+        // durable_persist_failures counter) and the run is kept in the
+        // in-memory ring — durable_history serves it from there while the
+        // cache holds it, and the counter keeps the degradation
+        // distinguishable from an intentionally-empty durable history
+        // (review task-273: never silently lost).
         if let Some(store) = self.durable.lock().await.as_ref() {
-            if let Err(e) = store.record(&run.to_record()).await {
-                error!(
-                    job = %job_name,
-                    "persisting job run to the durable store failed: {e}"
-                );
+            let record = run.to_record();
+            let mut persisted = false;
+            for attempt in 1..=DURABLE_RECORD_ATTEMPTS {
+                match store.record(&record).await {
+                    Ok(()) => {
+                        persisted = true;
+                        break;
+                    }
+                    Err(e) if attempt < DURABLE_RECORD_ATTEMPTS => {
+                        error!(
+                            job = %job_name,
+                            run_id = %run.id,
+                            attempt,
+                            "persisting job run to the durable store failed (retrying): {e}"
+                        );
+                        tokio::time::sleep(DURABLE_RECORD_BACKOFF).await;
+                    }
+                    Err(e) => {
+                        error!(
+                            job = %job_name,
+                            run_id = %run.id,
+                            attempts = DURABLE_RECORD_ATTEMPTS,
+                            "persisting job run to the durable store FAILED — the run is \
+                             held only in the in-memory cache and will be lost on restart: {e}"
+                        );
+                    }
+                }
+            }
+            if !persisted {
+                self.durable_persist_failures
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
         }
         let mut inner = self.inner.lock().await;
@@ -1225,5 +1279,134 @@ mod tests {
         registry.record_cycle("durable_job", 1000, &Ok(())).await;
         let runs = state.job_runs.list_by_job("durable_job", 10).await.unwrap();
         assert_eq!(runs.len(), 2, "record_cycle must persist through the store");
+    }
+
+    /// A durable store whose record() fails the first attempts then
+    /// succeeds — proves record_run RETRIES a transient persistence
+    /// failure instead of dropping the run to the memory ring only
+    /// (review task-273: completed runs were silently lost when the
+    /// durable write failed once).
+    struct FlakyJobRuns {
+        inner: Arc<dyn gyre_ports::JobRunRepository>,
+        failures_left: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl gyre_ports::JobRunRepository for FlakyJobRuns {
+        async fn record(&self, run: &gyre_ports::JobRunRecord) -> anyhow::Result<()> {
+            let left = self.failures_left.load(std::sync::atomic::Ordering::SeqCst);
+            if left > 0 {
+                self.failures_left
+                    .store(left - 1, std::sync::atomic::Ordering::SeqCst);
+                anyhow::bail!("transient storage failure");
+            }
+            self.inner.record(run).await
+        }
+        async fn list_by_job(
+            &self,
+            job_name: &str,
+            limit: usize,
+        ) -> anyhow::Result<Vec<gyre_ports::JobRunRecord>> {
+            self.inner.list_by_job(job_name, limit).await
+        }
+        async fn list_recent(&self, limit: usize) -> anyhow::Result<Vec<gyre_ports::JobRunRecord>> {
+            self.inner.list_recent(limit).await
+        }
+        async fn delete_older_than(&self, cutoff_secs: u64) -> anyhow::Result<u64> {
+            self.inner.delete_older_than(cutoff_secs).await
+        }
+    }
+
+    #[tokio::test]
+    async fn record_run_retries_transient_durable_failures() {
+        let state = test_state();
+        let registry = JobRegistry::new();
+        registry
+            .set_durable_store(Arc::new(FlakyJobRuns {
+                inner: Arc::clone(&state.job_runs) as Arc<dyn gyre_ports::JobRunRepository>,
+                failures_left: std::sync::atomic::AtomicUsize::new(2),
+            }))
+            .await;
+
+        let run = JobRun {
+            id: "retry-run-1".to_string(),
+            job_name: "retry_job".to_string(),
+            started_at: 100,
+            finished_at: Some(200),
+            logs: vec!["outcome".to_string()],
+            status: "success".to_string(),
+            error: None,
+        };
+        registry.record_run("retry_job", run).await;
+
+        // Two transient failures, then the retry landed the run durably.
+        let runs = state.job_runs.list_by_job("retry_job", 10).await.unwrap();
+        assert_eq!(runs.len(), 1, "the run must be persisted after retries");
+        assert_eq!(runs[0].id, "retry-run-1");
+        assert_eq!(
+            registry.durable_persist_failures(),
+            0,
+            "a retried-then-persisted run is not a persistence failure"
+        );
+    }
+
+    #[tokio::test]
+    async fn record_run_counts_runs_lost_after_exhausted_retries() {
+        struct AlwaysFailing(Arc<std::sync::atomic::AtomicUsize>);
+        #[async_trait::async_trait]
+        impl gyre_ports::JobRunRepository for AlwaysFailing {
+            async fn record(&self, _run: &gyre_ports::JobRunRecord) -> anyhow::Result<()> {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                anyhow::bail!("storage down")
+            }
+            async fn list_by_job(
+                &self,
+                _job_name: &str,
+                _limit: usize,
+            ) -> anyhow::Result<Vec<gyre_ports::JobRunRecord>> {
+                Ok(Vec::new())
+            }
+            async fn list_recent(
+                &self,
+                _limit: usize,
+            ) -> anyhow::Result<Vec<gyre_ports::JobRunRecord>> {
+                Ok(Vec::new())
+            }
+            async fn delete_older_than(&self, _cutoff_secs: u64) -> anyhow::Result<u64> {
+                Ok(0)
+            }
+        }
+
+        let registry = JobRegistry::new();
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        registry
+            .set_durable_store(Arc::new(AlwaysFailing(Arc::clone(&attempts))))
+            .await;
+
+        let run = JobRun {
+            id: "lost-run-1".to_string(),
+            job_name: "lost_job".to_string(),
+            started_at: 100,
+            finished_at: Some(200),
+            logs: vec![],
+            status: "success".to_string(),
+            error: None,
+        };
+        registry.record_run("lost_job", run).await;
+
+        // Every attempt failed: the degradation is COUNTED (not silently
+        // swallowed) and the run survives only in the memory ring.
+        assert_eq!(
+            attempts.load(std::sync::atomic::Ordering::SeqCst),
+            DURABLE_RECORD_ATTEMPTS,
+            "record must be attempted {DURABLE_RECORD_ATTEMPTS} times"
+        );
+        assert_eq!(
+            registry.durable_persist_failures(),
+            1,
+            "an unpersisted run must be distinguishable from an \
+             intentionally-empty durable history"
+        );
+        assert_eq!(registry.history("lost_job").await.len(), 1);
     }
 }

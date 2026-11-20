@@ -130,26 +130,22 @@ pub async fn admin_jobs(State(state): State<Arc<AppState>>) -> Json<Vec<JobInfo>
     let defs = state.job_registry.list_jobs().await;
     let mut jobs = Vec::with_capacity(defs.len());
     for def in defs {
-        // Durable history first (authoritative); fall back to the
-        // in-memory cache when the durable store has no rows for this job
-        // yet (e.g. pure-mem mode before any run was recorded).
-        let mut recent_runs: Vec<JobRunResponse> = state
+        // Durable history is AUTHORITATIVE, including when it is empty:
+        // after job_history_cleanup prunes a job's rows past retention, the
+        // pruned runs must NOT resurrect from the in-memory 50-entry ring
+        // (which holds >30 days of daily runs) — the cleanup's effect has
+        // to be visible on this, the only admin surface (review task-273).
+        // durable_history itself falls back to the ring ONLY on a durable
+        // read error (logged loudly) or in pure-mem mode with no durable
+        // store attached — never on an intentionally-empty result.
+        let recent_runs: Vec<JobRunResponse> = state
             .job_registry
             .durable_history(&def.name, 20)
             .await
             .into_iter()
             .map(JobRunResponse::from)
             .collect();
-        if recent_runs.is_empty() {
-            // The in-memory ring is oldest-first (VecDeque push_back order);
-            // serve it newest-first like the durable store so both the job
-            // status pill (most recent run's status, below) and the run
-            // ordering presented to the UI are consistent across paths.
-            let mut mem_history = state.job_registry.history(&def.name).await;
-            mem_history.reverse();
-            recent_runs = mem_history.into_iter().map(JobRunResponse::from).collect();
-        }
-        // Most recent run's status (both history paths are newest-first).
+        // Most recent run's status (newest-first).
         let status = recent_runs
             .first()
             .map(|r| r.status.as_str())
@@ -364,6 +360,10 @@ pub struct AuditQuery {
     pub user_id: Option<String>,
     pub repo_id: Option<String>,
     pub resource_type: Option<String>,
+    /// Outcome filter (success|failure|blocked) — the same dimension
+    /// `/audit/events` supports, so the TenantSettings Audit tab renders
+    /// the same filter set (review task-273).
+    pub outcome: Option<String>,
     /// Free-text search over the event detail payload (TASK-273:
     /// admin-panel.md §Audit log viewer — searchable trail). Enforced in
     /// SQL by the durable adapters, transparently decompressing
@@ -387,6 +387,14 @@ pub async fn admin_audit(
     auth: crate::auth::AuthenticatedAgent,
     Query(q): Query<AuditQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    let outcome = match q.outcome.as_deref() {
+        None => None,
+        Some(s) => Some(gyre_domain::AuditOutcome::from_str(s).ok_or_else(|| {
+            ApiError::InvalidInput(format!(
+                "invalid outcome filter '{s}': expected one of success|failure|blocked"
+            ))
+        })?),
+    };
     let filter = gyre_ports::AuditQueryFilter {
         agent_id: q.agent_id,
         event_type: q.event_type,
@@ -394,7 +402,7 @@ pub async fn admin_audit(
         user_id: q.user_id,
         repo_id: q.repo_id,
         resource_type: q.resource_type,
-        outcome: None,
+        outcome,
         // Tenant scoping is derived from the authenticated caller — a
         // tenant filter is never accepted from the query string.
         tenant_id: Some(auth.tenant_id.clone()),
@@ -1305,6 +1313,7 @@ mod tests {
     };
     use axum::{body::Body, Router};
     use http::{Request, StatusCode};
+    use std::sync::Arc;
     use tower::ServiceExt;
 
     fn app_no_jwt() -> Router {
@@ -3048,6 +3057,79 @@ mod tests {
         assert!(
             runs[0]["started_at"].as_u64().unwrap() >= runs[1]["started_at"].as_u64().unwrap(),
             "newest run must be served first on the memory fallback path"
+        );
+    }
+
+    /// Review task-273: an intentionally-EMPTY durable history (e.g. after
+    /// job_history_cleanup pruned a job's rows) must NOT be overridden by
+    /// the in-memory ring — the cleanup's effect has to be visible on
+    /// GET /admin/jobs, the only admin surface. Only a durable read error
+    /// (handled loudly inside durable_history) or pure-mem mode (no
+    /// store attached) serves the ring.
+    #[tokio::test]
+    async fn admin_jobs_does_not_resurrect_pruned_runs_from_the_ring() {
+        let state = test_state();
+        state
+            .job_registry
+            .register(
+                crate::jobs::JobDefinition {
+                    name: "pruned_job".to_string(),
+                    description: "Runs whose durable rows were pruned".to_string(),
+                    interval_secs: 60,
+                    enabled: true,
+                    run_at_utc_hour: None,
+                },
+                |_state, _log| async move { Ok(()) },
+            )
+            .await;
+        // Runs recorded while NO durable store is attached: they live only
+        // in the ring.
+        state
+            .job_registry
+            .trigger("pruned_job", Arc::clone(&state))
+            .await
+            .unwrap();
+        assert_eq!(
+            state.job_registry.history("pruned_job").await.len(),
+            1,
+            "precondition: the ring holds the run"
+        );
+
+        // Now attach a durable store with NO rows for the job — the exact
+        // state after job_history_cleanup pruned them.
+        state
+            .job_registry
+            .set_durable_store(Arc::new(crate::mem::MemJobRunRepository::default()))
+            .await;
+
+        let app = api_router().with_state(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/admin/jobs")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let jobs = body_json(resp).await;
+        let job = jobs
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|j| j["name"] == "pruned_job")
+            .expect("registered job must be listed");
+        assert_eq!(
+            job["recent_runs"].as_array().unwrap().len(),
+            0,
+            "an empty durable history is authoritative — pruned runs must \
+             not resurrect from the in-memory ring"
+        );
+        assert_eq!(
+            job["status"], "idle",
+            "status must reflect the (empty) durable history"
         );
     }
 
