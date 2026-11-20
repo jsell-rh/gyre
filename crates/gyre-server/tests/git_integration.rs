@@ -62,6 +62,12 @@ fn git_local(args: &[&str], dir: &std::path::Path) {
 
 /// Bind a server, return (port, base_url, auth_token).
 async fn start_server(auth_token: &str) -> (u16, String) {
+    // task-264: production's default signing mode is keyless Fulcio; this
+    // harness drives real pushes with non-JWT dev tokens, so it explicitly
+    // opts into local forge-key signing (`GYRE_SIGNING_MODE=local`, the
+    // documented operator opt-in). Keyless/fail-loud signing has its own
+    // dedicated suites (api/jj.rs, git_http.rs, merge_processor.rs).
+    unsafe { std::env::set_var("GYRE_SIGNING_MODE", "local") };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let base_url = format!("http://127.0.0.1:{port}");

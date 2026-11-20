@@ -2,8 +2,8 @@
 title: "Agent JWT claims completion and hard task-scope boundary (by-effect enforcement sweep)"
 spec_ref: "Spec gap spec-31d3ae72e12e22c52442e309 / agent-jwt-claims-task-scope / b60edce5bc49"
 depends_on: [task-130]
-progress: ready-for-review
-commits: ["425a7cee99d06beb68d86517128ac53c0d6c0577", "a5e2bf75878ad280286fc0974a1d4e1d8c57de55", "00f1cfcb9226f1df0f15b9fb8d64df21fa2f468a", "0ef2e11d928370edb94f553eafd823fcb540ab9a", "2dd934d6b81e50b85170574a53ca614370af3541", "356184ee46d2363835f9b71df07a2facde5cd895", "5cdce3aadee6da0de408e8e4e83b2666fdf11f12", "88f9a006a2d6983173200f08c850ece61072f49c", "585d459ed97d7d585397d3587f386221b8c96f28", "544b2755ea961f0764abb0d8c3cb9d1ea214f358", "42dad97a5b9daf8ed4204c8a272884d741bee052", "37f458b9b33f62b3a85ea82193afdead4b28e4d1", "f338cfc164c3a775de95a520e6ca09d2eec00b39"]
+progress: not-started
+commits: []
 ---
 
 ## Required behavior
@@ -93,28 +93,3 @@ Canonical spec: `specs/system/identity-security.md`. Source: `fb1424fbac55cd23cb
     ]
   }
 ]
-
-## Shipped
-
-This round (`425a7cee`, review repair for the checkpoint-`15ca4560` finding) closes the by-effect sweep miss on the post-merge recovery and merge-queue surfaces, on top of the previously reviewed task-263 branch (Layer-2 claims completion, the by-effect enforcement sweep, durable jti revocation, git-http agent repo identity, SPIFFE session binding — product commit `f338cfc1` through review-repair `00f1cfcb`/`a5e2bf75`).
-
-### This round: revert + merge-queue/MR-status agent task-scope boundary
-
-- **`POST /api/v1/repos/:id/revert/:mr_id`** (`revert_mr`, recovery.rs) now takes the auth extractor and denies task-bound agent principals outright. Its execution mutates task rows — `merge_processor::apply_revert_side_effects` step 6 creates a High-priority remediation task — in addition to rewriting the repo's default-branch history, marking the MR Reverted, and invalidating gate results. No task claim can cover those effects (the remediation task is a fresh row outside any claim; the history rewrite is repo-wide — the same effect class for which `archive_repo` denies task-bound agents), so denial is outright, mirroring the admin-surface gate. The route's middleware ABAC resolves only repo-tier scoping and the seeded `agent-scoped-access` builtin (priority 700) Allows the `write` action for Agent-role subjects on `*`, so under default configuration a task-A worker JWT could previously revert task B's merged MR; the boundary now holds in the handler regardless of policy configuration. Non-agent principals (Admin users, the system token, orchestrators) keep the right.
-- **Sibling surfaces enforced** (not left as statements): `POST /api/v1/merge-queue/enqueue` and `DELETE /api/v1/merge-queue/:id` now take the auth extractor and require the target MR's repository to be the repo resolved from the caller's `task_id` claim (task row's repo, falling back to the signed `repo_id` claim — fail closed on neither matching), via the new shared helper `require_repo_in_agent_task_scope` (merge_requests.rs). `PUT /api/v1/merge-requests/:id/status` applies the same check after the pre-existing human-approval gate (which stays first so its RbacDenied audit semantics are unchanged). `create_mr` was refactored onto the same helper with identical behavior. The Ralph loop's automatic post-completion enqueue goes through `enqueue_core` (system actor) and is unaffected; non-agent principals pass all checks untouched (`agent_task_claim()` is `None` for them).
-
-### Test evidence
-
-New boundary tests: `agent_jwt_cannot_revert_merged_mr` (recovery.rs — worker JWT → 403 with the MR still Merged, no revert commit recorded by the git double, no remediation task row; operator positive control on the same fixture reverts successfully and creates the remediation task), `agent_jwt_task_scope_boundary_on_merge_queue_surfaces` (merge_queue.rs — foreign-task token gets 403 on enqueue and cancel with no queue entry created / entry still queued; own-repo positive controls get 201/204), and `agent_jwt_cannot_transition_mr_outside_task_scope` (merge_requests.rs — foreign-repo MR transition 403 with the MR untouched; own-repo MR 200; `closed` used as the probe status so the 403 proves the task-scope check rather than the human-approval gate). Existing enqueue/cancel/revert tests were updated to authenticate (`Bearer test-token`) because the handlers now take the extractor.
-
-Local probes at head `425a7cee`: `cargo check -p gyre-server --all-targets` exit 0 (all test targets type-check), `rustfmt --edition 2021 --check` clean on the changed files, `scripts/check-arch.sh`, `check-abac-route-registry.sh`, `check-abac-exempt-handlers.sh`, and `check-api-auth.sh` all pass. Probe log: `/tmp/stage/review-evidence/round-425a7cee-probes.log`. gyre-server test execution is deferred to the independent verifier per the 4 GiB budget rule (the stage build wrapper mechanically blocks gyre-server test codegen); the verifier must run at head `425a7cee`: `cargo test -p gyre-server --lib api::recovery`, `--lib api::merge_queue`, `--lib api::merge_requests`, `--lib api::mr_timeline`, `--lib rbac`, `--test api_integration`, `--test spec_enforcement`, `--test git_integration`, `--test e2e_ralph_loop`, plus the boundary suite deferred from prior rounds (`agent_jwt_task_scope_boundary_on_lifecycle_endpoints`, `agent_jwt_cannot_spawn_onto_foreign_task`, `spawn_minted_jwt_carries_task_scoped_claims`, `agent_push_cross_workspace_same_name_repo_rejected`, `agent_only_requires_exact_stack_hash_match_e2e`, `session_svid_session_segment_equals_jwt_sub`, `federated_agent_two_configuration_probe`, the MCP task-scope and MR task-scope tests, `cargo test -p gyre-server admin::`, `--test m18_oidc_integration`, `--test task134_review_probe`) and the full `cargo test --all`.
-
-### Out-of-scope statements (justified)
-
-- **`wl_pid`/`wl_container_id` at mint time**: these facts do not exist until launch completes; minting them would fabricate them. They are recorded in the fresh workload-attestation record immediately post-launch.
-- **MCP `gyre_agent_complete`**: already enforced self-only for agent JWTs pre-task — unchanged.
-- **Admin snapshot create/delete and BCP drill**: read-only capture of task state (or deletion of a backup file) — no task row, task-scoped secret, or MR is mutated; the state-replacing effect is `admin_restore_snapshot`, which is gated.
-- **`PUT /api/v1/admin/retention`**: mutates retention configuration only; the purge effect runs through the job registry, whose manual trigger is gated and whose scheduled runs are system-initiated, not agent-callable.
-- **`PUT /api/v1/repos/:id/queue/pause` / `queue/resume`** (recovery.rs): mutate merge-queue pause KV state only — no task row, task-scoped secret, or MR is mutated; the recovery protocol they arm is executed by the system merge processor, not the caller.
-- **`PUT /api/v1/repos/:id/post-merge-gates`** (recovery.rs): replaces post-merge gate configuration rows only — no task-owned state is mutated.
-- **MR dependency surfaces** (`PUT/GET/DELETE /api/v1/merge-requests/:id/dependencies`, `PUT .../atomic-group`): mutate MR-dependency/group rows, not task rows, task-scoped secrets, or MRs.
