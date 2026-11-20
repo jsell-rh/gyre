@@ -260,22 +260,31 @@ pub async fn remote_agent_cleanup(state: Arc<AppState>, log: JobRunLog) -> Resul
         };
 
         // Reconstruct a backend for restart-orphans based on the durable
-        // record's backend descriptor. Container/Kubernetes kills address
-        // global resources (docker rm / kubectl delete pod) reachable from
-        // a default-constructed target; local kills are gated on pid
-        // identity verification (a recycled pid must not be SIGTERMed —
-        // review task-273); SSH-bare and unreconstructable descriptors
-        // are reported and eventually retired, not silently skipped.
+        // record's backend descriptor. Container kills address a global
+        // container id (runtime auto-detected at kill time when the
+        // record carries no explicit runtime); Kubernetes kills address
+        // the pod in the namespace/context PERSISTED in backend_config
+        // (review task-273: a default-constructed KubernetesTarget has
+        // no namespace, so `kubectl delete pod` without --namespace
+        // addresses the wrong place — and its NotFound failure was
+        // previously treated as a successful kill, marking the orphan
+        // terminated while the pod kept running; kill_process now fails
+        // on every non-NotFound error, and a kubernetes record WITHOUT
+        // persisted config is unreconstructable, not blindly killed);
+        // local kills are gated on pid identity verification (a recycled
+        // pid must not be SIGTERMed — review task-273); SSH-bare and
+        // unreconstructable descriptors are reported and eventually
+        // retired, not silently skipped.
         let outcome: Result<()> = match backend {
             Some(b) => kill_and_mark(&state, b.as_ref(), &instance, "remote_agent_cleanup").await,
             None => {
                 match instance.backend.as_str() {
                     "container" => {
-                        let target = gyre_adapters::compute::ContainerTarget::new("unused");
+                        let target = reconstruct_container_target(&instance);
                         kill_and_mark(&state, &target, &instance, "remote_agent_cleanup").await
                     }
-                    "kubernetes" => {
-                        let target = gyre_adapters::compute::KubernetesTarget::new("unused");
+                    "kubernetes" if instance.backend_config.is_some() => {
+                        let target = reconstruct_kubernetes_target(&instance);
                         kill_and_mark(&state, &target, &instance, "remote_agent_cleanup").await
                     }
                     "local" => {
@@ -538,6 +547,66 @@ pub(crate) async fn mark_gone(
         .await
         .remove(&instance.agent_id);
     Ok(())
+}
+
+/// Parse the durable record's `backend_config` JSON (review task-273).
+/// `None` on a missing or malformed config — callers treat that as
+/// "no reconstruction facts" (never fabricate any).
+fn backend_config_json(instance: &gyre_ports::AgentInstanceRecord) -> Option<serde_json::Value> {
+    instance
+        .backend_config
+        .as_deref()
+        .and_then(|s| serde_json::from_str(s).ok())
+}
+
+/// Reconstruct a [`ContainerTarget`] for a restart-orphan from the
+/// durable record's `backend_config` (review task-273): the explicit
+/// container runtime used at spawn, when one was configured — the kill
+/// (`<runtime> rm --force <id>`) addresses a global container id, so a
+/// record without a persisted runtime falls back to spawn-time
+/// auto-detection. The image is unused on the kill path.
+pub(crate) fn reconstruct_container_target(
+    instance: &gyre_ports::AgentInstanceRecord,
+) -> gyre_adapters::compute::ContainerTarget {
+    let mut target = gyre_adapters::compute::ContainerTarget::new("unused");
+    if let Some(cfg) = backend_config_json(instance) {
+        match cfg.get("runtime").and_then(|v| v.as_str()) {
+            Some("docker") => {
+                target = target.with_runtime(gyre_adapters::compute::container::Runtime::Docker);
+            }
+            Some("podman") => {
+                target = target.with_runtime(gyre_adapters::compute::container::Runtime::Podman);
+            }
+            _ => {}
+        }
+    }
+    target
+}
+
+/// Reconstruct a [`KubernetesTarget`] for a restart-orphan from the
+/// durable record's `backend_config` (review task-273): the pod's
+/// namespace, the kubectl context and the kubectl binary path used at
+/// spawn. Without the namespace, `kubectl delete pod` addresses the
+/// default namespace — a pod spawned into a configured namespace is not
+/// there, the delete fails NotFound, and (pre-fix) that failure was
+/// treated as a successful kill. Only called for records that HAVE a
+/// persisted config; the image is unused on the kill path.
+pub(crate) fn reconstruct_kubernetes_target(
+    instance: &gyre_ports::AgentInstanceRecord,
+) -> gyre_adapters::compute::KubernetesTarget {
+    let mut target = gyre_adapters::compute::KubernetesTarget::new("unused");
+    if let Some(cfg) = backend_config_json(instance) {
+        if let Some(ns) = cfg.get("namespace").and_then(|v| v.as_str()) {
+            target = target.with_namespace(ns);
+        }
+        if let Some(ctx) = cfg.get("context").and_then(|v| v.as_str()) {
+            target = target.with_context(ctx);
+        }
+        if let Some(kubectl) = cfg.get("kubectl_path").and_then(|v| v.as_str()) {
+            target = target.with_kubectl_path(kubectl);
+        }
+    }
+    target
 }
 
 /// Kill `instance` via `target` and mark it terminated with `reason` —
@@ -1048,6 +1117,7 @@ mod tests {
                 handle_id: pid.to_string(),
                 pid: Some(pid),
                 spawned_at: now_secs(),
+                backend_config: None,
                 terminated_at: None,
                 terminated_reason: None,
             })
@@ -1104,6 +1174,7 @@ mod tests {
                 handle_id: pid.to_string(),
                 pid: Some(pid),
                 spawned_at: now_secs(),
+                backend_config: None,
                 terminated_at: None,
                 terminated_reason: None,
             })
@@ -1162,6 +1233,7 @@ mod tests {
                 handle_id: pid.to_string(),
                 pid: Some(pid),
                 spawned_at: now_secs(),
+                backend_config: None,
                 terminated_at: None,
                 terminated_reason: None,
             })
@@ -1208,6 +1280,7 @@ mod tests {
                 handle_id: pid.to_string(),
                 pid: Some(pid),
                 spawned_at: now_secs().saturating_sub(10 * 86_400),
+                backend_config: None,
                 terminated_at: None,
                 terminated_reason: None,
             })
@@ -1264,6 +1337,7 @@ mod tests {
                 handle_id: pid.to_string(),
                 pid: Some(pid),
                 spawned_at: now_secs(),
+                backend_config: None,
                 terminated_at: None,
                 terminated_reason: None,
             })
@@ -1312,6 +1386,7 @@ mod tests {
                 handle_id: "ssh-handle".to_string(),
                 pid: None,
                 spawned_at: now_secs(),
+                backend_config: None,
                 terminated_at: None,
                 terminated_reason: None,
             })
@@ -1327,6 +1402,7 @@ mod tests {
                 handle_id: "ssh-handle-old".to_string(),
                 pid: None,
                 spawned_at: now_secs().saturating_sub(UNREAPABLE_RETENTION_SECS + 86_400),
+                backend_config: None,
                 terminated_at: None,
                 terminated_reason: None,
             })
@@ -1381,6 +1457,207 @@ mod tests {
         );
     }
 
+    #[test]
+    fn reconstruct_targets_from_persisted_backend_config() {
+        // review task-273: the sweep rebuilds container/kubernetes kill
+        // targets from the durable record's backend_config — the
+        // persisted runtime / namespace / context / kubectl path must
+        // land on the reconstructed target, or the kill addresses the
+        // wrong place (a pod spawned into a configured namespace is not
+        // in the default one).
+        let mut k8s = AgentInstanceRecord {
+            agent_id: "a".to_string(),
+            backend: "kubernetes".to_string(),
+            target_type: "kubernetes".to_string(),
+            handle_id: "pod-1".to_string(),
+            pid: None,
+            spawned_at: 1,
+            backend_config: Some(
+                serde_json::json!({
+                    "namespace": "gyre-agents",
+                    "context": "prod",
+                    "kubectl_path": "/opt/bin/kubectl"
+                })
+                .to_string(),
+            ),
+            terminated_at: None,
+            terminated_reason: None,
+        };
+        let target = reconstruct_kubernetes_target(&k8s);
+        assert_eq!(target.namespace.as_deref(), Some("gyre-agents"));
+        assert_eq!(target.context.as_deref(), Some("prod"));
+        assert_eq!(target.kubectl_path.as_deref(), Some("/opt/bin/kubectl"));
+
+        // An empty config object means "facts known, namespace genuinely
+        // the cluster default" — reconstruct exactly, no namespace.
+        k8s.backend_config = Some(serde_json::json!({}).to_string());
+        let target = reconstruct_kubernetes_target(&k8s);
+        assert!(target.namespace.is_none());
+        assert!(target.context.is_none());
+
+        // Container runtime reconstruction.
+        let container = AgentInstanceRecord {
+            agent_id: "a".to_string(),
+            backend: "container".to_string(),
+            target_type: "container".to_string(),
+            handle_id: "abc123".to_string(),
+            pid: None,
+            spawned_at: 1,
+            backend_config: Some(serde_json::json!({"runtime": "podman"}).to_string()),
+            terminated_at: None,
+            terminated_reason: None,
+        };
+        let target = reconstruct_container_target(&container);
+        assert_eq!(
+            target.runtime,
+            Some(gyre_adapters::compute::container::Runtime::Podman)
+        );
+        // No persisted runtime → auto-detect at kill time (None).
+        let mut legacy = container.clone();
+        legacy.backend_config = None;
+        assert!(reconstruct_container_target(&legacy).runtime.is_none());
+    }
+
+    /// review task-273: a kubernetes restart-orphan must be killed via a
+    /// target reconstructed from the PERSISTED backend_config — the
+    /// delete addresses the recorded pod in the recorded namespace —
+    /// and only then marked terminated. Driven end-to-end through
+    /// remote_agent_cleanup with a recording stub kubectl.
+    #[tokio::test]
+    async fn remote_agent_cleanup_kills_kubernetes_orphan_with_persisted_namespace() {
+        let state = crate::mem::test_state();
+        // A recording stub kubectl: writes its argv to a file, exits 0.
+        let dir = tempfile::tempdir().unwrap();
+        let stub = dir.path().join("kubectl");
+        let invoked = dir.path().join("invoked.txt");
+        std::fs::write(
+            &stub,
+            format!("#!/bin/sh\necho \"$@\" > {}\n", invoked.to_str().unwrap()),
+        )
+        .unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&stub).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&stub, perms).unwrap();
+        }
+
+        // The restart-orphan shape: no in-memory backend entry, durable
+        // kubernetes record carrying the spawn-time connection facts,
+        // agent row absent.
+        state
+            .agent_instances
+            .record_spawned(&AgentInstanceRecord {
+                agent_id: "agent-k8s-orphan".to_string(),
+                backend: "kubernetes".to_string(),
+                target_type: "kubernetes".to_string(),
+                handle_id: "agent-pod-9".to_string(),
+                pid: None,
+                spawned_at: now_secs(),
+                backend_config: Some(
+                    serde_json::json!({
+                        "namespace": "gyre-agents",
+                        "context": "prod",
+                        "kubectl_path": stub.to_str().unwrap()
+                    })
+                    .to_string(),
+                ),
+                terminated_at: None,
+                terminated_reason: None,
+            })
+            .await
+            .unwrap();
+
+        let log = JobRunLog::new();
+        remote_agent_cleanup(state.clone(), log.clone())
+            .await
+            .unwrap();
+
+        // The kill addressed the recorded pod in the recorded
+        // namespace/context, through the recorded kubectl binary.
+        let argv = std::fs::read_to_string(&invoked)
+            .expect("the stub kubectl must have been invoked by the sweep");
+        assert!(
+            argv.contains("delete pod agent-pod-9"),
+            "the kill must delete the recorded pod, invoked: {argv}"
+        );
+        assert!(
+            argv.contains("--namespace gyre-agents") && argv.contains("--context prod"),
+            "the kill must carry the persisted namespace/context, invoked: {argv}"
+        );
+
+        // The durable record is marked terminated only after the
+        // verified kill, and the run logs name the reaped instance.
+        let record = state
+            .agent_instances
+            .find_by_agent("agent-k8s-orphan")
+            .await
+            .unwrap()
+            .expect("record must survive");
+        assert!(record.terminated_at.is_some());
+        assert_eq!(
+            record.terminated_reason.as_deref(),
+            Some("remote_agent_cleanup")
+        );
+        let lines = log.take().await;
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("agent-k8s-orphan") && l.contains("killed")),
+            "run logs must name the reaped instance, got: {lines:?}"
+        );
+    }
+
+    /// review task-273: a kubernetes record WITHOUT persisted
+    /// backend_config (legacy row) is NOT blindly killed — a
+    /// default-namespace `kubectl delete pod` cannot be verified against
+    /// a pod that may live in a configured namespace, so the record goes
+    /// down the unreconstructable path (kept running for the sweep)
+    /// instead of being marked terminated on an unverified kill.
+    #[tokio::test]
+    async fn remote_agent_cleanup_does_not_blindly_kill_kubernetes_record_without_config() {
+        let state = crate::mem::test_state();
+        state
+            .agent_instances
+            .record_spawned(&AgentInstanceRecord {
+                agent_id: "agent-k8s-legacy".to_string(),
+                backend: "kubernetes".to_string(),
+                target_type: "kubernetes".to_string(),
+                handle_id: "agent-pod-legacy".to_string(),
+                pid: None,
+                spawned_at: now_secs(),
+                backend_config: None,
+                terminated_at: None,
+                terminated_reason: None,
+            })
+            .await
+            .unwrap();
+
+        let log = JobRunLog::new();
+        remote_agent_cleanup(state.clone(), log.clone())
+            .await
+            .unwrap();
+
+        let record = state
+            .agent_instances
+            .find_by_agent("agent-k8s-legacy")
+            .await
+            .unwrap()
+            .expect("record must survive");
+        assert!(
+            record.terminated_at.is_none(),
+            "a legacy kubernetes record without reconstruction facts must stay \
+             recorded-running (unreconstructable), not be blindly marked terminated"
+        );
+        let lines = log.take().await;
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("agent-k8s-legacy") && l.contains("NOT REAPED")),
+            "the sweep must report the unreconstructable record, got: {lines:?}"
+        );
+    }
+
     /// A compute target whose kill deterministically fails (test double
     /// for an unkillable process — e.g. a permission mismatch or a
     /// process that survives SIGKILL).
@@ -1424,6 +1701,7 @@ mod tests {
             handle_id: "4242".to_string(),
             pid: Some(4242),
             spawned_at: now_secs(),
+            backend_config: None,
             terminated_at: None,
             terminated_reason: None,
         };

@@ -309,29 +309,55 @@ impl VaultSecretRepository {
         )
     }
 
-    /// Validate a secret name before it becomes a Vault KV path segment:
-    /// no separators (`/`, `\\`), no traversal segments (`..`, `.`), no
+    /// Validate a value before it becomes a Vault KV path segment: no
+    /// separators (`/`, `\\`), no traversal segments (`..`, `.`), no
     /// control characters. The Admin API validates the same charset, but
     /// the port can be reached from other write paths — the adapter
-    /// enforces its own path-safety boundary: reqwest/url collapses `../`
-    /// segments, so a `../`-bearing name would write outside the caller's
-    /// tenant subtree whenever the server token's policy is broader than
-    /// one tenant subtree, and a plain `/` in a name breaks KV listing
-    /// (only the first path component is returned). (Review task-273.)
-    fn validate_name(name: &str) -> Result<()> {
+    /// enforces its own path-safety boundary: reqwest/url collapses
+    /// `../` segments, so a `../`-bearing segment would address outside
+    /// the caller's tenant subtree whenever the server token's policy is
+    /// broader than one tenant subtree, and a plain `/` in a segment
+    /// breaks KV listing (only the first path component is returned).
+    /// (Review task-273.)
+    fn validate_path_segment(what: &str, value: &str) -> Result<()> {
         anyhow::ensure!(
-            !name.is_empty() && name.len() <= 255,
-            "secret name must be 1-255 characters"
+            !value.is_empty() && value.len() <= 255,
+            "{what} must be 1-255 characters"
         );
         anyhow::ensure!(
-            !name.contains('/') && !name.contains('\\') && !name.contains("..") && name != ".",
-            "secret name must not contain '/', '\\', or '.'/'..' traversal segments"
+            !value.contains('/') && !value.contains('\\') && !value.contains("..") && value != ".",
+            "{what} must not contain '/', '\\', or '.'/'..' traversal segments"
         );
         anyhow::ensure!(
-            !name.chars().any(|c| c.is_control()),
-            "secret name must not contain control characters"
+            !value.chars().any(|c| c.is_control()),
+            "{what} must not contain control characters"
         );
         Ok(())
+    }
+
+    /// Validate a secret name before it becomes a Vault KV path segment
+    /// (see [`Self::validate_path_segment`]).
+    fn validate_name(name: &str) -> Result<()> {
+        Self::validate_path_segment("secret name", name)
+    }
+
+    /// Validate a secret id before it becomes a Vault KV path segment.
+    /// The id reaches this adapter VERBATIM from the URL path of the
+    /// delete/rotate routes (`Id::new(secret_id)`) — unlike the
+    /// server-derived tenant scope, it is caller-controlled, so a crafted
+    /// `../`-bearing id would escape the `_idx` subtree: read another
+    /// tenant's index entry (cross-tenant metadata leak) and target an
+    /// arbitrary metadata path for the index DELETE (review task-273).
+    fn validate_id(id: &str) -> Result<()> {
+        Self::validate_path_segment("secret id", id)
+    }
+
+    /// Validate a caller-supplied scope id before it becomes a Vault KV
+    /// path segment: the request-body `scope_id` is interpolated
+    /// unvalidated into the data/metadata paths otherwise (review
+    /// task-273).
+    fn validate_scope_id(scope_id: &str) -> Result<()> {
+        Self::validate_path_segment("scope id", scope_id)
     }
 
     fn metadata_path(&self, tenant_id: &str, scope: &str, scope_id: &str) -> String {
@@ -360,6 +386,21 @@ impl VaultSecretRepository {
     /// policy denial (scope the result) from transport failure (fail
     /// closed).
     async fn kv_read(&self, path: &str, token: &str) -> Result<Option<VaultSecretPayload>> {
+        Ok(self
+            .kv_read_versioned(path, token)
+            .await?
+            .map(|(payload, _)| payload))
+    }
+
+    /// [`Self::kv_read`] plus the version number of the read data (KV v2
+    /// `/data/metadata/version`). Write paths that supersede a version
+    /// (rotate, replace) use it to destroy the superseded version
+    /// afterwards (review task-273).
+    async fn kv_read_versioned(
+        &self,
+        path: &str,
+        token: &str,
+    ) -> Result<Option<(VaultSecretPayload, u64)>> {
         let url = format!("{}/v1/{path}", self.config.addr);
         let mut req = self.http.get(&url);
         req = Self::with_auth(req, token, self.config.namespace.as_deref());
@@ -380,13 +421,26 @@ impl VaultSecretRepository {
             .pointer("/data/data")
             .cloned()
             .context("Vault read response missing data")?;
-        Ok(Some(
-            serde_json::from_value(data).context("Vault secret payload is malformed")?,
-        ))
+        // A missing version on a 2xx read is an ERROR, not a silent 0: a
+        // version of 0 would make the post-write destroy target nothing
+        // ("versions 1..=0"), silently leaving the superseded value
+        // readable (fail-open; review task-273).
+        let version = body
+            .pointer("/data/metadata/version")
+            .and_then(|v| v.as_u64())
+            .with_context(|| format!("Vault read of {path} missing version metadata"))?;
+        let payload: VaultSecretPayload =
+            serde_json::from_value(data).context("Vault secret payload is malformed")?;
+        Ok(Some((payload, version)))
     }
 
-    /// Read the id index entry with the server token.
+    /// Read the id index entry with the server token. The id is
+    /// validated as a path segment FIRST — it reaches this method
+    /// verbatim from the delete/rotate URL paths, and every id-derived
+    /// Vault path (`_idx` reads and metadata deletes) flows through here
+    /// (review task-273).
     async fn read_index(&self, tenant_id: &str, id: &str) -> Result<Option<VaultIndexEntry>> {
+        Self::validate_id(id)?;
         let path = self.index_path(tenant_id, id);
         // The namespace header must ride index reads too: with
         // GYRE_VAULT_NAMESPACE set, a namespace-less read 404s, which
@@ -476,10 +530,23 @@ impl VaultSecretRepository {
     /// rotate / resolve_for_agent 403'd forever until an unrelated
     /// create/delete refreshed the cache).
     async fn kv_read_server(&self, path: &str) -> Result<Option<VaultSecretPayload>> {
+        Ok(self
+            .kv_read_server_versioned(path)
+            .await?
+            .map(|(payload, _)| payload))
+    }
+
+    /// [`Self::kv_read_server`] plus the read version — the pre-write
+    /// read of the rotate/replace paths, which destroy the superseded
+    /// version after the write (review task-273).
+    async fn kv_read_server_versioned(
+        &self,
+        path: &str,
+    ) -> Result<Option<(VaultSecretPayload, u64)>> {
         let path = path.to_string();
         self.server_token_retry(|token| {
             let path = path.clone();
-            async move { self.kv_read(&path, &token).await }
+            async move { self.kv_read_versioned(&path, &token).await }
         })
         .await
     }
@@ -562,6 +629,60 @@ impl VaultSecretRepository {
         })
         .await
     }
+
+    /// Destroy (permanently remove the contents of) specific versions of
+    /// a KV v2 secret: `POST {mount}/destroy/{path}` with `{"versions":
+    /// [...]}`. KV v2 writes are versioned appends — without destroying
+    /// the superseded version, the OLD value stays readable at
+    /// `GET ...?version=N` by any token with read on the path (the agent
+    /// JWT's policy included) indefinitely, so a compromise-driven
+    /// rotation leaves the compromised value retrievable (review
+    /// task-273). Destroying versions `1..=prior` (rather than exactly
+    /// the prior one) keeps the invariant across a retry after a failed
+    /// destroy: the re-read current version is already the rotated one,
+    /// and every version up to and including it is superseded. A destroy
+    /// failure fails the operation — the rotation's security contract
+    /// (old value not retrievable) is unmet; the operator grants the
+    /// server token `update` on `<mount>/destroy/<path>`.
+    async fn kv_destroy_versions(&self, data_path: &str, versions: &[u64]) -> Result<()> {
+        // KV v2 destroy lives at `{mount}/destroy/{secret-path}` — the
+        // data path's `data/` segment replaced by `destroy/`.
+        let url_path = Self::destroy_url_path(&self.config.kv_mount, data_path);
+        let versions = versions.to_vec();
+        self.server_token_retry(move |token| {
+            let url_path = url_path.clone();
+            let versions = versions.clone();
+            async move {
+                let url = format!("{}/v1/{}", self.config.addr, url_path);
+                let mut req = self.http.post(&url);
+                req = Self::with_auth(req, &token, self.config.namespace.as_deref());
+                let resp = req
+                    .json(&serde_json::json!({
+                        "versions": versions.iter().map(|v| v.to_string()).collect::<Vec<_>>()
+                    }))
+                    .send()
+                    .await
+                    .with_context(|| {
+                        format!("Vault destroy of {url_path} versions {versions:?} failed")
+                    })?;
+                anyhow::ensure!(
+                    resp.status().is_success(),
+                    "Vault destroy of {url_path} versions {versions:?} failed: HTTP {}",
+                    resp.status()
+                );
+                Ok(())
+            }
+        })
+        .await
+    }
+
+    /// The KV v2 destroy URL path for a data path: `{mount}/destroy/…`
+    /// (the data path's `data/` segment becomes `destroy/`).
+    fn destroy_url_path(kv_mount: &str, data_path: &str) -> String {
+        let prefix = format!("{kv_mount}/data/");
+        let secret_path = data_path.strip_prefix(&prefix).unwrap_or(data_path);
+        format!("{kv_mount}/destroy/{secret_path}")
+    }
 }
 
 /// Vault explicitly rejected the request with HTTP 403: the authenticated
@@ -635,9 +756,12 @@ impl SecretRepository for VaultSecretRepository {
         let scope_id = secret.scope_id.clone();
         let name = secret.name.clone();
 
-        // Path-safety boundary (review task-273): the name becomes a KV
-        // path segment — reject separators/traversal before anything else.
+        // Path-safety boundary (review task-273): the name and the
+        // caller-supplied scope id become KV path segments, and the id is
+        // validated inside read_index — reject separators/traversal
+        // before anything else.
         Self::validate_name(&name)?;
+        Self::validate_scope_id(&scope_id)?;
 
         // Port contract: fail if the same id, or the same
         // (scope, scope_id, name) within the tenant, already exists.
@@ -729,6 +853,10 @@ impl SecretRepository for VaultSecretRepository {
         scope_id: &str,
         tenant_id: &str,
     ) -> Result<Vec<Secret>> {
+        // Path-safety boundary (review task-273): the request-body scope
+        // id is a KV path segment — a `../`-bearing value would address
+        // another scope's (or tenant's) subtree.
+        Self::validate_scope_id(scope_id)?;
         let list_path = self.metadata_path(tenant_id, scope.as_str(), scope_id);
         let names = self.kv_list_server(&list_path).await?;
         let mut secrets = Vec::with_capacity(names.len());
@@ -805,8 +933,13 @@ impl SecretRepository for VaultSecretRepository {
         let rotated_at = now_secs();
         let not_found = format!("secret {id} not found in tenant {tenant_id}");
         let namespace = self.config.namespace.clone();
-        // Read + write under the retry wrapper: an AppRole token whose TTL
-        // expired between operations re-logins instead of 403ing forever
+        // Read + write + destroy under the retry wrapper: an AppRole token
+        // whose TTL expired between operations re-logins instead of 403ing
+        // forever (review task-273). The read also captures the CURRENT
+        // version so the superseded versions are destroyed after the
+        // write — KV v2 keeps every prior version readable at
+        // `?version=N`, so without the destroy a compromise-driven
+        // rotation leaves the compromised value retrievable indefinitely
         // (review task-273).
         self.server_token_retry(move |token| {
             let path = path.clone();
@@ -814,7 +947,9 @@ impl SecretRepository for VaultSecretRepository {
             let not_found = not_found.clone();
             let namespace = namespace.clone();
             async move {
-                let Some(mut payload) = self.kv_read(&path, &token).await? else {
+                let Some((mut payload, prior_version)) =
+                    self.kv_read_versioned(&path, &token).await?
+                else {
                     anyhow::bail!("{not_found}");
                 };
                 payload.value_b64 = value_b64;
@@ -831,6 +966,29 @@ impl SecretRepository for VaultSecretRepository {
                 anyhow::ensure!(
                     resp.status().is_success(),
                     "Vault rotate write failed: HTTP {}",
+                    resp.status()
+                );
+                // Every version up to and including the read one is now
+                // superseded — destroy them all (robust across retries:
+                // a failed destroy's retry re-reads the already-rotated
+                // version and destroys everything up to it).
+                let superseded: Vec<u64> = (1..=prior_version).collect();
+                let destroy_url_path = Self::destroy_url_path(&self.config.kv_mount, &path);
+                let url = format!("{}/v1/{}", self.config.addr, destroy_url_path);
+                let mut req = self.http.post(&url);
+                req = Self::with_auth(req, &token, namespace.as_deref());
+                let resp = req
+                    .json(&serde_json::json!({
+                        "versions": superseded.iter().map(|v| v.to_string()).collect::<Vec<_>>()
+                    }))
+                    .send()
+                    .await
+                    .with_context(|| {
+                        format!("Vault destroy of superseded versions {superseded:?} failed")
+                    })?;
+                anyhow::ensure!(
+                    resp.status().is_success(),
+                    "Vault destroy of superseded versions {superseded:?} failed: HTTP {}",
                     resp.status()
                 );
                 Ok(())
@@ -915,13 +1073,16 @@ impl SecretRepository for VaultSecretRepository {
             );
         };
         Self::validate_name(&secret.name)?;
+        Self::validate_scope_id(&secret.scope_id)?;
 
         // KV v2 writes are versioned appends at a path: posting the new
         // payload atomically supersedes the previous version — there is no
         // delete + create window in which the credential could be lost
         // (review task-273). When the (scope, scope_id, name) location is
         // unchanged — the rotation / re-enrollment cases — this is a
-        // single write.
+        // single write, followed by a DESTROY of the superseded versions
+        // so the old value is not still readable at `?version=N`
+        // (review task-273: same invariant the rotate path enforces).
         let payload = VaultSecretPayload::from_secret(secret, value);
         let new_path = self.data_path(
             &tenant_id,
@@ -929,7 +1090,15 @@ impl SecretRepository for VaultSecretRepository {
             &secret.scope_id,
             &secret.name,
         );
+        let prior_version = self
+            .kv_read_server_versioned(&new_path)
+            .await?
+            .map(|(_, v)| v);
         self.kv_write(&new_path, &payload).await?;
+        if let Some(prior) = prior_version {
+            let superseded: Vec<u64> = (1..=prior).collect();
+            self.kv_destroy_versions(&new_path, &superseded).await?;
+        }
 
         // Location changed (scope/name rewrite): repoint the id index and
         // remove the old data path. Order matters — the index is only

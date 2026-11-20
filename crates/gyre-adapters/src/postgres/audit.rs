@@ -134,9 +134,12 @@ impl AuditRepository for PgStorage {
         let mut e = event.clone();
         // Tenant scoping (admin-panel.md §Audit Log Viewer): derive the
         // scope server-side when the emitter did not — the workspace's
-        // owning tenant, or the acting user's tenant binding. A record
-        // that cannot be scoped keeps NULL (never attributed to a tenant
-        // it did not come from).
+        // owning tenant, the acting user's tenant binding, or (review
+        // task-273) the agent principal's own tenant for server-emitted
+        // agent events (container lifecycle, agent-principal denials)
+        // that carry neither workspace nor user. A record that cannot be
+        // scoped keeps NULL (never attributed to a tenant it did not come
+        // from).
         if e.tenant_id.is_none() {
             if let Some(ws_id) = e.workspace_id.as_ref() {
                 e.tenant_id = self.tenant_of_workspace(&ws_id.to_string()).await?;
@@ -144,6 +147,11 @@ impl AuditRepository for PgStorage {
             if e.tenant_id.is_none() {
                 if let Some(user_id) = e.user_id.as_ref() {
                     e.tenant_id = self.tenant_of_user(&user_id.to_string()).await?;
+                }
+            }
+            if e.tenant_id.is_none() {
+                if let Some(agent_id) = e.agent_id.as_ref() {
+                    e.tenant_id = self.tenant_of_agent(&agent_id.to_string()).await?;
                 }
             }
         }
@@ -332,6 +340,30 @@ impl PgStorage {
                 .first::<Option<String>>(&mut conn)
                 .optional()?
                 .flatten())
+        })
+        .await?
+    }
+
+    /// Resolve an agent-principal event's tenant from the agent's own
+    /// tenant column (review task-273): server-emitted agent events
+    /// (container lifecycle, agent-principal Rbac/Abac denials) carry an
+    /// agent_id but no workspace/user — without this derivation they are
+    /// stored tenant_id NULL and become invisible to the tenant-scoped
+    /// admin audit trail. `Ok(None)` when the agent row does not exist —
+    /// the scope cannot be determined, so it is not attributed (skip,
+    /// never fabricate). Mirrors the SQLite sibling exactly.
+    async fn tenant_of_agent(&self, agent_id: &str) -> Result<Option<String>> {
+        use crate::schema::agents;
+        let pool = Arc::clone(&self.pool);
+        let aid = agent_id.to_string();
+        tokio::task::spawn_blocking(move || -> Result<Option<String>> {
+            let mut conn = pool.get().context("get db connection")?;
+            Ok(agents::table
+                .filter(agents::id.eq(aid))
+                .select(agents::tenant_id)
+                .first::<String>(&mut conn)
+                .optional()?
+                .filter(|t| !t.is_empty()))
         })
         .await?
     }

@@ -507,6 +507,13 @@ pub(crate) async fn launch_orchestrator_process(
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_secs(),
+                // The orchestrator's container arm uses runtime
+                // auto-detection and its ssh/local arms need no
+                // reconstruction facts, so there is nothing to persist
+                // here (the sweep auto-detects the runtime at kill time;
+                // ssh stays unreconstructable by design — connection
+                // details are not persisted).
+                backend_config: None,
                 terminated_at: None,
                 terminated_reason: None,
             };

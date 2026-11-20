@@ -2,8 +2,8 @@
 title: "Admin Panel completion: SOPS/Vault secret backends, durable job history with logs, maintenance jobs, complete token refresh, server-log viewer, durable searchable admin audit"
 spec_ref: "Spec gap spec-5b647653a4554eea3e93ac19 / admin-panel-remaining-gap / e61ffd082155"
 depends_on: []
-progress: ready-for-review
-commits: ["7fe530de59c902ef18f9aadc7448aa6ff8acb3fe", "fa69e871b93d4c6e1cf2f6aeb2b39332dd9d7524", "44eb55a239681f4510d8388525ddf7a3257226dd", "3f51333665c3ad4284f27996e79c14af545db856", "56e5ea5f797f1f19037b40e65f529239c550d649", "a0dc3e637e6ffbae976675b755abf0b2891bf481", "4c71fe4827a62f792912b4e5ab257a50c1882860", "d6f32bd0269314f9ee552ed72df33322b0fe2238", "cd2f616e3ebd96addab2dcaf78242d31c58efc04", "808e3c10c035c9fc6fe8c5ee96d474fc5468acf3", "b979fefeeb7a6bb8340ccd85c64b467e0f46c553", "210dfa61bc1ea637a29a79c26af80746b2fb002c", "3ebd143d29eb52bb2bc0bd748f60fe52fa960f66", "9b81c9816f13a3d637057a6c3149c9be92f38a3c", "0fda00bfe9860c8c8b66ea1235f0d2e3251df67a", "1bc00b6cb9212e6ac6dfc7c764afede98ae8fd64", "a2b31ac19c05310ebd05a072ddde1acf0c51f2ec", "f6e31cf57779a7e117f5a0b9bd75720aed90ca56", "b101d27aafb7bde0907a568e7bb8a3ffbdd3ae67", "ee253c8854f16664f91d16171e08414effc314b7", "db320101b1540a35cf9986408e70ac46008b1982"]
+progress: not-started
+commits: []
 ---
 
 ## Required behavior
@@ -119,63 +119,3 @@ Canonical spec: `specs/system/admin-panel.md`. Source: `fb1424fbac55cd23cb08606f
     ]
   }
 ]
-
-## Shipped
-
-The eight admin-panel deliverables shipped in the earlier rounds on this
-branch (see the commits list) and are carried through the base merges,
-behavior preserved: SOPS-default/Vault-option secret backends (genuine
-SOPS documents with an age-wrapped data key, decryptable with the sops
-CLI; Vault KV v2 with agent-JWT resolution per platform-model §7, server
-AppRole writes, fail-closed on unreachable Vault), durable job history
-with per-run logs through the `JobRunRepository` port (SQLite +
-PostgreSQL + mem parity), the `repo_maintenance` / `oauth_state_cleanup`
-/ `remote_agent_cleanup` / `job_history_cleanup` scheduled jobs,
-document-shape token-refresh dispatch (RFC 6749 refresh grant, GCP SA
-RS256 JWT-bearer grant, per-secret outcomes in run logs), the durable
-OAuth-state Claude Max enrollment flow with PKCE, the ring-buffer
-server-log viewer (`GET /admin/server/logs` + Server Logs tab), and the
-durable tenant-scoped searchable admin audit (`tenant_id` on AuditEvent
-with portable backfill migration, free-text `q` in both SQL adapters,
-zstd-transparent matching).
-
-### This round: rebase repair onto 0a70b31e (merge commit 3001d786)
-
-The saved source was rebased onto base 0a70b31e (task-270: PR hygiene
-job + PR-collaboration push invariants). Conflicts in
-`crates/gyre-server/src/jobs.rs` and `crates/gyre-server/src/main.rs`
-resolved by keeping both sides: task-270's `pr_hygiene_check`
-registration, interval scheduler spawn and registration test alongside
-the task-273 maintenance jobs and durable job-run store tests. The one
-semantic adaptation: `pr_hygiene`'s handler registration now uses the
-task-273 two-argument handler signature (`|state, _log|`), matching how
-`email_digest` was adapted — `pr_hygiene::run_once` itself is unchanged.
-No other behavior changed in this round.
-
-### Verification evidence (this round)
-
-- `cargo check -p gyre-server` and `cargo check -p gyre-server --tests`
-  pass on the merged tree (type-level proof that both test modules and
-  both registration sets coexist).
-- `scripts/check-abac-route-registry.sh`: OK, no exemption growth (route
-  tables union-merged cleanly).
-- `scripts/check-migration-versions.sh`: OK, no duplicate versions.
-- web/dist left at the assignment-base state (executor owns asset
-  rebuild/publication); the local build.rs regeneration was discarded.
-
-### Deferred to the independent verifier (gyre-server test compilation
-exceeds the in-sandbox memory budget)
-
-- `cargo test -p gyre-server --lib jobs::` — covers both the task-273
-  durable-store tests (`trigger_persists_runs_through_the_durable_store`,
-  `record_run_retries_transient_durable_failures`,
-  `record_run_counts_runs_lost_after_exhausted_retries`) and the task-270
-  `pr_hygiene_check_registered_on_interval_not_daily`.
-- `cargo test -p gyre-server --lib pr_hygiene` and the maintenance-job
-  tests (`maintenance_jobs`, `repo_maintenance`, `oauth_state`,
-  `remote_agent_cleanup`, `job_history_cleanup` modules).
-- `cargo test -p gyre-server --test git_integration` and
-  `--test e2e_ralph_loop` (both touched by the base merge).
-- Full gates: check-arch.sh, check-migration-sql-portability.sh,
-  check-mem-port-contracts.sh, check-in-memory-state-stores.sh,
-  check-unbounded-external-http.sh, all-target Clippy, GitHub CI.

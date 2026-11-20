@@ -365,6 +365,7 @@ diesel::table! {
         handle_id -> Text,
         pid -> Nullable<Integer>,
         spawned_at -> BigInt,
+        backend_config -> Nullable<Text>,
         terminated_at -> Nullable<BigInt>,
         terminated_reason -> Nullable<Text>,
     }

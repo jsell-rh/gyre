@@ -3,6 +3,8 @@ use async_trait::async_trait;
 use gyre_ports::{ComputeTarget, ProcessHandle, SpawnConfig};
 use tokio::process::Command;
 
+use super::container_already_gone;
+
 /// Spawns processes inside Docker containers via the `docker run` CLI.
 pub struct DockerTarget {
     /// Docker image to use when spawning containers.
@@ -62,16 +64,29 @@ impl ComputeTarget for DockerTarget {
     }
 
     async fn kill_process(&self, handle: &ProcessHandle) -> Result<()> {
-        let status = Command::new("docker")
+        let output = Command::new("docker")
             .arg("rm")
             .arg("--force")
             .arg(&handle.id)
-            .status()
+            .output()
             .await
             .context("docker rm --force failed")?;
 
-        if !status.success() {
-            tracing::warn!(container_id = %handle.id, "docker rm --force returned non-zero");
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            // Already-gone container = successful kill; every other
+            // non-zero exit is a real failure that must surface (review
+            // task-273: a warn-and-return-Ok would mark a live orphan
+            // terminated).
+            if container_already_gone(&stderr) {
+                tracing::info!(container_id = %handle.id, "container already gone");
+                return Ok(());
+            }
+            return Err(anyhow::anyhow!(
+                "docker rm --force {} failed: {}",
+                handle.id,
+                stderr.trim()
+            ));
         }
         Ok(())
     }

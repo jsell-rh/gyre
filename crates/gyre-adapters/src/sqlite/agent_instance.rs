@@ -20,6 +20,7 @@ struct AgentInstanceRow {
     handle_id: String,
     pid: Option<i32>,
     spawned_at: i64,
+    backend_config: Option<String>,
     terminated_at: Option<i64>,
     terminated_reason: Option<String>,
 }
@@ -33,6 +34,7 @@ impl AgentInstanceRow {
             handle_id: self.handle_id,
             pid: self.pid.map(|p| p as u32),
             spawned_at: self.spawned_at as u64,
+            backend_config: self.backend_config,
             terminated_at: self.terminated_at.map(|t| t as u64),
             terminated_reason: self.terminated_reason,
         }
@@ -48,6 +50,7 @@ struct NewAgentInstanceRow<'a> {
     handle_id: &'a str,
     pid: Option<i32>,
     spawned_at: i64,
+    backend_config: Option<&'a str>,
     terminated_at: Option<i64>,
     terminated_reason: Option<&'a str>,
 }
@@ -66,6 +69,7 @@ impl AgentInstanceRepository for SqliteStorage {
                 handle_id: &record.handle_id,
                 pid: record.pid.map(|p| p as i32),
                 spawned_at: record.spawned_at as i64,
+                backend_config: record.backend_config.as_deref(),
                 terminated_at: record.terminated_at.map(|t| t as i64),
                 terminated_reason: record.terminated_reason.as_deref(),
             };
@@ -156,9 +160,31 @@ mod tests {
             handle_id: handle.to_string(),
             pid: Some(4242),
             spawned_at: 1_000,
+            backend_config: None,
             terminated_at: None,
             terminated_reason: None,
         }
+    }
+
+    #[tokio::test]
+    async fn backend_config_roundtrips() {
+        // review task-273: kill-reconstruction details (container runtime,
+        // k8s namespace/context/kubectl path) must survive the store —
+        // the orphan sweep reconstructs the kill target from them.
+        let (_tmp, s) = setup();
+        let mut rec = instance("agent-1", "pod-a");
+        rec.backend = "kubernetes".to_string();
+        rec.target_type = "kubernetes".to_string();
+        rec.backend_config =
+            Some(serde_json::json!({"namespace": "gyre-agents", "context": "prod"}).to_string());
+        s.record_spawned(&rec).await.unwrap();
+        let found = s.find_by_agent("agent-1").await.unwrap().unwrap();
+        assert_eq!(found.backend_config, rec.backend_config);
+        // And it is listed for the sweep.
+        assert_eq!(
+            s.list_running().await.unwrap()[0].backend_config,
+            rec.backend_config
+        );
     }
 
     #[tokio::test]

@@ -318,18 +318,33 @@ impl ComputeTarget for KubernetesTarget {
     }
 
     async fn kill_process(&self, handle: &ProcessHandle) -> Result<()> {
-        let status = self
+        let output = self
             .kubectl()
             .arg("delete")
             .arg("pod")
             .arg(&handle.id)
             .arg("--grace-period=30")
-            .status()
+            .output()
             .await
             .with_context(|| format!("kubectl delete pod {} failed", handle.id))?;
-        if !status.success() {
-            // Already-gone pods are a successful kill.
-            tracing::warn!(pod = %handle.id, "kubectl delete returned non-zero");
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            // A pod that does not exist is already gone — a successful
+            // kill. EVERYTHING else (wrong namespace, missing context,
+            // unreachable cluster, RBAC denial) is a REAL failure that
+            // must surface: callers mark the instance terminated only
+            // after a verified kill, and a warn-and-return-Ok here would
+            // permanently hide a live orphan behind a "reaped" record
+            // (review task-273).
+            if pod_already_gone(&stderr) {
+                tracing::info!(pod = %handle.id, "pod already gone (NotFound)");
+                return Ok(());
+            }
+            return Err(anyhow!(
+                "kubectl delete pod {} failed: {}",
+                handle.id,
+                stderr.trim()
+            ));
         }
         Ok(())
     }
@@ -389,6 +404,18 @@ pub fn kubernetes_target_from_config(config: &serde_json::Value) -> KubernetesTa
         t = t.with_kubectl_path(p);
     }
     t
+}
+
+/// Whether a failed `kubectl delete` stderr means the pod does not exist
+/// (already gone — a successful kill) as opposed to a real failure
+/// (unreachable cluster, wrong namespace, RBAC denial, …).
+/// `Error from server (NotFound): pods "x" not found` is kubectl's
+/// already-gone shape (review task-273: only this class may be treated as
+/// success; every other non-zero exit must fail the kill so the caller
+/// does not mark a live orphan terminated).
+fn pod_already_gone(stderr: &str) -> bool {
+    let lower = stderr.to_lowercase();
+    lower.contains("notfound") || lower.contains("not found")
 }
 
 #[cfg(test)]
@@ -515,6 +542,131 @@ mod tests {
             t.kubectl_path.is_none(),
             "no config kubectl_path must fall back to kubectl from PATH"
         );
+    }
+
+    #[test]
+    fn pod_already_gone_matches_only_not_found_stderr() {
+        // Already-gone shapes (successful kill).
+        assert!(pod_already_gone(
+            "Error from server (NotFound): pods \"agent-1\" not found"
+        ));
+        assert!(pod_already_gone("error: pods \"x\" not found"));
+        // Real failures must NOT be treated as already-gone.
+        assert!(!pod_already_gone(
+            "error: context \"prod\" does not exist"
+        ));
+        assert!(!pod_already_gone(
+            "Error from server (Forbidden): pods \"agent-1\" is forbidden"
+        ));
+        assert!(!pod_already_gone(
+            "The connection to the server 10.0.0.1:6443 was refused"
+        ));
+        assert!(!pod_already_gone(""));
+    }
+
+    /// review task-273: kill_process must distinguish an already-gone pod
+    /// (NotFound → Ok) from a real failure (anything else → Err) — a
+    /// warn-and-return-Ok on every non-zero exit let a wrong-namespace or
+    /// unreachable-cluster delete be recorded as a successful kill while
+    /// the orphan pod kept running. Drives the real kubectl invocation
+    /// through a stub binary via `kubectl_path`.
+    #[tokio::test]
+    async fn kill_process_not_found_is_ok_real_failure_is_err() {
+        let stub = write_stub_kubectl(
+            "if echo \"$*\" | grep -q 'already-gone'; then
+                 echo 'Error from server (NotFound): pods already-gone not found' >&2
+                 exit 1
+             fi
+             echo 'The connection to the server was refused' >&2
+             exit 1",
+        );
+        let target = KubernetesTarget::new("gyre-agent:test").with_kubectl_path(&stub);
+
+        let gone = ProcessHandle {
+            id: "already-gone".to_string(),
+            target_type: "kubernetes".to_string(),
+            pid: None,
+        };
+        target.kill_process(&gone).await.unwrap();
+
+        let live = ProcessHandle {
+            id: "still-running".to_string(),
+            target_type: "kubernetes".to_string(),
+            pid: None,
+        };
+        let err = target.kill_process(&live).await.unwrap_err();
+        assert!(
+            err.to_string().contains("still-running"),
+            "a real delete failure must name the pod, got: {err}"
+        );
+    }
+
+    /// review task-273: the kill must address the pod in the namespace
+    /// (and context) the target was constructed with — the
+    /// remote_agent_cleanup sweep reconstructs the target from the
+    /// durable record's backend_config, and a default-constructed target
+    /// without the persisted namespace deletes from the wrong place.
+    #[tokio::test]
+    async fn kill_process_addresses_persisted_namespace_and_context() {
+        let (stub, recorded) = write_recording_kubectl();
+        let target = KubernetesTarget::new("gyre-agent:test")
+            .with_kubectl_path(&stub)
+            .with_namespace("gyre-agents")
+            .with_context("prod");
+        let handle = ProcessHandle {
+            id: "agent-pod-7".to_string(),
+            target_type: "kubernetes".to_string(),
+            pid: None,
+        };
+        target.kill_process(&handle).await.unwrap();
+        let invoked = std::fs::read_to_string(recorded).unwrap();
+        assert!(
+            invoked.contains("--namespace gyre-agents") && invoked.contains("--context prod"),
+            "the kill must carry the persisted namespace/context, invoked: {invoked}"
+        );
+        assert!(
+            invoked.contains("delete pod agent-pod-7"),
+            "the kill must delete the recorded pod, invoked: {invoked}"
+        );
+    }
+
+    /// Write an executable stub `kubectl` that exits per `script`.
+    fn write_stub_kubectl(script: &str) -> String {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("kubectl");
+        std::fs::write(&path, format!("#!/bin/sh\n{script}\n")).unwrap();
+        make_executable(&path);
+        // Leak the tempdir: the stub must outlive this function (the
+        // target invokes it asynchronously afterwards).
+        std::mem::forget(dir);
+        path.to_str().unwrap().to_string()
+    }
+
+    /// Write an executable stub `kubectl` that records its arguments to
+    /// `recorded` (a file next to the stub) and exits 0. Returns
+    /// (kubectl_path, recorded_path).
+    fn write_recording_kubectl() -> (String, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let stub = dir.path().join("kubectl");
+        let recorded = dir.path().join("invoked.txt");
+        std::fs::write(
+            &stub,
+            format!(
+                "#!/bin/sh\necho \"$@\" > {}\n",
+                recorded.to_str().unwrap()
+            ),
+        )
+        .unwrap();
+        make_executable(&stub);
+        std::mem::forget(dir);
+        (stub.to_str().unwrap().to_string(), recorded.to_str().unwrap().to_string())
+    }
+
+    fn make_executable(path: &std::path::Path) {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(path, perms).unwrap();
     }
 
     /// `kubectl_path` must drive the actual binary spawn_process invokes —

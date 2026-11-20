@@ -260,6 +260,17 @@
     return col === activeCol ? (dir === 1 ? ' ↑' : ' ↓') : '';
   }
 
+  // TASK-273 review: the server's JobInfo carries interval_secs (there is
+  // no cron `schedule` or `last_run` field) — render the interval the API
+  // actually sends instead of a phantom column that is always '—'.
+  function fmtJobInterval(secs) {
+    if (secs == null) return '—';
+    if (secs % 86400 === 0) return `every ${secs / 86400}d`;
+    if (secs % 3600 === 0) return `every ${secs / 3600}h`;
+    if (secs % 60 === 0) return `every ${secs / 60}m`;
+    return `every ${secs}s`;
+  }
+
   // ── Data loading driven by tab ─────────────────────────────────────────
   $effect(() => {
     const tab = activeTab;
@@ -644,6 +655,14 @@
     try {
       const data = await api.adminJobs();
       jobs = Array.isArray(data) ? data : (data?.jobs ?? []);
+      // TASK-273 review: JobInfo sends no `last_run` field — derive the
+      // Last Run column's sort key from the most recent persisted run so
+      // the column header sorts real data instead of a phantom field.
+      for (const j of jobs) {
+        if (j && j.last_run == null && Array.isArray(j.recent_runs) && j.recent_runs.length > 0) {
+          j.last_run = j.recent_runs[0].started_at ?? null;
+        }
+      }
     } catch (e) {
       jobsError = e?.message ?? $t('tenant_settings.error_load_jobs');
     } finally {
@@ -1826,7 +1845,7 @@
             <thead>
               <tr>
                 <th scope="col" aria-sort={jobsSortCol === 'name' ? (jobsSortDir === 1 ? 'ascending' : 'descending') : 'none'}><button class="sort-btn" onclick={() => toggleSort('name', jobsSortCol, jobsSortDir, v => jobsSortCol = v, v => jobsSortDir = v)}>{$t('tenant_settings.jobs.col_job')}{sortArrow('name', jobsSortCol, jobsSortDir)}</button></th>
-                <th scope="col" aria-sort={jobsSortCol === 'schedule' ? (jobsSortDir === 1 ? 'ascending' : 'descending') : 'none'}><button class="sort-btn" onclick={() => toggleSort('schedule', jobsSortCol, jobsSortDir, v => jobsSortCol = v, v => jobsSortDir = v)}>{$t('tenant_settings.jobs.col_schedule')}{sortArrow('schedule', jobsSortCol, jobsSortDir)}</button></th>
+                <th scope="col" aria-sort={jobsSortCol === 'interval_secs' ? (jobsSortDir === 1 ? 'ascending' : 'descending') : 'none'}><button class="sort-btn" onclick={() => toggleSort('interval_secs', jobsSortCol, jobsSortDir, v => jobsSortCol = v, v => jobsSortDir = v)}>{$t('tenant_settings.jobs.col_schedule')}{sortArrow('interval_secs', jobsSortCol, jobsSortDir)}</button></th>
                 <th scope="col" aria-sort={jobsSortCol === 'last_run' ? (jobsSortDir === 1 ? 'ascending' : 'descending') : 'none'}><button class="sort-btn" onclick={() => toggleSort('last_run', jobsSortCol, jobsSortDir, v => jobsSortCol = v, v => jobsSortDir = v)}>{$t('tenant_settings.jobs.col_last_run')}{sortArrow('last_run', jobsSortCol, jobsSortDir)}</button></th>
                 <th scope="col" aria-sort={jobsSortCol === 'status' ? (jobsSortDir === 1 ? 'ascending' : 'descending') : 'none'}><button class="sort-btn" onclick={() => toggleSort('status', jobsSortCol, jobsSortDir, v => jobsSortCol = v, v => jobsSortDir = v)}>{$t('tenant_settings.jobs.col_status')}{sortArrow('status', jobsSortCol, jobsSortDir)}</button></th>
                 <th scope="col">{$t('tenant_settings.audit.col_action')}</th>
@@ -1837,8 +1856,8 @@
                 {@const jobId = job.name ?? job.id}
                 <tr class="clickable-row" onclick={() => { expandedJobRuns = expandedJobRuns === jobId ? null : jobId; }} tabindex="0" role="button" onkeydown={(e) => { if (e.key === 'Enter') expandedJobRuns = expandedJobRuns === jobId ? null : jobId; }} aria-expanded={expandedJobRuns === jobId}>
                   <td class="td-name">{job.name ?? job.id ?? '—'}</td>
-                  <td class="td-mono">{job.schedule ?? '—'}</td>
-                  <td class="td-mono">{job.last_run ? new Date(job.last_run).toLocaleString() : (job.recent_runs?.[0] ? fmtTimestamp(job.recent_runs[0].started_at) : '—')}</td>
+                  <td class="td-mono">{fmtJobInterval(job.interval_secs)}</td>
+                  <td class="td-mono">{job.recent_runs?.[0] ? fmtTimestamp(job.recent_runs[0].started_at) : '—'}</td>
                   <td>
                     <span class="status-pill" class:status-ok={job.status === 'ok' || job.status === 'success'} class:status-warn={job.status === 'running'} class:status-err={job.status === 'error' || job.status === 'failed'} title={job.status === 'ok' || job.status === 'success' ? 'Last run completed successfully' : job.status === 'running' ? 'Job is currently executing' : job.status === 'error' || job.status === 'failed' ? 'Last run failed — check logs for details' : ''}>
                       {job.status ?? '—'}

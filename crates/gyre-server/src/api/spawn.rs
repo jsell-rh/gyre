@@ -2575,6 +2575,49 @@ impl SpawnBackend {
             SpawnBackend::Local => "local",
         }
     }
+
+    /// Kill-reconstruction details persisted in the durable
+    /// agent-instance record, as JSON (review task-273): the
+    /// remote_agent_cleanup sweep rebuilds a compute target for a
+    /// restart-orphan from the record alone, and container/kubernetes
+    /// kills address global resources whose location depends on facts
+    /// known only here — the explicit container runtime, and the pod's
+    /// namespace / kubectl context / binary path. Without them the
+    /// reconstructed `kubectl delete pod` runs without `--namespace` and
+    /// addresses the wrong place, failing while the orphan pod keeps
+    /// running. `None` when the backend needs nothing beyond the handle
+    /// (local) or cannot be reconstructed (ssh: connection details are
+    /// not persisted in the record).
+    fn backend_kill_config(&self) -> Option<String> {
+        match self {
+            SpawnBackend::Container(t) => t.runtime.as_ref().map(|r| {
+                serde_json::json!({
+                    "runtime": match r {
+                        gyre_adapters::compute::container::Runtime::Docker => "docker",
+                        gyre_adapters::compute::container::Runtime::Podman => "podman",
+                    }
+                })
+                .to_string()
+            }),
+            SpawnBackend::Kubernetes(t) => {
+                // ALWAYS persist a config for kubernetes spawns, even an
+                // empty object: the sweep must distinguish "reconstruction
+                // facts known (namespace possibly genuinely None =
+                // cluster default)" from a legacy record with no config
+                // (unknown namespace — unreconstructable, never blindly
+                // killed).
+                Some(
+                    serde_json::json!({
+                        "namespace": t.namespace,
+                        "context": t.context,
+                        "kubectl_path": t.kubectl_path,
+                    })
+                    .to_string(),
+                )
+            }
+            SpawnBackend::SshDocker(_) | SpawnBackend::SshBare(_) | SpawnBackend::Local => None,
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -2662,6 +2705,11 @@ async fn register_spawned_agent(
     // TASK-273: descriptor for the durable instance record, captured before
     // the backend is moved into the in-memory registry.
     let backend_descriptor = backend.target_type().to_string();
+    // review task-273: kill-reconstruction details (container runtime;
+    // k8s namespace/context/kubectl path), captured before the move —
+    // the orphan sweep rebuilds a target that addresses the right
+    // process/container/pod after a restart.
+    let backend_config = backend.backend_kill_config();
     state
         .process_registry
         .lock()
@@ -2689,6 +2737,11 @@ async fn register_spawned_agent(
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs(),
+        // review task-273: kill-reconstruction details (container
+        // runtime; k8s namespace/context/kubectl path) so the orphan
+        // sweep can rebuild a target that addresses the right
+        // process/container/pod after a restart.
+        backend_config,
         terminated_at: None,
         terminated_reason: None,
     };

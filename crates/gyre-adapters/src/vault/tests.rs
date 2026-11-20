@@ -15,7 +15,7 @@ type VaultStore = Arc<Mutex<HashMap<String, serde_json::Value>>>;
 type NamespaceEvent = (&'static str, Option<String>);
 
 /// What the stub server observed (tokens per path, JWT logins,
-/// namespaces, AppRole token generations).
+/// namespaces, AppRole token generations, version destroys).
 #[derive(Default, Clone)]
 struct Observed {
     /// (path, token) for every data read.
@@ -23,8 +23,16 @@ struct Observed {
     /// JWTs presented at the JWT login endpoint.
     jwt_logins: Arc<Mutex<Vec<String>>>,
     /// (op, namespace header) for every namespaced request (data reads,
-    /// index reads, lists, deletes, writes).
+    /// index reads, lists, deletes, writes, destroys).
     namespaces: Arc<Mutex<Vec<NamespaceEvent>>>,
+    /// (path, versions) for every KV v2 destroy request (review
+    /// task-273: rotate/replace must destroy the superseded versions).
+    destroys: Arc<Mutex<Vec<(String, Vec<String>)>>>,
+    /// KV v2 version model (stub server state, not just observation): a
+    /// per-path write counter, incremented on every data POST and served
+    /// as `/data/metadata/version` on reads — real Vault's versioned
+    /// append semantics.
+    data_versions: Arc<Mutex<HashMap<String, u64>>>,
     /// AppRole tokens "approle-token-N" with N <= this value are rejected
     /// (403) by the data/metadata handlers — the test flips this to
     /// simulate a cached server token whose TTL expired.
@@ -46,6 +54,10 @@ async fn spawn_vault() -> (String, VaultStore, Observed) {
     let reads = Arc::clone(&observed.reads);
     let jwt_logins = Arc::clone(&observed.jwt_logins);
     let namespaces = Arc::clone(&observed.namespaces);
+    let destroys = Arc::clone(&observed.destroys);
+    let data_versions = Arc::clone(&observed.data_versions);
+    let data_versions_read = Arc::clone(&data_versions);
+    let data_versions_write = Arc::clone(&data_versions);
     let reject_approle_upto = Arc::clone(&observed.reject_approle_upto);
     let agent_denied_reads = Arc::clone(&observed.agent_denied_prefixes);
     let agent_denied_lists = Arc::clone(&observed.agent_denied_prefixes);
@@ -56,12 +68,14 @@ async fn spawn_vault() -> (String, VaultStore, Observed) {
     // Per-handler clones: each `move` route closure needs its own Arc.
     let ns_data_read = Arc::clone(&namespaces);
     let ns_delete = Arc::clone(&namespaces);
+    let ns_destroy = Arc::clone(&namespaces);
     let ns_approle_login = Arc::clone(&namespaces);
     let ns_jwt_login = Arc::clone(&namespaces);
     let reject_reads = Arc::clone(&reject_approle_upto);
     let reject_writes = Arc::clone(&reject_approle_upto);
     let reject_list = Arc::clone(&reject_approle_upto);
     let reject_delete = Arc::clone(&reject_approle_upto);
+    let reject_destroy = Arc::clone(&reject_approle_upto);
     let approle_generation = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let approle_gen_login = Arc::clone(&approle_generation);
 
@@ -174,10 +188,17 @@ async fn spawn_vault() -> (String, VaultStore, Observed) {
                             .await
                             .push((format!("secret/data/{path}"), token));
                         let store = store.lock().await;
+                        let version = *data_versions_read
+                            .lock()
+                            .await
+                            .get(&format!("secret/data/{path}"))
+                            .unwrap_or(&0);
                         match store.get(&format!("secret/data/{path}")) {
                             Some(data) => (
                                 axum::http::StatusCode::OK,
-                                axum::Json(serde_json::json!({ "data": { "data": data } })),
+                                axum::Json(serde_json::json!({
+                                    "data": { "data": data, "metadata": { "version": version } }
+                                })),
                             ),
                             None => (
                                 axum::http::StatusCode::NOT_FOUND,
@@ -207,10 +228,63 @@ async fn spawn_vault() -> (String, VaultStore, Observed) {
                         }
                         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
                         let data = v["data"].clone();
-                        store
+                        let key = format!("secret/data/{path}");
+                        let mut versions = data_versions_write.lock().await;
+                        let version = versions.entry(key.clone()).or_insert(0);
+                        *version += 1;
+                        store.lock().await.insert(key, data);
+                        (
+                            axum::http::StatusCode::OK,
+                            axum::Json(serde_json::json!({})),
+                        )
+                    }
+                },
+            ),
+        )
+        // KV v2 version destroy (review task-273): rotate/replace must
+        // destroy the superseded versions — the old value must not stay
+        // readable at ?version=N.
+        .route(
+            "/v1/secret/destroy/*path",
+            post(
+                move |axum::extract::Path(path): axum::extract::Path<String>,
+                      headers: axum::http::HeaderMap,
+                      body: String| {
+                    let destroys = Arc::clone(&destroys);
+                    let namespaces = ns_destroy;
+                    let reject_upto = reject_destroy;
+                    async move {
+                        let token = headers
+                            .get("X-Vault-Token")
+                            .and_then(|t| t.to_str().ok())
+                            .unwrap_or_default()
+                            .to_string();
+                        if !token_accepted(&token, &reject_upto) {
+                            return (
+                                axum::http::StatusCode::FORBIDDEN,
+                                axum::Json(serde_json::json!({"errors": ["permission denied"]})),
+                            );
+                        }
+                        namespaces.lock().await.push((
+                            "destroy",
+                            headers
+                                .get("X-Vault-Namespace")
+                                .and_then(|n| n.to_str().ok())
+                                .map(str::to_string),
+                        ));
+                        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+                        let versions: Vec<String> = v["versions"]
+                            .as_array()
+                            .map(|a| {
+                                a.iter()
+                                    .filter_map(|x| x.as_str().map(str::to_string))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        destroys
                             .lock()
                             .await
-                            .insert(format!("secret/data/{path}"), data);
+                            .push((format!("secret/data/{path}"), versions));
                         (
                             axum::http::StatusCode::OK,
                             axum::Json(serde_json::json!({})),
@@ -695,6 +769,167 @@ async fn create_rejects_path_unsafe_names() {
     assert!(
         store.lock().await.is_empty(),
         "no path-unsafe write may land"
+    );
+}
+
+/// Review task-273: the raw secret `id` (verbatim from the delete/rotate
+/// URL path) and the request-body `scope_id` are interpolated into Vault
+/// KV paths — a crafted `../`-bearing id escapes the `_idx` subtree (it
+/// can read ANOTHER tenant's index entry and target an arbitrary metadata
+/// path for the index DELETE), and a `../`-bearing scope_id addresses
+/// another scope's subtree. Both must be rejected as path-unsafe segments
+/// by the adapter itself.
+#[tokio::test]
+async fn path_unsafe_ids_and_scope_ids_are_rejected() {
+    let (addr, store, observed) = spawn_vault().await;
+    let repo = VaultSecretRepository::new(config(&addr)).unwrap();
+
+    // Seed one real secret in tenant t1.
+    let real = sample_secret("REAL", SecretScope::Repo, "repo-1", "t1");
+    repo.create(&real, b"v").await.unwrap();
+    observed.reads.lock().await.clear();
+
+    // A crafted id (the delete/rotate URL-path shape) is rejected on every
+    // id-addressed operation — BEFORE any Vault request is made.
+    for bad in ["../t2/_idx/x", "a/b", "a\\b", "..", "bad\u{0}id"] {
+        let crafted = Id::new(bad);
+        let err = repo.get_value(&crafted, "t1").await.unwrap_err();
+        assert!(
+            err.to_string().contains("traversal") || err.to_string().contains("control"),
+            "id {bad:?} must be rejected as path-unsafe, got: {err}"
+        );
+        let err = repo.delete(&crafted, "t1").await.unwrap_err();
+        assert!(
+            err.to_string().contains("traversal") || err.to_string().contains("control"),
+            "id {bad:?} must be rejected as path-unsafe on delete, got: {err}"
+        );
+        let err = repo.rotate(&crafted, b"v", "t1").await.unwrap_err();
+        assert!(
+            err.to_string().contains("traversal") || err.to_string().contains("control"),
+            "id {bad:?} must be rejected as path-unsafe on rotate, got: {err}"
+        );
+    }
+
+    // A crafted request-body scope_id is rejected on create and
+    // list_by_scope.
+    for bad in ["../escape", "a/b", ".."] {
+        let mut secret = sample_secret("NEW", SecretScope::Repo, bad, "t1");
+        secret.scope_id = bad.to_string();
+        let err = repo.create(&secret, b"v").await.unwrap_err();
+        assert!(
+            err.to_string().contains("traversal") || err.to_string().contains("control"),
+            "scope_id {bad:?} must be rejected as path-unsafe, got: {err}"
+        );
+        let err = repo
+            .list_by_scope(SecretScope::Repo, bad, "t1")
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("traversal") || err.to_string().contains("control"),
+            "scope_id {bad:?} must be rejected as path-unsafe on list, got: {err}"
+        );
+    }
+
+    // No Vault request addressed anything outside tenant t1's subtree —
+    // in particular no cross-tenant index read ever happened.
+    // (Scoped: the reads guard must be released before the final
+    // get_value — its server handler pushes into the same mutex.)
+    {
+        let reads = observed.reads.lock().await;
+        assert!(
+            reads
+                .iter()
+                .all(|(p, _)| p.starts_with("secret/data/gyre-secrets/t1/")),
+            "no request may escape the caller's tenant subtree, saw: {reads:?}"
+        );
+    }
+    // The seeded secret is untouched.
+    assert_eq!(
+        repo.get_value(&real.id, "t1").await.unwrap(),
+        Some(b"v".to_vec())
+    );
+    assert!(store.lock().await.len() >= 2, "seeded entries remain");
+}
+
+/// Review task-273: KV v2 writes are versioned appends — after a rotate,
+/// the prior version stays readable at `?version=N` (by any token with
+/// read on the path, the agent JWT's policy included) unless it is
+/// explicitly destroyed. Rotate must destroy every superseded version.
+#[tokio::test]
+async fn rotate_destroys_superseded_versions() {
+    let (addr, _store, observed) = spawn_vault().await;
+    let repo = VaultSecretRepository::new(config(&addr)).unwrap();
+
+    let secret = sample_secret("ROT", SecretScope::Repo, "repo-1", "t1");
+    repo.create(&secret, b"v1").await.unwrap();
+    observed.destroys.lock().await.clear();
+
+    let data_path = "secret/data/gyre-secrets/t1/repo/repo-1/ROT";
+    repo.rotate(&secret.id, b"v2", "t1").await.unwrap();
+
+    // The superseded version 1 was destroyed at the secret's data path.
+    // (Scoped: the guard must be released before the requests below —
+    // the stub's destroy handler pushes into the same mutex.)
+    {
+        let destroys = observed.destroys.lock().await;
+        assert!(
+            destroys
+                .iter()
+                .any(|(p, versions)| p == data_path && versions == &["1".to_string()]),
+            "rotate must destroy the superseded version 1, saw: {destroys:?}"
+        );
+    }
+
+    // The new value is served.
+    assert_eq!(
+        repo.get_value(&secret.id, "t1").await.unwrap(),
+        Some(b"v2".to_vec())
+    );
+
+    // A second rotation destroys everything superseded — versions 1 and
+    // 2 (version 2 was superseded by this very rotation; robust across
+    // retries after a failed destroy).
+    repo.rotate(&secret.id, b"v3", "t1").await.unwrap();
+    let destroys = observed.destroys.lock().await;
+    assert!(
+        destroys.iter().any(|(p, versions)| p == data_path
+            && versions.contains(&"1".to_string())
+            && versions.contains(&"2".to_string())),
+        "the second rotation must destroy versions 1 and 2, saw: {destroys:?}"
+    );
+    assert_eq!(
+        repo.get_value(&secret.id, "t1").await.unwrap(),
+        Some(b"v3".to_vec())
+    );
+}
+
+/// Review task-273: `replace` (the rotation / re-enrollment write path)
+/// supersedes a version at the same data path — the prior version must
+/// be destroyed there too, exactly like rotate.
+#[tokio::test]
+async fn replace_destroys_superseded_versions_at_unchanged_location() {
+    let (addr, _store, observed) = spawn_vault().await;
+    let repo = VaultSecretRepository::new(config(&addr)).unwrap();
+
+    let secret = sample_secret("REP", SecretScope::Repo, "repo-1", "t1");
+    repo.create(&secret, b"old").await.unwrap();
+    observed.destroys.lock().await.clear();
+
+    let mut updated = secret.clone();
+    updated.last_rotated_at = Some(1_700_000_100);
+    repo.replace(&updated, b"new").await.unwrap();
+
+    let destroys = observed.destroys.lock().await;
+    let data_path = "secret/data/gyre-secrets/t1/repo/repo-1/REP";
+    assert!(
+        destroys
+            .iter()
+            .any(|(p, versions)| p == data_path && versions == &["1".to_string()]),
+        "replace must destroy the superseded version at the data path, saw: {destroys:?}"
+    );
+    assert_eq!(
+        repo.get_value(&secret.id, "t1").await.unwrap(),
+        Some(b"new".to_vec())
     );
 }
 

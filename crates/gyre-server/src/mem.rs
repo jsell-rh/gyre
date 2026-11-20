@@ -2122,6 +2122,10 @@ pub struct MemAuditRepository {
 struct MemAuditTenantSources {
     workspaces: Option<Arc<dyn gyre_ports::WorkspaceRepository>>,
     users: Option<Arc<dyn gyre_ports::UserRepository>>,
+    /// Agent principals (review task-273): server-emitted agent events
+    /// (container lifecycle, agent-principal denials) carry neither
+    /// workspace nor user — their tenant is derived from the agent row.
+    agents: Option<Arc<dyn gyre_ports::AgentRepository>>,
 }
 
 impl MemAuditRepository {
@@ -2132,20 +2136,23 @@ impl MemAuditRepository {
         Arc::clone(&self.store)
     }
 
-    /// Inject the workspace/user repositories used to derive an event's
-    /// tenant server-side at record time — the same contract as the SQL
-    /// adapters' `tenant_of_workspace` / `tenant_of_user` (workspace's
-    /// owning tenant first, then the acting user's tenant binding). Pure
-    /// dev-mem mode must not attribute events differently than SQLite
-    /// does (TASK-273 review: mem parity).
+    /// Inject the workspace/user/agent repositories used to derive an
+    /// event's tenant server-side at record time — the same contract as
+    /// the SQL adapters' `tenant_of_workspace` / `tenant_of_user` /
+    /// `tenant_of_agent` (workspace's owning tenant first, then the acting
+    /// user's tenant binding, then the agent principal's own tenant for
+    /// server-emitted agent events). Pure dev-mem mode must not attribute
+    /// events differently than SQLite does (TASK-273 review: mem parity).
     pub fn set_tenant_sources(
         &self,
         workspaces: Arc<dyn gyre_ports::WorkspaceRepository>,
         users: Arc<dyn gyre_ports::UserRepository>,
+        agents: Arc<dyn gyre_ports::AgentRepository>,
     ) {
         let mut sources = self.tenant_sources.write().unwrap();
         sources.workspaces = Some(workspaces);
         sources.users = Some(users);
+        sources.agents = Some(agents);
     }
 }
 
@@ -2216,9 +2223,13 @@ impl AuditRepository for MemAuditRepository {
         // workspace-scoped server events from the tenant-scoped admin
         // audit view.
         if e.tenant_id.is_none() {
-            let (ws_repo, user_repo) = {
+            let (ws_repo, user_repo, agent_repo) = {
                 let sources = self.tenant_sources.read().unwrap();
-                (sources.workspaces.clone(), sources.users.clone())
+                (
+                    sources.workspaces.clone(),
+                    sources.users.clone(),
+                    sources.agents.clone(),
+                )
             };
             if let (Some(ws_id), Some(workspaces)) = (e.workspace_id.as_ref(), ws_repo.as_ref()) {
                 if let Ok(Some(ws)) = workspaces.find_by_id(ws_id).await {
@@ -2229,6 +2240,25 @@ impl AuditRepository for MemAuditRepository {
                 if let (Some(user_id), Some(users)) = (e.user_id.as_ref(), user_repo.as_ref()) {
                     if let Ok(Some(user)) = users.find_by_id(user_id).await {
                         e.tenant_id = user.tenant_id.map(|t| t.to_string());
+                    }
+                }
+            }
+            // Agent-principal events (review task-273): container
+            // lifecycle and agent denial events carry an agent_id but no
+            // workspace/user; their tenant is the agent's (via the
+            // agent's governing workspace — the mem Agent has no tenant
+            // column of its own) — parity with the SQL adapters'
+            // tenant_of_agent.
+            if e.tenant_id.is_none() {
+                if let Some(agent_id) = e.agent_id.as_ref() {
+                    let agent_tenant = async {
+                        let agent = agent_repo.as_ref()?.find_by_id(agent_id).await.ok()??;
+                        let ws = ws_repo.as_ref()?.find_by_id(&agent.workspace_id).await.ok()??;
+                        Some(ws.tenant_id.to_string())
+                    }
+                    .await;
+                    if let Some(t) = agent_tenant {
+                        e.tenant_id = Some(t);
                     }
                 }
             }
@@ -2333,10 +2363,14 @@ mod mem_audit_tenant_tests {
     use super::*;
 
     fn event(workspace_id: Option<Id>, user_id: Option<Id>) -> AuditEvent {
+        agent_event(workspace_id, user_id, None)
+    }
+
+    fn agent_event(workspace_id: Option<Id>, user_id: Option<Id>, agent_id: Option<Id>) -> AuditEvent {
         let mut e = AuditEvent::new(
             Id::new("evt-1"),
             gyre_domain::AuditEventType::ProcessExec,
-            None,
+            agent_id,
             user_id,
             None,
             workspace_id,
@@ -2353,15 +2387,27 @@ mod mem_audit_tenant_tests {
         e
     }
 
+    fn sources(
+        workspaces: MemWorkspaceRepository,
+        users: MemUserRepository,
+        agents: MemAgentRepository,
+    ) -> (Arc<dyn gyre_ports::WorkspaceRepository>, Arc<dyn gyre_ports::UserRepository>, Arc<dyn gyre_ports::AgentRepository>) {
+        (
+            Arc::new(workspaces) as Arc<dyn gyre_ports::WorkspaceRepository>,
+            Arc::new(users) as Arc<dyn gyre_ports::UserRepository>,
+            Arc::new(agents) as Arc<dyn gyre_ports::AgentRepository>,
+        )
+    }
+
     #[tokio::test]
     async fn record_derives_tenant_from_workspace_then_user() {
         let audit = MemAuditRepository::default();
-        let workspaces = MemWorkspaceRepository::default();
-        let users = MemUserRepository::default();
-        audit.set_tenant_sources(
-            Arc::new(workspaces) as Arc<dyn gyre_ports::WorkspaceRepository>,
-            Arc::new(users) as Arc<dyn gyre_ports::UserRepository>,
+        let (ws_src, user_src, agent_src) = sources(
+            MemWorkspaceRepository::default(),
+            MemUserRepository::default(),
+            MemAgentRepository::default(),
         );
+        audit.set_tenant_sources(ws_src, user_src, agent_src);
 
         // A workspace-scoped server event: attributed to the workspace's
         // owning tenant.
@@ -2393,10 +2439,12 @@ mod mem_audit_tenant_tests {
         ws_repo.create(&ws).await.unwrap();
         let users_repo = MemUserRepository::default();
         let audit2 = MemAuditRepository::default();
-        audit2.set_tenant_sources(
-            Arc::new(ws_repo) as Arc<dyn gyre_ports::WorkspaceRepository>,
-            Arc::new(users_repo) as Arc<dyn gyre_ports::UserRepository>,
+        let (ws_src, user_src, agent_src) = sources(
+            ws_repo,
+            users_repo,
+            MemAgentRepository::default(),
         );
+        audit2.set_tenant_sources(ws_src, user_src, agent_src);
         audit2
             .record(&event(Some(Id::new("ws-1")), None))
             .await
@@ -2412,10 +2460,12 @@ mod mem_audit_tenant_tests {
         let users_repo = MemUserRepository::default();
         users_repo.create(&user).await.unwrap();
         let audit3 = MemAuditRepository::default();
-        audit3.set_tenant_sources(
-            Arc::new(ws_repo) as Arc<dyn gyre_ports::WorkspaceRepository>,
-            Arc::new(users_repo) as Arc<dyn gyre_ports::UserRepository>,
+        let (ws_src, user_src, agent_src) = sources(
+            ws_repo,
+            users_repo,
+            MemAgentRepository::default(),
         );
+        audit3.set_tenant_sources(ws_src, user_src, agent_src);
         audit3
             .record(&event(None, Some(Id::new("user-1"))))
             .await
@@ -2430,6 +2480,54 @@ mod mem_audit_tenant_tests {
         audit3.record(&supplied).await.unwrap();
         let stored = audit3.store.lock().await.last().unwrap().event.clone();
         assert_eq!(stored.tenant_id.as_deref(), Some("tenant-explicit"));
+    }
+
+    #[tokio::test]
+    async fn record_derives_tenant_for_agent_principal_events() {
+        // review task-273: server-emitted agent events (container
+        // lifecycle, agent-principal denials) carry an agent_id but
+        // neither workspace nor user — without the agent derivation they
+        // are stored tenant_id NULL and vanish from the tenant-scoped
+        // admin audit trail. The agent's tenant is derived via its
+        // governing workspace.
+        let ws =
+            gyre_domain::Workspace::new(Id::new("ws-a"), Id::new("tenant-a"), "A", "a", 1_000);
+        let mut agent = gyre_domain::Agent::new(Id::new("agent-1"), "worker", 1_000);
+        agent.workspace_id = ws.id.clone();
+        let ws_repo = MemWorkspaceRepository::default();
+        ws_repo.create(&ws).await.unwrap();
+        let agents_repo = MemAgentRepository::default();
+        agents_repo.create(&agent).await.unwrap();
+
+        let audit = MemAuditRepository::default();
+        let (ws_src, user_src, agent_src) = sources(
+            ws_repo,
+            MemUserRepository::default(),
+            agents_repo,
+        );
+        audit.set_tenant_sources(ws_src, user_src, agent_src);
+
+        // The container_audit::emit shape: agent_id set, workspace/user
+        // None.
+        audit
+            .record(&agent_event(None, None, Some(Id::new("agent-1"))))
+            .await
+            .unwrap();
+        let stored = audit.store.lock().await.last().unwrap().event.clone();
+        assert_eq!(
+            stored.tenant_id.as_deref(),
+            Some("tenant-a"),
+            "an agent-principal event must be attributed to the agent's tenant"
+        );
+
+        // An agent row that does not exist stays unattributed (NULL,
+        // never fabricated) — parity with the SQL adapters.
+        audit
+            .record(&agent_event(None, None, Some(Id::new("agent-ghost"))))
+            .await
+            .unwrap();
+        let stored = audit.store.lock().await.last().unwrap().event.clone();
+        assert_eq!(stored.tenant_id, None);
     }
 }
 
@@ -5966,10 +6064,6 @@ fn test_state_inner(
     // repos the state serves, exactly like the SQLite/PostgreSQL
     // adapters — pure-mem mode must not attribute events differently.
     let mem_users = Arc::new(MemUserRepository::default());
-    mem_audit.set_tenant_sources(
-        Arc::clone(&workspaces),
-        Arc::clone(&mem_users) as Arc<dyn gyre_ports::UserRepository>,
-    );
     let mem_spec_approvals = Arc::new(MemSpecApprovalRepository::default());
     let mem_spec_ledger = Arc::new(MemSpecLedgerRepository::default());
 
@@ -6003,6 +6097,15 @@ fn test_state_inner(
     let agents = crate::search_sync::wrap_agents(
         Arc::new(MemAgentRepository::default()),
         Arc::clone(&search),
+    );
+    // TASK-273 review (mem parity): the audit repo derives an event's
+    // tenant server-side at record time from the SAME workspace/user/
+    // agent repos the state serves, exactly like the SQLite/PostgreSQL
+    // adapters — pure-mem mode must not attribute events differently.
+    mem_audit.set_tenant_sources(
+        Arc::clone(&workspaces),
+        Arc::clone(&mem_users) as Arc<dyn gyre_ports::UserRepository>,
+        Arc::clone(&agents),
     );
     // The persona repo shares the task store so the atomic
     // `apply_approval_reset_with_task` write (persona approval reset +
