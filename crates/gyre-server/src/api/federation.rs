@@ -228,9 +228,20 @@ mod tests {
         .expect("remote JWT mint must succeed")
     }
 
-    fn peer_svid(ca: &TrustDomainCa) -> gyre_spiffe::ca::IssuedSvid {
+    /// The remote session subject a real Gyre issuer binds into BOTH the
+    /// JWT `sub` and the SVID's SPIFFE ID session segment — decoded from
+    /// the REAL mint (not re-derived from a constant) so this probe fails
+    /// if either side drifts from the shared contract
+    /// `/agent/{role}/session/{jwt sub}` (spiffe_federation.rs).
+    fn federated_sub(key: &crate::auth::AgentSigningKey, token: &str, issuer: &str) -> String {
+        key.validate(token, issuer)
+            .expect("real mint must validate against its own issuer")
+            .sub
+    }
+
+    fn peer_svid(ca: &TrustDomainCa, session: &str) -> gyre_spiffe::ca::IssuedSvid {
         ca.issue_svid(
-            &SpiffeId::agent(PEER_TD, "worker", "fed-session-1").expect("peer SPIFFE ID"),
+            &SpiffeId::agent(PEER_TD, "worker", session).expect("peer SPIFFE ID"),
             BASE_SVID_TTL_SECS,
         )
         .expect("peer SVID issuance")
@@ -288,8 +299,12 @@ mod tests {
     async fn federated_agent_two_configuration_probe() {
         let (server, key, ca) = spawn_instance_a();
         let token = federated_token(&key, &server.origin);
-        let svid = peer_svid(&ca);
-        let expected_id = "spiffe://gyre-a.example.com/agent/worker/session/fed-session-1";
+        // The session subject the remote issuer really minted into the
+        // token's `sub`; the peer SVID names the SAME session, per the
+        // documented invariant `/agent/{role}/session/{jwt sub}`.
+        let sub = federated_sub(&key, &token, &server.origin);
+        let svid = peer_svid(&ca, &sub);
+        let expected_id = format!("spiffe://{PEER_TD}/agent/worker/session/{sub}");
 
         // (a) B trusts A's OIDC issuer but has NOT exchanged A's SPIFFE
         // bundle: the agent AUTHENTICATES (Layer 2 — the request passes
@@ -320,7 +335,7 @@ mod tests {
         let json = body_json(resp).await;
         assert_eq!(json["spiffe_id"], expected_id);
         assert_eq!(json["trust_domain"], PEER_TD);
-        assert_eq!(json["session_id"], "fed-session-1");
+        assert_eq!(json["session_id"], sub);
 
         // The workload is now reported as attested, keyed by the
         // federated agent id ("{remote-host}/{sub}").
@@ -331,10 +346,7 @@ mod tests {
         assert_eq!(json["spiffe_id"], expected_id);
         assert_eq!(
             json["agent_id"],
-            format!(
-                "{}/fed-session-1",
-                server.origin.trim_start_matches("http://")
-            )
+            format!("{}/{}", server.origin.trim_start_matches("http://"), sub)
         );
     }
 
@@ -346,14 +358,14 @@ mod tests {
     async fn never_exchanged_trust_domain_rejected_over_http() {
         let (server, key, _ca) = spawn_instance_a();
         let token = federated_token(&key, &server.origin);
+        let sub = federated_sub(&key, &token, &server.origin);
 
         // A genuine SVID from a third instance (gyre-c.example.org) whose
         // bundle B never exchanged, presented by the trusted A-agent.
         let third = TrustDomainCa::generate("gyre-c.example.org").expect("third CA");
         let svid = third
             .issue_svid(
-                &SpiffeId::agent("gyre-c.example.org", "worker", "fed-session-1")
-                    .expect("third SPIFFE ID"),
+                &SpiffeId::agent("gyre-c.example.org", "worker", &sub).expect("third SPIFFE ID"),
                 BASE_SVID_TTL_SECS,
             )
             .expect("third SVID issuance");

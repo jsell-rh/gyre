@@ -310,7 +310,13 @@ async fn token_info_for_jwt_agent_token() {
         claims.is_object(),
         "jwt_claims must be present for JWT tokens"
     );
-    assert_eq!(claims["sub"].as_str().unwrap(), agent_id);
+    // Task-Scoped JWT Claims (identity-security.md): `sub` is minted as
+    // `agent:<uuid>`; `subject` above is the resolved bare agent id.
+    assert_eq!(
+        claims["sub"].as_str().unwrap(),
+        format!("agent:{agent_id}"),
+        "sub must be agent:<uuid>"
+    );
     // §1 Token Scoping: the worker JWT carries fine-grained scopes and
     // hierarchy claims minted from the spawn context.
     let scope = claims["scope"]
