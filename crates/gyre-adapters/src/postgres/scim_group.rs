@@ -49,6 +49,7 @@ struct MemberRow {
     group_id: String,
     user_id: String,
     added_at: i64,
+    display: Option<String>,
 }
 
 impl MemberRow {
@@ -57,6 +58,7 @@ impl MemberRow {
             group_id: Id::new(self.group_id),
             user_id: Id::new(self.user_id),
             added_at: self.added_at as u64,
+            display: self.display,
         }
     }
 }
@@ -67,6 +69,7 @@ struct NewMemberRow<'a> {
     group_id: &'a str,
     user_id: &'a str,
     added_at: i64,
+    display: Option<&'a str>,
 }
 
 #[derive(Queryable, Selectable)]
@@ -250,6 +253,12 @@ impl ScimGroupRepository for PgStorage {
         .await?
     }
 
+    /// Add one member. Idempotent row-wise: re-pushing an existing
+    /// `(group, user)` membership never duplicates the row — when the
+    /// push carries a `display`, the upsert refreshes the stored one
+    /// (the IdP's current view of the name); a push without one leaves
+    /// any previously stored `display` untouched (partial pushes must
+    /// not erase data they did not carry).
     async fn add_member(&self, member: &ScimGroupMember) -> Result<()> {
         let pool = Arc::clone(&self.pool);
         let m = member.clone();
@@ -259,12 +268,23 @@ impl ScimGroupRepository for PgStorage {
                 group_id: m.group_id.as_str(),
                 user_id: m.user_id.as_str(),
                 added_at: m.added_at as i64,
+                display: m.display.as_deref(),
             };
-            diesel::insert_into(scim_group_members::table)
-                .values(&row)
-                .on_conflict_do_nothing()
-                .execute(&mut *conn)
-                .context("add SCIM group member")?;
+            if m.display.is_some() {
+                diesel::insert_into(scim_group_members::table)
+                    .values(&row)
+                    .on_conflict((scim_group_members::group_id, scim_group_members::user_id))
+                    .do_update()
+                    .set(scim_group_members::display.eq(m.display.as_deref()))
+                    .execute(&mut *conn)
+                    .context("add SCIM group member")?;
+            } else {
+                diesel::insert_into(scim_group_members::table)
+                    .values(&row)
+                    .on_conflict_do_nothing()
+                    .execute(&mut *conn)
+                    .context("add SCIM group member")?;
+            }
             Ok(())
         })
         .await?
@@ -303,6 +323,7 @@ impl ScimGroupRepository for PgStorage {
                             group_id: m.group_id.as_str(),
                             user_id: m.user_id.as_str(),
                             added_at: m.added_at as i64,
+                            display: m.display.as_deref(),
                         })
                         .execute(conn)
                         .context("insert SCIM group member")?;

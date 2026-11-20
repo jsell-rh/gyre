@@ -3211,11 +3211,19 @@ impl ScimGroupRepository for MemScimGroupRepository {
 
     async fn add_member(&self, member: &ScimGroupMember) -> Result<()> {
         let mut members = self.members.lock().await;
-        // Port contract: idempotent — adding an existing member is Ok().
-        if !members
-            .iter()
-            .any(|m| m.group_id == member.group_id && m.user_id == member.user_id)
+        // Port contract: idempotent row-wise — adding an existing member
+        // is Ok() and never duplicates the row. A push carrying a
+        // `display` refreshes the stored one (upsert, same contract as
+        // the SQLite/PostgreSQL adapters); a push without one leaves any
+        // previously stored `display` untouched.
+        if let Some(existing) = members
+            .iter_mut()
+            .find(|m| m.group_id == member.group_id && m.user_id == member.user_id)
         {
+            if member.display.is_some() {
+                existing.display = member.display.clone();
+            }
+        } else {
             members.push(member.clone());
         }
         Ok(())

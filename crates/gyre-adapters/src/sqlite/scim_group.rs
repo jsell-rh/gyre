@@ -49,6 +49,7 @@ struct MemberRow {
     group_id: String,
     user_id: String,
     added_at: i64,
+    display: Option<String>,
 }
 
 impl MemberRow {
@@ -57,6 +58,7 @@ impl MemberRow {
             group_id: Id::new(self.group_id),
             user_id: Id::new(self.user_id),
             added_at: self.added_at as u64,
+            display: self.display,
         }
     }
 }
@@ -67,6 +69,7 @@ struct NewMemberRow<'a> {
     group_id: &'a str,
     user_id: &'a str,
     added_at: i64,
+    display: Option<&'a str>,
 }
 
 #[derive(Queryable, Selectable)]
@@ -255,6 +258,12 @@ impl ScimGroupRepository for SqliteStorage {
         .await?
     }
 
+    /// Add one member. Idempotent row-wise: re-pushing an existing
+    /// `(group, user)` membership never duplicates the row — when the
+    /// push carries a `display`, the upsert refreshes the stored one
+    /// (the IdP's current view of the name); a push without one leaves
+    /// any previously stored `display` untouched (partial pushes must
+    /// not erase data they did not carry).
     async fn add_member(&self, member: &ScimGroupMember) -> Result<()> {
         let pool = Arc::clone(&self.pool);
         let m = member.clone();
@@ -264,12 +273,23 @@ impl ScimGroupRepository for SqliteStorage {
                 group_id: m.group_id.as_str(),
                 user_id: m.user_id.as_str(),
                 added_at: m.added_at as i64,
+                display: m.display.as_deref(),
             };
-            diesel::insert_into(scim_group_members::table)
-                .values(&row)
-                .on_conflict_do_nothing()
-                .execute(&mut *conn)
-                .context("add SCIM group member")?;
+            if m.display.is_some() {
+                diesel::insert_into(scim_group_members::table)
+                    .values(&row)
+                    .on_conflict((scim_group_members::group_id, scim_group_members::user_id))
+                    .do_update()
+                    .set(scim_group_members::display.eq(m.display.as_deref()))
+                    .execute(&mut *conn)
+                    .context("add SCIM group member")?;
+            } else {
+                diesel::insert_into(scim_group_members::table)
+                    .values(&row)
+                    .on_conflict_do_nothing()
+                    .execute(&mut *conn)
+                    .context("add SCIM group member")?;
+            }
             Ok(())
         })
         .await?
@@ -308,6 +328,7 @@ impl ScimGroupRepository for SqliteStorage {
                             group_id: m.group_id.as_str(),
                             user_id: m.user_id.as_str(),
                             added_at: m.added_at as i64,
+                            display: m.display.as_deref(),
                         })
                         .execute(conn)
                         .context("insert SCIM group member")?;
@@ -445,7 +466,7 @@ mod tests {
     async fn add_member_is_idempotent() {
         // Port contract / task-266 idempotency: re-pushing the same
         // (group, user) membership must not duplicate the row
-        // (composite primary key + ON CONFLICT DO NOTHING).
+        // (composite primary key + ON CONFLICT handling).
         let (_tmp, s) = setup();
         let g = make_group("g1", "cn=eng,dc=example,dc=com", "Eng");
         s.create(&g).await.unwrap();
@@ -453,11 +474,44 @@ mod tests {
             group_id: g.id.clone(),
             user_id: Id::new("u1"),
             added_at: 1000,
+            display: Some("Group Member 1".to_string()),
         };
         s.add_member(&m).await.unwrap();
         s.add_member(&m).await.unwrap();
         s.add_member(&m).await.unwrap();
-        assert_eq!(s.list_members(&g.id).await.unwrap().len(), 1);
+        let stored = s.list_members(&g.id).await.unwrap();
+        assert_eq!(stored.len(), 1);
+        // The IdP-pushed `display` is persisted on the membership row and
+        // round-trips on read (RFC 7644 Group member value/display).
+        assert_eq!(stored[0].display.as_deref(), Some("Group Member 1"));
+
+        // A re-push carrying a new `display` refreshes the stored one —
+        // still one row (upsert, never a duplicate).
+        s.add_member(&ScimGroupMember {
+            group_id: g.id.clone(),
+            user_id: Id::new("u1"),
+            added_at: 2000,
+            display: Some("Renamed Member".to_string()),
+        })
+        .await
+        .unwrap();
+        let stored = s.list_members(&g.id).await.unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].display.as_deref(), Some("Renamed Member"));
+
+        // A re-push WITHOUT a `display` (partial push) leaves the stored
+        // one untouched — it must not erase data it did not carry.
+        s.add_member(&ScimGroupMember {
+            group_id: g.id.clone(),
+            user_id: Id::new("u1"),
+            added_at: 3000,
+            display: None,
+        })
+        .await
+        .unwrap();
+        let stored = s.list_members(&g.id).await.unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].display.as_deref(), Some("Renamed Member"));
     }
 
     #[tokio::test]
@@ -469,6 +523,7 @@ mod tests {
             group_id: g.id.clone(),
             user_id: Id::new("u1"),
             added_at: 1000,
+            display: None,
         })
         .await
         .unwrap();

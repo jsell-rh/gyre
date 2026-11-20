@@ -429,6 +429,12 @@ pub async fn scim_list_users(
 
 /// POST /scim/v2/Users — create user.
 ///
+/// The body is read as raw bytes and parsed AFTER `check_scim_auth`:
+/// an axum `Json` extractor rejects a body-less or content-type-less
+/// request with 415 before the handler runs, which would leak the
+/// auth-enforcement ordering (an unauthenticated request must get 403,
+/// never a body-shape error) — same shape as the PATCH handlers.
+///
 /// The username handle is derived from the SCIM `userName` exactly as the
 /// SSO first-login path derives it from `preferred_username`
 /// (auth.rs `find_or_create_user`): sanitized to the URL-safe handle
@@ -441,9 +447,12 @@ pub async fn scim_list_users(
 pub async fn scim_create_user(
     headers: HeaderMap,
     State(state): State<Arc<AppState>>,
-    Json(req): Json<ScimUserRequest>,
+    body: axum::body::Bytes,
 ) -> Result<(StatusCode, Json<ScimUser>), ApiError> {
     check_scim_auth(&headers)?;
+
+    let req: ScimUserRequest = serde_json::from_slice(&body)
+        .map_err(|e| ApiError::InvalidInput(format!("invalid JSON: {e}")))?;
 
     let now = now_secs();
     let ext_id = req.external_id.clone().unwrap_or_default();
@@ -535,9 +544,14 @@ pub async fn scim_update_user(
     headers: HeaderMap,
     Path(id): Path<String>,
     State(state): State<Arc<AppState>>,
-    Json(req): Json<ScimUserRequest>,
+    body: axum::body::Bytes,
 ) -> Result<Json<ScimUser>, ApiError> {
     check_scim_auth(&headers)?;
+
+    // Parsed after auth (see scim_create_user): an unauthenticated
+    // request must get 403, never a body-shape 415.
+    let req: ScimUserRequest = serde_json::from_slice(&body)
+        .map_err(|e| ApiError::InvalidInput(format!("invalid JSON: {e}")))?;
 
     let mut user = state
         .users
@@ -883,9 +897,11 @@ pub struct ScimGroupRequest {
 }
 
 /// Serialize a stored group + its members as a SCIM Group resource.
-/// `display` for each member is the stored user's display name when the
-/// member resolves to a user (best effort — an unresolvable member is
-/// still listed with its raw `value`).
+/// Each member's `display` is the IdP-pushed value persisted on the
+/// membership row (migration 000069) when the push carried one — the
+/// group read must round-trip exactly what the IdP pushed; when it did
+/// not, the member user's display name is the best-effort fallback (an
+/// unresolvable member is still listed with its raw `value`).
 async fn group_to_scim(
     state: &Arc<AppState>,
     group: &ScimGroup,
@@ -893,11 +909,14 @@ async fn group_to_scim(
     let stored_members = state.scim_groups.list_members(&group.id).await?;
     let mut members = Vec::with_capacity(stored_members.len());
     for m in &stored_members {
-        let display = state
-            .users
-            .find_by_id(&m.user_id)
-            .await?
-            .map(|u| u.display_name);
+        let display = match &m.display {
+            Some(d) => Some(d.clone()),
+            None => state
+                .users
+                .find_by_id(&m.user_id)
+                .await?
+                .map(|u| u.display_name),
+        };
         members.push(ScimGroupMemberRef {
             value: m.user_id.to_string(),
             display,
@@ -1266,9 +1285,15 @@ pub async fn scim_get_group(
 pub async fn scim_create_group(
     headers: HeaderMap,
     State(state): State<Arc<AppState>>,
-    Json(req): Json<ScimGroupRequest>,
+    body: axum::body::Bytes,
 ) -> Result<(StatusCode, Json<ScimGroupResource>), ApiError> {
     check_scim_auth(&headers)?;
+
+    // Parsed after auth (see scim_patch_group): an unauthenticated
+    // request must get 403, never the Json extractor's 415 on a
+    // body-less/content-type-less request.
+    let req: ScimGroupRequest = serde_json::from_slice(&body)
+        .map_err(|e| ApiError::InvalidInput(format!("invalid JSON: {e}")))?;
 
     let now = now_secs();
     let ext_id = req.external_id.clone().unwrap_or_default();
@@ -1327,6 +1352,7 @@ async fn add_member_with_effect(
             group_id: group.id.clone(),
             user_id: user.id.clone(),
             added_at: now_secs(),
+            display: member.display.clone(),
         })
         .await?;
     apply_member_added(state, group, &user).await
@@ -1360,9 +1386,15 @@ pub async fn scim_update_group(
     headers: HeaderMap,
     Path(id): Path<String>,
     State(state): State<Arc<AppState>>,
-    Json(req): Json<ScimGroupRequest>,
+    body: axum::body::Bytes,
 ) -> Result<Json<ScimGroupResource>, ApiError> {
     check_scim_auth(&headers)?;
+
+    // Parsed after auth (see scim_patch_group): an unauthenticated
+    // request must get 403, never the Json extractor's 415 on a
+    // body-less/content-type-less request.
+    let req: ScimGroupRequest = serde_json::from_slice(&body)
+        .map_err(|e| ApiError::InvalidInput(format!("invalid JSON: {e}")))?;
 
     let mut group = load_group(&state, &id).await?;
 
@@ -1399,10 +1431,10 @@ async fn set_members_exact(
     let current_ids: std::collections::HashSet<Id> =
         current.iter().map(|m| m.user_id.clone()).collect();
 
-    let mut pushed_ids: Vec<Id> = Vec::new();
+    let mut pushed: Vec<(Id, Option<String>)> = Vec::new();
     for member in refs {
         match resolve_member_user(state, &member.value).await? {
-            Some(user) => pushed_ids.push(user.id.clone()),
+            Some(user) => pushed.push((user.id.clone(), member.display.clone())),
             None => tracing::warn!(
                 group_id = %group.id,
                 member_value = %member.value,
@@ -1410,9 +1442,10 @@ async fn set_members_exact(
             ),
         }
     }
-    let pushed_set: std::collections::HashSet<Id> = pushed_ids.iter().cloned().collect();
+    let pushed_set: std::collections::HashSet<Id> =
+        pushed.iter().map(|(id, _)| id.clone()).collect();
 
-    for user_id in &pushed_ids {
+    for (user_id, display) in &pushed {
         if !current_ids.contains(user_id) {
             let user = state
                 .users
@@ -1425,6 +1458,7 @@ async fn set_members_exact(
                     group_id: group.id.clone(),
                     user_id: user_id.clone(),
                     added_at: now_secs(),
+                    display: display.clone(),
                 })
                 .await?;
             apply_member_added(state, group, &user).await?;

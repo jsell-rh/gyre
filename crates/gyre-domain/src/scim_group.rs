@@ -59,6 +59,14 @@ pub struct ScimGroupMember {
     pub group_id: Id,
     pub user_id: Id,
     pub added_at: u64,
+    /// The IdP-pushed RFC 7643 §2.4 `display` sub-attribute of the member
+    /// reference (the human-readable name the IdP holds for the member).
+    /// Persisted so group reads round-trip exactly what the IdP pushed;
+    /// `None` when the push carried no `display` — the API layer then
+    /// derives it from the member user's display name (best effort).
+    /// Re-pushing an existing member refreshes it (upsert), never
+    /// duplicates the row.
+    pub display: Option<String>,
 }
 
 /// Admin-configured IdP-group → workspace-role mapping

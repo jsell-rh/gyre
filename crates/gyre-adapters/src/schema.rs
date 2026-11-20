@@ -463,6 +463,7 @@ diesel::table! {
         group_id -> Text,
         user_id -> Text,
         added_at -> BigInt,
+        display -> Nullable<Text>,
     }
 }
 

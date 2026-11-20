@@ -453,11 +453,16 @@ async fn groups_crud_surface_per_rfc7644() {
 async fn groups_endpoints_enforce_scim_token() {
     let (_guard, _dir, _state, app) = sqlite_ctx().await;
 
-    // Missing Authorization header.
+    // Missing Authorization header — across ALL six Groups endpoints:
+    // auth must reject before any body parsing (a body-less PUT/POST
+    // must get 403, never the Json extractor's 415).
     for (method, uri) in [
         (Method::GET, "/scim/v2/Groups"),
         (Method::GET, "/scim/v2/Groups/some-id"),
         (Method::POST, "/scim/v2/Groups"),
+        (Method::PUT, "/scim/v2/Groups/some-id"),
+        (Method::PATCH, "/scim/v2/Groups/some-id"),
+        (Method::DELETE, "/scim/v2/Groups/some-id"),
     ] {
         let resp = raw_call(&app, method.clone(), uri, None, None).await;
         assert_eq!(
