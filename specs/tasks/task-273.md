@@ -3,7 +3,7 @@ title: "Admin Panel completion: SOPS/Vault secret backends, durable job history 
 spec_ref: "Spec gap spec-5b647653a4554eea3e93ac19 / admin-panel-remaining-gap / e61ffd082155"
 depends_on: []
 progress: ready-for-review
-commits: ["4c71fe4827a62f792912b4e5ab257a50c1882860", "d6f32bd0269314f9ee552ed72df33322b0fe2238", "cd2f616e3ebd96addab2dcaf78242d31c58efc04", "808e3c10c035c9fc6fe8c5ee96d474fc5468acf3", "b979fefeeb7a6bb8340ccd85c64b467e0f46c553", "210dfa61bc1ea637a29a79c26af80746b2fb002c", "3ebd143d29eb52bb2bc0bd748f60fe52fa960f66", "9b81c9816f13a3d637057a6c3149c9be92f38a3c", "0fda00bfe9860c8c8b66ea1235f0d2e3251df67a", "1bc00b6cb9212e6ac6dfc7c764afede98ae8fd64", "a2b31ac19c05310ebd05a072ddde1acf0c51f2ec", "f6e31cf57779a7e117f5a0b9bd75720aed90ca56", "b101d27aafb7bde0907a568e7bb8a3ffbdd3ae67", "ee253c8854f16664f91d16171e08414effc314b7", "db320101b1540a35cf9986408e70ac46008b1982"]
+commits: ["a0dc3e637e6ffbae976675b755abf0b2891bf481", "4c71fe4827a62f792912b4e5ab257a50c1882860", "d6f32bd0269314f9ee552ed72df33322b0fe2238", "cd2f616e3ebd96addab2dcaf78242d31c58efc04", "808e3c10c035c9fc6fe8c5ee96d474fc5468acf3", "b979fefeeb7a6bb8340ccd85c64b467e0f46c553", "210dfa61bc1ea637a29a79c26af80746b2fb002c", "3ebd143d29eb52bb2bc0bd748f60fe52fa960f66", "9b81c9816f13a3d637057a6c3149c9be92f38a3c", "0fda00bfe9860c8c8b66ea1235f0d2e3251df67a", "1bc00b6cb9212e6ac6dfc7c764afede98ae8fd64", "a2b31ac19c05310ebd05a072ddde1acf0c51f2ec", "f6e31cf57779a7e117f5a0b9bd75720aed90ca56", "b101d27aafb7bde0907a568e7bb8a3ffbdd3ae67", "ee253c8854f16664f91d16171e08414effc314b7", "db320101b1540a35cf9986408e70ac46008b1982"]
 ---
 
 ## Required behavior
@@ -122,100 +122,53 @@ Canonical spec: `specs/system/admin-panel.md`. Source: `fb1424fbac55cd23cb08606f
 
 ## Shipped
 
-The eight admin-panel deliverables (SOPS/Vault secret backends, durable
-job history with logs, maintenance jobs, complete token refresh, the
-OAuth enrollment flow, remote-agent cleanup, the server-log viewer, the
-durable searchable admin audit) shipped in the earlier rounds on this
-branch and are carried through three base merges (`7add1d8d`,
-`f54b1057`, `5c155180` onto base `cae04d59`), behavior preserved.
+The eight admin-panel deliverables shipped in the earlier rounds on this
+branch and are carried through the base merges (most recently `6139844`
+via `bc2d92b9`), behavior preserved: SOPS-default/Vault-option secret
+backends (genuine SOPS documents with an age-wrapped data key; Vault KV
+v2 with agent-JWT resolution, server AppRole writes, fail-closed on
+unreachable Vault), durable job history with per-run logs through the
+`JobRunRepository` port (SQLite + PostgreSQL + mem parity), the
+`repo_maintenance` / `oauth_state_cleanup` / `remote_agent_cleanup` /
+`job_history_cleanup` scheduled jobs, document-shape token-refresh
+dispatch (RFC 6749 refresh, GCP SA RS256 JWT-bearer grant, per-secret
+outcomes in run logs), the durable OAuth-state Claude Max enrollment
+flow, the ring-buffer server-log viewer (`GET /admin/server/logs` +
+Server Logs tab), and the durable tenant-scoped searchable admin audit
+(`tenant_id` on AuditEvent with portable backfill migration, free-text
+`q` in both SQL adapters). Review-repair and verification-repair rounds
+(`9b81c981`…`4c71fe48`) hardened atomic credential rewrites, refresh
+cadence, durable-history authority, Vault policy scoping, and clippy
+cleanliness; details live in those commits.
 
-### Review-repair round (commits `9b81c981`…`d6f32bd0`)
+### This round: base-merge verification repair (commit `a0dc3e63`)
 
-1. **Atomic credential rewrites** — new `SecretRepository::replace`
-   port operation (single UPDATE in SQLite/PostgreSQL, in-place under
-   the lock in mem with the same not-found failure contract, versioned
-   KV v2 write in Vault): the rotation job's `attempt_rotation`, the
-   Admin `rewrite_secret`, and the Claude Max re-enrollment no longer
-   use delete+create pairs, so a crash can never lose a live
-   credential mid-rewrite.
-2. **Refresh cadence** — `should_refresh` derives the refresh threshold
-   from the granted lifetime (`expires_at − last_rotated_at`, one
-   fifth, clamped to [10 min, 1 h]): a 3600 s Google access token is
-   refreshed when ~12 minutes remain, not on every 5-minute cycle; a
-   token response without `expires_in` fails the rotation honestly
-   (notification + untouched stored value) instead of fabricating a
-   3600 s lifetime.
-3. **Durable job history authoritative** — `GET /admin/jobs` no longer
-   resurrects runs pruned by `job_history_cleanup` from the in-memory
-   ring (an intentionally-empty durable result is authoritative; only
-   a loud read error or pure-mem mode serves the ring); `record_run`
-   retries a transient durable-write failure (3 attempts) and counts
-   exhausted ones in `durable_persist_failures`.
-4. **Vault policy scoping** — a 403 is a typed `VaultPermissionDenied`:
-   the agent-JWT cascade skips the denied scope/secret and returns the
-   permitted subset (platform-model §7), everything else fails closed;
-   the server path still re-logins an expired AppRole token;
-   `kv_list` errors on a malformed 2xx instead of returning `[]`.
-5. **Audit backfill + search folding** — migration 000074 backfills
-   user-scoped rows' `tenant_id` from the users table (second
-   correlated UPDATE, portable SQL); the free-text `q` re-filter and
-   LIKE pattern use full Unicode `to_lowercase` in both SQL adapters,
-   matching SQL `LOWER()` and the mem adapter.
-6. **Maintenance jobs** — `repo_maintenance` also maintains
-   unregistered git repos under `repos_root` (canonical-path
-   deduplication); local restart-orphans are killed only after the
-   pid's `/proc` start time matches the recorded spawn time (recycled
-   pids refused, exited orphans marked terminated); unreapable SSH
-   instances are retried for 7 days then retired with an escalation
-   log line; `LocalTarget::kill_process` verifies the process is
-   actually gone (SIGTERM → wait → SIGKILL → wait → error).
-7. **Admin UI** — the Server Logs tab gains the advertised `since`
-   filter (relative window → epoch-ms); the Audit tab renders the full
-   `/audit/events` filter set (agent/workspace/user/repo/resource/
-   outcome/since/until + q), with the `outcome` filter added to
-   `GET /admin/audit` (validated like `/audit/events`).
-
-### Verification-repair round (commit `4c71fe48`)
-
-The independent verification run (`checks.sh`, candidate `3ce715c3`)
-failed on ten clippy findings, all inside this task's new files.
-`4c71fe48` clears every one with behavior-preserving rewrites:
-`AgeIdentity::from_str` renamed to `parse` (`should_implement_trait`,
-all 10 call sites updated), identity `.into()` removals in
-`api/oauth.rs` (`useless_conversion`), `&token` → `token` in
-`api/spawn.rs` (`needless_borrow`), `Ok(x.transpose()?)` →
-`x.transpose()` in `postgres/secret.rs`, char-array `find` patterns in
-`sops/mod.rs`, redundant test-module trait imports dropped in
-`sqlite/{job_run,agent_instance,oauth_state}.rs` (the traits are
-already in scope via `use super::*`), `== false` → `!` in
-`sqlite/secret.rs`, and a `NamespaceEvent` type alias plus a rewrapped
-module doc in `vault/tests.rs`. No route, migration, port, or behavior
-change; probe evidence in
-`/tmp/stage/review-evidence/verification-repair-round.md`.
+The `cargo test --all --quiet` verification run against the merged
+candidate failed on exactly one test:
+`sqlite::tests::migration_000058_backfills_unique_url_safe_usernames`
+panicked in migration `2026-11-13-000074_audit_events_tenant_id` with
+`no such column: u.tenant_id`. Root cause: that test deliberately
+applies every embedded migration EXCEPT `000058` (which owns
+`users.tenant_id`) before running `000058` alone against seeded legacy
+rows, and task-273's `000074` backfills `audit_events.tenant_id` from
+`users u` — so it cannot run in that pre-`000058` set. The fix excludes
+`000074` from the test's pre set and runs it after the target batch,
+the identical treatment `000065` already receives for the same
+dependency; on a deployed database `000058` (20261008000058) always
+sorts before `000074` (20261113000074), so production migration
+ordering is unchanged. Test-only change; no production code touched.
 
 ### Test evidence
 
-Executed in this sandbox (passing): `cargo test -p gyre-adapters
---lib -- sops vault secret job_run agent_instance oauth_state` (68,
-re-run after the verification repair: SOPS document format and
-roundtrip, legacy AES-GCM upgrade, Vault KV v2 / JWT-auth /
-policy-denial / fail-closed, job-run / agent-instance / oauth-state
-SQLite adapters). After the repair: `cargo clippy -p gyre-adapters
---all-targets` and `cargo clippy -p gyre-server --all-targets` both
-exit 0, with a scripted mapping of every remaining warning against the
-task-273 diff line ranges confirming ZERO warnings inside the task's
-changed lines (the remainder is pre-existing debt in untouched files,
-identical at base `cae04d59`). `rustfmt --check` clean on every touched
-file. All mechanical invariant scripts re-run and passing with no new
-exemption entries (arch, migration versions/portability, mem-port-contracts,
-in-memory-state-stores, abac-route-registry, unbounded-external-http,
-byte-slice-truncation, lossy-secret-conversion,
-task-commit-attribution).
-
-gyre-server test *execution* is deferred to the independent verifier
-per the 4 GiB build budget; the required module filters (jobs,
-secret_rotation, maintenance_jobs, api::admin, api::secrets, api::oauth,
-mem) are recorded in `/tmp/stage/review-evidence/required-server-tests.txt`
-along with the executed-probe list.
+Executed in this sandbox: `cargo test -p gyre-adapters --lib` — 663
+passed, 0 failed (includes the repaired 000058 backfill test plus the
+task-273 suites: SOPS format/roundtrip/legacy-upgrade, Vault KV
+v2/JWT-auth/policy-denial/fail-closed, job-run/agent-instance/
+oauth-state adapters, audit filters). `cargo fmt --check` clean on all
+touched crates (gyre-ports, gyre-domain, gyre-adapters, gyre-server).
+`check-migration-versions.sh` and `check-migration-sql-portability.sh`
+pass with no new exemptions. gyre-server test execution and the full
+workspace suite remain with the independent verifier per the 4 GiB
+build budget.
 
 The acceptance checkboxes remain for the independent verifier.
