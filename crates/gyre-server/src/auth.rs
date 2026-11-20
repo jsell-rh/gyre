@@ -1573,6 +1573,33 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedAgent {
         // 3. API keys -- look up by SHA-256 hash of the raw token.
         if let Ok(Some(user_id)) = state.api_keys.find_user_id(&hash_api_key(token)).await {
             if let Ok(Some(user)) = state.users.find_by_id(&user_id).await {
+                let credential_hash = hash_api_key(token);
+                // "Sign out everywhere" enforcement: an API key whose every
+                // session is revoked is rejected here (user-management.md
+                // §Session Management — revoking all sessions signs the
+                // credential out). Checked BEFORE the deactivation branch
+                // so a lifecycle deactivation that revokes sessions
+                // (SCIM `active:false` / deprovision, task-265) reports the
+                // credential-level 401 ("Session has been revoked" —
+                // re-authenticate) rather than the account-level 403: the
+                // credential was signed out, which is the precise reason
+                // the replay fails. An account deactivated WITHOUT session
+                // revocation (the admin deactivate path) has no revoked
+                // sessions and still falls through to the 403 below, so
+                // both deactivation flavors keep their accurate reason.
+                if credential_revoked(state, &user.id, &credential_hash).await {
+                    record_auth_failure(
+                        state,
+                        "api_key",
+                        "session has been revoked",
+                        forensic_ip,
+                        forensic_ua,
+                    )
+                    .await;
+                    return Err(
+                        (StatusCode::UNAUTHORIZED, "Session has been revoked").into_response()
+                    );
+                }
                 // Deactivated accounts fail authentication (user-management.md
                 // §API > User Management: deactivation cascades to access).
                 // Checked before the tenant binding so a deactivation takes
@@ -1624,24 +1651,6 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedAgent {
                             .into_response());
                     }
                 };
-                let credential_hash = hash_api_key(token);
-                // "Sign out everywhere" enforcement: an API key whose every
-                // session is revoked is rejected here (user-management.md
-                // §Session Management — revoking all sessions signs the
-                // credential out).
-                if credential_revoked(state, &user.id, &credential_hash).await {
-                    record_auth_failure(
-                        state,
-                        "api_key",
-                        "session has been revoked",
-                        forensic_ip,
-                        forensic_ua,
-                    )
-                    .await;
-                    return Err(
-                        (StatusCode::UNAUTHORIZED, "Session has been revoked").into_response()
-                    );
-                }
                 // Session tracking (user-management.md §Session Management:
                 // one session row per credential+device; throttled
                 // last-active updates). The IP is the socket peer address
