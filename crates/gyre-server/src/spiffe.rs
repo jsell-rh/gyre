@@ -295,7 +295,9 @@ fn bounded_http_client() -> anyhow::Result<reqwest::Client> {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SvidRecord {
     pub agent_id: String,
-    /// SPIFFE ID of the session (URI SAN of the leaf).
+    /// SPIFFE ID of the session (URI SAN of the leaf). The session
+    /// segment is the session's JWT subject (`agent:<uuid>`) — see
+    /// `issue_session_svid`.
     pub spiffe_id: String,
     /// Role segment of the SPIFFE ID path.
     pub role: String,
@@ -397,6 +399,15 @@ pub fn agent_role(
 /// resolved compute target and stack evidence) — SVID issuance is gated on
 /// that spawn-time authorization evidence, so the runtime proves it runs
 /// on authorized infrastructure.
+///
+/// The SPIFFE ID session segment is the session's JWT subject
+/// (`agent:<uuid>`, see `crate::auth::agent_subject`) — the same `sub` the
+/// Layer-2 mint embeds for this agent — so the documented binding
+/// invariant `/agent/{role}/session/{jwt sub}` (spiffe_federation.rs,
+/// identity-security.md §Federation) holds exactly: a federated verifier
+/// binds the presented SVID to the caller's JWT `sub` by direct string
+/// comparison, with no normalization on either side. The KV record stays
+/// keyed by the bare agent id (the local lookup key everywhere else).
 pub async fn issue_session_svid(
     state: &AppState,
     agent_id: &str,
@@ -404,9 +415,10 @@ pub async fn issue_session_svid(
     compute_target: &str,
     stack_fingerprint: &str,
 ) -> Result<SessionSvid, anyhow::Error> {
+    let session_id = crate::auth::agent_subject(agent_id);
     let issued = state
         .spiffe
-        .issue_for_session(role, agent_id)
+        .issue_for_session(role, &session_id)
         .await
         .map_err(|e| anyhow::anyhow!("SVID issuance for agent {agent_id}: {e}"))?;
     let record = SvidRecord {
@@ -684,6 +696,58 @@ mod tests {
         assert_eq!(
             agent_role(Some(""), &OrchestratorType::WorkspaceOrchestrator),
             "workspace-orchestrator"
+        );
+    }
+
+    /// identity-security.md §Federation binding invariant, pinned at the
+    /// production issuer: the SPIFFE ID session segment of a session SVID
+    /// equals the JWT `sub` the Layer-2 mint embeds for the SAME agent.
+    /// The federated verifier compares the two by exact string comparison
+    /// (`/agent/{role}/session/{jwt sub}`, spiffe_federation.rs), so any
+    /// drift in either form breaks federated workload attestation for
+    /// every upgraded issuer (review round 69d50ca9 F1 — the sub-form mint
+    /// change left the SVID session segment on the bare agent id).
+    #[tokio::test]
+    async fn session_svid_session_segment_equals_jwt_sub() {
+        let state = crate::mem::test_state();
+        let key = crate::auth::AgentSigningKey::generate();
+        let agent_id = "svid-sub-agent-1";
+        // The REAL Layer-2 mint for this agent, validated back through the
+        // real decoder — not a re-derived constant.
+        let token = key
+            .mint(
+                agent_id,
+                "task-1",
+                "system",
+                "http://gyre.local",
+                3600,
+                "tenant-1",
+                "ws-1",
+                "repo-1",
+                "repo-1-name",
+            )
+            .expect("agent JWT mint must succeed");
+        let sub = key
+            .validate(&token, "http://gyre.local")
+            .expect("minted agent JWT must validate")
+            .sub;
+        // The REAL Layer-1 issuance for the same agent.
+        let svid = issue_session_svid(
+            &state,
+            agent_id,
+            "worker",
+            "local",
+            "sha256:invariant-test-stack",
+        )
+        .await
+        .expect("session SVID issuance must succeed");
+        let spiffe_id =
+            SpiffeId::parse(&svid.record.spiffe_id).expect("issued SPIFFE ID must parse");
+        assert_eq!(
+            spiffe_id.agent_path().expect("agent path").session_id,
+            sub,
+            "SVID session segment must equal the JWT sub \
+             (federated binding invariant /agent/{{role}}/session/{{jwt sub}})"
         );
     }
 }

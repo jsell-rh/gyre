@@ -2,8 +2,8 @@
 title: "Agent JWT claims completion and hard task-scope boundary (by-effect enforcement sweep)"
 spec_ref: "Spec gap spec-31d3ae72e12e22c52442e309 / agent-jwt-claims-task-scope / b60edce5bc49"
 depends_on: [task-130]
-progress: not-started
-commits: []
+progress: complete
+commits: ["b0409d0315fbbd56aa32b16095196bb1e16d2a84", "6a17ba07dd35e403a53aeb7f8f04ae109cd4698a", "425a7cee99d06beb68d86517128ac53c0d6c0577", "a5e2bf75878ad280286fc0974a1d4e1d8c57de55", "00f1cfcb9226f1df0f15b9fb8d64df21fa2f468a", "0ef2e11d928370edb94f553eafd823fcb540ab9a", "2dd934d6b81e50b85170574a53ca614370af3541", "356184ee46d2363835f9b71df07a2facde5cd895", "5cdce3aadee6da0de408e8e4e83b2666fdf11f12", "88f9a006a2d6983173200f08c850ece61072f49c", "585d459ed97d7d585397d3587f386221b8c96f28", "544b2755ea961f0764abb0d8c3cb9d1ea214f358", "42dad97a5b9daf8ed4204c8a272884d741bee052", "37f458b9b33f62b3a85ea82193afdead4b28e4d1", "f338cfc164c3a775de95a520e6ca09d2eec00b39"]
 ---
 
 ## Required behavior
@@ -93,3 +93,30 @@ Canonical spec: `specs/system/identity-security.md`. Source: `fb1424fbac55cd23cb
     ]
   }
 ]
+
+## Shipped
+
+The task-263 branch delivers the Layer-2 agent-JWT claims completion and the hard task-scope boundary: spawn-minted JWTs carry `sub=agent:<uuid>`, `aud` (validated on inbound agent tokens), the specced 3600 s default TTL, `persona`, `stack_hash`/`wl_stack_hash` from the stored workload-attestation fingerprint, `wl_hostname`/`wl_compute_target`/`wl_image_hash` from real spawn-time facts, and `attestation_level` from the compute-target type (`f338cfc1` through `356184ee`); the by-effect enforcement sweep gates every task-mutating REST/MCP surface for agent principals (task update/transition, agent complete/stop/fail, spawn-onto-task, `gyre_update_task`/`gyre_decompose_spec`, MR creation, git push repo scope, revert and merge-queue enqueue/cancel, admin seed, orchestrator-mint routes — `425a7cee`, `5cdce3aa`, `6a17ba07`); revocation is durable via the jti-keyed `revoked_tokens` SQL table (lookup precedes expiry validation, survives restarts, cannot be un-revoked); git-http derives agent repo identity from the signed `repo_id` claim (`0ef2e11d`) and SPIFFE session SVIDs bind the JWT subject (`00f1cfcb`, `a5e2bf75`).
+
+### This round (`b0409d03`): merged-base repair
+
+The branch was merged onto the current base `9f0c709` (task-258 agent-session tracking) and the retained verification failures repaired. All three are test-side; no production behavior changed:
+
+- `auth.rs agent_jwt_mints_specced_task_scoped_claims` passed the `wl_hostname`/`wl_compute_target` mint arguments swapped (both `Option<String>`, so it type-checked) — the mint produced `wl_compute_target=Some("ssh-host-1")` while asserting `ct-docker-1`. Production callers (`api/spawn.rs`, `ralph_loop.rs`) pass the correct order; the test now matches the signature order and its assertions hold as written.
+- `api/merge_queue.rs cancel_not_found` sent `DELETE /merge-queue/no-such` with no auth header; `cancel_entry` takes an `AuthenticatedAgent` extractor since the task-263 queue boundary, so the request was (correctly) rejected 401 before the entry lookup. The test now authenticates with the same fixture token as its sibling cancel tests and still asserts 404 for a nonexistent entry.
+- The task-258 dirty-completion test in `api/spawn.rs` (merged in from the base) called `complete_agent` without the `AuthenticatedAgent` argument task-263 added, breaking lib-test compilation post-merge; it now passes the in-scope plain spawner principal (`jwt_claims: None`, so `agent_task_claim()` is `None` and the self-or-task boundary passes), mirroring the sibling `plain_auth` usage.
+
+### Test evidence
+
+Local probes at head `b0409d03`: `cargo check -p gyre-server --all-targets` exit 0 (lib + all test targets compile post-merge), `cargo fmt -p gyre-server -- --check` clean, and every standing mechanical gate passes (`check-arch`, `check-abac-route-registry`, `check-abac-exempt-handlers`, `check-mcp-write-tools`, migration checks, and the invariant linters). Probe log: `/tmp/stage/review-evidence/round-merged-base-repair.log`. gyre-server test execution is deferred to the independent verifier per the 4 GiB budget rule; the verifier must run at head `b0409d03`: `cargo test -p gyre-server --lib auth::tests` (covers the repaired claims test), `--lib api::merge_queue` (covers the repaired cancel test), `--lib api::spawn` (covers the repaired task-258 merged tests), plus the boundary suites deferred from prior rounds (`cargo test -p gyre-server --test api_integration` for `orchestrator_spawn_denied_for_task_bound_agent_jwt`, `agent_jwt_task_scope_boundary_on_lifecycle_endpoints`, `agent_jwt_cannot_spawn_onto_foreign_task`, `agent_jwt_cannot_revert_merged_mr`, `agent_jwt_task_scope_boundary_on_merge_queue_surfaces`, `agent_jwt_cannot_transition_mr_outside_task_scope`, `spawn_minted_jwt_carries_task_scoped_claims`, `agent_push_cross_workspace_same_name_repo_rejected`, `agent_only_requires_exact_stack_hash_match_e2e`, `session_svid_session_segment_equals_jwt_sub`, `federated_agent_two_configuration_probe`, the MCP task-scope and MR task-scope tests, `--lib api::orchestrator`, `--lib api::recovery`, `--lib api::merge_requests`, `--lib rbac`, `--lib mcp` (task-258 `mcp_agent_complete_terminates_open_session_with_dirty_state`), `--test spec_enforcement`, `--test git_integration`, `--test e2e_ralph_loop`, `--test m18_oidc_integration`, `--test task134_review_probe`) and the full `cargo test --all`.
+
+### Out-of-scope statements (justified)
+
+- **`wl_pid`/`wl_container_id` at mint time**: these facts do not exist until launch completes; minting them would fabricate them. They are recorded in the fresh workload-attestation record immediately post-launch.
+- **MCP `gyre_agent_complete`**: already enforced self-only for agent JWTs pre-task — unchanged.
+- **MCP `gyre_spawn_repo_orchestrator`**: already requires workspace-orchestrator tool scope (`validate_tool_scope`) — unreachable for worker JWTs; the REST denial mirrors it.
+- **Admin snapshot create/delete and BCP drill**: read-only capture of task state (or deletion of a backup file) — no task row, task-scoped secret, or MR is mutated; the state-replacing effect is `admin_restore_snapshot`, which is gated.
+- **`PUT /api/v1/admin/retention`**: mutates retention configuration only; the purge effect runs through the job registry, whose manual trigger is gated and whose scheduled runs are system-initiated, not agent-callable.
+- **`PUT /api/v1/repos/:id/queue/pause` / `queue/resume`** (recovery.rs): mutate merge-queue pause KV state only — no task row, task-scoped secret, or MR is mutated; the recovery protocol they arm is executed by the system merge processor, not the caller.
+- **`PUT /api/v1/repos/:id/post-merge-gates`** (recovery.rs): replaces post-merge gate configuration rows only — no task-owned state is mutated.
+- **MR dependency surfaces** (`PUT/GET/DELETE /api/v1/merge-requests/:id/dependencies`, `PUT .../atomic-group`): mutate MR-dependency/group rows, not task rows, task-scoped secrets, or MRs.
