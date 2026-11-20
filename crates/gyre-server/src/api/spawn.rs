@@ -8312,7 +8312,11 @@ exit 1\n"
         let state = test_state();
         let app = crate::api::api_router().with_state(state.clone());
         let temp = tempfile::tempdir().expect("tempdir");
-        let dump_path = temp.path().join("local-gates-dump").to_string_lossy().into_owned();
+        let dump_path = temp
+            .path()
+            .join("local-gates-dump")
+            .to_string_lossy()
+            .into_owned();
 
         let (app, ws_id) = create_workspace(app, "local-gates-ws").await;
         let (app, repo_id) = create_repo_in_workspace(app, &ws_id).await;
@@ -8383,7 +8387,11 @@ exit 1\n"
         let arr = gates
             .as_array()
             .expect("GYRE_LOCAL_GATES must be a JSON array");
-        assert_eq!(arr.len(), 2, "exactly the two pre-merge command gates: {raw}");
+        assert_eq!(
+            arr.len(),
+            2,
+            "exactly the two pre-merge command gates: {raw}"
+        );
         let commands: Vec<&str> = arr
             .iter()
             .map(|g| g["command"].as_str().unwrap_or(""))
@@ -8421,7 +8429,11 @@ exit 1\n"
         let state = test_state();
         let app = crate::api::api_router().with_state(state.clone());
         let temp = tempfile::tempdir().expect("tempdir");
-        let dump_path = temp.path().join("local-gates-empty-dump").to_string_lossy().into_owned();
+        let dump_path = temp
+            .path()
+            .join("local-gates-empty-dump")
+            .to_string_lossy()
+            .into_owned();
 
         let (app, ws_id) = create_workspace(app, "local-gates-empty-ws").await;
         let (app, repo_id) = create_repo_in_workspace(app, &ws_id).await;
@@ -8431,14 +8443,8 @@ exit 1\n"
 
         // No gate rows seeded for this repo.
         create_worktree_dir(&state, &ws_id, "wt-repo", "feat/local-gates-empty");
-        let (_, json) = do_spawn_with_target(
-            app,
-            &repo_id,
-            &task_id,
-            "feat/local-gates-empty",
-            &ct_id,
-        )
-        .await;
+        let (_, json) =
+            do_spawn_with_target(app, &repo_id, &task_id, "feat/local-gates-empty", &ct_id).await;
         assert_eq!(json["agent"]["status"], "active");
 
         let dump = wait_for_dump(&dump_path)

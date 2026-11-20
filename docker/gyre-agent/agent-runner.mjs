@@ -323,8 +323,49 @@ const { turnFile } = createHooksSettingsFile();
 
 let messageCount = 0;
 let lastHeartbeat = Date.now();
-const HEARTBEAT_INTERVAL_MS = 15_000; // Must be < server's 60s stale timeout
+// Must stay < the server's 60s stale-agent timeout (stale_agents.rs).
+// GYRE_HEARTBEAT_INTERVAL_MS overrides the interval for tests/tuning;
+// anything missing/invalid keeps the safe default.
+const HEARTBEAT_INTERVAL_MS = (() => {
+  const parsed = Number.parseInt(process.env.GYRE_HEARTBEAT_INTERVAL_MS ?? '', 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 15_000;
+})();
 let conversationSha = null;
+
+/**
+ * Send one heartbeat to the server (uses GYRE_AUTH_TOKEN; interim, see
+ * M27.4 for the full proxy plan). identity-security.md Layer 1: the
+ * heartbeat carries the session's X.509-SVID for fail-closed
+ * workload-identity verification (GYRE_SVID_PEM is injected at spawn).
+ */
+async function sendHeartbeat() {
+  lastHeartbeat = Date.now();
+  try {
+    const resp = await fetch(`${serverUrl}/api/v1/agents/${agentId}/heartbeat`, {
+      method: 'PUT',
+      headers: {
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        svid: process.env.GYRE_SVID_PEM || '',
+        stack_fingerprint: process.env.GYRE_STACK_HASH || '',
+      }),
+    });
+    if (!resp.ok) console.warn(`[heartbeat] failed: ${resp.status}`);
+  } catch (e) {
+    console.warn(`[heartbeat] error: ${e.message}`);
+  }
+}
+
+/** Fire a heartbeat if the interval has elapsed since the last one.
+ * Shared by the SDK message loop AND the local-gate execution phase
+ * below — gate subprocesses must not starve the liveness signal. */
+function maybeHeartbeat() {
+  if (Date.now() - lastHeartbeat > HEARTBEAT_INTERVAL_MS) {
+    return sendHeartbeat();
+  }
+}
 
 /**
  * Run one SDK query to completion, collecting provenance, forwarding
@@ -375,30 +416,8 @@ async function runAgentQuery(prompt) {
 
     conversationLog.push(logEntry);
 
-    // Periodic heartbeat using GYRE_AUTH_TOKEN (interim; see M27.4 for full proxy plan)
-    const now = Date.now();
-    if (now - lastHeartbeat > HEARTBEAT_INTERVAL_MS) {
-      lastHeartbeat = now;
-      try {
-        const resp = await fetch(`${serverUrl}/api/v1/agents/${agentId}/heartbeat`, {
-          method: 'PUT',
-          headers: {
-            ...(token ? { Authorization: `Bearer ${token}` } : {}),
-            'Content-Type': 'application/json',
-          },
-          // identity-security.md Layer 1: the heartbeat carries the
-          // session's X.509-SVID for fail-closed workload-identity
-          // verification (GYRE_SVID_PEM is injected at spawn).
-          body: JSON.stringify({
-            svid: process.env.GYRE_SVID_PEM || '',
-            stack_fingerprint: process.env.GYRE_STACK_HASH || '',
-          }),
-        });
-        if (!resp.ok) console.warn(`[heartbeat] failed: ${resp.status}`);
-      } catch (e) {
-        console.warn(`[heartbeat] error: ${e.message}`);
-      }
-    }
+    // Periodic heartbeat (shared with the local-gate phase below).
+    await maybeHeartbeat();
   }
 }
 
@@ -625,22 +644,34 @@ try {
     const parsedCap = parseInt(process.env.GYRE_LOCAL_GATE_MAX_RETRIES ?? '2', 10);
     const maxRemediations = Number.isFinite(parsedCap) && parsedCap >= 0 ? parsedCap : 2;
     let remediations = 0;
-    for (;;) {
-      const failures = await runLocalGates(localGates);
-      if (failures.length === 0) break;
-      if (remediations >= maxRemediations) {
-        console.error(`[local-gates] ${failures.length} gate(s) still failing after ${remediations} remediation attempt(s) — retry cap exhausted`);
-        console.error('[local-gates] NOT signaling completion: no MR will be created for failing work');
-        postLog(`Agent runner failed: ${failures.length} local gate(s) still failing after ${remediations} remediation attempt(s); no MR created`);
-        // Provenance is uploaded (the conversation explains why), but the
-        // completion call — the MR-creating step — is never made.
-        await uploadConversation();
-        process.exit(1);
+    // Heartbeat keep-alive for the gate-execution phase: gate subprocesses
+    // routinely run for minutes (a real test suite — the whole point of
+    // this feature), and the server's stale-agent detector applies the
+    // disconnected behavior after 60s without a heartbeat, tearing the
+    // agent down mid-verification. That is exactly the "slow or absent
+    // feedback is a platform bug" failure the spec forbids, so keep
+    // heartbeating on the same interval until local verification ends.
+    const gateHeartbeat = setInterval(() => { maybeHeartbeat(); }, HEARTBEAT_INTERVAL_MS);
+    try {
+      for (;;) {
+        const failures = await runLocalGates(localGates);
+        if (failures.length === 0) break;
+        if (remediations >= maxRemediations) {
+          console.error(`[local-gates] ${failures.length} gate(s) still failing after ${remediations} remediation attempt(s) — retry cap exhausted`);
+          console.error('[local-gates] NOT signaling completion: no MR will be created for failing work');
+          postLog(`Agent runner failed: ${failures.length} local gate(s) still failing after ${remediations} remediation attempt(s); no MR created`);
+          // Provenance is uploaded (the conversation explains why), but the
+          // completion call — the MR-creating step — is never made.
+          await uploadConversation();
+          process.exit(1);
+        }
+        remediations++;
+        console.log(`[local-gates] ${failures.length} gate(s) failed — feeding failure output back to the agent (remediation attempt ${remediations}/${maxRemediations})`);
+        postLog(`[local-gates] ${failures.length} gate(s) failed — remediation attempt ${remediations}/${maxRemediations}`);
+        await runAgentQuery(gateFailureFeedback(failures));
       }
-      remediations++;
-      console.log(`[local-gates] ${failures.length} gate(s) failed — feeding failure output back to the agent (remediation attempt ${remediations}/${maxRemediations})`);
-      postLog(`[local-gates] ${failures.length} gate(s) failed — remediation attempt ${remediations}/${maxRemediations}`);
-      await runAgentQuery(gateFailureFeedback(failures));
+    } finally {
+      clearInterval(gateHeartbeat);
     }
   }
 

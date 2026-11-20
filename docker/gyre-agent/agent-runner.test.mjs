@@ -465,4 +465,46 @@ describe('pre-PR local gate verification (GYRE_LOCAL_GATES)', () => {
       'no completion call on malformed gate config',
     );
   });
+
+  // Regression (review 4fba4dc6): heartbeats used to fire only inside the
+  // SDK message loop, so a gate subprocess running longer than the
+  // server's 60s stale timeout got the agent torn down mid-verification.
+  // The runner must keep heartbeating while local gates execute. This test
+  // fails if the gate-phase heartbeat keep-alive is removed: the stub SDK
+  // query resolves in milliseconds, so every heartbeat observed below
+  // fired while the 1s gate subprocess was running.
+  it('keeps heartbeating while local gates execute (no stale-agent teardown mid-verification)', async () => {
+    const dir = buildStubbedRunnerRecordingQueries();
+    const gates = JSON.stringify([
+      { id: 'gate-hb-1', name: 'slow tests', command: 'sleep 1', timeout_secs: 10 },
+    ]);
+    const { code, stderr } = await runRunnerCapturingOutput(dir, {
+      GYRE_SERVER_URL: cap.url,
+      GYRE_AUTH_TOKEN: 'test-token',
+      GYRE_AGENT_ID: 'agt-gates-6',
+      GYRE_TASK_ID: 'task-gates-6',
+      GYRE_BRANCH: 'feat/gates6',
+      GYRE_REPO_ID: 'repo-1',
+      GYRE_LOCAL_GATES: gates,
+      // Shrink the heartbeat interval (same code path, default 15s) so the
+      // keep-alive is observable within a 1s gate run.
+      GYRE_HEARTBEAT_INTERVAL_MS: '150',
+    });
+    assert.equal(code, 0, `slow-but-passing gate must complete normally, stderr:\n${stderr}`);
+
+    const heartbeats = cap.requests.filter(
+      (r) => r.method === 'PUT' && r.path.endsWith('/agents/agt-gates-6/heartbeat'),
+    );
+    assert.ok(
+      heartbeats.length >= 2,
+      `heartbeats must continue during gate execution (a gate longer than the server's ` +
+        `stale timeout would otherwise get the agent torn down mid-verification), ` +
+        `got ${heartbeats.length} heartbeat(s): ${JSON.stringify(cap.requests)}`,
+    );
+    // And the gate passing still proceeds to completion (MR flow unbroken).
+    assert.ok(
+      cap.requests.some((r) => r.method === 'POST' && r.path.endsWith('/agents/agt-gates-6/complete')),
+      'heartbeating must not break the completion flow',
+    );
+  });
 });
