@@ -478,9 +478,7 @@ pub async fn cleanup_worktrees_for_task(state: &Arc<AppState>, task: &gyre_domai
     }
     if let Ok(agents) = state.agents.list().await {
         for agent in agents {
-            if agent.current_task_id.as_ref() == Some(&task.id)
-                && !agent_ids.contains(&agent.id)
-            {
+            if agent.current_task_id.as_ref() == Some(&task.id) && !agent_ids.contains(&agent.id) {
                 agent_ids.push(agent.id.clone());
             }
         }

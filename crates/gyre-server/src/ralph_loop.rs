@@ -995,6 +995,7 @@ mod tests {
     use gyre_domain::{
         AgentWorktree, GateResult, GateStatus, GateType, MergeRequest, MrStatus, QualityGate,
     };
+    use gyre_ports::GitOpsPort;
 
     #[test]
     fn default_max_iterations_matches_spec() {
