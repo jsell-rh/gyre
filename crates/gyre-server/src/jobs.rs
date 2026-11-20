@@ -252,6 +252,19 @@ impl JobRegistry {
     /// (review task-273).
     pub async fn durable_history(&self, job_name: &str, limit: usize) -> Vec<JobRun> {
         let store = self.durable.lock().await.clone();
+        let fallback = |ring: Vec<JobRun>| {
+            // The in-memory ring is oldest-first (VecDeque push_back); the
+            // documented contract of this method — and what every consumer
+            // (GET /admin/jobs status pill, recent_runs) assumes — is
+            // newest-first, identical to `list_by_job`. Without the
+            // reversal the fallback path presents the OLDEST run as the
+            // latest (review task-273: the status pill showed a stale
+            // failure after a later successful run).
+            let mut newest_first = ring;
+            newest_first.reverse();
+            newest_first.truncate(limit);
+            newest_first
+        };
         match store {
             Some(store) => match store.list_by_job(job_name, limit).await {
                 Ok(runs) => runs.into_iter().map(JobRun::from_record).collect(),
@@ -261,10 +274,10 @@ impl JobRegistry {
                         "reading durable job history failed (serving the in-memory \
                          cache): {e}"
                     );
-                    self.history(job_name).await
+                    fallback(self.history(job_name).await)
                 }
             },
-            None => self.history(job_name).await,
+            None => fallback(self.history(job_name).await),
         }
     }
 
