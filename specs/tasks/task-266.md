@@ -2,8 +2,8 @@
 title: "SCIM groups and group-to-workspace role mapping"
 spec_ref: "Spec gap spec-31d3ae72e12e22c52442e309 / scim-groups-workspace-mapping / b60edce5bc49"
 depends_on: [task-265]
-progress: ready-for-review
-commits: ["70e1fa7b3b05b3f11546942a694f1e2226d9e968", "eee34c67807e51536f21fd3bc3b8ec91604bf9a9"]
+progress: not-started
+commits: []
 ---
 
 ## Required behavior
@@ -43,29 +43,3 @@ Canonical spec: `specs/system/identity-security.md`. Source: `fb1424fbac55cd23cb
     ]
   }
 ]
-
-## Shipped
-
-Both halves of the gap are implemented in production code: checkpoint commit `eee34c67` (all six Groups endpoints, ports + SQLite/Postgres adapters, migration 000068, mapping surface, effect logic, integration test suite) completed by `70e1fa7b` (formatting, SQLite contract-test defect fix, adapter contract tests, coverage row 10, api-reference docs). This assignment rebased that source onto the task-263 completion base `00669baa` (merge commit `d007a8af`, resolving the identity-security.md coverage-file conflict: row 10 keeps this branch's task-266 implemented state, row 4 takes main's task-263 implemented state) and re-verified the result — evidence in /tmp/stage/review-evidence/task-266-rebase-evidence.md.
-
-### SCIM Groups surface (requirement 1)
-
-All six `/scim/v2/Groups` endpoints are registered in the production router (api/mod.rs) and implemented in api/scim.rs per RFC 7643 §4.2 / RFC 7644: GET list with `startIndex`/`count` pagination (1-based) and `displayName eq` / `externalId eq` filters; GET `{id}` with 404 on unknown id; POST create (idempotent on `externalId` — re-push returns the stored resource, never a duplicate row); PUT replace (`displayName` + the membership set exactly; `externalId` is the immutable join key); PATCH partial update (`add`/`remove`/`replace` on `members` including the `members[value eq "x"]` path-filter form, value lists, whole-attribute remove, and the simplified bare-body form); DELETE (runs the mapping-revocation effect for each member, then removes the group and membership rows, 204). Every endpoint enforces the dedicated `GYRE_SCIM_TOKEN` bearer via `check_scim_auth` (fail-closed 403 on unset token, missing header, or wrong bearer). Member `value` resolves to a Gyre user by user id, then externalId, then username; unresolvable members are skipped, never fabricated.
-
-### Durable storage (requirement 4)
-
-`gyre-ports::ScimGroupRepository` + `ScimMappingRepository`, implemented by BOTH the SQLite and PostgreSQL adapters over migration `2026-11-14-000068_scim_groups_and_mappings` (next unused 6-digit sequence; portable SQL — partial unique index on `scim_groups.external_id`, composite keys `(group_id, user_id)` and `(workspace_id, idp_group)`). Wired through `build_state`'s `store!` pattern — no in-memory AppState store; the mem-mode adapter guards the duplicate-external_id port contract in code.
-
-### Mapping surface (requirement 2)
-
-`PUT/GET /api/v1/workspaces/{id}/scim-mappings` (api/scim_mappings.rs): whole-set PUT validated before anything persists (unknown role, empty or duplicate `idp_group` → 400, never a partially-applied set), durable in `scim_workspace_mappings`. Authorization: registered in the ABAC `RouteResourceMapping` (resource `scim_mapping`) with the `builtin:scim-mapping-management` policy (workspace Owner/Admin), plus a per-handler `can_manage` guard — a plain Developer member gets 403, cross-tenant callers contained by `load_workspace`.
-
-### Mapping effects (requirement 3 + control case)
-
-`apply_member_added` / `apply_member_removed` (api/scim.rs) run from every membership-changing push (create with members, PUT, PATCH add/remove/replace, DELETE). Adding user U to a group whose `externalId` (else `displayName`) matches a workspace's mapping creates U's `WorkspaceMembership` with the mapped role — accepted on creation, tenant-contained, idempotent (never duplicated or rewritten). Removing U revokes the mapped membership — only the membership the mapping governs (a different-role grant is left intact). Unmapped groups create no membership anywhere. Every effect emits an audit event (`workspace_membership_created`/`workspace_membership_revoked`, `source: "scim"`).
-
-### Test evidence
-
-- This sandbox (post-rebase, /tmp/stage/review-evidence/task-266-rebase-evidence.md): `cargo check -p gyre-server --tests` clean — type-checks the merged task-263 auth changes alongside the full SCIM surface and both scim integration-test suites; `cargo test -p gyre-adapters sqlite::scim_group` — 5 passed; `cargo test -p gyre-domain --lib scim_group` — 1 passed; `cargo test -p gyre-spiffe` — 36 passed (crate touched by the rebase); `cargo fmt --all --check` clean; standing-invariant scripts pass (check-arch, check-abac-route-registry, check-abac-exempt-handlers, check-in-memory-state-stores, check-mem-port-contracts, check-migration-sql-portability, check-migration-versions).
-- `tests/scim_groups.rs` (6 tests) drives every request through the full production `build_router()` stack over a real SQLite temp-file database: RFC 7644 CRUD + pagination + filters + 404s; SCIM-token enforcement on every endpoint; the verification-intent scenario (map G→Developer in W, push U into G — membership created and U's authenticated workspace access succeeds; remove U — the same access is denied); the unmapped control case (no WorkspaceMembership row anywhere); restart survival over the same db file; displayName-keyed mapping and cross-tenant containment.
-- gyre-server test EXECUTION is deferred to the independent verifier (sandbox 4 GiB build cap blocks gyre-server codegen; the build wrapper records the restriction): the verifier must run `cargo test -p gyre-server --test scim_groups`, `cargo test -p gyre-server --test scim_lifecycle`, plus the adapter/domain suites above (both green here), and the full `cargo test --all`.
