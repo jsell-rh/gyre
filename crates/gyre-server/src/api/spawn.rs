@@ -3833,6 +3833,7 @@ mod tests {
     /// `auth_in_tenant`).
     fn plain_auth(agent_id: &str) -> crate::auth::AuthenticatedAgent {
         crate::auth::AuthenticatedAgent {
+            auth_mechanism: crate::auth::AuthMechanism::AgentToken,
             agent_id: agent_id.to_string(),
             user_id: None,
             roles: vec![gyre_domain::UserRole::Admin],
