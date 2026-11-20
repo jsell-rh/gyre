@@ -525,9 +525,46 @@ mod tests {
         std::env::set_var("GYRE_CLAUDE_MAX_TOKEN_ENDPOINT", &token_url);
         std::env::set_var("GYRE_CLAUDE_MAX_REDIRECT_URI", "http://localhost:3000/cb");
 
-        let state = crate::mem::test_state();
+        // Authenticate as a REAL admin user via JWT: the state row must
+        // carry the initiating admin's server-derived identity. (The
+        // global dev token would honestly record "system" — the
+        // enrollment flow is admin-initiated, so the test exercises the
+        // user-identity derivation path the spec requires.)
+        use crate::auth::test_helpers::{make_test_state_with_jwt, sign_test_jwt};
+        let state = make_test_state_with_jwt();
+        let mut admin = gyre_domain::User::new(
+            Id::new("user-admin"),
+            "user-admin-ext",
+            "user-admin",
+            now_secs(),
+        );
+        // The JWT role sync happens at SSO provisioning; an existing
+        // account authenticates with its STORED roles, so the seeded
+        // admin carries Admin (the role the enroll handler requires).
+        admin.roles = vec![gyre_domain::UserRole::Admin];
+        state.users.create(&admin).await.unwrap();
+        let admin_jwt = sign_test_jwt(
+            &serde_json::json!({
+                "sub": "user-admin-ext",
+                "preferred_username": "user-admin",
+                "realm_access": { "roles": ["admin"] },
+                "tenant_id": "default"
+            }),
+            3600,
+        );
         let app = app(state.clone());
-        let response = app.oneshot(enroll_request("{}")).await.unwrap();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/admin/oauth/claude-max/enroll")
+                    .header("Authorization", format!("Bearer {admin_jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         assert_eq!(response.status(), StatusCode::SEE_OTHER);
         let location = response
             .headers()

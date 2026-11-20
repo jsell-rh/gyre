@@ -636,6 +636,18 @@ mod tests {
     async fn repo_maintenance_prunes_unreachable_objects_and_isolates_failures() {
         let state = crate::mem::test_state();
         let tmp = tempfile::tempdir().unwrap();
+        // Point repos_root at the tempdir (uniquely owned state: safe to
+        // mutate before any clone). The default test repos_root
+        // (/tmp/gyre-unit-test-repos-<pid>) is SHARED by every test in
+        // this binary — other tests leave real git directories under it,
+        // and repo_maintenance's unregistered-repo scan would count them,
+        // breaking the exact "1 of 3" failure-count assertion below.
+        let state = {
+            let mut s = state;
+            let inner = Arc::get_mut(&mut s).expect("test state is uniquely owned");
+            inner.repos_root = tmp.path().to_string_lossy().into_owned();
+            s
+        };
 
         // Repo A: healthy, seeded with an unreachable loose object that a
         // real gc --prune=now must reclaim.

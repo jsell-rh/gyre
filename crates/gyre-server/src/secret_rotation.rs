@@ -1883,13 +1883,20 @@ mod tests {
     );
 
     /// Rebuild the PEM-armored PKCS#8 form of the test SA key (the shape a
-    /// real Google-issued SA JSON carries in `private_key`).
+    /// real Google-issued SA JSON carries in `private_key`). The embedded
+    /// DER constant is the PKCS#1 RSAPrivateKey encoding of the key whose
+    /// public half is [`TEST_SA_PUBLIC_SPKI_B64`]; Google's armor wraps the
+    /// PKCS#8 PrivateKeyInfo form, so the PKCS#1 bytes are re-wrapped here
+    /// exactly as `openssl pkcs8 -topk8` would — a bare PKCS#1 body under
+    /// PKCS#8 armor would be rejected by `RsaKeyPair::from_pkcs8` before
+    /// any grant is signed.
     fn test_sa_private_key_pem() -> String {
         use base64::Engine as _;
-        let der = base64::engine::general_purpose::STANDARD
+        let pkcs1 = base64::engine::general_purpose::STANDARD
             .decode(TEST_SA_PRIVATE_KEY_DER_B64.trim())
             .expect("test key DER is valid base64");
-        let b64 = base64::engine::general_purpose::STANDARD.encode(&der);
+        let pkcs8 = pkcs8_wrap_pkcs1(&pkcs1);
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&pkcs8);
         let mut pem = String::from("-----BEGIN PRIVATE KEY-----\n");
         for chunk in b64.as_bytes().chunks(64) {
             pem.push_str(std::str::from_utf8(chunk).unwrap());
@@ -1897,6 +1904,36 @@ mod tests {
         }
         pem.push_str("-----END PRIVATE KEY-----\n");
         pem
+    }
+
+    /// Minimal DER TLV encoder: tag, DER length, content.
+    fn der_tlv(tag: u8, content: &[u8]) -> Vec<u8> {
+        let mut out = vec![tag];
+        let len = content.len();
+        if len < 0x80 {
+            out.push(len as u8);
+        } else {
+            let bytes = len.to_be_bytes();
+            let skip = bytes.iter().take_while(|b| **b == 0).count();
+            out.push(0x80 | (bytes.len() - skip) as u8);
+            out.extend_from_slice(&bytes[skip..]);
+        }
+        out.extend_from_slice(content);
+        out
+    }
+
+    /// Wrap a PKCS#1 RSAPrivateKey DER in a PKCS#8 PrivateKeyInfo
+    /// (version 0 + rsaEncryption AlgorithmIdentifier + OCTET STRING) —
+    /// the format `RsaKeyPair::from_pkcs8` and real Google SA keys use.
+    fn pkcs8_wrap_pkcs1(pkcs1: &[u8]) -> Vec<u8> {
+        const RSA_ENCRYPTION_ALGID: &[u8] = &[
+            0x06, 0x09, // OID, 9 bytes: 1.2.840.113549.1.1.1 (rsaEncryption)
+            0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01, 0x05, 0x00, // + NULL params
+        ];
+        let mut content = der_tlv(0x02, &[0]); // version: 0
+        content.extend(der_tlv(0x30, RSA_ENCRYPTION_ALGID));
+        content.extend(der_tlv(0x04, pkcs1)); // privateKey OCTET STRING
+        der_tlv(0x30, &content)
     }
 
     /// A full, Google-shaped service-account key document pointing at
