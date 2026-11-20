@@ -9,19 +9,19 @@ use gyre_domain::{
     Agent, AgentCommit, AgentStatus, AgentUsage, AgentWorktree, AnalyticsEvent, AuditEvent,
     CostEntry, DependencyEdge, LlmFunctionConfig, MergeQueueEntry, MergeQueueEntryStatus,
     MergeRequest, MrStatus, NetworkPeer, Persona, PersonaScope, Repository, Review, ReviewComment,
-    ReviewDecision, Task, TaskStatus, Tenant, User, Workspace,
+    ReviewDecision, Session, Task, TaskStatus, Tenant, User, Workspace,
 };
 #[cfg(test)]
 use gyre_domain::{BranchInfo, CommitInfo, DiffResult, MergeResult};
 use gyre_ports::{
-    AgentCommitRepository, AgentInstanceRepository, AgentRepository, AnalyticsQueryFilter,
-    AnalyticsRepository, ApiKeyRepository, AuditQueryFilter, AuditRepository, BudgetRepository,
-    BudgetUsageRepository, CostRepository, DependencyRepository, JobRunRepository, KvJsonStore,
-    LlmConfigRepository, MergeQueueRepository, MergeRequestRepository, MetaSpecSetRepository,
-    NetworkPeerRepository, OAuthStateRepository, PersonaRepository, RepoRepository,
-    ReviewRepository, RolloutPolicyRepository, SpawnLogEntry, SpawnLogRepository, TaskRepository,
-    TenantMetaSpecSetRepository, TenantRepository, UserRepository, UserWorkspaceStateRepository,
-    WorkspaceRepository, WorktreeRepository,
+    AgentCommitRepository, AgentInstanceRepository, AgentRepository, AgentSessionRepository,
+    AnalyticsQueryFilter, AnalyticsRepository, ApiKeyRepository, AuditQueryFilter, AuditRepository,
+    BudgetRepository, BudgetUsageRepository, CostRepository, DependencyRepository,
+    JobRunRepository, KvJsonStore, LlmConfigRepository, MergeQueueRepository,
+    MergeRequestRepository, MetaSpecSetRepository, NetworkPeerRepository, OAuthStateRepository,
+    PersonaRepository, RepoRepository, ReviewRepository, RolloutPolicyRepository, SpawnLogEntry,
+    SpawnLogRepository, TaskRepository, TenantMetaSpecSetRepository, TenantRepository,
+    UserRepository, UserWorkspaceStateRepository, WorkspaceRepository, WorktreeRepository,
 };
 #[cfg(test)]
 use gyre_ports::{GitOpsPort, JjChange, JjNewChange, JjOpsPort};
@@ -697,6 +697,149 @@ impl AgentCommitRepository for MemAgentCommitRepository {
             .filter(|ac| ac.task_id.as_deref() == Some(task_id))
             .cloned()
             .collect())
+    }
+
+    async fn find_by_session(&self, session_id: &Id) -> Result<Vec<AgentCommit>> {
+        // Chronological (oldest first): the session-to-commit mapping is
+        // ordered by when each commit landed. The mem adapter has no ORDER
+        // BY, so the sort is done in code (same contract as the SQLite and
+        // PostgreSQL adapters).
+        let mut commits: Vec<AgentCommit> = self
+            .store
+            .lock()
+            .await
+            .iter()
+            .filter(|ac| ac.session_id.as_deref() == Some(session_id.as_str()))
+            .cloned()
+            .collect();
+        commits.sort_by(|a, b| {
+            a.timestamp
+                .cmp(&b.timestamp)
+                .then_with(|| a.id.as_str().cmp(b.id.as_str()))
+        });
+        Ok(commits)
+    }
+
+    async fn find_by_file(&self, repo_id: &Id, path: &str) -> Result<Vec<AgentCommit>> {
+        // Exact path match against the recorded files_changed lists (same
+        // contract as the SQLite and PostgreSQL adapters).
+        let mut commits: Vec<AgentCommit> = self
+            .store
+            .lock()
+            .await
+            .iter()
+            .filter(|ac| {
+                ac.repository_id.as_str() == repo_id.as_str()
+                    && ac.files_changed.iter().any(|f| f == path)
+            })
+            .cloned()
+            .collect();
+        commits.sort_by(|a, b| {
+            a.timestamp
+                .cmp(&b.timestamp)
+                .then_with(|| a.id.as_str().cmp(b.id.as_str()))
+        });
+        Ok(commits)
+    }
+}
+
+#[derive(Default)]
+pub struct MemAgentSessionRepository {
+    store: Arc<Mutex<Vec<Session>>>,
+}
+
+#[async_trait]
+impl AgentSessionRepository for MemAgentSessionRepository {
+    async fn create(&self, session: &Session) -> Result<()> {
+        let mut store = self.store.lock().await;
+        // Port contract: fails if a session with the same id already
+        // exists. Guarded in code because the mem adapter has no schema to
+        // enforce the SQLite/PostgreSQL primary key.
+        if store.iter().any(|s| s.id == session.id) {
+            anyhow::bail!("session {} already exists", session.id);
+        }
+        store.push(session.clone());
+        Ok(())
+    }
+
+    async fn find_by_agent(&self, agent_id: &Id) -> Result<Vec<Session>> {
+        // Chronological (oldest first), same contract as the DB adapters,
+        // including the same-second tie-break: an ended session predates a
+        // still-open session started in the same second (one agent's
+        // sessions are sequential context windows), then ended_at, then the
+        // id as the final deterministic fallback — never the random-UUID id
+        // alone, which orders same-second sessions arbitrarily.
+        let mut sessions: Vec<Session> = self
+            .store
+            .lock()
+            .await
+            .iter()
+            .filter(|s| s.agent_id.as_str() == agent_id.as_str())
+            .cloned()
+            .collect();
+        sessions.sort_by(|a, b| {
+            a.started_at
+                .cmp(&b.started_at)
+                .then_with(|| a.ended_at.is_none().cmp(&b.ended_at.is_none()))
+                .then_with(|| a.ended_at.cmp(&b.ended_at))
+                .then_with(|| a.id.as_str().cmp(b.id.as_str()))
+        });
+        Ok(sessions)
+    }
+
+    async fn find_by_repo(&self, repository_id: &Id) -> Result<Vec<Session>> {
+        // Same ordering contract as find_by_agent (see there).
+        let mut sessions: Vec<Session> = self
+            .store
+            .lock()
+            .await
+            .iter()
+            .filter(|s| s.repository_id.as_str() == repository_id.as_str())
+            .cloned()
+            .collect();
+        sessions.sort_by(|a, b| {
+            a.started_at
+                .cmp(&b.started_at)
+                .then_with(|| a.ended_at.is_none().cmp(&b.ended_at.is_none()))
+                .then_with(|| a.ended_at.cmp(&b.ended_at))
+                .then_with(|| a.id.as_str().cmp(b.id.as_str()))
+        });
+        Ok(sessions)
+    }
+
+    async fn find_by_id(&self, id: &Id) -> Result<Option<Session>> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .iter()
+            .find(|s| s.id == *id)
+            .cloned())
+    }
+
+    async fn find_open_by_agent(&self, agent_id: &Id) -> Result<Option<Session>> {
+        // The latest session without ended_at (there is at most one per
+        // agent, but the query must return the newest if several exist).
+        Ok(self
+            .store
+            .lock()
+            .await
+            .iter()
+            .filter(|s| s.agent_id.as_str() == agent_id.as_str() && s.ended_at.is_none())
+            .max_by_key(|s| (s.started_at, s.id.to_string()))
+            .cloned())
+    }
+
+    async fn update(&self, session: &Session) -> Result<()> {
+        let mut store = self.store.lock().await;
+        // Port contract: fails if the session does not exist (same guard
+        // as the SQLite and PostgreSQL adapters' zero-rows check).
+        let existing = store
+            .iter_mut()
+            .find(|s| s.id == session.id)
+            .ok_or_else(|| anyhow::anyhow!("session {} does not exist", session.id))?;
+        *existing = session.clone();
+        Ok(())
     }
 }
 
@@ -5679,6 +5822,7 @@ fn test_state_inner(
         git_ops,
         jj_ops: Arc::new(NoopJjOps),
         agent_commits: Arc::new(MemAgentCommitRepository::default()),
+        agent_sessions: Arc::new(MemAgentSessionRepository::default()),
         worktrees: Arc::new(MemWorktreeRepository::default()),
         telemetry_buffer: Arc::new(gyre_common::message::TelemetryBuffer::new(1_000, 10)),
         message_broadcast_tx: broadcast::channel(16).0,

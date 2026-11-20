@@ -77,7 +77,7 @@ pub mod workspace_membership;
 
 pub use agent::AgentRepository;
 pub use agent_instance::{AgentInstanceRecord, AgentInstanceRepository};
-pub use agent_tracking::{AgentCommitRepository, WorktreeRepository};
+pub use agent_tracking::{AgentCommitRepository, AgentSessionRepository, WorktreeRepository};
 pub use analytics::{AnalyticsGroupBy, AnalyticsQueryFilter, AnalyticsRepository, CostRepository};
 pub use attestation_repo::AttestationRepository;
 pub use attestation_signer::AttestationSigner;

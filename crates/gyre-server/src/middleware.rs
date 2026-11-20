@@ -151,6 +151,23 @@ pub async fn last_seen_middleware(
     use crate::auth::AuthenticatedAgent;
     use axum::extract::FromRequestParts;
 
+    // SCIM 2.0 provisioning requests (identity-security.md §SCIM
+    // Provisioning) pass `require_auth_middleware` via its /scim/v2
+    // exemption and authenticate with the dedicated `GYRE_SCIM_TOKEN`
+    // bearer — a credential the `AuthenticatedAgent` ladder below does
+    // not accept. Running that extractor on a SCIM request made it fall
+    // through to the final fallback in auth.rs, which PERSISTS an
+    // AuthFailure audit event ('invalid token', CEF severity 6 in the
+    // SIEM export) even though `check_scim_auth` then accepted the
+    // request — one false high-severity failure row per successful IdP
+    // provisioning call, indistinguishable from a credential attack.
+    // Last-seen tracking is already dead for these paths (no
+    // /api/v1/workspaces/<id> segment to extract), so skip straight to
+    // the handler.
+    if req.uri().path().starts_with("/scim/v2/") {
+        return next.run(req).await;
+    }
+
     // Extract workspace_id from path: /api/v1/workspaces/<id>/...
     let workspace_id = extract_workspace_id_from_path(req.uri().path());
 
@@ -283,6 +300,7 @@ mod tests {
             git_ops: base.git_ops.clone(),
             jj_ops: base.jj_ops.clone(),
             agent_commits: base.agent_commits.clone(),
+            agent_sessions: base.agent_sessions.clone(),
             worktrees: base.worktrees.clone(),
             telemetry_buffer: base.telemetry_buffer.clone(),
             message_broadcast_tx: base.message_broadcast_tx.clone(),

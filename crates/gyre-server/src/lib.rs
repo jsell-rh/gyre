@@ -4,6 +4,7 @@ pub(crate) mod abac;
 pub mod abac_middleware;
 pub mod abandoned_branch;
 pub mod agent_audit;
+pub mod agent_sessions;
 pub mod aibom_spec_registry;
 pub mod api;
 pub mod attestation;
@@ -87,20 +88,20 @@ use gyre_common::message::{Destination, Message, MessageKind, MessageOrigin, Tel
 use gyre_common::Id;
 use gyre_common::WsMessage;
 use gyre_ports::{
-    AgentCommitRepository, AgentRepository, AnalyticsRepository, ApiKeyRepository,
-    AttestationRepository, AttestationStorage, AuditRepository, BreakingChangeRepository,
-    BudgetCallRepository, BudgetRepository, BudgetUsageRepository, ComputeTargetRepository,
-    ContainerAuditRepository, ConversationRepository, CostRepository, DependencyPolicyRepository,
-    DependencyRepository, GateResultRepository, GitOpsPort, GraphPort, JjOpsPort, KvJsonStore,
-    LlmConfigRepository, MergeQueueRepository, MergeRequestRepository, MetaSpecBindingRepository,
-    MetaSpecRepository, MetaSpecSetRepository, NetworkPeerRepository, NotificationRepository,
-    PersonaRepository, PolicyRepository, PreAcceptGate, ProcessHandle, PushGateRepository,
-    QualityGateRepository, RekorClient, RepoAccessOverrideRepository, RepoRepository,
-    ReviewRepository, RolloutPolicyRepository, SpawnLogRepository, SpecApprovalEventRepository,
-    SpecApprovalRepository, SpecLedgerRepository, SpecLifecycleRepository, SpecPolicyRepository,
-    TaskRepository, TeamRepository, TenantMetaSpecSetRepository, TraceRepository, UserRepository,
-    UserWorkspaceStateRepository, WorkspaceMembershipRepository, WorkspaceRepository,
-    WorktreeRepository,
+    AgentCommitRepository, AgentRepository, AgentSessionRepository, AnalyticsRepository,
+    ApiKeyRepository, AttestationRepository, AttestationStorage, AuditRepository,
+    BreakingChangeRepository, BudgetCallRepository, BudgetRepository, BudgetUsageRepository,
+    ComputeTargetRepository, ContainerAuditRepository, ConversationRepository, CostRepository,
+    DependencyPolicyRepository, DependencyRepository, GateResultRepository, GitOpsPort, GraphPort,
+    JjOpsPort, KvJsonStore, LlmConfigRepository, MergeQueueRepository, MergeRequestRepository,
+    MetaSpecBindingRepository, MetaSpecRepository, MetaSpecSetRepository, NetworkPeerRepository,
+    NotificationRepository, PersonaRepository, PolicyRepository, PreAcceptGate, ProcessHandle,
+    PushGateRepository, QualityGateRepository, RekorClient, RepoAccessOverrideRepository,
+    RepoRepository, ReviewRepository, RolloutPolicyRepository, SpawnLogRepository,
+    SpecApprovalEventRepository, SpecApprovalRepository, SpecLedgerRepository,
+    SpecLifecycleRepository, SpecPolicyRepository, TaskRepository, TeamRepository,
+    TenantMetaSpecSetRepository, TraceRepository, UserRepository, UserWorkspaceStateRepository,
+    WorkspaceMembershipRepository, WorkspaceRepository, WorktreeRepository,
 };
 use jobs::JobRegistry;
 use retention::RetentionStore;
@@ -242,6 +243,10 @@ pub struct AppState {
     pub git_ops: Arc<dyn GitOpsPort>,
     pub jj_ops: Arc<dyn JjOpsPort>,
     pub agent_commits: Arc<dyn AgentCommitRepository>,
+    /// Agent sessions (one per context window) — source-control.md
+    /// §Agent-to-Commit Tracking. Port-backed so sessions survive a
+    /// server restart.
+    pub agent_sessions: Arc<dyn AgentSessionRepository>,
     pub worktrees: Arc<dyn WorktreeRepository>,
     /// In-memory ring buffer for Telemetry-tier messages (replaces ActivityStore).
     pub telemetry_buffer: Arc<TelemetryBuffer>,
@@ -876,6 +881,22 @@ async fn require_auth_middleware(
     // RouteResourceMapping::exempt entry.
     let path = req.uri().path();
     if path == "/api/v1/version" || path == "/api/v1/oauth/claude-max/callback" {
+        return next.run(req).await;
+    }
+
+    // SCIM 2.0 provisioning endpoints (identity-security.md §SCIM
+    // Provisioning) authenticate with the dedicated `GYRE_SCIM_TOKEN`
+    // bearer token — a server-to-server credential separate from the agent
+    // JWT / global-token ladder below. Passing a SCIM request through that
+    // ladder rejected it 401 ("Invalid token") before the handler-level
+    // `check_scim_auth` ever ran, so the specced authentication model did
+    // not work end-to-end in the shipped server. The exemption is safe
+    // because every /scim/v2 handler enforces `check_scim_auth` itself:
+    // fail-closed 403 when GYRE_SCIM_TOKEN is unset, constant-time bearer
+    // compare otherwise. ABAC middleware passes these routes through as
+    // resolver-exempt (RouteResourceMapping::exempt entries), so no policy
+    // evaluation is skipped by this bypass.
+    if req.uri().path().starts_with("/scim/v2/") {
         return next.run(req).await;
     }
 
@@ -1979,6 +2000,10 @@ pub fn build_state(
         agent_commits: store!(
             dyn AgentCommitRepository,
             mem::MemAgentCommitRepository::default()
+        ),
+        agent_sessions: store!(
+            dyn AgentSessionRepository,
+            mem::MemAgentSessionRepository::default()
         ),
         worktrees: store!(
             dyn WorktreeRepository,
