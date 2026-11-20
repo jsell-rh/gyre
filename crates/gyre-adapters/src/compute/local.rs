@@ -40,20 +40,40 @@ impl ComputeTarget for LocalTarget {
     }
 
     async fn kill_process(&self, handle: &ProcessHandle) -> Result<()> {
-        if let Some(pid) = handle.pid {
-            // Send SIGTERM via kill(1)
-            let status = Command::new("kill")
-                .arg("-TERM")
-                .arg(pid.to_string())
-                .status()
-                .await
-                .context("kill command failed")?;
-            if !status.success() {
-                // Process may have already exited; treat as success
-                tracing::debug!(pid, "kill returned non-zero (process may have exited)");
-            }
+        let Some(pid) = handle.pid else {
+            return Ok(());
+        };
+        // Already gone? A dead pid is a successful kill (idempotent —
+        // the instance record is simply marked terminated).
+        if !self.is_alive(handle).await? {
+            return Ok(());
         }
-        Ok(())
+        // SIGTERM, wait for exit, then SIGKILL, then VERIFY: the kill's
+        // success is the process actually being gone — a non-zero kill
+        // exit status or an ignored signal must never be reported as
+        // success (review task-273: a failed kill treated as success let
+        // "killed" instances keep running).
+        let _ = Command::new("kill")
+            .arg("-TERM")
+            .arg(pid.to_string())
+            .status()
+            .await; // verified below — a racing exit shows up in the poll
+        if wait_for_exit(pid, std::time::Duration::from_secs(10)).await {
+            return Ok(());
+        }
+        let status = Command::new("kill")
+            .arg("-KILL")
+            .arg(pid.to_string())
+            .status()
+            .await
+            .with_context(|| format!("kill -KILL of {pid} failed to run"))?;
+        if !status.success() && self.is_alive(handle).await? {
+            anyhow::bail!("kill -KILL of {pid} failed");
+        }
+        if wait_for_exit(pid, std::time::Duration::from_secs(10)).await {
+            return Ok(());
+        }
+        anyhow::bail!("process {pid} survived SIGTERM and SIGKILL — kill did not take effect");
     }
 
     async fn is_alive(&self, handle: &ProcessHandle) -> Result<bool> {
@@ -68,6 +88,51 @@ impl ComputeTarget for LocalTarget {
             Ok(status.success())
         } else {
             Ok(false)
+        }
+    }
+}
+
+/// Whether `pid` is gone (exited or an unreaped zombie — a zombie owns no
+/// resources and never runs again, so it is dead for kill purposes).
+/// Polls for up to `timeout`.
+async fn wait_for_exit(pid: u32, timeout: std::time::Duration) -> bool {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if process_gone(pid) {
+            return true;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+}
+
+fn process_gone(pid: u32) -> bool {
+    match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+        Ok(stat) => {
+            // State is field 3; comm (field 2) may contain ')' — parse
+            // after the last one. 'Z' = zombie = dead for our purposes
+            // (init reaps it; it will never run again).
+            match stat.rsplit_once(')') {
+                Some((_, after)) => after
+                    .split_whitespace()
+                    .next()
+                    .map(|state| state.starts_with('Z'))
+                    .unwrap_or(false),
+                None => false,
+            }
+        }
+        // /proc is unavailable (non-Linux): fall back to kill -0 via the
+        // shell's exit status through `kill` (best-effort portability).
+        Err(_) => {
+            let gone = std::process::Command::new("kill")
+                .arg("-0")
+                .arg(pid.to_string())
+                .status()
+                .map(|s| !s.success())
+                .unwrap_or(false);
+            gone
         }
     }
 }
@@ -115,6 +180,25 @@ mod tests {
         let handle = target.spawn_process(&config).await.unwrap();
         assert_eq!(handle.target_type, "local");
         // No assertion on is_alive — process exits immediately, that's fine.
+    }
+
+    #[tokio::test]
+    async fn local_kill_of_already_exited_pid_is_ok() {
+        // Idempotent kill: a pid that already exited is a successful kill
+        // (the caller marks the instance record terminated), never an
+        // error and never a signal to a recycled pid — kill_process checks
+        // liveness first (review task-273).
+        let target = LocalTarget;
+        let mut child = Command::new("true").spawn().unwrap();
+        let pid = child.id().expect("spawned child has a pid");
+        let status = child.wait().await.unwrap();
+        assert!(status.success());
+        let handle = ProcessHandle {
+            id: pid.to_string(),
+            target_type: "local".to_string(),
+            pid: Some(pid),
+        };
+        target.kill_process(&handle).await.unwrap();
     }
 
     #[tokio::test]
