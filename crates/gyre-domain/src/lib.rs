@@ -44,6 +44,7 @@ pub mod prompt_template;
 pub mod python_extractor;
 pub mod quality_gate;
 pub mod repo_access;
+pub mod scim_group;
 pub mod repository;
 pub mod review;
 pub mod rust_extractor;
@@ -133,6 +134,7 @@ pub use repo_access::{
 pub use repository::{RepoStatus, Repository};
 pub use review::{Review, ReviewComment, ReviewDecision};
 pub use rust_extractor::RustExtractor;
+pub use scim_group::{ScimGroup, ScimGroupMember, ScimWorkspaceMapping};
 pub use spec_approval::SpecApproval;
 pub use spec_assertions::{
     evaluate_assertions, parse_assertions, AssertionResult, Comparison, ParsedAssertion, Predicate,

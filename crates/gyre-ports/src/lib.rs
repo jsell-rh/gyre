@@ -48,6 +48,7 @@ pub mod rekor;
 pub mod repo_access;
 pub mod repository;
 pub mod review;
+pub mod scim_group;
 pub mod rollout_policy;
 pub mod saved_view;
 pub mod search;
@@ -120,6 +121,7 @@ pub use rekor::RekorClient;
 pub use repo_access::RepoAccessOverrideRepository;
 pub use repository::RepoRepository;
 pub use review::ReviewRepository;
+pub use scim_group::{ScimGroupRepository, ScimMappingRepository};
 pub use rollout_policy::RolloutPolicyRepository;
 pub use saved_view::{SavedView, SavedViewRepository};
 pub use search::{
