@@ -3312,7 +3312,7 @@ async fn handle_graph_query_dryrun(state: &AppState, args: &Value) -> Value {
         Err(e) => return tool_error(format!("Failed to load graph edges: {e}")),
     };
 
-    let result = gyre_domain::view_query_resolver::dry_run_with_call_graph(
+    let result = gyre_domain::view_query_resolver::dry_run_with_diff_change_set(
         &query,
         &nodes,
         &edges,
@@ -3325,6 +3325,11 @@ async fn handle_graph_query_dryrun(state: &AppState, args: &Value) -> Value {
             )
             .await,
         ),
+        // SHA/ref-based diff scopes resolve their change set from the repo's
+        // real git via the shared two-commit graph-diff core.
+        crate::graph_diff_core::resolve_view_query_diff_changes_for_state(state, &repo_id, &query)
+            .await
+            .as_ref(),
     );
     // §9: the dry-run tool response echoes the query alongside the preview
     // (`{"query": ..., "result": {...}}`); the `result` member carries the

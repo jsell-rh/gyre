@@ -1,6 +1,7 @@
 <script>
   import { onDestroy, untrack } from 'svelte';
   import { t } from 'svelte-i18n';
+  import { api } from './api.js';
   import EmptyState from './EmptyState.svelte';
   import PlaybackControls from '../components/PlaybackControls.svelte';
   import FlowCanvas from './FlowCanvas.svelte';
@@ -194,6 +195,82 @@
       q.annotation.description = q.annotation.description.replace(/\$name/g, node.name ?? '');
     }
     onInteractiveQuery(q);
+  });
+
+  // ── SHA/ref-based diff scope: server-resolved commit-range change set ──
+  // View-query-grammar.md §2 `diff` ("Changes between two commits"): the
+  // matched set for a SHA/ref-based diff scope is the node-level change set
+  // between the two boundary commits, computed by the server from real
+  // per-commit repository state (shared two-commit graph-diff core — the
+  // same path that serves GET /repos/{id}/graph/diff). The current graph
+  // snapshot's created_sha/last_modified_sha provenance cannot express a
+  // commit range (single-point stamps miss nodes changed by intermediate
+  // commits), so the local SHA-prefix heuristic was removed: the set is
+  // fetched from the query-dryrun endpoint and fed into the matched/depth
+  // machinery below. Temporal "~<epoch>" diffs stay local (a different
+  // query form). Loading and error states surface an explicit warning
+  // instead of an incorrect set.
+  let diffScopeResolved = $state(null); // { ids: Set<string> | null, warnings: string[] }
+  let diffScopeVersion = 0; // stale-response guard
+
+  // Whether the active query is a SHA/ref-based (non-temporal) diff scope —
+  // the query form whose matched set must come from the server.
+  function isServerDiffScope(q) {
+    if (!q?.scope || q.scope.type !== 'diff') return false;
+    const from = q.scope.from_commit ?? '';
+    const to = q.scope.to_commit ?? '';
+    if (!from || !to) return false;
+    const temporal = (s) => /^~\d+$/.test(s);
+    // Both boundaries temporal → temporal query form, resolved locally.
+    return !(temporal(from) && temporal(to));
+  }
+
+  $effect(() => {
+    const q = activeQuery;
+    if (!isServerDiffScope(q) || !repoId) {
+      diffScopeResolved = null;
+      return;
+    }
+    const thisVersion = ++diffScopeVersion;
+    // A new fetch is in flight: drop the previous query's set so a stale
+    // matched set is never rendered for the new boundaries (the loading
+    // status shows until the response arrives).
+    diffScopeResolved = null;
+    api.graphQueryDiffScope(repoId, q, null)
+      .then((r) => {
+        if (thisVersion !== diffScopeVersion) return; // stale response
+        diffScopeResolved = {
+          ids: new Set(r?.matchedIds ?? []),
+          warnings: r?.warnings ?? [],
+        };
+      })
+      .catch((e) => {
+        if (thisVersion !== diffScopeVersion) return; // stale response
+        diffScopeResolved = {
+          ids: null, // error: no matched set — never an incorrect guess
+          warnings: [
+            `Diff scope could not be resolved server-side (${e?.message ?? e}); ` +
+              'the matched set is unavailable.',
+          ],
+        };
+      });
+  });
+
+  // Loading/error/server-warning status for the SHA/ref-based diff scope.
+  let diffScopeStatus = $derived.by(() => {
+    if (!isServerDiffScope(activeQuery)) return null;
+    if (!repoId) {
+      return { kind: 'error', text: 'Diff scope: no repository selected — the commit-range change set cannot be resolved.' };
+    }
+    if (!diffScopeResolved) {
+      return { kind: 'loading', text: 'Diff scope: resolving the commit-range change set…' };
+    }
+    const warnings = diffScopeResolved.warnings ?? [];
+    if (warnings.length > 0) {
+      // ids === null means the fetch failed: the matched set is unavailable.
+      return { kind: diffScopeResolved.ids ? 'warning' : 'error', text: warnings.join(' ') };
+    }
+    return null;
   });
 
   // ── Color palette (depth-based HSL for tree groups) ──────────────────
@@ -2348,10 +2425,18 @@
       return dm.size > 0 ? dm : null;
     }
 
-    // Diff scope: nodes changed between two commits. Semantics mirror the
-    // server resolver (gyre-domain view_query_resolver.rs Scope::Diff) and
-    // read the fields GraphNodeResponse actually serializes: created_sha,
-    // last_modified_sha, created_at, last_modified_at.
+    // Diff scope: nodes changed between two commits (view-query-grammar.md
+    // §2 `diff`). Two query forms:
+    //
+    // 1. Temporal ("~<epoch seconds>" on both boundaries): resolved locally
+    //    against created_at/last_modified_at — a different query form,
+    //    unchanged.
+    // 2. SHA/ref-based: the matched set is the server-computed commit-range
+    //    change set (shared two-commit graph-diff core, fetched via the
+    //    query-dryrun endpoint — see diffScopeResolved above). The local
+    //    SHA-prefix heuristic over created_sha/last_modified_sha was
+    //    removed: single-snapshot provenance cannot express a commit range
+    //    (nodes changed by intermediate commits were silently missed).
     if (scope.type === 'diff') {
       const fromCommit = (scope.from_commit ?? '').toLowerCase();
       const toCommit = (scope.to_commit ?? '').toLowerCase();
@@ -2373,20 +2458,19 @@
             matched.set(n.id, 0);
           }
         }
-      } else {
-        // SHA diff: to_commit must be a ≥7-char prefix of the node's
-        // created_sha/last_modified_sha (short-prefix false-positive guard);
-        // nodes already unchanged at from_commit (BOTH shas match from) are
-        // excluded. Matches server heuristic including its limitations.
-        const shaMatches = (sha, target) => {
-          if (!sha || target.length < 7) return false;
-          return String(sha).toLowerCase().startsWith(target);
-        };
-        for (const n of nodes) {
-          const matchesTo = shaMatches(n.created_sha, toCommit) || shaMatches(n.last_modified_sha, toCommit);
-          const unchangedAtFrom = shaMatches(n.created_sha, fromCommit) && shaMatches(n.last_modified_sha, fromCommit);
-          if (matchesTo && !unchangedAtFrom) matched.set(n.id, 0);
+      } else if (diffScopeResolved?.ids) {
+        // SHA/ref-based diff: highlight exactly the server-returned node
+        // ids (added + modified entries of the commit-range change set,
+        // mapped to current node ids server-side). Only ids present in the
+        // current graph are renderable; removed nodes are surfaced by name
+        // in the server warnings (diffScopeStatus), never guessed locally.
+        for (const id of diffScopeResolved.ids) {
+          if (nodes.some((n) => n.id === id)) matched.set(id, 0);
         }
+      } else {
+        // Loading or error: no matched set — never an incorrect set. The
+        // status banner (diffScopeStatus) shows the explicit warning.
+        return null;
       }
       return matched.size > 0 ? matched : null;
     }
@@ -6137,6 +6221,16 @@
     </div>
   {/if}
 
+  <!-- SHA/ref-based diff scope status: the matched set comes from the
+       server's commit-range change set; loading, error, and server warnings
+       (removed nodes, unresolvable refs) are surfaced explicitly instead of
+       an incorrect local set. -->
+  {#if diffScopeStatus}
+    <div class="diff-scope-status" role="status" data-diff-scope-status={diffScopeStatus.kind}>
+      {diffScopeStatus.text}
+    </div>
+  {/if}
+
   <!-- Preview mode indicator (ghost overlays active) -->
   {#if hasGhosts}
     <div class="preview-mode-bar" role="status" data-testid="preview-mode-indicator">
@@ -6970,6 +7064,17 @@
   .query-annotation {
     display: flex; align-items: center; justify-content: space-between;
     padding: 6px 12px; background: #172554; border-bottom: 1px solid #1e3a5f; flex-shrink: 0;
+  }
+  .diff-scope-status {
+    padding: 4px 12px; flex-shrink: 0;
+    font-size: 11px; color: #fbbf24;
+    background: rgba(120, 53, 15, 0.35);
+    border-bottom: 1px solid rgba(245, 158, 11, 0.35);
+  }
+  .diff-scope-status[data-diff-scope-status='error'] {
+    color: #f87171;
+    background: rgba(127, 29, 29, 0.35);
+    border-bottom-color: rgba(248, 113, 113, 0.35);
   }
   .trace-warning {
     display: flex; align-items: center; gap: 8px;
