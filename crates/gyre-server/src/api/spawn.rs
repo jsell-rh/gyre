@@ -398,6 +398,106 @@ pub async fn cleanup_jj_workspace(
     }
 }
 
+/// Tear down an agent's worktrees on a terminal path — the ONE shared
+/// teardown for every path where the agent's work is terminally complete
+/// (agent-workflow.md §Parallel Work via Worktrees: "worktrees are ephemeral
+/// — created at task start, cleaned up on completion"): the stale-agent Dead
+/// transition, the admin kill, task Done after MR merge (the Ralph-loop
+/// watcher), the Phase 7 iteration ceiling, fail_agent, and task
+/// cancellation.
+///
+/// This is the real VCS operation, not just a DB row delete: each worktree's
+/// jj workspace is forgotten from the repo's shared jj checkout and its
+/// working-copy directory removed ([`cleanup_jj_workspace`]), the plain-git
+/// worktree is removed via the git_ops port, and only then is the
+/// `agent_worktrees` DB record deleted. The pushed branch, the MR, the
+/// commits, and the snapshot refs stay intact server-side — only the
+/// working copy and its record go.
+///
+/// Ordering contract: snapshot refs are written against the bare repo (not
+/// the worktree) at completion, and callers must capture session end state
+/// (`agent_sessions::end_session` observes the worktree's real branch and
+/// dirty state) BEFORE invoking this — the working copy is that
+/// observation's data source. Ralph-loop gate-failure respawns REUSE the
+/// worktree (`relaunch_agent_session`), so this must never fire at
+/// MR-creation completion — only on terminal states.
+pub async fn cleanup_agent_worktrees(state: &AppState, agent_id: &Id) {
+    let worktrees = match state.worktrees.find_by_agent(agent_id).await {
+        Ok(wts) => wts,
+        Err(e) => {
+            tracing::warn!(
+                agent_id = %agent_id,
+                "worktree cleanup: find_by_agent failed: {e}"
+            );
+            return;
+        }
+    };
+    for wt in worktrees {
+        if let Ok(Some(repo)) = state.repos.find_by_id(&wt.repository_id).await {
+            // Plain-git worktree removal via the git_ops port FIRST, while
+            // the working copy still exists: `git worktree remove` deletes
+            // the directory AND its administrative metadata (the registered
+            // entry under .git/worktrees) in one real VCS operation. A
+            // plain-git worktree is not a jj workspace, so the jj forget
+            // below just warns; a jj workspace is not a registered git
+            // worktree, so this call just warns — each kind is torn down by
+            // its own operation.
+            if let Err(e) = state.git_ops.remove_worktree(&repo.path, &wt.path).await {
+                tracing::warn!("remove_worktree failed for agent {agent_id}: {e}");
+            }
+            // jj workspace teardown (source-control.md §4): forget the
+            // workspace from the shared jj checkout and remove the working
+            // copy dir (also the filesystem backstop when the git removal
+            // above could not run — e.g. a dirty plain-git worktree that
+            // `git worktree remove` refuses without --force).
+            cleanup_jj_workspace(
+                state,
+                &agent_id.to_string(),
+                &repo.path,
+                &wt.path,
+                &format!("agent-{agent_id}"),
+            )
+            .await;
+        }
+        let _ = state.worktrees.delete(&wt.id).await;
+    }
+}
+
+/// Terminal worktree teardown for a CANCELLED task
+/// (agent-workflow.md §Parallel Work via Worktrees: a cancelled task's work
+/// is terminally complete — platform-model.md §Task Status: "Cancelled …
+/// terminal — cannot be re-opened"). Resolves every agent that worked the
+/// task — the assignee plus any agent whose current task is this task —
+/// captures each agent's session end state (BEFORE removing the working
+/// copy it observes), then tears the worktrees down via
+/// [`cleanup_agent_worktrees`]. Shared by every task-cancellation surface
+/// (the HTTP status endpoint, the MCP task-update tool, repo archival, spec
+/// rejection) so none can drift.
+pub async fn cleanup_worktrees_for_task(state: &Arc<AppState>, task: &gyre_domain::Task) {
+    let mut agent_ids: Vec<Id> = Vec::new();
+    if let Some(assignee) = &task.assigned_to {
+        agent_ids.push(assignee.clone());
+    }
+    if let Ok(agents) = state.agents.list().await {
+        for agent in agents {
+            if agent.current_task_id.as_ref() == Some(&task.id) && !agent_ids.contains(&agent.id) {
+                agent_ids.push(agent.id.clone());
+            }
+        }
+    }
+    for agent_id in agent_ids {
+        let Ok(Some(agent)) = state.agents.find_by_id(&agent_id).await else {
+            continue;
+        };
+        // Session capture before working-copy removal (source-control.md
+        // §Agent-to-Commit Tracking): records the worktree's real current
+        // branch and dirty state while it still exists. Best-effort no-op
+        // when no session is open.
+        crate::agent_sessions::end_session(state, &agent).await;
+        cleanup_agent_worktrees(state, &agent_id).await;
+    }
+}
+
 // ── Handlers ──────────────────────────────────────────────────────────────────
 
 // ── Shared agent-process launch ──────────────────────────────────────────
@@ -3308,6 +3408,14 @@ pub async fn fail_agent(
     // and dirty state, and stamps ended_at. Best-effort: never fails the
     // failure path.
     crate::agent_sessions::end_session(&state, &agent).await;
+
+    // agent-workflow.md §Parallel Work via Worktrees: Failed is terminal,
+    // so the ephemeral worktree is torn down (jj workspace/git worktree
+    // removal + agent_worktrees record delete) AFTER the session end-state
+    // capture above — the working copy is that capture's data source. A
+    // later orchestrator replacement is a fresh entity with no worktree
+    // (`restart_orchestrator`), so teardown here cannot break a restart.
+    cleanup_agent_worktrees(&state, &agent.id).await;
 
     // M22.2: Decrement budget active-agent counter.
     let workspace_id = agent.workspace_id.to_string();

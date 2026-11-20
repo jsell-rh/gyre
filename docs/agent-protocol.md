@@ -51,7 +51,9 @@ This document covers the full agent lifecycle: spawn, operation, and completion.
 // Response 200 -- returns the opened MergeRequest
 ```
 
-The server automatically: opens the MR, marks the task done, removes the git worktree, and marks the agent Idle.
+The server automatically: opens the MR, puts the task into Review, and marks the agent Idle (its token is revoked and a snapshot ref is written — see below).
+
+**Worktree teardown is deferred to terminal completion:** the working copy is NOT removed at this call. The Ralph loop reuses the same worktree/branch to re-spawn the agent when gates fail (`agent-runtime.md` §1 Phase 7), so teardown fires only when the work is terminally complete: the task reaching Done after the MR merges (the Ralph loop's merge watcher), the Phase 7 iteration ceiling (task Blocked, agent Failed), `POST /api/v1/agents/{id}/fail`, and task cancellation (including repo archival and spec rejection). At those terminal points the server removes the jj workspace / plain-git worktree from disk and deletes its `agent_worktrees` record, after capturing the session end state (final branch, dirty state) from the working copy. The pushed branch, the MR, the commits, and the snapshot refs remain intact server-side — only the ephemeral working copy goes.
 
 **Idempotent (M13.7):** Calling complete a second time returns **202 Accepted** rather than an error -- safe to retry on network failure or agent restart.
 
