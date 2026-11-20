@@ -426,6 +426,20 @@ async fn agent_messages_send_and_receive() {
     let ctx = Ctx::new().await;
     let agent_id = create_agent(&ctx).await;
 
+    // Scoping rule 1 (message-bus.md): the send path resolves the target
+    // agent's tenant from its workspace record and rejects sends whose
+    // scope cannot be resolved. Agents created via POST /api/v1/agents land
+    // in the bootstrap "default" workspace — seed the matching workspace
+    // row (tenant "default", the global token's system principal tenant).
+    let ws = gyre_domain::Workspace::new(
+        gyre_common::Id::new("default"),
+        gyre_common::Id::new("default"),
+        "Default",
+        "default",
+        0,
+    );
+    ctx.state.workspaces.create(&ws).await.unwrap();
+
     // Send via new unified send endpoint (workspace-scoped).
     // The agent was created with workspace_id="default", so use that.
     let resp = ctx
