@@ -3,7 +3,7 @@ title: "Admin Panel completion: SOPS/Vault secret backends, durable job history 
 spec_ref: "Spec gap spec-5b647653a4554eea3e93ac19 / admin-panel-remaining-gap / e61ffd082155"
 depends_on: []
 progress: ready-for-review
-commits: ["0fda00bfe9860c8c8b66ea1235f0d2e3251df67a", "1bc00b6cb9212e6ac6dfc7c764afede98ae8fd64", "a2b31ac19c05310ebd05a072ddde1acf0c51f2ec", "f6e31cf57779a7e117f5a0b9bd75720aed90ca56", "b101d27aafb7bde0907a568e7bb8a3ffbdd3ae67", "ee253c8854f16664f91d16171e08414effc314b7", "db320101b1540a35cf9986408e70ac46008b1982"]
+commits: ["db320101b1540a35cf9986408e70ac46008b1982", "ee253c8854f16664f91d16171e08414effc314b7", "b101d27aafb7bde0907a568e7bb8a3ffbdd3ae67", "f6e31cf57779a7e117f5a0b9bd75720aed90ca56", "a2b31ac19c05310ebd05a072ddde1acf0c51f2ec", "1bc00b6cb9212e6ac6dfc7c764afede98ae8fd64", "0fda00bfe9860c8c8b66ea1235f0d2e3251df67a", "6b897ab8635b4e1e4dc7289c4dc7366555d37d46"]
 ---
 
 ## Required behavior
@@ -122,108 +122,67 @@ Canonical spec: `specs/system/admin-panel.md`. Source: `fb1424fbac55cd23cb08606f
 
 ## Shipped
 
-All eight deliverables were implemented on this branch and every finding
-from the independent review of candidate `5ff6596d` is repaired in
-`0fda00bf` (13/13, each a real code fix with focused tests). The
-acceptance checkboxes above remain for the independent verifier.
+All eight admin-panel deliverables are implemented on this branch,
+carried through the independent review-repair round (`0fda00bf`,
+13/13 findings fixed with focused tests) and rebased onto base
+`2f33a117` (task-265/task-258) in merge commit `6b897ab8` with
+behavior preserved. The acceptance checkboxes above remain for the
+independent verifier.
 
-### Review-repair round (`0fda00bf`)
+### Rebase repair round (`6b897ab8`)
 
-- **Vault path traversal**: secret names are validated at the API
-  boundary (`validate_secret_name` in `api/secrets.rs`) and defensively
-  in the Vault adapter (`VaultSecretRepository::validate_name`) — no
-  `/`, `\`, `..` segments or control characters may become a KV path
-  segment. Pinned by `create_rejects_path_unsafe_names` (vault) and
-  `path_unsafe_secret_names_are_rejected` (API, 400 + nothing stored).
-- **OAuth state single-use race**: `OAuthStateRepository::mark_consumed`
-  is now an atomic conditional flip (`UPDATE … WHERE state = ? AND
-  consumed = 0`) returning `Ok(bool)` in all three adapters; the callback
-  rejects the loser of a concurrent replay via the flip result, not a
-  read-then-write check. Pinned by `mark_consumed_is_atomic_single_use`
-  (SQLite), a PG SQL-shape test asserting the `consumed = 0` predicate,
-  and `concurrent_state_consumption_is_single_use` (mem, `tokio::join!`).
-- **Redirect URI**: `GYRE_CLAUDE_MAX_REDIRECT_URI` is required and must
-  be an absolute http(s) URI (RFC 6749 §3.1.2) — no silent relative
-  default. Pinned by `enroll_rejects_relative_or_missing_redirect_uri`.
-- **Orchestrator instances are durable**: `launch_orchestrator_process`
-  records every spawn through `AgentInstanceRepository` and marks
-  terminated on clean exit, so restart-orphaned orchestrators are
-  visible to `remote_agent_cleanup`.
-- **Admin kill of restart orphans**: `kill_agent` reconstructs the
-  backend from the durable instance record (container/kubernetes/local)
-  and kills it; the record is marked terminated only when a kill was
-  actually attempted — an unreconstructable (ssh) record stays
-  sweepable. Pinned by `admin_kill_kills_restart_orphan_via_durable_record`
-  (real process killed; ssh record left running).
-- **SOPS CLI MAC compatibility**: `canonical_lastmodified` truncates the
-  stored `lastmodified` to second-precision RFC 3339 before MAC AAD use
-  (Go marshals RFC3339Nano, sops seals the MAC under
-  `Format(time.RFC3339)`), so CLI-encrypted documents verify. Pinned by
-  `canonical_lastmodified_truncates_fractions_and_keeps_zone` and
-  `sops_decrypt_verifies_cli_style_fractional_lastmodified` (a different
-  second still fails).
-- **Vault namespace + AppRole TTL**: `X-Vault-Namespace` now rides index
-  reads and both delete paths (previously: reads failed open, deletes
-  silently no-oped in namespaced mode); every server-token operation
-  (`get_value`, `list_by_scope`, `rotate`, `resolve_for_agent`, create's
-  existence check) goes through the AppRole re-login retry wrapper.
-  Pinned by `namespace_header_rides_index_reads_and_deletes` and
-  `expired_approle_token_relogs_in_for_every_operation` (stub rejects the
-  cached generation; every operation still succeeds).
-- **Re-enrollment expiry**: the callback rewrites the credential row
-  (value AND `expires_at`) with restore-on-failure, so an expired
-  re-enrolled credential is immediately visible to `resolve_for_agent`.
-  Pinned by `callback_reenrollment_extends_expiry_immediately`.
-- **Durable job-run wiring**: `trigger_persists_runs_through_the_durable_store`
-  proves trigger/record_cycle runs (with logs) land in the attached
-  `JobRunRepository` and that `durable_history` reads through it;
-  `durable_history` logs read failures instead of silently degrading.
-- **Server-log buffer**: capacity 0 clamps to 1 (never unbounded); the
-  level filter is case-insensitive and unknown levels are a 400 at
-  `GET /api/v1/admin/server/logs`. HTTP-level tests added:
-  `admin_server_logs_non_admin_gets_403_through_full_stack` (developer
-  JWT through `build_router`'s ABAC middleware) and
-  `admin_server_logs_serves_captured_events_with_filters` (captured
-  lines retrievable; level/since/limit honored; bogus level → 400).
-- **Rotation fail-closed**: `secret_rotation_check` fails the run on a
-  scope-list error (no silent green run over skipped credentials) and
-  `attempt_rotation` restores the original secret if the metadata
-  rewrite fails (the credential document is never lost).
-- **Mem audit parity**: `MemAuditRepository::record` derives the tenant
-  server-side (workspace's owner, then the acting user) exactly like the
-  SQLite/PostgreSQL adapters, wired in `build_state` and the shared test
-  state. Pinned by `record_derives_tenant_from_workspace_then_user`.
+Merged base `2f33a117` into the pipeline branch. The two content
+conflicts were resolved as unions: `crates/gyre-ports/src/lib.rs`
+(base's `AgentSessionRepository` export alongside this task's
+`AgentInstanceRepository`) and `crates/gyre-server/src/mem.rs` (import
+list unioning `AgentSessionRepository` with this task's
+`AgentInstanceRepository` / `JobRunRepository` / `OAuthStateRepository`;
+both sides' impl blocks coexist untouched). The base consumed migration
+sequence 000067 (`user_manager_id`, `agent_sessions`), colliding with
+this task's `2026-11-13-000067_job_runs` (identical full Diesel
+version 20261113000067, so one would silently never run), so this
+task's four migrations were renumbered to the next unused sequences —
+`000071_job_runs`, `000072_oauth_states`, `000073_agent_instances`,
+`000074_audit_events_tenant_id` — as directory renames only (SQL
+unchanged; they had never shipped on main). Post-merge evidence:
 
-### Test evidence
+- `cargo check -p gyre-server` and `cargo check -p gyre-server
+  --all-targets`: clean (lib plus every test target).
+- `cargo test -p gyre-adapters --lib`: **655 passed, 0 failed** —
+  including the vault suite (KV v2 CRUD, agent-JWT resolution,
+  AppRole re-login, namespace rides, path-unsafe names,
+  unreachable-Vault fails closed), plus the sops, oauth_state,
+  job_run and audit tenant-scoping suites.
+- `cargo test -p gyre-ports -p gyre-common -p gyre-domain`:
+  129 + 570 + 8 passed.
+- `cd web && npm test`: **2571 passed, 41 skipped** across 127 test
+  files — including the TenantSettings server-logs / jobs / audit
+  tab tests.
+- All 15 mechanical invariant scripts pass with no new exemption
+  entries, including check-migration-versions (the duplicate
+  20261113000067 is resolved), check-migration-sql-portability,
+  check-arch, check-mem-port-contracts,
+  check-in-memory-state-stores, check-abac-route-registry and
+  check-unbounded-external-http.
 
-- `cargo test -p gyre-adapters` (full): **642 passed, 0 failed** —
-  including the vault (10), sops (18) and oauth_state (6) suites with
-  the new tests.
-- `cargo test -p gyre-ports -p gyre-common -p gyre-domain`: 129 + 569 +
-  8 passed.
-- `cargo check -p gyre-server --all-targets`: clean (lib + all test
-  targets, including every new server-side test). gyre-server test
-  *execution* is blocked in this sandbox by the 4 GiB build wrapper and
-  is recorded for the independent verifier in
-  `/tmp/stage/review-evidence/required-server-tests.txt` (api::oauth,
-  api::secrets, api::admin, jobs, telemetry, mem_audit_tenant_tests,
-  secret_rotation modules).
-- Mechanical gates all pass with no new exemptions: check-arch,
-  check-migration-versions, check-migration-sql-portability,
-  check-mem-port-contracts, check-in-memory-state-stores,
-  check-abac-route-registry, check-unbounded-external-http (plus the
-  byte-slice, relative-path, fail-open-ref, lossy-secret,
-  forged-scope and inert-enforcement checks).
+gyre-server test *execution* is deferred to the independent verifier
+per the 4 GiB build budget; the required commands and module filters
+are recorded in `/tmp/stage/review-evidence/required-server-tests.txt`
+(api::oauth, api::secrets, api::admin, jobs, telemetry, mem audit
+tenant tests, secret_rotation modules).
 
-### Standing behavior (unchanged, from the prior shipped rounds)
+### Standing behavior (unchanged through the rebase)
 
-SOPS default with legacy AES-256-GCM re-encryption on first access;
-Vault KV v2 backend with agent-JWT resolution and fail-closed startup;
-durable job history with run-scoped logs and the Jobs tab;
-`repo_maintenance` / `oauth_state_cleanup` / `remote_agent_cleanup` /
-`job_history_cleanup`; Claude Max enrollment (Admin-only initiation,
-PKCE, atomic single-use state, latency-bounded token exchange);
-document-shape-driven token refresh (RFC 6749 + GCP SA RS256
-JWT-bearer); server-logs capture layer + endpoint + UI tab; durable
-searchable admin audit with tenant scoping and zstd-transparent `q`
-search.
+SOPS default (genuine age-encrypted SOPS documents in the existing
+columns, legacy AES-256-GCM values re-encrypted on first access);
+Vault KV v2 backend with agent-JWT resolution, server AppRole/token
+writes and fail-closed behavior when unreachable; durable job history
+with run-scoped logs and the Jobs tab; `repo_maintenance` /
+`oauth_state_cleanup` / `remote_agent_cleanup` /
+`job_history_cleanup` registered + scheduled jobs; Claude Max
+enrollment (Admin-only initiation, PKCE, atomic single-use state,
+latency-bounded token exchange); document-shape-driven token refresh
+(RFC 6749 refresh grant + GCP SA RS256 JWT-bearer, no-refresh-mechanism
+escalation recorded in run logs); server-logs capture layer + Admin
+endpoint + UI tab; durable searchable admin audit with tenant scoping
+and zstd-transparent `q` search.
