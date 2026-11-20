@@ -148,6 +148,14 @@ async fn main() -> Result<()> {
         Arc::clone(&state),
     );
 
+    // Meta-spec preview GC (§5 of meta-spec-reconciliation.md): expire preview
+    // runs so throwaway branches, worktrees and tokens cannot outlive their TTL.
+    jobs::spawn_job(
+        Arc::clone(&state.job_registry),
+        "meta_spec_preview_gc".to_string(),
+        Arc::clone(&state),
+    );
+
     // PR hygiene (specs/development/agent-workflow.md §PRs as the
     // Collaboration Primitive, task-270): continuously (minutes-scale
     // interval) monitors open MRs for stale classes — unreviewed,

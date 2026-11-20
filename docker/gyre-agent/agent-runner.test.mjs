@@ -16,7 +16,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import http from 'node:http';
 import { once } from 'node:events';
-import { mkdtempSync, writeFileSync, mkdirSync, readFileSync, cpSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, mkdirSync, readFileSync, cpSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -505,6 +505,80 @@ describe('pre-PR local gate verification (GYRE_LOCAL_GATES)', () => {
     assert.ok(
       cap.requests.some((r) => r.method === 'POST' && r.path.endsWith('/agents/agt-gates-6/complete')),
       'heartbeating must not break the completion flow',
+    );
+  });
+});
+
+describe('preview mode (meta-spec reconciliation §5): draft reaches the agent, ceremony skipped', () => {
+  let cap;
+
+  before(async () => {
+    cap = await startRecordingServer();
+  });
+
+  beforeEach(() => {
+    // Each test asserts on the requests ITS OWN runner made.
+    cap.requests.length = 0;
+  });
+
+  after(async () => {
+    cap.server.close();
+  });
+
+  // The preview early-exit sits BETWEEN the SDK query loop and the pre-PR
+  // local-gate phase (§5 skips gates, provenance and completion — the
+  // server derives the result from the pushed branch). This test fails if
+  // the exit moves after gate execution (a failing gate would exit nonzero
+  // and trigger a remediation query), if the draft stops reaching the LLM
+  // prompt, or if any completion/provenance call leaks into preview mode.
+  it('preview run with configured gates: draft in prompt, gates never executed, no upload, no completion', async () => {
+    const dir = buildStubbedRunnerRecordingQueries();
+    const gateMarker = join(dir, 'preview-gate-ran-marker');
+    const gates = JSON.stringify([
+      // A gate that would both "fail" (nonzero exit) and leave a marker if
+      // preview mode wrongly executed it.
+      { id: 'gate-preview-1', name: 'unit tests', command: `touch ${gateMarker}; exit 7` },
+    ]);
+    const { code, stdout, stderr } = await runRunnerCapturingOutput(dir, {
+      GYRE_SERVER_URL: cap.url,
+      GYRE_AUTH_TOKEN: 'test-token',
+      GYRE_AGENT_ID: 'agt-preview-1',
+      // GYRE_PREVIEW_ID (not GYRE_TASK_ID) puts the runner in preview mode.
+      GYRE_PREVIEW_ID: 'prev-206',
+      GYRE_BRANCH: 'preview/prev-206/search',
+      GYRE_REPO_ID: 'repo-1',
+      GYRE_WORK_DIR: dir,
+      GYRE_META_SPEC_DRAFT_KIND: 'meta:persona',
+      GYRE_META_SPEC_DRAFT_CONTENT: 'DRAFT-PERSONA-MARKER-7f3a: always write the test before the code',
+      GYRE_TARGET_SPEC_PATH: 'specs/system/search.md',
+      // Gates ARE configured — preview mode must skip them anyway (§5).
+      GYRE_LOCAL_GATES: gates,
+    });
+
+    assert.equal(code, 0, `preview run must exit 0 (throwaway, not a gate failure), stderr:\n${stderr}`);
+    assert.match(stdout, /Preview mode complete/, 'runner must log the preview completion');
+
+    // Exactly one query (the preview prompt) — no gate-remediation loop.
+    const queries = readFileSync(join(dir, 'queries.log'), 'utf8').trim()
+      .split('\n').filter(Boolean).map((l) => JSON.parse(l));
+    assert.equal(queries.length, 1, `preview mode must not remediate on gate failures, got ${queries.length} queries`);
+    // The draft actually reached the LLM prompt (not just the env).
+    assert.match(queries[0], /DRAFT-PERSONA-MARKER-7f3a/, 'draft meta-spec content must reach the SDK prompt');
+    assert.match(queries[0], /specs\/system\/search\.md/, 'target spec path must reach the SDK prompt');
+    assert.match(queries[0], /preview\/prev-206\/search/, 'preview branch must reach the SDK prompt');
+
+    // The gate was never executed.
+    assert.equal(existsSync(gateMarker), false, 'preview mode must not execute local quality gates');
+
+    // No completion call (no MR) and no provenance upload — only liveness
+    // traffic (heartbeats, logs) may reach the server.
+    assert.ok(
+      cap.requests.every((r) => !r.path.includes('/complete')),
+      `preview mode must never signal completion, got: ${JSON.stringify(cap.requests)}`,
+    );
+    assert.ok(
+      cap.requests.every((r) => !r.path.includes('/mcp')),
+      `preview mode must never upload conversation provenance, got: ${JSON.stringify(cap.requests)}`,
     );
   });
 });

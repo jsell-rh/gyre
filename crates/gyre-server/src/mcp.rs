@@ -5111,6 +5111,75 @@ pub async fn mcp_handler(
                 ));
             }
 
+            // Preview agents (meta-spec reconciliation §5) run with all
+            // ceremony stripped: no task ledger, no MR, no merge queue, no
+            // provenance. The runner withholds these tools client-side, but
+            // allowedTools is advisory — the server must not execute
+            // task/MR/complete mutations for a preview agent. The branch push
+            // is the entire deliverable; the run ends when the process exits.
+            // gyre_message_send / gyre_message_ack are in the same class: a
+            // preview agent injecting Directed-tier messages into production
+            // inboxes (or acking around the exit hook's bulk-ack) leaves a
+            // durable footprint that outlives the throwaway run. The four
+            // orchestrator tools (gyre_spawn_worker,
+            // gyre_spawn_repo_orchestrator, gyre_cross_repo_task,
+            // gyre_decompose_spec) are in the same class too: they create tasks and spawn agents — ceremony a preview
+            // run must skip. They are currently unreachable for a preview
+            // caller only because preview JWTs carry no orchestrator claims
+            // (validate_tool_scope's token-shape check); the preview registry
+            // is the containment boundary, so they are denied here as
+            // defense-in-depth, not left to token shape.
+            if is_agent_jwt(&auth)
+                && matches!(
+                    tool_name,
+                    "gyre_create_task"
+                        | "gyre_update_task"
+                        | "gyre_create_mr"
+                        | "gyre_agent_complete"
+                        | "conversation_upload"
+                        | "gyre_message_send"
+                        | "gyre_message_ack"
+                        | "gyre_spawn_worker"
+                        | "gyre_spawn_repo_orchestrator"
+                        | "gyre_cross_repo_task"
+                        | "gyre_decompose_spec"
+                )
+                && crate::api::meta_specs::is_preview_agent(&state, &auth.agent_id).await
+            {
+                return Json(JsonRpcResponse::err(
+                    id,
+                    PERMISSION_DENIED,
+                    format!(
+                        "PERMISSION_DENIED: preview agent {auth_agent_id} may not call {tool_name} — preview runs skip task/MR/provenance ceremony",
+                        auth_agent_id = auth.agent_id
+                    ),
+                ));
+            }
+
+            // The liveness/telemetry tools stay available to a preview run's
+            // OWN agent (the preview prompt instructs self-heartbeat), but a
+            // preview agent may not target ANOTHER agent with them:
+            // heartbeating a real agent keeps it alive against stale-reaping,
+            // and record_activity injects telemetry attributed to the named
+            // agent. Self-targeting only — the scratch run may touch its own
+            // identity and nothing else.
+            if is_agent_jwt(&auth)
+                && matches!(tool_name, "gyre_agent_heartbeat" | "gyre_record_activity")
+                && get_str(&args, "agent_id")
+                    .map(|a| a != auth.agent_id)
+                    .unwrap_or(false)
+                && crate::api::meta_specs::is_preview_agent(&state, &auth.agent_id).await
+            {
+                return Json(JsonRpcResponse::err(
+                    id,
+                    PERMISSION_DENIED,
+                    format!(
+                        "PERMISSION_DENIED: preview agent {auth_agent_id} may not target another agent with {tool_name} — preview runs are scratch work scoped to their own agent",
+                        auth_agent_id = auth.agent_id
+                    ),
+                ));
+            }
+
             // §1 Token Scoping: validate the caller's token scope on every
             // tool call. Scoped callers (agent JWTs) may only act within the
             // tenant/workspace/repo their token encodes.
@@ -11295,6 +11364,221 @@ concepts:
         assert!(json["result"]["isError"].as_bool().unwrap());
         let text = json["result"]["content"][0]["text"].as_str().unwrap();
         assert!(text.contains("workspace-orchestrator"), "got: {text}");
+    }
+
+    // ── preview agents are denied ceremony tools (meta-spec §5) ───────────────
+
+    /// Register a preview agent (agent row + `preview_agents` discriminator +
+    /// scoped JWT in `agent_tokens`) and return (agent_id, token). Mirrors the
+    /// server-side provisioning in `api::meta_specs` without spawning a
+    /// process — the MCP guard keys off the kv record, not the process.
+    async fn register_preview_agent(state: &std::sync::Arc<crate::AppState>) -> (String, String) {
+        let agent_id = "preview-agent-1".to_string();
+        let mut agent = gyre_domain::Agent::new(gyre_common::Id::new(&agent_id), "preview", 0);
+        agent.workspace_id = gyre_common::Id::new("ws-1");
+        agent
+            .transition_status(gyre_domain::AgentStatus::Active)
+            .unwrap();
+        state.agents.create(&agent).await.unwrap();
+
+        // The discriminator the dispatch guard (and process-exit path) reads.
+        state
+            .kv_store
+            .kv_set(
+                "preview_agents",
+                &agent_id,
+                serde_json::to_string(&serde_json::json!({
+                    "preview_id": "preview-test",
+                    "agent_id": agent_id,
+                    "repo_id": "r-1",
+                    "workspace_id": "ws-1",
+                    "spec_path": "specs/system/search.md",
+                    "branch": "preview/preview-test/search",
+                    "base_sha": "0000000000000000000000000000000000000000",
+                    "worktree_path": "/nonexistent",
+                    "released": false
+                }))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let token = state
+            .agent_signing_key
+            .mint(
+                &agent_id,
+                "preview-test",
+                "system",
+                &state.base_url,
+                300,
+                "default",
+                "ws-1",
+                "r-1",
+                "repo",
+            )
+            .unwrap();
+        state
+            .kv_store
+            .kv_set("agent_tokens", &agent_id, token.clone())
+            .await
+            .unwrap();
+        (agent_id, token)
+    }
+
+    #[tokio::test]
+    async fn mcp_preview_agent_denied_ceremony_tools() {
+        let state = orch_state().await;
+        let (agent_id, token) = register_preview_agent(&state).await;
+        let app = crate::build_router(state.clone());
+
+        // Ceremony tools: each must be refused for a preview agent, even
+        // though the runner's allowedTools list is advisory (client-side).
+        let ceremony_tools = [
+            ("gyre_create_task", json!({ "name": "sneaky task" })),
+            (
+                "gyre_update_task",
+                json!({ "task_id": "t-1", "status": "in_progress" }),
+            ),
+            (
+                "gyre_create_mr",
+                json!({ "repo_id": "r-1", "source_branch": "b", "title": "t" }),
+            ),
+            ("gyre_agent_complete", json!({ "agent_id": agent_id })),
+            ("conversation_upload", json!({ "data": "" })),
+            // Message tools (task-206 review F2): a preview agent injecting
+            // Directed-tier messages into production inboxes leaves a
+            // durable footprint that outlives the throwaway run.
+            (
+                "gyre_message_send",
+                json!({ "to": {"agent": "some-real-agent"}, "kind": "status_update", "payload": {} }),
+            ),
+            ("gyre_message_ack", json!({ "message_id": "m-1" })),
+            // Orchestrator tools (task-206 review repair eb6937c4 F2): they
+            // create tasks / spawn agents — ceremony the preview run must
+            // skip. Defense-in-depth: a preview JWT carries no orchestrator
+            // claims, so token shape would also refuse them; the preview
+            // registry must refuse them on its own.
+            (
+                "gyre_spawn_worker",
+                json!({ "task_id": "t-1", "persona": "worker" }),
+            ),
+            ("gyre_spawn_repo_orchestrator", json!({ "repo_id": "r-1" })),
+            (
+                "gyre_cross_repo_task",
+                json!({ "title": "t", "repo_ids": ["r-1"] }),
+            ),
+            ("gyre_decompose_spec", json!({ "spec_path": "specs/s.md" })),
+        ];
+        for (tool, args) in ceremony_tools {
+            let (_status, json) =
+                mcp_post_with_token(app.clone(), tool_call(tool, args), &token).await;
+            // The guard refuses before dispatch, so the error surfaces as a
+            // JSON-RPC error object, not as a tool result.
+            let text = json["error"]["message"]
+                .as_str()
+                .or(json["result"]["content"][0]["text"].as_str())
+                .unwrap_or_default();
+            assert!(
+                text.contains("PERMISSION_DENIED") && text.contains("preview agent"),
+                "{tool} must be denied for a preview agent; got: {text}"
+            );
+        }
+        // A normal (non-preview) agent with the same token shape is NOT
+        // denied: the guard is keyed off preview membership, not role.
+        state
+            .kv_store
+            .kv_remove("preview_agents", &agent_id)
+            .await
+            .unwrap();
+        let (_status, json) = mcp_post_with_token(
+            app.clone(),
+            tool_call("gyre_agent_heartbeat", json!({ "agent_id": agent_id })),
+            &token,
+        )
+        .await;
+        let text = json["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(
+            !text.contains("preview agent"),
+            "non-preview agent must not trip the preview guard; got: {text}"
+        );
+    }
+
+    /// Task-206 review F2: the identity-scoped tools (heartbeat,
+    /// record_activity) stay available to a preview run's OWN agent — the
+    /// preview prompt instructs self-heartbeat — but a preview agent may
+    /// not target ANOTHER agent with them (keeping a real agent alive
+    /// against stale-reaping, injecting telemetry attributed to it).
+    #[tokio::test]
+    async fn mcp_preview_agent_heartbeat_targets_only_self() {
+        let state = orch_state().await;
+        let (agent_id, token) = register_preview_agent(&state).await;
+        let app = crate::build_router(state.clone());
+
+        // Cross-target heartbeat: refused by the dispatch guard before the
+        // handler (so the SVID check is never reached).
+        let (_status, json) = mcp_post_with_token(
+            app.clone(),
+            tool_call(
+                "gyre_agent_heartbeat",
+                json!({ "agent_id": "real-agent-9", "svid": "x" }),
+            ),
+            &token,
+        )
+        .await;
+        let text = json["error"]["message"]
+            .as_str()
+            .or(json["result"]["content"][0]["text"].as_str())
+            .unwrap_or_default();
+        assert!(
+            text.contains("PERMISSION_DENIED") && text.contains("preview agent"),
+            "cross-target heartbeat must be denied for a preview agent; got: {text}"
+        );
+
+        // Cross-target record_activity: same refusal.
+        let (_status, json) = mcp_post_with_token(
+            app.clone(),
+            tool_call(
+                "gyre_record_activity",
+                json!({ "agent_id": "real-agent-9", "event_type": "RUN_STARTED", "description": "d" }),
+            ),
+            &token,
+        )
+        .await;
+        let text = json["error"]["message"]
+            .as_str()
+            .or(json["result"]["content"][0]["text"].as_str())
+            .unwrap_or_default();
+        assert!(
+            text.contains("PERMISSION_DENIED") && text.contains("preview agent"),
+            "cross-target record_activity must be denied for a preview agent; got: {text}"
+        );
+
+        // Self-target heartbeat passes the dispatch guard. This manually
+        // seeded preview row carries no SVID record, so the handler's SVID
+        // verification is the expected failure here — a different, expected
+        // error, never the preview denial. (A preview agent launched through
+        // the production path DOES carry a session SVID — see
+        // `preview_agent_heartbeats_keep_long_runs_active` in meta_specs.rs —
+        // so its self-heartbeat verifies and keeps the run alive.)
+        let (_status, json) = mcp_post_with_token(
+            app.clone(),
+            tool_call(
+                "gyre_agent_heartbeat",
+                json!({ "agent_id": agent_id, "svid": "x" }),
+            ),
+            &token,
+        )
+        .await;
+        let text = json["error"]["message"]
+            .as_str()
+            .or(json["result"]["content"][0]["text"].as_str())
+            .unwrap_or_default();
+        assert!(
+            !text.contains("preview agent"),
+            "self-target heartbeat must not trip the preview guard; got: {text}"
+        );
     }
 
     #[tokio::test]

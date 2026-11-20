@@ -479,6 +479,21 @@ async fn emit_budget_warning(
 /// Uses the EFFECTIVE workspace limits (tighter of workspace config and the
 /// tenant ceiling) so a lowered tenant ceiling binds immediately.
 pub async fn check_spawn_budget(state: &AppState, project_id: &str) -> Result<(), String> {
+    check_spawn_budget_for(state, project_id, 1).await
+}
+
+/// Check if spawning `requested` more agents at once would exceed
+/// workspace/tenant budget limits. A caller provisioning N agents in a single
+/// request must reserve all N slots up front: checking each spawn against
+/// current usage only (before any increments land) over-admits when
+/// max_concurrent_agents < N. Only the concurrency check scales with
+/// `requested` — token/cost limits are daily consumption and do not depend on
+/// how many agents this one request spawns.
+pub async fn check_spawn_budget_for(
+    state: &AppState,
+    project_id: &str,
+    requested: u32,
+) -> Result<(), String> {
     let key = workspace_key(project_id);
     let config = effective_workspace_config(state, &key).await;
     let usage = state
@@ -498,9 +513,9 @@ pub async fn check_spawn_budget(state: &AppState, project_id: &str) -> Result<()
             max as f64,
         )
         .await;
-        if usage.active_agents >= max {
+        if usage.active_agents.saturating_add(requested) > max {
             return Err(format!(
-                "workspace budget exceeded: max_concurrent_agents={max} ({} active)",
+                "workspace budget exceeded: max_concurrent_agents={max} ({} active, {requested} requested)",
                 usage.active_agents
             ));
         }
@@ -1477,6 +1492,14 @@ pub async fn budget_stop_agent(state: &AppState, agent: &gyre_domain::Agent, rea
     // Charge wall-clock compute minutes and release the budget slot.
     record_compute_minutes_for_agent(state, &stopped).await;
     decrement_active_agents(state, &stopped.workspace_id.to_string()).await;
+    // Preview-agent slot bookkeeping: this stop released the slot and killed
+    // the process, so the exit monitor will route the agent through
+    // finish_preview_agent and a later preview DELETE/GC runs teardown —
+    // both consult the flag this writes so neither releases the same slot
+    // a second time (exactly-once; decrement_active is MAX(0, n-1) — a
+    // double release permanently biases the counter down). No-op for
+    // normal agents.
+    crate::api::meta_specs::mark_preview_slot_released(state, &stopped.id.to_string()).await;
 
     // platform-model.md §5 Enforcement Behavior: "A task is created:
     // 'Agent hit budget limit on TASK-X, needs reassignment or budget

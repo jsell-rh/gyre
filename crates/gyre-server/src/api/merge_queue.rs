@@ -89,6 +89,16 @@ pub async fn enqueue(
         "enqueue this merge request",
     )
     .await?;
+    // Preview agents (meta-spec reconciliation §5) skip the merge queue like
+    // they skip MRs — the preview branch is the deliverable. Lower reachability
+    // than the task guards (enqueue needs an existing MR), but the same
+    // Agent-role 'write' escape applies, so guard it here too.
+    if crate::api::meta_specs::caller_is_preview_agent(&state, &auth).await {
+        return Err(ApiError::Forbidden(
+            "preview agents may not enqueue merge requests — preview runs skip merge-queue ceremony"
+                .to_string(),
+        ));
+    }
     let priority = req.priority.unwrap_or(50);
     let mr_id = Id::new(req.merge_request_id);
     let (entry, created) = enqueue_core(&state, &mr_id, priority).await?;
@@ -192,6 +202,17 @@ pub async fn cancel_entry(
     Path(id): Path<String>,
     auth: crate::auth::AuthenticatedAgent,
 ) -> Result<StatusCode, ApiError> {
+    // Preview agents may not cancel merge-queue entries (meta-spec
+    // reconciliation §5 skip-ceremony; same escape class as the enqueue
+    // guard above) — cancelling another run's entry mutates the merge
+    // pipeline from throwaway preview scratch work.
+    if crate::api::meta_specs::caller_is_preview_agent(&state, &auth).await {
+        return Err(ApiError::Forbidden(
+            "preview agents may not cancel merge queue entries — preview runs skip \
+             merge-queue ceremony"
+                .to_string(),
+        ));
+    }
     let entry = state
         .merge_queue
         .find_by_id(&Id::new(&id))
@@ -314,8 +335,8 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/api/v1/merge-queue/enqueue")
-                    .header("content-type", "application/json")
                     .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -344,8 +365,8 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/api/v1/merge-queue/enqueue")
-                    .header("content-type", "application/json")
                     .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -366,8 +387,8 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/api/v1/merge-queue/enqueue")
-                    .header("content-type", "application/json")
                     .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -393,8 +414,8 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/api/v1/merge-queue/enqueue")
-                    .header("content-type", "application/json")
                     .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
                     .body(Body::from(body.clone()))
                     .unwrap(),
             )
@@ -408,8 +429,8 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/api/v1/merge-queue/enqueue")
-                    .header("content-type", "application/json")
                     .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
                     .body(Body::from(body))
                     .unwrap(),
             )
@@ -451,8 +472,8 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/api/v1/merge-queue/enqueue")
-                    .header("content-type", "application/json")
                     .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::to_vec(&serde_json::json!({ "merge_request_id": "mr-1" }))
                             .unwrap(),
@@ -715,8 +736,8 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/api/v1/merge-queue/enqueue")
-                    .header("content-type", "application/json")
                     .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::to_vec(&serde_json::json!({
                             "merge_request_id": "mr-rev"

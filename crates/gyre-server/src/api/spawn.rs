@@ -1476,13 +1476,7 @@ pub(crate) async fn spawn_agent_core(
         super::analytics::record_task_status_changed(state, &task, &pre_assign_status).await;
     }
 
-    // Build clone URL: {base_url}/git/{workspace_slug}/{repo_name}
-    // Reuse the already-fetched workspace; fall back to workspace_id if not found.
-    let ws_slug = workspace
-        .as_ref()
-        .map(|ws| ws.slug.clone())
-        .unwrap_or_else(|| repo.workspace_id.to_string());
-    let clone_url = format!("{}/git/{}/{}", state.base_url, ws_slug, repo.name);
+    let clone_url = build_clone_url(state, workspace.as_ref(), &repo);
 
     // Launch a real process and monitor its lifecycle. Shared with the
     // Ralph-loop re-spawn path (agent-runtime.md §1 Phase 7) so first
@@ -1877,6 +1871,9 @@ async fn dispatch_agent_launch(
                 }
                 if let Some(port) = cfg.config["port"].as_u64() {
                     ssh_target = ssh_target.with_port(port as u16);
+                }
+                if let Some(bin) = cfg.config["ssh_path"].as_str() {
+                    ssh_target = ssh_target.with_ssh_path(bin);
                 }
                 match gyre_ports::ComputeTarget::spawn_process(&ssh_target, &ssh_spawn_config).await
                 {
@@ -2678,79 +2675,430 @@ async fn register_spawned_agent(
 async fn monitor_spawned_agent_exit(state: Arc<AppState>, agent_id: String) {
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(EXIT_MONITOR_POLL_SECS)).await;
-
-        let handle = {
-            let registry = state.process_registry.lock().await;
-            match registry.get(&agent_id) {
-                Some(h) => h.clone(),
-                // Already unregistered (killed, or another monitor iteration
-                // finished first) — nothing left to watch.
-                None => break,
-            }
-        };
-
-        // Probe the backend that owns this handle. Clone the Arc out and
-        // DROP the lock before awaiting: an SSH probe can block for the
-        // TCP connect timeout, and holding the lock across it would stall
-        // admin kills and every new spawn registration.
-        let backend = {
-            let backends = state.spawned_backends.lock().await;
-            match backends.get(&agent_id) {
-                Some(b) => std::sync::Arc::clone(b),
-                // Already unregistered (killed, or another monitor iteration
-                // finished first) — nothing left to watch.
-                None => break,
-            }
-        };
-        let alive = gyre_ports::ComputeTarget::is_alive(backend.as_ref(), &handle)
-            .await
-            .unwrap_or(false);
-
-        if !alive {
-            state.process_registry.lock().await.remove(&agent_id);
-            state.spawned_backends.lock().await.remove(&agent_id);
-
-            // M19.3: Update the audit record on container exit. No-op when
-            // no audit record exists (local/SSH-bare spawns) —
-            // `capture_exit_audit` returns early on missing records.
-            container_audit::capture_exit_audit(state.container_audits.as_ref(), &agent_id).await;
-
-            // M23: Emit container_stopped audit event (best-effort).
-            {
-                let audit_rec = state
-                    .container_audits
-                    .find_by_agent_id(&agent_id)
-                    .await
-                    .ok()
-                    .flatten();
-                let exit_code = audit_rec.as_ref().and_then(|r| r.exit_code);
-                let ctx = crate::container_audit::AuditCtx {
-                    audit: state.audit.as_ref(),
-                    broadcast_tx: &state.audit_broadcast_tx,
-                    search: state.search.as_ref(),
-                };
-                let container_id_for_evt = audit_rec.map(|r| r.container_id).unwrap_or_default();
-                crate::container_audit::emit_stopped(
-                    &ctx,
-                    &agent_id,
-                    &container_id_for_evt,
-                    exit_code,
-                )
-                .await;
-            }
-
-            if let Ok(Some(mut a)) = state.agents.find_by_id(&Id::new(&agent_id)).await {
-                if a.status == AgentStatus::Active {
-                    let _ = a.transition_status(AgentStatus::Idle);
-                    let _ = state.agents.update(&a).await;
-                    // Platform Model §7: the run's process is gone — revoke its
-                    // task-scoped ephemeral secrets (teardown; logs `secret.revoked`).
-                    crate::secret_rotation::revoke_agent_task_secrets(&state, &a).await;
-                }
-            }
+        if !monitor_poll_once(&state, &agent_id).await {
             break;
         }
     }
+}
+
+/// A single exit-monitor iteration. Returns `true` while the agent should
+/// keep being polled, `false` once the monitor is done (agent unregistered
+/// or reported not-alive). Split out of the loop so tests can drive one
+/// iteration without the poll sleep.
+async fn monitor_poll_once(state: &AppState, agent_id: &str) -> bool {
+    let handle = {
+        let registry = state.process_registry.lock().await;
+        match registry.get(agent_id) {
+            Some(h) => h.clone(),
+            // Already unregistered (killed, or another monitor iteration
+            // finished first) — nothing left to watch. Drop the backend
+            // entry too if a kill path removed only the handle: leaving
+            // it would leak one Arc<SpawnBackend> per agent for the
+            // lifetime of the server.
+            None => {
+                drop(registry);
+                state.spawned_backends.lock().await.remove(agent_id);
+                return false;
+            }
+        }
+    };
+
+    // Probe the backend that owns this handle. Clone the Arc out and
+    // DROP the lock before awaiting: an SSH probe can block for the
+    // TCP connect timeout, and holding the lock across it would stall
+    // admin kills and every new spawn registration.
+    let backend = {
+        let backends = state.spawned_backends.lock().await;
+        match backends.get(agent_id) {
+            Some(b) => std::sync::Arc::clone(b),
+            // Already unregistered — nothing left to watch. Drop the
+            // handle entry too, symmetric with the branch above.
+            None => {
+                drop(backends);
+                state.process_registry.lock().await.remove(agent_id);
+                return false;
+            }
+        }
+    };
+    // Three-state probe (task-206 review F5): a liveness probe that ERRORS
+    // says nothing about the process. `Ok(false)` is a confirmed exit (the
+    // backend answered and reported the process gone); `Err` is a failed
+    // probe — transient SSH failure, unreachable daemon — and running the
+    // exit path on it would destroy preview work unrecoverably (token
+    // revoked, worktree force-removed, budget slot released) while the
+    // remote process still runs. A probe-failed agent stays monitored; the
+    // stale-agent detector and the preview GC own agents whose backend
+    // never becomes reachable again — normal agents park Idle through
+    // those paths, which is recoverable, unlike this path.
+    let alive = match gyre_ports::ComputeTarget::is_alive(backend.as_ref(), &handle).await {
+        Ok(alive) => alive,
+        Err(e) => {
+            tracing::warn!(
+                agent_id,
+                "exit-monitor liveness probe failed; agent stays monitored: {e:#}"
+            );
+            return true;
+        }
+    };
+
+    if !alive {
+        state.process_registry.lock().await.remove(agent_id);
+        state.spawned_backends.lock().await.remove(agent_id);
+
+        // M19.3: Update the audit record on container exit. No-op when
+        // no audit record exists (local/SSH-bare spawns) —
+        // `capture_exit_audit` returns early on missing records.
+        container_audit::capture_exit_audit(state.container_audits.as_ref(), agent_id).await;
+
+        // M23: Emit container_stopped audit event (best-effort).
+        {
+            let audit_rec = state
+                .container_audits
+                .find_by_agent_id(agent_id)
+                .await
+                .ok()
+                .flatten();
+            let exit_code = audit_rec.as_ref().and_then(|r| r.exit_code);
+            let ctx = crate::container_audit::AuditCtx {
+                audit: state.audit.as_ref(),
+                broadcast_tx: &state.audit_broadcast_tx,
+                search: state.search.as_ref(),
+            };
+            let container_id_for_evt = audit_rec.map(|r| r.container_id).unwrap_or_default();
+            crate::container_audit::emit_stopped(&ctx, agent_id, &container_id_for_evt, exit_code)
+                .await;
+        }
+
+        on_agent_process_exit(state, agent_id).await;
+        return false;
+    }
+    true
+}
+
+/// Shared process-exit transition for every compute-target monitor.
+///
+/// Preview agents are killed on completion (reconciliation §5): they land in
+/// Stopped with their token revoked and budget slot released — never Idle,
+/// because an Idle preview agent could be re-targeted onto real work.
+/// Normal agents keep the Active→Idle transition (with task-scoped secret
+/// revocation, platform-model.md §7 teardown).
+pub(crate) async fn on_agent_process_exit(state: &AppState, agent_id: &str) {
+    if super::meta_specs::finish_preview_agent(state, agent_id).await {
+        return;
+    }
+    if let Ok(Some(mut a)) = state.agents.find_by_id(&Id::new(agent_id)).await {
+        if a.status == AgentStatus::Active {
+            let _ = a.transition_status(AgentStatus::Idle);
+            let _ = state.agents.update(&a).await;
+            // Platform Model §7: the run's process is gone — revoke its
+            // task-scoped ephemeral secrets (teardown; logs `secret.revoked`).
+            crate::secret_rotation::revoke_agent_task_secrets(state, &a).await;
+        }
+    }
+}
+
+/// Force-kill the process behind a registered handle.
+///
+/// Container handles are killed by container id (`docker rm --force`), so they
+/// must not be dispatched to the local target — a container handle's pid (if
+/// any) belongs to the docker daemon's child, not to the agent. SSH handles
+/// carry the REMOTE pid echoed by the remote shell: dispatching them to the
+/// local target would terminate an unrelated local process that happens to
+/// hold that pid while the remote agent survives. Both are reconstructed
+/// from the handle itself — the spawning target object is long gone by the
+/// time a registry lookup kills a process.
+pub(crate) async fn kill_process_handle(handle: &gyre_ports::ProcessHandle) -> anyhow::Result<()> {
+    use gyre_ports::ComputeTarget;
+    if handle.target_type == "container" {
+        // The image is irrelevant to `docker rm --force`; the handle id is the
+        // container id recorded at spawn time.
+        let target = gyre_adapters::compute::ContainerTarget::new(String::new());
+        ComputeTarget::kill_process(&target, handle).await
+    } else if handle.target_type == "ssh" {
+        let target = gyre_adapters::compute::SshTarget::from_handle(handle).ok_or_else(|| {
+            anyhow::anyhow!(
+                "cannot reconstruct ssh target from handle id '{}' — refusing to \
+                 kill a local pid that belongs to a remote process",
+                handle.id
+            )
+        })?;
+        ComputeTarget::kill_process(&target, handle).await
+    } else {
+        ComputeTarget::kill_process(&gyre_adapters::compute::LocalTarget, handle).await
+    }
+}
+
+/// Build the agent clone URL: `{base_url}/git/{workspace_slug}/{repo_name}`.
+/// Falls back to the workspace id when the workspace record is unavailable.
+pub(crate) fn build_clone_url(
+    state: &AppState,
+    workspace: Option<&gyre_domain::Workspace>,
+    repo: &gyre_domain::Repository,
+) -> String {
+    let ws_slug = workspace
+        .map(|ws| ws.slug.clone())
+        .unwrap_or_else(|| repo.workspace_id.to_string());
+    format!("{}/git/{}/{}", state.base_url, ws_slug, repo.name)
+}
+
+/// Everything a task-less agent launch needs, decoupled from the task
+/// ledger so agents with no task assignment (meta-spec previews,
+/// reconciliation §5) share the platform's single dispatch
+/// ([`dispatch_agent_launch`]) with task-driven spawns.
+pub(crate) struct AgentLaunchParams<'a> {
+    pub state: &'a Arc<AppState>,
+    pub agent: &'a Agent,
+    pub repo: &'a gyre_domain::Repository,
+    /// `None` when the workspace record could not be loaded: tenant-scoped
+    /// secret resolution is skipped rather than aimed at a fabricated tenant.
+    pub workspace: Option<&'a gyre_domain::Workspace>,
+    /// Resolved compute target. `None` = local process spawn.
+    pub resolved_target_config: Option<super::compute::ComputeTargetConfig>,
+    pub token: &'a str,
+    pub branch: &'a str,
+    pub repo_id: &'a str,
+    pub worktree_path: &'a str,
+    /// `None` for agents with no task — `GYRE_TASK_ID` is then not injected.
+    pub task_id: Option<&'a str>,
+    pub clone_url: &'a str,
+    /// Extra agent-context env (preview agents inject their draft meta-spec
+    /// here). Merged before the server-owned identity/credential vars so it
+    /// can never shadow them.
+    pub extra_env: std::collections::HashMap<String, String>,
+}
+
+/// Outcome of a task-less launch: whether a process actually started on
+/// the resolved compute target.
+#[derive(Default)]
+pub(crate) struct LaunchOutcome {
+    /// Whether the dispatch actually started a process on any backend.
+    /// This is the authority on "did it start" — never the handle's
+    /// shape: SshDocker and Kubernetes handles carry `pid: None` by
+    /// design (their id is a remote container / Pod name), so callers
+    /// guessing from `pid`/`container_id` would misreport every
+    /// *successful* remote launch as a failure.
+    pub launched: bool,
+}
+
+/// Launch a task-less agent process (meta-spec preview, reconciliation §5)
+/// on its resolved compute target.
+///
+/// Unlike [`launch_agent_process`] (task-driven spawns, which build the full
+/// prompt/persona env from [`AgentLaunchCtx`]), the caller supplies the
+/// agent-context env directly via `extra_env` — a preview agent's governing
+/// context is the draft meta-spec, not an assembled prompt set. Process
+/// registration and the exit monitor are identical (both go through
+/// [`dispatch_agent_launch`]), so preview agents get the same lifecycle
+/// management — including the §5 kill-on-completion routing in
+/// [`on_agent_process_exit`] — as any other agent.
+pub(crate) async fn launch_taskless_agent_process(
+    params: AgentLaunchParams<'_>,
+) -> Result<LaunchOutcome, ApiError> {
+    let AgentLaunchParams {
+        state,
+        agent,
+        repo,
+        workspace,
+        resolved_target_config,
+        token,
+        branch,
+        repo_id,
+        worktree_path,
+        task_id,
+        clone_url,
+        extra_env,
+    } = params;
+
+    // Docker requires an absolute working directory path. Canonicalize the
+    // worktree path to ensure it's absolute even when GYRE_REPOS_PATH is
+    // relative (e.g. the configured repos root prefix).
+    let effective_work_dir = if std::path::Path::new(worktree_path).exists() {
+        std::fs::canonicalize(worktree_path)
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| worktree_path.to_string())
+    } else {
+        // Worktree not yet on disk — fall back to /workspace (absolute).
+        "/workspace".to_string()
+    };
+    // Command is server-controlled only — never from user input (C-1 RCE fix).
+    // Use compute target's configured command, GYRE_AGENT_COMMAND env var, or /gyre/entrypoint.sh.
+    let command = resolved_target_config
+        .as_ref()
+        .and_then(|cfg| cfg.config.get("command"))
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .or_else(|| std::env::var("GYRE_AGENT_COMMAND").ok())
+        .unwrap_or_else(|| "/gyre/entrypoint.sh".to_string());
+    let args: Vec<String> = resolved_target_config
+        .as_ref()
+        .and_then(|cfg| cfg.config.get("args"))
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // Inject agent context env vars so the container can bootstrap itself.
+    let mut container_env = std::collections::HashMap::new();
+    // Caller-supplied extra context (preview agents inject their draft
+    // meta-spec here). Merged before the standard vars so a stray key can
+    // never shadow the server-owned identity/credential env vars.
+    for (key, value) in extra_env {
+        container_env.insert(key, value);
+    }
+    container_env.insert("GYRE_SERVER_URL".to_string(), state.base_url.clone());
+    container_env.insert("GYRE_AUTH_TOKEN".to_string(), token.to_string());
+    container_env.insert("GYRE_CLONE_URL".to_string(), clone_url.to_string());
+    container_env.insert("GYRE_BRANCH".to_string(), branch.to_string());
+    container_env.insert("GYRE_AGENT_ID".to_string(), agent.id.to_string());
+    if let Some(task_id) = task_id {
+        container_env.insert("GYRE_TASK_ID".to_string(), task_id.to_string());
+    }
+    container_env.insert("GYRE_REPO_ID".to_string(), repo_id.to_string());
+
+    // identity-security.md Layer 1 (task-206 review repair): issue the
+    // session's X.509-SVID before dispatch, mirroring
+    // [`launch_agent_workload`]. Without it the preview agent's runner
+    // heartbeats — sent every 15 s with `GYRE_SVID_PEM` /
+    // `GYRE_STACK_HASH`, exactly as the preview prompt instructs — fail
+    // closed at `attest_session` ("session was never attested"), so
+    // `Agent::is_alive` falls back to `spawned_at` and the stale-agent
+    // detector flips a still-running preview agent to Stopped ~60 s into
+    // every real run. Issuance here is gated on the same spawn-time
+    // authorization evidence this path already holds (post-ABAC,
+    // post-budget, resolved compute target); a failed issuance fails the
+    // launch closed — an unattested workload is never spawned silently.
+    let compute_target_label = resolved_target_config
+        .as_ref()
+        .map(|c| c.id.clone())
+        .unwrap_or_else(|| "local".to_string());
+    let spiffe_role = crate::spiffe::agent_role(None, &agent.orchestrator_type);
+    let stack_evidence = match container_env.get("GYRE_STACK_HASH") {
+        Some(existing) if !existing.is_empty() => existing.clone(),
+        _ => {
+            crate::spiffe::resolve_session_stack_evidence(
+                state,
+                &agent.id.to_string(),
+                &compute_target_label,
+                None,
+                None,
+                Some(&spiffe_role),
+            )
+            .await
+        }
+    };
+    let svid = crate::spiffe::issue_session_svid(
+        state,
+        &agent.id.to_string(),
+        &spiffe_role,
+        &compute_target_label,
+        &stack_evidence,
+    )
+    .await
+    .map_err(ApiError::Internal)?;
+    // The workload presents this fingerprint on every heartbeat; it must
+    // be the exact evidence bound at issuance or verification fails.
+    container_env.insert("GYRE_STACK_HASH".to_string(), stack_evidence);
+    let svid_record = &svid.record;
+    container_env.insert("GYRE_SPIFFE_ID".to_string(), svid_record.spiffe_id.clone());
+    container_env.insert("GYRE_SVID_PEM".to_string(), svid_record.chain_pem.clone());
+    // The SVID private key is handed to the workload (the SVID = leaf +
+    // key, per the SPIFFE X.509-SVID specification); the server retains
+    // only the record above.
+    container_env.insert("GYRE_SVID_KEY".to_string(), svid.private_key_pem.clone());
+
+    // Platform Model §7 Secrets Delivery: resolve scoped secrets from the
+    // repository (tenant → workspace → repo → task, nearest scope wins)
+    // and inject as GYRE_CRED_* env vars. Failure is logged and skipped: a
+    // missing/undecryptable secret must not block spawning the agent itself.
+    // The tenant scope comes from the workspace record. When it cannot be
+    // resolved, tenant-scoped secret resolution is SKIPPED — never aimed
+    // at a fabricated "default" tenant (that silently re-targets secrets).
+    match workspace.map(|ws| ws.tenant_id.to_string()) {
+        None => tracing::warn!(
+            agent_id = %agent.id,
+            "workspace record unavailable; skipping tenant-scoped secret resolution"
+        ),
+        Some(tenant_id) => match state
+            .secrets
+            .resolve_for_agent(&tenant_id, &repo.workspace_id.to_string(), repo_id, task_id)
+            .await
+        {
+            Ok(resolved) => {
+                for (name, value) in resolved {
+                    // Secret values are raw bytes: a lossy conversion hands
+                    // the agent a corrupted credential (U+FFFD) with no
+                    // error. Skip the secret and name it in the log.
+                    match String::from_utf8(value) {
+                        Ok(v) => {
+                            container_env.insert(format!("GYRE_CRED_{name}"), v);
+                        }
+                        Err(_) => tracing::warn!(
+                            agent_id = %agent.id,
+                            secret = %name,
+                            "secret value is not valid UTF-8; skipping GYRE_CRED_{name}"
+                        ),
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    agent_id = %agent.id,
+                    "secret resolution failed; continuing without GYRE_CRED_* env vars: {e:#}"
+                );
+            }
+        },
+    }
+
+    // M27: cred-proxy addresses for credential routing.
+    container_env.insert(
+        "GYRE_CRED_PROXY".to_string(),
+        "http://127.0.0.1:8765".to_string(),
+    );
+    container_env.insert(
+        "ANTHROPIC_BASE_URL".to_string(),
+        "http://127.0.0.1:8765".to_string(),
+    );
+    // Placeholder so the Anthropic SDK initialises; cred-proxy injects the real key per request.
+    container_env.insert("ANTHROPIC_API_KEY".to_string(), "proxy-managed".to_string());
+
+    // Vertex AI: forward non-secret Vertex config env vars to the container.
+    for var_name in [
+        "CLAUDE_CODE_USE_VERTEX",
+        "ANTHROPIC_VERTEX_PROJECT_ID",
+        "CLOUD_ML_REGION",
+    ] {
+        if let Ok(val) = std::env::var(var_name) {
+            if !val.is_empty() {
+                container_env.insert(var_name.to_string(), val);
+            }
+        }
+    }
+    // Also check GYRE_VERTEX_LOCATION as an alias for CLOUD_ML_REGION.
+    if !container_env.contains_key("CLOUD_ML_REGION") {
+        if let Ok(val) = std::env::var("GYRE_VERTEX_LOCATION") {
+            if !val.is_empty() {
+                container_env.insert("CLOUD_ML_REGION".to_string(), val);
+            }
+        }
+    }
+
+    let dispatch = dispatch_agent_launch(
+        state,
+        agent,
+        &resolved_target_config,
+        &command,
+        &args,
+        &container_env,
+        &effective_work_dir,
+    )
+    .await?;
+
+    Ok(LaunchOutcome {
+        launched: dispatch.launched,
+    })
 }
 
 /// POST /api/v1/agents/spawn
@@ -3098,12 +3446,45 @@ pub async fn complete_agent(
     auth: crate::auth::AuthenticatedAgent,
     Json(req): Json<CompleteAgentRequest>,
 ) -> Result<(StatusCode, Json<MrResponse>), ApiError> {
+    // Caller-keyed preview refusal (task-206 review F3): a preview agent
+    // completing ANY agent mints a real MR, transitions a task to Review
+    // and writes refs/agents/*/snapshots/* refs — MR-creation ceremony §5
+    // forbids for preview runs. The target-keyed guard below refuses
+    // completing a preview agent; this one refuses the preview agent as
+    // the CALLER, so it cannot run the ceremony against another agent.
+    // The builtin agent-scoped-access policy grants the Agent role
+    // 'complete' on 'agent', so this per-handler guard is the only
+    // refusal layer for a same-tenant preview-agent JWT.
+    if crate::api::meta_specs::caller_is_preview_agent(&state, &auth).await {
+        return Err(ApiError::Forbidden(
+            "preview agents may not complete agents — preview runs skip MR creation \
+             and completion ceremony"
+                .to_string(),
+        ));
+    }
     let mut agent = state
         .agents
         .find_by_id(&Id::new(&id))
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("agent {id} not found")))?;
     require_agent_self_or_task_claim(&auth, &agent)?;
+
+    // Preview agents (meta-spec reconciliation §5) run ceremony-free: no MR,
+    // no provenance, no idle state — the branch push is the entire deliverable
+    // and the run ends when the process exits (routed through
+    // `finish_preview_agent`). The MCP dispatch already refuses
+    // `gyre_agent_complete` for preview agents, but allowedTools is advisory:
+    // the REST surface must enforce the same invariant or a preview agent can
+    // mint a real MR and park itself in Idle through this route.
+    // (task-206 review F3: the caller-keyed guard above refuses the preview
+    // agent as caller; this target-keyed guard refuses completing a preview
+    // agent as the target — both directions are containment.)
+    if crate::api::meta_specs::is_preview_agent(&state, &id).await {
+        return Err(ApiError::Forbidden(format!(
+            "agent {id} belongs to a meta-spec preview run — preview agents skip \
+             MR creation and completion ceremony; the run ends when the process exits"
+        )));
+    }
 
     let (mr, created) = create_mr_for_completion(
         &state,
@@ -3303,6 +3684,40 @@ pub async fn complete_agent(
 
 // ── Agent lifecycle endpoints ─────────────────────────────────────────────────
 
+/// Per-handler tenant containment for the registry-exempt per-agent control
+/// routes (`POST /api/v1/agents/:id/stop`, `POST /api/v1/agents/:id/fail`):
+/// the target agent's workspace tenant must match the caller's authenticated
+/// tenant. These routes run without middleware ABAC (no resolver mapping, no
+/// exemption-file policy evaluation), so this comparison is the only
+/// cross-tenant guard — without it any authenticated principal in any tenant
+/// could stop or fail any agent (task-206 review F1). Fail-closed when the
+/// agent's workspace row is missing: the tenant scope cannot be determined,
+/// and proceeding would act on an agent whose scope is unverifiable.
+async fn assert_agent_tenant_contained(
+    state: &AppState,
+    agent: &Agent,
+    auth: &crate::auth::AuthenticatedAgent,
+) -> Result<(), ApiError> {
+    let ws_tenant = match state.workspaces.find_by_id(&agent.workspace_id).await {
+        Ok(Some(ws)) => ws.tenant_id.to_string(),
+        Ok(None) => {
+            return Err(ApiError::Forbidden(format!(
+                "agent {} references workspace {} which does not exist — the tenant scope \
+                 cannot be determined, refusing the request",
+                agent.id, agent.workspace_id
+            )));
+        }
+        Err(e) => return Err(ApiError::Internal(e)),
+    };
+    if ws_tenant != auth.tenant_id {
+        return Err(ApiError::Forbidden(format!(
+            "agent {} belongs to tenant {ws_tenant}, not the caller's tenant {}",
+            agent.id, auth.tenant_id
+        )));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Deserialize)]
 pub struct RecordUsageRequest {
     pub tokens_input: u64,
@@ -3313,14 +3728,33 @@ pub struct RecordUsageRequest {
 /// POST /api/v1/agents/:id/usage
 ///
 /// Agent reports its token/cost usage for the current session.
-/// Auth: agent-scoped JWT — the reporting agent must match :id.
+/// Auth: agent-scoped JWT — the reporting agent must match :id (the
+/// documented contract); Admin/global principals may report on behalf of an
+/// agent (operator tooling and the task-190 budget-accounting flow).
 /// Returns 200 OK, or 429 if workspace budget is exhausted (best-effort check).
-#[instrument(skip(state), fields(agent_id = %id))]
+#[instrument(skip(state, auth), fields(agent_id = %id))]
 pub async fn record_agent_usage(
     State(state): State<Arc<AppState>>,
+    auth: crate::auth::AuthenticatedAgent,
     Path(id): Path<String>,
     Json(req): Json<RecordUsageRequest>,
 ) -> Result<StatusCode, ApiError> {
+    // Per-handler authorization (registry-exempt route — no middleware ABAC
+    // runs, so this check is the only authorization surface). The usage
+    // report is the budget-enforcement input: a report against ANOTHER
+    // agent's id would charge that agent's workspace, push it over its
+    // budget and trigger the ≥100% enforcement action (graceful stop / hard
+    // kill) against the victim — the same cross-agent escape class the
+    // task-206 review closed on stop/fail. The cred-proxy sidecar always
+    // reports with the agent's own token, so the self-match branch is the
+    // production path; the Admin branch covers operator tooling.
+    if auth.agent_id != id && !auth.roles.contains(&gyre_domain::UserRole::Admin) {
+        return Err(ApiError::Forbidden(format!(
+            "usage reports are self-reported: caller '{}' may not record usage for agent '{id}'",
+            auth.agent_id
+        )));
+    }
+
     let agent = state
         .agents
         .find_by_id(&Id::new(&id))
@@ -3416,12 +3850,29 @@ pub async fn record_agent_usage(
 /// agent's tenant, and an agent principal may only fail its own agent
 /// (identity-security.md §Task-Scoped JWT Claims — failing another task's
 /// agent terminates its workload and revokes its Task-scoped secrets).
+/// Preview-agent callers are also refused (meta-spec reconciliation §5 —
+/// a preview agent's live JWT is a valid credential whose Agent role would
+/// otherwise reach this handler with no policy evaluation at all).
 #[instrument(skip(state, auth), fields(agent_id = %id))]
 pub async fn fail_agent(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     auth: crate::auth::AuthenticatedAgent,
 ) -> Result<StatusCode, ApiError> {
+    // meta-spec reconciliation §5 (task-206 review F1): failing an agent is
+    // a durable production effect — it revokes the victim's token and
+    // task-scoped secrets, decrements its workspace budget and fires
+    // orchestrator death handling (replacement spawns). Throwaway preview
+    // scratch must not reach it: the preview agent's JWT is a live Agent-role
+    // credential, and this route is registry-exempt so no ABAC policy is
+    // evaluated anywhere between require_auth and this branch.
+    if crate::api::meta_specs::caller_is_preview_agent(&state, &auth).await {
+        return Err(ApiError::Forbidden(
+            "preview agents may not fail agents — preview runs leave no production footprint"
+                .to_string(),
+        ));
+    }
+
     let mut agent = state
         .agents
         .find_by_id(&Id::new(&id))
@@ -3429,6 +3880,14 @@ pub async fn fail_agent(
         .ok_or_else(|| ApiError::NotFound(format!("agent {id} not found")))?;
     require_agent_tenant_containment(&state, &auth, &agent).await?;
     require_agent_self_only(&auth, &agent)?;
+
+    // Per-handler tenant containment: this route runs without middleware
+    // ABAC, so the comparison below is the only cross-tenant guard between
+    // a caller in tenant A and a kill of an agent in tenant B. Holds for
+    // EVERY caller — the global token included (its tenant is the bootstrap
+    // principal "default", same as the workspace-orchestrator spawn route's
+    // no-bypass containment).
+    assert_agent_tenant_contained(&state, &agent, &auth).await?;
 
     // Already-terminal guard (task-093 review): a failed/stopped/dead agent
     // is a corpse — re-failing it must not re-run the budget decrement,
@@ -3465,6 +3924,15 @@ pub async fn fail_agent(
     // M22.2: Decrement budget active-agent counter.
     let workspace_id = agent.workspace_id.to_string();
     super::budget::decrement_active_agents(&state, &workspace_id).await;
+    // A preview agent holds a real budget slot (spawned via
+    // POST /meta-specs/preview), and this route just released it — flag the
+    // preview bookkeeping so the preview-owned release (process exit,
+    // DELETE, GC) does not decrement the same slot a second time
+    // (exactly-once; `decrement_active` is MAX(0, n-1), so a double
+    // release permanently biases the counter down). No-op for normal
+    // agents. The process keeps running until it exits on its own; the
+    // exit monitor's finish path then sees the flag and skips its release.
+    super::meta_specs::mark_preview_slot_released(&state, &agent.id.to_string()).await;
     // agent-runtime.md §4: wall-clock compute time (spawn → fail).
     super::budget::record_compute_minutes_for_agent(&state, &agent).await;
 
@@ -3579,12 +4047,28 @@ pub async fn fail_agent(
 /// agent's tenant, and an agent principal may only stop its own agent
 /// (identity-security.md §Task-Scoped JWT Claims — stopping another task's
 /// agent terminates its workload and revokes its Task-scoped secrets).
+/// Preview-agent callers are also refused (meta-spec reconciliation §5 —
+/// a preview agent's live JWT is a valid Agent-role credential on a route
+/// with no policy evaluation anywhere).
 #[instrument(skip(state, auth), fields(agent_id = %id))]
 pub async fn stop_agent(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     auth: crate::auth::AuthenticatedAgent,
 ) -> Result<StatusCode, ApiError> {
+    // meta-spec reconciliation §5 (task-206 review F1): stopping an agent is
+    // a durable production effect — token/task-secret revocation, budget
+    // decrement, orchestrator death handling with replacement spawns.
+    // Preview scratch must not reach it (same escape class as fail_agent
+    // above: live Agent-role JWT, registry-exempt route, no policy
+    // evaluation anywhere).
+    if crate::api::meta_specs::caller_is_preview_agent(&state, &auth).await {
+        return Err(ApiError::Forbidden(
+            "preview agents may not stop agents — preview runs leave no production footprint"
+                .to_string(),
+        ));
+    }
+
     let mut agent = state
         .agents
         .find_by_id(&Id::new(&id))
@@ -3592,6 +4076,9 @@ pub async fn stop_agent(
         .ok_or_else(|| ApiError::NotFound(format!("agent {id} not found")))?;
     require_agent_tenant_containment(&state, &auth, &agent).await?;
     require_agent_self_only(&auth, &agent)?;
+
+    // Per-handler tenant containment — same no-bypass rule as fail_agent.
+    assert_agent_tenant_contained(&state, &agent, &auth).await?;
 
     if matches!(
         agent.status,
@@ -3623,6 +4110,12 @@ pub async fn stop_agent(
     // M22.2: Decrement budget active-agent counter.
     let workspace_id = agent.workspace_id.to_string();
     super::budget::decrement_active_agents(&state, &workspace_id).await;
+    // Preview-agent slot bookkeeping — same exactly-once contract as the
+    // decrement above (see fail_agent): this route released the slot, so
+    // the preview-owned release must not release it again. The process
+    // keeps running (stop is a ledger transition, not a kill); its later
+    // exit routes through finish_preview_agent, which consults the flag.
+    super::meta_specs::mark_preview_slot_released(&state, &agent.id.to_string()).await;
     // agent-runtime.md §4: wall-clock compute time (spawn → stop).
     super::budget::record_compute_minutes_for_agent(&state, &agent).await;
 
@@ -3967,6 +4460,7 @@ async fn create_derived_input_for_agent(
 mod tests {
     use super::complete_agent;
     use super::create_interrogation_policies_in;
+    use super::monitor_poll_once;
     use super::register_spawned_agent;
     use super::spawn_agent_core;
     use super::CompleteAgentRequest;
@@ -3980,26 +4474,6 @@ mod tests {
     use http::{Request, StatusCode};
     use std::sync::Arc;
     use tower::ServiceExt;
-
-    /// Hand-rolled principal for direct handler calls where the auth
-    /// extractor is not in play (same shape as orchestrator.rs's
-    /// `auth_in_tenant`).
-    fn plain_auth(agent_id: &str) -> crate::auth::AuthenticatedAgent {
-        crate::auth::AuthenticatedAgent {
-            auth_mechanism: crate::auth::AuthMechanism::AgentToken,
-            agent_id: agent_id.to_string(),
-            user_id: None,
-            roles: vec![gyre_domain::UserRole::Admin],
-            tenant_id: "default".to_string(),
-            workspace_id: None,
-            repo_id: None,
-            scope: Vec::new(),
-            jwt_claims: None,
-            bearer_token: None,
-            deprecated_token_auth: false,
-            impersonation: None,
-        }
-    }
 
     fn app() -> Router {
         crate::api::api_router().with_state(test_state())
@@ -4043,8 +4517,8 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/api/v1/tasks")
-                    .header("content-type", "application/json")
                     .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -4644,7 +5118,7 @@ mod tests {
             let (code, body) = complete_agent(
                 axum::extract::State(state.clone()),
                 axum::extract::Path(agent_id.clone()),
-                plain_auth("system"),
+                auth.clone(),
                 axum::Json(CompleteAgentRequest {
                     branch: "feat/r19".to_string(),
                     title: "R19 feature".to_string(),
@@ -5005,6 +5479,30 @@ mod tests {
         assert_eq!(agent_json["status"], "idle");
     }
 
+    /// An SSH handle's pid is the REMOTE pid echoed by the remote shell.
+    /// `kill_process_handle` must reconstruct an SshTarget (or refuse) — never
+    /// fall through to a local kill, which would terminate an unrelated local
+    /// process holding that pid while the remote agent survives. The handle
+    /// here carries THIS test process's pid and a malformed destination: a
+    /// regression to local dispatch kills the test runner itself, so the
+    /// guard is proven by survival, not just the error message.
+    #[tokio::test]
+    async fn kill_process_handle_refuses_malformed_ssh_handle() {
+        let handle = gyre_ports::ProcessHandle {
+            id: "no-destination-here".to_string(),
+            target_type: "ssh".to_string(),
+            pid: Some(std::process::id()),
+            options: std::collections::HashMap::new(),
+        };
+        let err = super::kill_process_handle(&handle)
+            .await
+            .expect_err("malformed ssh handle must be refused, not killed locally");
+        assert!(
+            err.to_string().contains("cannot reconstruct ssh target"),
+            "unexpected error: {err:#}"
+        );
+    }
+
     /// source-control.md §Agent-to-Commit Tracking: the spawn starts an
     /// open session, and completion terminates it — recording the
     /// worktree's REAL current branch and dirty state (a real
@@ -5143,7 +5641,7 @@ mod tests {
             let (code, body) = complete_agent(
                 axum::extract::State(state.clone()),
                 axum::extract::Path(agent_id.to_string()),
-                auth,
+                auth.clone(),
                 axum::Json(CompleteAgentRequest {
                     branch: "feat/moved".to_string(),
                     title: "D feature".to_string(),
@@ -6140,6 +6638,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/api/v1/agents")
+                    .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
@@ -7393,8 +7892,8 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/api/v1/tasks")
-                    .header("content-type", "application/json")
                     .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -7563,6 +8062,7 @@ mod tests {
             id: "fake-container-id".to_string(),
             target_type: "container".to_string(),
             pid: None,
+            options: std::collections::HashMap::new(),
         };
         register_spawned_agent(
             &state,
@@ -7657,6 +8157,7 @@ mod tests {
                     id: pid.to_string(),
                     target_type: "local".to_string(),
                     pid: Some(pid),
+                    options: std::collections::HashMap::new(),
                 },
             )
             .await
@@ -7683,6 +8184,225 @@ mod tests {
             .lock()
             .await
             .contains_key("agt-kill-1"));
+    }
+
+    /// F2 regression (task-206 review): a monitor iteration that finds only
+    /// half of the registration — a handle whose backend was already reaped
+    /// by a kill path, or a backend whose handle was — must purge the other
+    /// half too instead of just breaking. Otherwise one Arc<SpawnBackend>
+    /// (or ProcessHandle) leaks per affected agent for the lifetime of the
+    /// server: the kill paths remove both entries, but any path that removes
+    /// only one used to park the other here forever.
+    #[tokio::test]
+    async fn monitor_iteration_purges_half_registered_entries() {
+        let state = test_state();
+
+        // Handle registered, backend already reaped: the iteration must end
+        // the monitor AND remove the orphaned handle.
+        state.process_registry.lock().await.insert(
+            "agt-half-1".to_string(),
+            gyre_ports::ProcessHandle {
+                id: "half-1".to_string(),
+                target_type: "local".to_string(),
+                pid: None,
+                options: std::collections::HashMap::new(),
+            },
+        );
+        assert!(
+            !monitor_poll_once(&state, "agt-half-1").await,
+            "a missing backend must end the monitor"
+        );
+        assert!(
+            !state
+                .process_registry
+                .lock()
+                .await
+                .contains_key("agt-half-1"),
+            "the orphaned handle entry must be purged, not leaked"
+        );
+
+        // Backend registered, handle already reaped: symmetric.
+        state.spawned_backends.lock().await.insert(
+            "agt-half-2".to_string(),
+            std::sync::Arc::new(SpawnBackend::Local),
+        );
+        assert!(
+            !monitor_poll_once(&state, "agt-half-2").await,
+            "a missing handle must end the monitor"
+        );
+        assert!(
+            !state
+                .spawned_backends
+                .lock()
+                .await
+                .contains_key("agt-half-2"),
+            "the orphaned backend entry must be purged, not leaked"
+        );
+    }
+
+    /// A fully registered, still-alive agent keeps its monitor polling:
+    /// `monitor_poll_once` returns true and touches neither entry. Uses a
+    /// real process so the liveness probe is the production one.
+    #[tokio::test]
+    async fn monitor_iteration_keeps_polling_alive_agent() {
+        let state = test_state();
+        let spawn_cfg = gyre_ports::SpawnConfig {
+            name: "monitor-alive-probe".to_string(),
+            command: "sleep".to_string(),
+            args: vec!["60".to_string()],
+            env: std::collections::HashMap::new(),
+            work_dir: "/tmp".to_string(),
+        };
+        let handle = gyre_adapters::compute::LocalTarget
+            .spawn_process(&spawn_cfg)
+            .await
+            .expect("spawning sleep should work on linux");
+
+        state
+            .process_registry
+            .lock()
+            .await
+            .insert("agt-alive-1".to_string(), handle.clone());
+        state.spawned_backends.lock().await.insert(
+            "agt-alive-1".to_string(),
+            std::sync::Arc::new(SpawnBackend::Local),
+        );
+
+        assert!(
+            monitor_poll_once(&state, "agt-alive-1").await,
+            "an alive agent must keep its monitor polling"
+        );
+        assert!(state
+            .process_registry
+            .lock()
+            .await
+            .contains_key("agt-alive-1"));
+        assert!(state
+            .spawned_backends
+            .lock()
+            .await
+            .contains_key("agt-alive-1"));
+
+        // Cleanup: kill the process and drop both entries so no monitor or
+        // process outlives the test.
+        let _ =
+            gyre_ports::ComputeTarget::kill_process(&gyre_adapters::compute::LocalTarget, &handle)
+                .await;
+        state.process_registry.lock().await.remove("agt-alive-1");
+        state.spawned_backends.lock().await.remove("agt-alive-1");
+    }
+
+    /// Task-206 review F5: a liveness probe that ERRS must not run the exit
+    /// path. `monitor_poll_once` used to map an is_alive error to
+    /// not-alive (`.unwrap_or(false)`), so one transient SSH failure ran
+    /// the full exit path into `finish_preview_agent`'s destructive
+    /// teardown (token revoked, worktree force-removed, budget slot
+    /// released, row Stopped) while the remote process still ran and its
+    /// work was lost. Uses a real SSH-docker backend pointed at a refused
+    /// port — the probe fails at the transport layer ("ssh: connect ...
+    /// Connection refused"), the exact production failure class. When ssh
+    /// is absent the probe fails too, so the test holds either way.
+    #[tokio::test]
+    async fn monitor_iteration_survives_liveness_probe_failure() {
+        let state = test_state();
+
+        // A preview agent row the exit path would destroy: an index entry
+        // in preview_agents routes process exits to finish_preview_agent.
+        let mut agent = gyre_domain::Agent::new(Id::new("agt-probe-1"), "preview-x", 0);
+        agent
+            .transition_status(gyre_domain::AgentStatus::Active)
+            .unwrap();
+        state.agents.create(&agent).await.unwrap();
+        state
+            .kv_store
+            .kv_set(
+                "preview_agents",
+                "agt-probe-1",
+                serde_json::json!({
+                    "preview_id": "pv-probe",
+                    "agent_id": "agt-probe-1",
+                    "repo_id": "r-1",
+                    "workspace_id": "ws-1",
+                    "spec_path": "specs/system/search.md",
+                    "branch": "preview/pv-probe/search",
+                    "base_sha": "0".repeat(40),
+                    "worktree_path": "/nonexistent",
+                    "released": false,
+                })
+                .to_string(),
+            )
+            .await
+            .unwrap();
+
+        // Backend whose probe fails at the SSH transport layer: port 1 on
+        // localhost refuses connections immediately.
+        let backend = SpawnBackend::SshDocker(gyre_adapters::compute::SshDockerTarget::new(
+            gyre_adapters::compute::SshTarget::new("root", "127.0.0.1").with_port(1),
+            "gyre-agent:latest",
+        ));
+        state.process_registry.lock().await.insert(
+            "agt-probe-1".to_string(),
+            gyre_ports::ProcessHandle {
+                id: "probe-failed-container".to_string(),
+                target_type: "ssh-docker".to_string(),
+                pid: None,
+                options: std::collections::HashMap::new(),
+            },
+        );
+        state
+            .spawned_backends
+            .lock()
+            .await
+            .insert("agt-probe-1".to_string(), std::sync::Arc::new(backend));
+
+        // The probe FAILS (transport), it does not confirm death: the
+        // monitor must keep polling and leave every registration — and the
+        // preview agent's Active row — untouched.
+        assert!(
+            monitor_poll_once(&state, "agt-probe-1").await,
+            "a failed liveness probe must keep the monitor polling"
+        );
+        assert!(
+            state
+                .process_registry
+                .lock()
+                .await
+                .contains_key("agt-probe-1"),
+            "a probe failure must not unregister the handle"
+        );
+        assert!(
+            state
+                .spawned_backends
+                .lock()
+                .await
+                .contains_key("agt-probe-1"),
+            "a probe failure must not unregister the backend"
+        );
+        let agent = state
+            .agents
+            .find_by_id(&Id::new("agt-probe-1"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            agent.status,
+            gyre_domain::AgentStatus::Active,
+            "a probe failure must not terminal-ize the preview agent"
+        );
+        // And no teardown side effects fired: the preview index entry is
+        // still unreleased (no token revocation / budget release ran).
+        let raw = state
+            .kv_store
+            .kv_get("preview_agents", "agt-probe-1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            !serde_json::from_str::<serde_json::Value>(&raw).unwrap()["released"]
+                .as_bool()
+                .unwrap(),
+            "a probe failure must not release the preview agent's slot"
+        );
     }
     /// TASK-077 (F6): `create_interrogation_policies` must fail closed — if
     /// a policy cannot be created (e.g. duplicate id), the error propagates

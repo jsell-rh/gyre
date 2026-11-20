@@ -363,6 +363,8 @@ mod tests {
         }
 
         // 2. ReadOnly caller running a meta-spec preview (Admin-or-Developer).
+        //    Global preview route (meta-spec-reconciliation.md §5); the
+        //    role guard in the handler is the audit surface.
         {
             let state = make_test_state_with_jwt();
             let app = crate::api::api_router().with_state(state.clone());
@@ -370,10 +372,24 @@ mod tests {
                 .oneshot(
                     Request::builder()
                         .method("POST")
-                        .uri("/api/v1/workspaces/ws-1/meta-specs/preview")
+                        .uri("/api/v1/meta-specs/preview")
                         .header("Authorization", format!("Bearer {}", readonly_jwt()))
                         .header("Content-Type", "application/json")
-                        .body(Body::from("{}"))
+                        .body(Body::from(
+                            serde_json::to_string(&serde_json::json!({
+                                "draft": {
+                                    "kind": "meta:persona",
+                                    "content": "draft persona text"
+                                },
+                                "targets": [
+                                    {
+                                        "repo_id": "00000000-0000-0000-0000-000000000000",
+                                        "spec_path": "specs/system/search.md"
+                                    }
+                                ]
+                            }))
+                            .unwrap(),
+                        ))
                         .unwrap(),
                 )
                 .await
@@ -382,7 +398,7 @@ mod tests {
             assert_one_rbac_denied(
                 &state,
                 "Admin or Developer",
-                "POST /api/v1/workspaces/:id/meta-specs/preview",
+                "POST /api/v1/meta-specs/preview",
             )
             .await;
         }
@@ -456,14 +472,16 @@ mod tests {
             );
             state.repos.create(&repo).await.unwrap();
             let app = crate::api::api_router().with_state(state.clone());
-            // create_mr takes the auth extractor now (task-263 MR-scope
-            // boundary); seed the MR with the global test token.
+            // create_mr takes the auth extractor (task-263 MR-scope
+            // boundary); seed the MR with the global test token
+            // (system/Admin) so the seed itself is authorized.
             let resp = app
                 .clone()
                 .oneshot(
                     Request::builder()
                         .method("POST")
                         .uri("/api/v1/merge-requests")
+                        .header("Authorization", "Bearer test-token")
                         .header("Content-Type", "application/json")
                         .header("authorization", "Bearer test-token")
                         .body(Body::from(

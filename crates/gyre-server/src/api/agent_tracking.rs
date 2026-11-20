@@ -200,11 +200,29 @@ impl From<AgentWorktree> for AgentWorktreeResponse {
 // ── Handlers ──────────────────────────────────────────────────────────────────
 
 /// POST /api/v1/repos/:id/commits/record
+///
+/// Records an AgentCommit provenance row. Preview-agent callers are
+/// refused (task-206 review F5): §5 forbids preview runs from leaving an
+/// audit trail, and this handler persists a caller-supplied agent_id as a
+/// provenance row — the MCP dispatch already refuses `conversation_upload`
+/// for preview agents for exactly this reason, and this per-handler guard
+/// closes the REST twin. The middleware maps the route to (repo, write),
+/// which the Agent role passes via the builtin agent-scoped-access policy,
+/// so this guard is the only refusal layer for a same-tenant
+/// preview-agent JWT.
 pub async fn record_commit(
     State(state): State<Arc<AppState>>,
+    auth: AuthenticatedAgent,
     Path(repo_id): Path<String>,
     Json(req): Json<RecordCommitRequest>,
 ) -> Result<(StatusCode, Json<AgentCommitResponse>), ApiError> {
+    if crate::api::meta_specs::caller_is_preview_agent(&state, &auth).await {
+        return Err(ApiError::Forbidden(
+            "preview agents may not record commit provenance — preview runs leave no \
+             audit trail"
+                .to_string(),
+        ));
+    }
     // Verify the repo exists (and keep it: the file list is derived from
     // its real object store when possible).
     let repo = state
@@ -748,6 +766,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri(format!("/api/v1/repos/{repo_id}/commits/record"))
+                    .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
@@ -786,6 +805,7 @@ mod tests {
                     Request::builder()
                         .method("POST")
                         .uri(format!("/api/v1/repos/{repo_id}/commits/record"))
+                        .header("authorization", "Bearer test-token")
                         .header("content-type", "application/json")
                         .body(Body::from(serde_json::to_vec(&body).unwrap()))
                         .unwrap(),
@@ -824,6 +844,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/api/v1/repos/no-such/commits/record")
+                    .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
@@ -1018,6 +1039,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri(format!("/api/v1/repos/{repo_id}/commits/record"))
+                    .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),

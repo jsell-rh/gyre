@@ -106,6 +106,16 @@ pub async fn run_once(state: &Arc<AppState>) -> anyhow::Result<()> {
                         &agent.workspace_id.to_string(),
                     )
                     .await;
+                    // Preview-agent slot bookkeeping: this abort released
+                    // the slot, and the preview-owned release (process
+                    // exit, DELETE, GC) must not release it a second time
+                    // (exactly-once; decrement_active is MAX(0, n-1)).
+                    // No-op for normal agents.
+                    crate::api::meta_specs::mark_preview_slot_released(
+                        state,
+                        &agent.id.to_string(),
+                    )
+                    .await;
                     // agent-runtime.md §4: wall-clock compute time
                     // (spawn → dead).
                     crate::api::budget::record_compute_minutes_for_agent(state, &agent).await;
