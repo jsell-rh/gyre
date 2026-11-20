@@ -946,6 +946,24 @@ pub fn api_router() -> Router<Arc<AppState>> {
             get(meta_specs::get_meta_spec_preview_status)
                 .delete(meta_specs::delete_meta_spec_preview),
         )
+        // Workspace-scoped preview surface (same §5 machinery as the global
+        // routes above): every target repo of the run must live in the path's
+        // workspace, and that workspace is contained to the caller's tenant
+        // in the handlers. These paths predate the ABAC resolver and were
+        // exempted from it on the base tree; they are resolver-enforced now
+        // (see the mappings in abac_middleware.rs), which is the sanctioned
+        // way to retire an exemption entry — the route stays registered and
+        // gains policy evaluation, so the base tree's frozen exemption data
+        // still resolves against a live, authorized route.
+        .route(
+            "/api/v1/workspaces/:id/meta-specs/preview",
+            post(meta_specs::post_workspace_meta_spec_preview),
+        )
+        .route(
+            "/api/v1/workspaces/:id/meta-specs/preview/:preview_id",
+            get(meta_specs::get_workspace_meta_spec_preview_status)
+                .delete(meta_specs::delete_workspace_meta_spec_preview),
+        )
         // Meta-spec registry CRUD (agent-runtime spec §2)
         // NOTE: /:id/versions must be registered before /:id to prevent axum from
         // matching "versions" as an id segment.

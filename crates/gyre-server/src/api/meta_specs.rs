@@ -835,7 +835,63 @@ pub async fn post_meta_spec_preview(
     Json(req): Json<PreviewMetaSpecRequest>,
 ) -> Result<(StatusCode, Json<PreviewResponse>), ApiError> {
     require_preview_role(&state, &auth, "POST /api/v1/meta-specs/preview").await?;
+    validate_preview_request(&req)?;
+    let resolved = resolve_preview_targets(&state, &auth, &req.targets, None).await?;
+    spawn_preview_run(&state, &auth, &req.draft, resolved).await
+}
 
+// ---------------------------------------------------------------------------
+// POST /api/v1/workspaces/{id}/meta-specs/preview  (Admin or Developer)
+// ---------------------------------------------------------------------------
+
+/// Workspace-scoped twin of the global preview route: same body, same §5
+/// machinery, one extra containment rule — every target repo must live in the
+/// path's workspace, and that workspace must be inside the caller's tenant.
+/// The run's scope still comes from the repo records (never the path alone):
+/// each target passes the same repo ABAC and tenant checks as the global
+/// route, so the workspace segment narrows, never replaces, authorization.
+pub async fn post_workspace_meta_spec_preview(
+    State(state): State<Arc<AppState>>,
+    Path(workspace_id): Path<String>,
+    auth: AuthenticatedAgent,
+    Json(req): Json<PreviewMetaSpecRequest>,
+) -> Result<(StatusCode, Json<PreviewResponse>), ApiError> {
+    require_preview_role(
+        &state,
+        &auth,
+        "POST /api/v1/workspaces/:id/meta-specs/preview",
+    )
+    .await?;
+    let workspace = load_workspace_for_caller(&state, &auth, &workspace_id).await?;
+    validate_preview_request(&req)?;
+    let resolved = resolve_preview_targets(&state, &auth, &req.targets, Some(&workspace)).await?;
+    spawn_preview_run(&state, &auth, &req.draft, resolved).await
+}
+
+/// Load the workspace named by a workspace-scoped preview path and contain it
+/// to the caller: unknown ids are NotFound, and a workspace in another tenant
+/// is Forbidden for every non-Admin caller.
+async fn load_workspace_for_caller(
+    state: &AppState,
+    auth: &AuthenticatedAgent,
+    workspace_id: &str,
+) -> Result<Workspace, ApiError> {
+    let workspace = state
+        .workspaces
+        .find_by_id(&Id::new(workspace_id))
+        .await?
+        .ok_or_else(|| ApiError::NotFound(format!("workspace '{workspace_id}' not found")))?;
+    if !auth.roles.contains(&UserRole::Admin) && workspace.tenant_id.as_str() != auth.tenant_id {
+        return Err(ApiError::Forbidden(format!(
+            "workspace '{workspace_id}' is outside the caller's tenant"
+        )));
+    }
+    Ok(workspace)
+}
+
+/// Request validation shared by both POST surfaces: the draft must name a
+/// known meta-spec kind with non-empty content, and at least one target.
+fn validate_preview_request(req: &PreviewMetaSpecRequest) -> Result<(), ApiError> {
     if req.draft.kind.trim().is_empty() || req.draft.content.trim().is_empty() {
         return Err(ApiError::BadRequest(
             "draft.kind and draft.content are both required".to_string(),
@@ -851,12 +907,22 @@ pub async fn post_meta_spec_preview(
             "targets must not be empty".to_string(),
         ));
     }
+    Ok(())
+}
 
-    // ── Pass 1: resolve, authorize and validate every target. Nothing is
-    // created before this completes, so a rejected target cannot leave an
-    // agent, branch or worktree behind.
-    let mut resolved: Vec<ResolvedTarget> = Vec::with_capacity(req.targets.len());
-    for target in &req.targets {
+/// Pass 1 of both POST surfaces: resolve, authorize and validate every
+/// target. Nothing is created before this completes, so a rejected target
+/// cannot leave an agent, branch or worktree behind. With `workspace_scope`
+/// set (the workspace-scoped route), every target repo must additionally
+/// live inside that workspace.
+async fn resolve_preview_targets(
+    state: &AppState,
+    auth: &AuthenticatedAgent,
+    targets: &[PreviewTarget],
+    workspace_scope: Option<&Workspace>,
+) -> Result<Vec<ResolvedTarget>, ApiError> {
+    let mut resolved: Vec<ResolvedTarget> = Vec::with_capacity(targets.len());
+    for target in targets {
         let repo = state
             .repos
             .find_by_id(&Id::new(&target.repo_id))
@@ -869,9 +935,18 @@ pub async fn post_meta_spec_preview(
             .ok_or_else(|| {
                 ApiError::NotFound(format!("workspace '{}' not found", repo.workspace_id))
             })?;
-        // Global route: the run's scope is derived from the repo record and the
-        // caller's identity — never from the request body.
-        crate::abac::check_repo_abac(&state, &repo.id.to_string(), &auth)
+        // Workspace-scoped route: the path's workspace must own every target.
+        if let Some(scope) = workspace_scope {
+            if repo.workspace_id != scope.id {
+                return Err(ApiError::Forbidden(format!(
+                    "repo '{}' is not in workspace '{}'",
+                    repo.id, scope.id
+                )));
+            }
+        }
+        // The run's scope is derived from the repo record and the caller's
+        // identity — never from the request body or the path alone.
+        crate::abac::check_repo_abac(state, &repo.id.to_string(), auth)
             .await
             .map_err(ApiError::Forbidden)?;
         if !auth.roles.contains(&UserRole::Admin) && workspace.tenant_id.as_str() != auth.tenant_id
@@ -908,14 +983,26 @@ pub async fn post_meta_spec_preview(
             spec_path: target.spec_path.clone(),
         });
     }
+    Ok(resolved)
+}
 
+/// Passes 2-4 of both POST surfaces: budget, provision, launch. Shared so the
+/// workspace-scoped route runs the exact same §5 machinery (preview budget,
+/// per-workspace spawn budget, rollback-on-failure, persist-before-launch)
+/// as the global route — only the target-resolution scope differs.
+async fn spawn_preview_run(
+    state: &Arc<AppState>,
+    auth: &AuthenticatedAgent,
+    draft: &DraftMetaSpec,
+    resolved: Vec<ResolvedTarget>,
+) -> Result<(StatusCode, Json<PreviewResponse>), ApiError> {
     // ── Pass 2: budget.
     let requested = resolved.len() as u64;
     if let Some(max) = state.preview_budget_max_concurrent {
         // Fail closed on the enumeration: a kv-store failure means the number
         // of running preview agents is unknown, and admitting the POST would
         // fail the concurrency cap open.
-        let running = count_running_preview_agents(&state).await.map_err(|e| {
+        let running = count_running_preview_agents(state).await.map_err(|e| {
             ApiError::Internal(anyhow::anyhow!(
                 "cannot enumerate preview agents for the budget check: {e:#}"
             ))
@@ -938,7 +1025,7 @@ pub async fn post_meta_spec_preview(
                 .or_insert(0) += 1;
         }
         for (ws_id, requested) in per_workspace {
-            super::budget::check_spawn_budget_for(&state, &ws_id, requested)
+            super::budget::check_spawn_budget_for(state, &ws_id, requested)
                 .await
                 .map_err(ApiError::TooManyRequests)?;
         }
@@ -951,11 +1038,11 @@ pub async fn post_meta_spec_preview(
     let mut provisioned: Vec<Provisioned> = Vec::with_capacity(resolved.len());
     for rt in &resolved {
         let branch = preview_branch_name(&preview_id, &rt.spec_path, &mut used_slugs);
-        match provision_preview_agent(&state, &auth, &preview_id, rt, &branch, now).await {
+        match provision_preview_agent(state, auth, &preview_id, rt, &branch, now).await {
             Ok(p) => provisioned.push(p),
             Err(e) => {
                 for p in &provisioned {
-                    rollback_preview_agent(&state, &p.agent_ref).await;
+                    rollback_preview_agent(state, &p.agent_ref).await;
                 }
                 return Err(e);
             }
@@ -974,9 +1061,9 @@ pub async fn post_meta_spec_preview(
         created_at: now,
         agents: provisioned.iter().map(|p| p.agent_ref.clone()).collect(),
     };
-    if let Err(e) = persist_preview(&state, &record).await {
+    if let Err(e) = persist_preview(state, &record).await {
         for p in &provisioned {
-            rollback_preview_agent(&state, &p.agent_ref).await;
+            rollback_preview_agent(state, &p.agent_ref).await;
         }
         // A partial persist may have stored the run record before an index
         // write failed — drop it too, or a record whose agents were all
@@ -992,7 +1079,7 @@ pub async fn post_meta_spec_preview(
 
     tracing::info!(
         preview_id = %preview_id,
-        draft_kind = %req.draft.kind,
+        draft_kind = %draft.kind,
         agents = provisioned.len(),
         requested_by = %auth.agent_id,
         "meta-spec preview started"
@@ -1001,13 +1088,13 @@ pub async fn post_meta_spec_preview(
     // ── Pass 4: launch. A target whose process never starts is reported failed
     // and its slot released; the rest of the run still proceeds.
     for p in provisioned.iter_mut() {
-        if let Err(reason) = launch_preview_agent(&state, &req.draft, p).await {
+        if let Err(reason) = launch_preview_agent(state, draft, p).await {
             tracing::error!(
                 preview_id = %preview_id,
                 agent_id = %p.agent_ref.agent_id,
                 "preview agent launch failed: {reason}"
             );
-            mark_preview_agent_failed(&state, p).await;
+            mark_preview_agent_failed(state, p).await;
         }
     }
 
@@ -1039,11 +1126,46 @@ pub async fn get_meta_spec_preview_status(
     require_preview_role(&state, &auth, "GET /api/v1/meta-specs/preview/:preview_id").await?;
     let record = load_preview(&state, &preview_id).await?;
     require_preview_scope(&state, &auth, &record).await?;
+    Ok(preview_status_response(&state, &record).await)
+}
 
+// ---------------------------------------------------------------------------
+// GET /api/v1/workspaces/{id}/meta-specs/preview/{preview_id}
+// ---------------------------------------------------------------------------
+
+/// Workspace-scoped twin of the global status route: the run is visible only
+/// through the workspace that owns its target repos — every repo of the run
+/// must resolve inside the path's workspace (else NotFound), the workspace
+/// must be inside the caller's tenant, and the same per-repo ABAC policy
+/// checks as the global route apply.
+pub async fn get_workspace_meta_spec_preview_status(
+    State(state): State<Arc<AppState>>,
+    Path((workspace_id, preview_id)): Path<(String, String)>,
+    auth: AuthenticatedAgent,
+) -> Result<Json<PreviewStatusResponse>, ApiError> {
+    require_preview_role(
+        &state,
+        &auth,
+        "GET /api/v1/workspaces/:id/meta-specs/preview/:preview_id",
+    )
+    .await?;
+    let workspace = load_workspace_for_caller(&state, &auth, &workspace_id).await?;
+    let record = load_preview(&state, &preview_id).await?;
+    require_preview_in_workspace(&state, &record, &workspace).await?;
+    require_preview_scope(&state, &auth, &record).await?;
+    Ok(preview_status_response(&state, &record).await)
+}
+
+/// Build the status body shared by both GET surfaces: per-agent state derived
+/// from the real agent records plus the produced branch diff.
+async fn preview_status_response(
+    state: &AppState,
+    record: &PreviewRecord,
+) -> Json<PreviewStatusResponse> {
     let mut agents = Vec::with_capacity(record.agents.len());
     let mut running = false;
     for agent_ref in &record.agents {
-        let status = preview_agent_status(&state, agent_ref).await;
+        let status = preview_agent_status(state, agent_ref).await;
         if status == "running" {
             running = true;
         }
@@ -1052,18 +1174,18 @@ pub async fn get_meta_spec_preview_status(
             repo_id: agent_ref.repo_id.clone(),
             spec_path: agent_ref.spec_path.clone(),
             branch: agent_ref.branch.clone(),
-            diff: preview_diff(&state, agent_ref).await,
+            diff: preview_diff(state, agent_ref).await,
             status,
         });
     }
 
-    Ok(Json(PreviewStatusResponse {
-        preview_id: record.preview_id,
+    Json(PreviewStatusResponse {
+        preview_id: record.preview_id.clone(),
         created_at: record.created_at,
         ttl_seconds: state.preview_ttl_secs,
         state: if running { "running" } else { "complete" }.to_string(),
         agents,
-    }))
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1091,6 +1213,70 @@ pub async fn delete_meta_spec_preview(
         "meta-spec preview torn down"
     );
     Ok(StatusCode::NO_CONTENT)
+}
+
+// ---------------------------------------------------------------------------
+// DELETE /api/v1/workspaces/{id}/meta-specs/preview/{preview_id}
+// ---------------------------------------------------------------------------
+
+/// Workspace-scoped twin of the global teardown route: same scope rules as
+/// the workspace status route (workspace containment, then per-repo ABAC),
+/// then the same teardown of agents, branches, worktrees and the record.
+pub async fn delete_workspace_meta_spec_preview(
+    State(state): State<Arc<AppState>>,
+    Path((workspace_id, preview_id)): Path<(String, String)>,
+    auth: AuthenticatedAgent,
+) -> Result<StatusCode, ApiError> {
+    require_preview_role(
+        &state,
+        &auth,
+        "DELETE /api/v1/workspaces/:id/meta-specs/preview/:preview_id",
+    )
+    .await?;
+    let workspace = load_workspace_for_caller(&state, &auth, &workspace_id).await?;
+    let record = load_preview(&state, &preview_id).await?;
+    require_preview_in_workspace(&state, &record, &workspace).await?;
+    require_preview_scope(&state, &auth, &record).await?;
+    teardown_preview(&state, &record).await;
+    tracing::info!(
+        preview_id = %record.preview_id,
+        workspace_id = %workspace.id,
+        agents = record.agents.len(),
+        requested_by = %auth.agent_id,
+        "meta-spec preview torn down via workspace route"
+    );
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Containment for the workspace-scoped status/teardown routes: the run is
+/// addressable only through a workspace that owns every one of its target
+/// repos. A repo deleted after the run started is skipped (the run is
+/// already heading for teardown, mirroring [`require_preview_scope`]); a
+/// resolvable repo outside the workspace makes the run NotFound in this
+/// workspace's scope.
+async fn require_preview_in_workspace(
+    state: &AppState,
+    record: &PreviewRecord,
+    workspace: &Workspace,
+) -> Result<(), ApiError> {
+    let mut checked: Vec<String> = Vec::new();
+    for agent_ref in &record.agents {
+        if checked.iter().any(|r| r == &agent_ref.repo_id) {
+            continue;
+        }
+        checked.push(agent_ref.repo_id.clone());
+        let repo = match state.repos.find_by_id(&Id::new(&agent_ref.repo_id)).await? {
+            Some(repo) => repo,
+            None => continue,
+        };
+        if repo.workspace_id != workspace.id {
+            return Err(ApiError::NotFound(format!(
+                "preview '{}' not found in workspace '{}'",
+                record.preview_id, workspace.id
+            )));
+        }
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -2999,6 +3185,92 @@ mod tests {
                     .method("DELETE")
                     .uri(format!("/api/v1/meta-specs/preview/{preview_id}"))
                     .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    /// POST a preview through the workspace-scoped route, authenticating as
+    /// the global admin token.
+    async fn post_workspace_preview(
+        app: &Router,
+        workspace_id: &str,
+        body: serde_json::Value,
+    ) -> axum::response::Response {
+        post_workspace_preview_with_token(app, workspace_id, "test-token", body).await
+    }
+
+    /// POST a preview through the workspace-scoped route with an explicit
+    /// bearer token (JWT-based containment tests).
+    async fn post_workspace_preview_with_token(
+        app: &Router,
+        workspace_id: &str,
+        token: &str,
+        body: serde_json::Value,
+    ) -> axum::response::Response {
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/api/v1/workspaces/{workspace_id}/meta-specs/preview"
+                    ))
+                    .header("authorization", format!("Bearer {token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    /// GET a preview status through the workspace-scoped route (admin token).
+    async fn get_workspace_preview_status(
+        app: &Router,
+        workspace_id: &str,
+        preview_id: &str,
+    ) -> axum::response::Response {
+        get_workspace_preview_status_with_token(app, workspace_id, preview_id, "test-token").await
+    }
+
+    /// GET a preview status through the workspace-scoped route with an
+    /// explicit bearer token.
+    async fn get_workspace_preview_status_with_token(
+        app: &Router,
+        workspace_id: &str,
+        preview_id: &str,
+        token: &str,
+    ) -> axum::response::Response {
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/api/v1/workspaces/{workspace_id}/meta-specs/preview/{preview_id}"
+                    ))
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    /// DELETE a preview through the workspace-scoped route (admin token).
+    async fn delete_workspace_preview(
+        app: &Router,
+        workspace_id: &str,
+        preview_id: &str,
+    ) -> axum::response::Response {
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!(
+                        "/api/v1/workspaces/{workspace_id}/meta-specs/preview/{preview_id}"
+                    ))
+                    .header("authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -5356,6 +5628,241 @@ mod tests {
             // Admin cleanup (also kills the spawned process).
             let resp = delete_preview(&app, &preview_id).await;
             assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        })
+        .await;
+    }
+
+    /// Workspace-scoped POST containment: the path's workspace must own every
+    /// target repo (403 otherwise), must exist (404), and must be inside the
+    /// caller's tenant (403 for a foreign-tenant Developer). No denial may
+    /// provision anything. The positive control really spawns through the
+    /// workspace route and tears down through it too.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn workspace_preview_post_scopes_targets_to_the_path_workspace() {
+        use crate::auth::test_helpers::{make_jwt_config, sign_test_jwt};
+
+        let dir = tempfile::tempdir().unwrap();
+        let (state, repo_id, ws_id) = preview_state(dir.path(), 86_400, None).await;
+
+        // A second workspace in the SAME tenant: same-tenant callers can see
+        // it, but it does not own the seeded repo.
+        let ws_b = gyre_domain::Workspace::new(
+            gyre_common::Id::new(uuid::Uuid::new_v4().to_string()),
+            gyre_common::Id::new("default"),
+            "preview-ws-b",
+            format!("preview-ws-b-{}", uuid::Uuid::new_v4()),
+            0,
+        );
+        state.workspaces.create(&ws_b).await.unwrap();
+
+        let mut jwt_state = (*state).clone();
+        jwt_state.jwt_config = Some(make_jwt_config());
+        let jwt_state = std::sync::Arc::new(jwt_state);
+        let app = crate::api::api_router().with_state(jwt_state.clone());
+
+        let dev_tenant_b = sign_test_jwt(
+            &serde_json::json!({
+                "tenant_id": "tenant-b",
+                "sub": "dev-tenant-b",
+                "preferred_username": "dev-tenant-b",
+                "realm_access": { "roles": ["developer"] }
+            }),
+            3600,
+        );
+
+        // 1. Target repo owned by another workspace: refused before anything
+        //    is provisioned.
+        let resp = post_workspace_preview(
+            &app,
+            ws_b.id.as_str(),
+            preview_body(&repo_id, &["specs/system/search.md"]),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let json = body_json(resp).await;
+        assert_eq!(
+            json["error"].as_str().unwrap(),
+            format!("repo '{repo_id}' is not in workspace '{}'", ws_b.id),
+            "the denial must come from the workspace-scope check"
+        );
+
+        // 2. Unknown workspace id.
+        let resp = post_workspace_preview(
+            &app,
+            "no-such-workspace",
+            preview_body(&repo_id, &["specs/system/search.md"]),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        // 3. Cross-tenant Developer: the workspace itself is outside the
+        //    caller's tenant (the repo carries no ABAC policy here, so the
+        //    workspace tenant check is the denial source).
+        let resp = post_workspace_preview_with_token(
+            &app,
+            ws_id.as_str(),
+            &dev_tenant_b,
+            preview_body(&repo_id, &["specs/system/search.md"]),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let json = body_json(resp).await;
+        assert_eq!(
+            json["error"].as_str().unwrap(),
+            format!("workspace '{}' is outside the caller's tenant", ws_id),
+            "the denial must come from load_workspace_for_caller's tenant containment"
+        );
+
+        // None of the denials provisioned anything.
+        assert!(jwt_state.agents.list().await.unwrap().is_empty());
+        assert!(jwt_state
+            .kv_store
+            .kv_list("meta_spec_previews")
+            .await
+            .unwrap()
+            .is_empty());
+        let repo = jwt_state
+            .repos
+            .find_by_id(&gyre_common::Id::new(&repo_id))
+            .await
+            .unwrap()
+            .unwrap();
+        let branches = jwt_state.git_ops.list_branches(&repo.path).await.unwrap();
+        assert!(
+            !branches.iter().any(|b| b.name.starts_with("preview/")),
+            "a denied workspace-scoped preview must not leave branches behind"
+        );
+
+        // 4. Positive control: the owning workspace really spawns through the
+        //    workspace route (same machinery as the global one) and the run
+        //    is teardown-addressable through the same route.
+        let script = env_dump_script(dir.path(), &dir.path().join("agent-env.txt"));
+        with_agent_command(script.to_str().unwrap(), || async {
+            let resp = post_workspace_preview(
+                &app,
+                ws_id.as_str(),
+                preview_body(&repo_id, &["specs/system/search.md"]),
+            )
+            .await;
+            assert_eq!(
+                resp.status(),
+                StatusCode::ACCEPTED,
+                "the owning workspace must be able to run a preview through the workspace route"
+            );
+            let json = body_json(resp).await;
+            let preview_id = json["preview_id"].as_str().unwrap().to_string();
+            let branch = json["agents"][0]["branch"].as_str().unwrap().to_string();
+            assert!(
+                branch.starts_with(&format!("preview/{preview_id}/")),
+                "workspace-route spawns use the same preview branch scheme: {branch}"
+            );
+
+            assert_eq!(
+                jwt_state.agents.list().await.unwrap().len(),
+                1,
+                "the workspace route must create a real agent record"
+            );
+            let branches = jwt_state.git_ops.list_branches(&repo.path).await.unwrap();
+            assert!(
+                branches.iter().any(|b| b.name == branch),
+                "the preview branch must exist in the target repo"
+            );
+
+            let del = delete_workspace_preview(&app, ws_id.as_str(), &preview_id).await;
+            assert_eq!(del.status(), StatusCode::NO_CONTENT);
+        })
+        .await;
+    }
+
+    /// Workspace-scoped GET/DELETE containment: a run is addressable only
+    /// through a workspace that owns its target repos (404 through any other
+    /// workspace, with nothing torn down), an unknown preview id is 404, and
+    /// the authorized workspace route reads real state and really tears down.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn workspace_preview_status_and_delete_scope_to_the_path_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, repo_id, ws_id) = preview_state(dir.path(), 86_400, None).await;
+
+        let ws_b = gyre_domain::Workspace::new(
+            gyre_common::Id::new(uuid::Uuid::new_v4().to_string()),
+            gyre_common::Id::new("default"),
+            "preview-ws-b",
+            format!("preview-ws-b-{}", uuid::Uuid::new_v4()),
+            0,
+        );
+        state.workspaces.create(&ws_b).await.unwrap();
+
+        let app = crate::api::api_router().with_state(state.clone());
+
+        let script = env_dump_script(dir.path(), &dir.path().join("agent-env.txt"));
+        with_agent_command(script.to_str().unwrap(), || async {
+            let resp =
+                post_preview(&app, preview_body(&repo_id, &["specs/system/search.md"])).await;
+            assert_eq!(resp.status(), StatusCode::ACCEPTED);
+            let json = body_json(resp).await;
+            let preview_id = json["preview_id"].as_str().unwrap().to_string();
+
+            // Unknown preview id through a valid workspace.
+            let resp = get_workspace_preview_status(&app, ws_id.as_str(), "no-such-preview").await;
+            assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+            // The owning workspace reads real state.
+            let resp = get_workspace_preview_status(&app, ws_id.as_str(), &preview_id).await;
+            assert_eq!(resp.status(), StatusCode::OK);
+            let json = body_json(resp).await;
+            assert_eq!(json["preview_id"].as_str().unwrap(), preview_id);
+            assert_eq!(json["agents"].as_array().unwrap().len(), 1);
+
+            // Another same-tenant workspace: the run is not addressable
+            // there, and the refusal leaks nothing about the run.
+            let resp = get_workspace_preview_status(&app, ws_b.id.as_str(), &preview_id).await;
+            assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+            let json = body_json(resp).await;
+            assert_eq!(
+                json["error"].as_str().unwrap(),
+                format!(
+                    "preview '{preview_id}' not found in workspace '{}'",
+                    ws_b.id
+                ),
+                "the denial must come from require_preview_in_workspace"
+            );
+
+            // The wrong-workspace DELETE refuses AND tears nothing down.
+            let resp = delete_workspace_preview(&app, ws_b.id.as_str(), &preview_id).await;
+            assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+            assert!(
+                state
+                    .kv_store
+                    .kv_get("meta_spec_previews", &preview_id)
+                    .await
+                    .unwrap()
+                    .is_some(),
+                "a wrong-workspace DELETE must not remove the preview record"
+            );
+
+            // The owning workspace really tears down: record and branch gone.
+            let resp = delete_workspace_preview(&app, ws_id.as_str(), &preview_id).await;
+            assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+            assert!(
+                state
+                    .kv_store
+                    .kv_get("meta_spec_previews", &preview_id)
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "the workspace DELETE must remove the preview record"
+            );
+            let repo = state
+                .repos
+                .find_by_id(&gyre_common::Id::new(&repo_id))
+                .await
+                .unwrap()
+                .unwrap();
+            let branches = state.git_ops.list_branches(&repo.path).await.unwrap();
+            assert!(
+                !branches.iter().any(|b| b.name.starts_with("preview/")),
+                "the workspace DELETE must remove the preview branches"
+            );
         })
         .await;
     }
