@@ -2,8 +2,8 @@
 title: "Ephemeral worktrees: teardown when work is terminally complete (task terminal states), preserving the Ralph-loop respawn working copy"
 spec_ref: "Spec gap spec-4c39ca6ea3e71ce8a53398f3 / terminal-worktree-cleanup / d30f233daf86"
 depends_on: [task-258]
-progress: not-started
-commits: ["e5b21daaca840e5e6ea60597d6247ffb62b45065"]
+progress: ready-for-review
+commits: ["e5b21daaca840e5e6ea60597d6247ffb62b45065", "5dfcf6425bc8dce8d07290e6e783c58b04069101"]
 ---
 
 ## Required behavior
@@ -52,3 +52,68 @@ Canonical spec: `specs/development/agent-workflow.md`. Source: `fb1424fbac55cd23
     ]
   }
 ]
+
+## Shipped
+
+Worktrees are now torn down when work is terminally complete, via one
+shared teardown helper instead of the three previous inline copies
+(implementation in e5b21daa; compile/format repair of that checkpoint in
+5dfcf642):
+
+- **Shared teardown** — `cleanup_agent_worktrees` (api/spawn.rs): for each
+  of the agent's `agent_worktrees` rows it removes the plain-git worktree
+  through the git_ops port (`git worktree remove` — directory plus its
+  `.git/worktrees` registration), forgets the jj workspace and removes the
+  working copy (`cleanup_jj_workspace`, the spawn-time `agent-{id}`
+  workspace name), then deletes the DB record. The stale-agent Dead path,
+  the admin kill path, and the budget-preserve kill path now all call this
+  helper (the admin path previously skipped the jj forget, leaking the
+  workspace registration).
+- **Terminal placements** — (a) task Done after MR merge: the Ralph-loop
+  merge watcher `complete_task_on_merge` (ralph_loop.rs); (b) the Phase 7
+  iteration ceiling in `on_gates_failed` (task Blocked, agent Failed) and
+  the terminal respawn-failure path in `respawn_with_retry`; (c)
+  `fail_agent` (POST /agents/:id/fail); (d) task cancellation on every
+  surface — HTTP `transition_task_status`, the MCP `gyre_update_task`
+  tool, repo archival, and spec rejection — via
+  `cleanup_worktrees_for_task`, which resolves the assignee plus any
+  agent still holding the task. Cleanup does NOT run at MR-creation
+  completion (`complete_agent`/`create_mr_for_completion`), preserving the
+  Phase 7 gate-failure respawn, which reuses the same worktree
+  (`relaunch_agent_session`).
+- **Ordering** — every placement captures session end state
+  (`agent_sessions::end_session`: ended_at, current branch, dirty state
+  from the real worktree) before removing the working copy; the merge
+  watcher and ceiling paths re-run `end_session` as a best-effort no-op
+  when a session is already closed. Snapshot refs were already written
+  against the bare repo at completion. Only the working copy and its DB
+  row go — MR, branch, commits, and snapshot refs stay server-side.
+- **Doc** — docs/agent-protocol.md no longer claims complete "removes the
+  git worktree"; it now describes the terminal-cleanup semantics
+  (deferred teardown, which terminal states fire it, what survives).
+
+### Test evidence
+
+New tests in ralph_loop.rs (killing-direction: each fails on the
+pre-task-269 tree): `merge_completion_tears_down_worktree` (AC1 — after
+task Done the worktree directory is gone, `worktrees.find_by_agent` is
+empty, the merged MR survives), `iteration_ceiling_tears_down_worktree`
+(AC2), `terminal_cleanup_is_the_real_vcs_operation` (AC4 — drives the
+merge watcher with the real Git2OpsAdapter against a real bare repo and a
+really registered git worktree; asserts `git worktree list` no longer
+registers it, the directory is gone, jj workspace forget ran with the
+spawn-time name, and the DB row is deleted). The existing
+`gate_failure_respawns_agent_with_fresh_context` was extended with the
+AC3 placement probe: after a gate-failure respawn the worktree record and
+its on-disk directory still exist.
+
+`SKIP_WEB_BUILD=1 cargo check -p gyre-server --all-targets` is green and
+`cargo fmt --check` is clean locally. gyre-server test EXECUTION is
+deferred to the independent verifier (the stage build wrapper blocks
+gyre-server code generation against the 4 GiB budget): required probe is
+`SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib ralph_loop::tests` —
+see /tmp/stage/review-evidence/task-269-implement-evidence.md for the
+full list (primary + secondary probes and expected results). No coverage
+matrix file exists for specs/development/agent-workflow.md (coverage
+tracks specs/coverage/system/ only), so there are no coverage rows to
+update for this gap.
