@@ -702,6 +702,28 @@ pub async fn start_job_registry(state: Arc<AppState>) {
         )
         .await;
 
+    // Register PR hygiene job (specs/development/agent-workflow.md §PRs as
+    // the Collaboration Primitive, task-270): continuously (minutes-scale
+    // interval, NOT the daily abandoned_branch_check cadence) monitors open
+    // MRs for stale classes — unreviewed, conflicted, long-open, abandoned —
+    // and acts: nudge reviewers, rebase, escalate, or close with
+    // explanation. Interval configurable via GYRE_PR_HYGIENE_INTERVAL_SECS.
+    registry
+        .register(
+            JobDefinition {
+                name: crate::pr_hygiene::JOB_NAME.to_string(),
+                description: "Nudges reviewers, rebases, escalates, or closes stale \
+                     open merge requests (agent-workflow.md §PRs as the Collaboration \
+                     Primitive)"
+                    .to_string(),
+                interval_secs: crate::pr_hygiene::interval_secs(),
+                enabled: true,
+                run_at_utc_hour: None,
+            },
+            |state| async move { crate::pr_hygiene::run_once(&state).await },
+        )
+        .await;
+
     // Schedulers are NOT spawned here — existing background tasks in main.rs handle
     // periodic execution. Handlers registered above enable on-demand triggering and
     // status tracking via POST /admin/jobs/{name}/run and GET /admin/jobs.
@@ -846,5 +868,41 @@ mod tests {
 
         let all = registry.all_history().await;
         assert_eq!(all.len(), 2);
+    }
+
+    /// task-270 (agent-workflow.md §PRs as the Collaboration Primitive):
+    /// the PR hygiene job must be registered on a minutes-scale interval —
+    /// "continuously monitors" — never as a run_at_utc_hour daily job like
+    /// abandoned_branch_check, and its handler must be wired so a manual
+    /// trigger runs a real evaluation.
+    #[tokio::test]
+    async fn pr_hygiene_check_registered_on_interval_not_daily() {
+        let state = test_state();
+        start_job_registry(Arc::clone(&state)).await;
+
+        let jobs = state.job_registry.list_jobs().await;
+        let job = jobs
+            .iter()
+            .find(|j| j.name == "pr_hygiene_check")
+            .expect("pr_hygiene_check must be registered");
+        assert_eq!(
+            job.run_at_utc_hour, None,
+            "continuous cadence, not a run_at_utc_hour daily schedule"
+        );
+        assert!(
+            job.interval_secs > 0 && job.interval_secs < 86400,
+            "minutes-scale interval, got {}",
+            job.interval_secs
+        );
+
+        // The registered handler runs a real evaluation.
+        state
+            .job_registry
+            .trigger("pr_hygiene_check", Arc::clone(&state))
+            .await
+            .unwrap();
+        let history = state.job_registry.history("pr_hygiene_check").await;
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].status, "success");
     }
 }
