@@ -30,10 +30,10 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use gyre_common::graph::GraphNode;
+use gyre_common::view_query::{Scope, ViewQuery};
 use gyre_common::Id;
 use gyre_domain::graph_diff::{compute_node_change_set, NodeChangeSet};
 use gyre_domain::view_query_resolver::InjectedDiffChangeSet;
-use gyre_common::view_query::{Scope, ViewQuery};
 
 /// Maximum number of per-commit extraction results kept in the process-wide
 /// cache. Bounded so repeated diff queries cannot grow memory without limit;
@@ -94,7 +94,11 @@ async fn extract_commit_nodes(
     sha: &str,
 ) -> anyhow::Result<Arc<Vec<GraphNode>>> {
     let cache_key = (repo_id.to_string(), sha.to_string());
-    if let Some(hit) = extraction_cache().lock().ok().and_then(|c| c.get(&cache_key).cloned()) {
+    if let Some(hit) = extraction_cache()
+        .lock()
+        .ok()
+        .and_then(|c| c.get(&cache_key).cloned())
+    {
         return Ok(hit);
     }
 
@@ -213,8 +217,9 @@ fn diff_scope_refs(query: &ViewQuery) -> Option<(&str, &str)> {
             to_commit,
         } => {
             let temporal = |s: &str| {
-                s.strip_prefix('~')
-                    .is_some_and(|rest| !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()))
+                s.strip_prefix('~').is_some_and(|rest| {
+                    !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit())
+                })
             };
             // The domain resolver's temporal path requires BOTH boundaries to
             // be "~<epoch>" refs; any other combination is a SHA/ref-based

@@ -38,7 +38,10 @@ impl NodeChangeSet {
     /// Qualified names of nodes that a view-query diff scope can match
     /// (added + modified). Removed nodes cannot be rendered.
     pub fn matched(&self) -> impl Iterator<Item = &str> {
-        self.added.iter().chain(self.modified.iter()).map(|s| s.as_str())
+        self.added
+            .iter()
+            .chain(self.modified.iter())
+            .map(|s| s.as_str())
     }
 
     pub fn is_empty(&self) -> bool {
@@ -216,18 +219,36 @@ mod tests {
 
         assert!(!nodes_differ_substantively(&a, &b));
         let cs = compute_node_change_set(&[a], &[b]);
-        assert!(cs.modified.is_empty(), "bookkeeping-only diff must not be modified: {cs:?}");
+        assert!(
+            cs.modified.is_empty(),
+            "bookkeeping-only diff must not be modified: {cs:?}"
+        );
     }
 
     #[test]
     fn substantive_field_differences_count_as_modified() {
         let cases: Vec<(fn(&mut GraphNode), &str)> = vec![
-            (|n: &mut GraphNode| n.doc_comment = Some("fn f(x: u64)".into()), "doc/signature"),
+            (
+                |n: &mut GraphNode| n.doc_comment = Some("fn f(x: u64)".into()),
+                "doc/signature",
+            ),
             (|n: &mut GraphNode| n.complexity = Some(7), "complexity"),
-            (|n: &mut GraphNode| n.test_coverage = Some(0.5), "test_coverage"),
-            (|n: &mut GraphNode| n.spec_path = Some("specs/x.md".into()), "spec_path"),
-            (|n: &mut GraphNode| n.spec_paths = vec!["specs/x.md".into()], "spec_paths"),
-            (|n: &mut GraphNode| n.file_path = "src/other.rs".into(), "file_path"),
+            (
+                |n: &mut GraphNode| n.test_coverage = Some(0.5),
+                "test_coverage",
+            ),
+            (
+                |n: &mut GraphNode| n.spec_path = Some("specs/x.md".into()),
+                "spec_path",
+            ),
+            (
+                |n: &mut GraphNode| n.spec_paths = vec!["specs/x.md".into()],
+                "spec_paths",
+            ),
+            (
+                |n: &mut GraphNode| n.file_path = "src/other.rs".into(),
+                "file_path",
+            ),
             (|n: &mut GraphNode| n.line_start = 12, "line_start"),
             (|n: &mut GraphNode| n.line_end = 34, "line_end"),
             (|n: &mut GraphNode| n.churn_count_30d = 3, "churn"),
@@ -240,7 +261,10 @@ mod tests {
             assert!(nodes_differ_substantively(&a, &b), "case {label}");
             // Sanity: the same mutation on both sides is not a difference.
             mutate(&mut a);
-            assert!(!nodes_differ_substantively(&a, &b), "case {label} (both mutated)");
+            assert!(
+                !nodes_differ_substantively(&a, &b),
+                "case {label} (both mutated)"
+            );
         }
     }
 
