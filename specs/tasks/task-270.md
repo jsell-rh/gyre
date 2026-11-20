@@ -2,8 +2,8 @@
 title: "PR collaboration invariants: reject agent-principal pushes to the default branch (human push path preserved per spec-lifecycle.md) and continuously act on stale MRs (nudge, rebase, escalate, close)"
 spec_ref: "Spec gap spec-4c39ca6ea3e71ce8a53398f3 / pr-protection-and-hygiene / d30f233daf86"
 depends_on: []
-progress: not-started
-commits: []
+progress: complete
+commits: ["68564e547fc9677a2ce6b2590ec9a9d1f4aa272a", "5b5ac0852bdcf5b8bde0a960909262e8e175564a", "2f56050a4bed2981b1e84d5659112f5bb5125172", "1b0cbd6c15741fee50202fe06682344f7a91b176", "f48a62f6be9ea6b85b94f5dd1293e137e7b51504", "34f7878e3734df124067c20b225ad7e2a150ec70", "041bddcdd54e58930beb34cfc06ca12a0d16e9fa", "c9faf6a80ba0a216889c2d7efb5c82f71f58deee", "d5888ad56a3369911836d9ccaeb06995dd73de9d", "c269022921fb4faddc818da21fd2d834d00ab63e", "94a1dfb331e5b43afcec4b033e60a67717bb0b15"]
 ---
 
 ## Required behavior
@@ -61,3 +61,107 @@ Canonical spec: `specs/development/agent-workflow.md`. Source: `fb1424fbac55cd23
     ]
   }
 ]
+
+## Shipped
+
+Both normative bullets of specs/development/agent-workflow.md §PRs as the
+Collaboration Primitive are enforced in production code on this branch.
+Product commits (oldest first): `c2690229` (push protection), `d5888ad5`
+(PR hygiene job), `c9faf6a8` (formatting), `041bddcd` (review repair:
+deletion bypass + agent nudge dedup), `34f7878e` (rustfmt/clippy
+repair), `f48a62f6` (review repair: packfile-carrying test receive-pack
+bodies), `1b0cbd6c` (rustfmt single-line assert), `2f56050a`
+(verification repair: nested-path test commits + Fulcio test ref),
+`5b5ac085` (verification repair: spec-approval test pushes as system
+principal, see below).
+
+### Rebase repair round (f810255a)
+
+The published PR conflicted with current main (task-276 graph-diff work,
+cc61956d). The merge was resolved preserving the retained task-270
+implementation untouched — the only conflicts were web/dist build
+artifacts, taken from main's verified asset set; no task-270 source file
+(git_http.rs push protection, pr_hygiene.rs, jobs.rs registration) was
+modified by main. Probe evidence for the merged tree (saved under
+/tmp/stage/review-evidence): `cargo check -p gyre-server` exit 0 and
+`cargo check -p gyre-server --tests` exit 0, both with no warnings.
+
+### Agent-principal default-branch push protection
+
+`git_receive_pack` (crates/gyre-server/src/git_http.rs) rejects, with 403
+and an explicit reason directing the agent to the MR flow, any push whose
+target ref is `refs/heads/{default_branch}` — resolved from the
+Repository record's `default_branch` field, never a hardcoded "main" —
+when the caller is an agent principal (`auth.user_id.is_none() &&
+!auth.is_system_principal()`). The check is a direct, unconditional
+check in the push handler (not an opt-in named pre-accept gate) and runs
+BEFORE `git receive-pack` executes, so the ref is never updated
+server-side on rejection; it matches the RAW pkt-line ref-update
+commands (`parse_ref_update_commands`), so agent-principal deletion of
+the default branch is rejected too. The rejection emits a `PushRejected`
+message-bus event and a `GitPushRejected` audit event (gate_name
+`default-branch-protection`, outcome Blocked). Human principals (user
+JWTs / API keys with push permission) and the system principal are
+exempt, preserving specs/system/spec-lifecycle.md §Automatic Task
+Creation (post-receive task creation, persona changes, ledger sync run
+unchanged); server-side landing (merge queue, post-merge reverts) goes
+through the git_ops/jj_ops ports, not this handler.
+
+### Continuous PR hygiene job
+
+`pr_hygiene_check` (crates/gyre-server/src/pr_hygiene.rs) is registered
+in jobs.rs on a minutes-scale interval (default 5 minutes, configurable
+via GYRE_PR_HYGIENE_INTERVAL_SECS; NOT the daily abandoned_branch_check
+cadence) and evaluates every open MR per workspace against the stale
+classes using real persisted state (MergeRequest.updated_at, reviewer
+assignments, review records, a real merge-base conflict check):
+unreviewed beyond the nudge threshold nudges assigned reviewers (or
+escalates to workspace Developers/Admins when there are none);
+conflicted MRs get a real rebase attempt via the jj machinery for
+agent-authored branches with live worktrees (rate-limited by a KV
+backoff window) and otherwise a rebase-required escalation; long-open
+MRs beyond the escalation threshold notify workspace Admins/Owners at
+higher priority; abandoned MRs beyond the hard close threshold are
+closed with a persisted status transition, an explanatory MR comment,
+and delivery to the author — never a silent close. Every action is
+recorded (notification rows, message-bus events, `pr_hygiene` audit
+events). Thresholds configurable via
+GYRE_PR_HYGIENE_{NUDGE,ESCALATE,CLOSE}_SECS (defaults 2d/7d/30d). The
+daily abandoned_branch_check job is untouched.
+
+### Verification repair (5b5ac085)
+
+The independent verification run (`cargo test --all`, attempt 83a59ac4)
+failed one test: `spec_approval_auto_invalidated_on_spec_change`
+(crates/gyre-server/tests/git_integration.rs) — its initial push to
+refs/heads/main got HTTP 403 because the test minted an AGENT token via
+POST /agents/spawn and pushed its spec commits with it, exactly the
+caller class the new protection rejects. The test's subject is
+spec-lifecycle post-receive behavior (manifest-driven spec registry
+sync, approval revocation on spec change), which spec-lifecycle.md
+§Automatic Task Creation scopes to the human/system push path, so the
+repair (per the task contract: "system-token test pushes to main keep
+succeeding") drives its main pushes with the global dev token — the
+system principal, an exempt caller class — and removes the
+now-purposeless agent spawn. All assertions are unchanged.
+
+Local probe evidence (saved under /tmp/stage/review-evidence):
+`cargo check -p gyre-server --test git_integration` exit 0 (no
+warnings), rustfmt clean on the changed file; for the rebase round,
+`cargo check -p gyre-server` and `cargo check -p gyre-server --tests`
+exit 0 on the merged tree. The test binaries themselves could not be
+executed in this sandbox — the build wrapper blocks gyre-server test
+compilation (4 GiB budget); that is a sandbox restriction, not a code
+defect. Verifier must run:
+`cargo test -p gyre-server --test git_integration` (includes the
+repaired test plus the task-270 push-protection and PR-hygiene tests),
+`cargo test -p gyre-server --lib` (git_http push-protection tests:
+agent_push_to_default_branch_rejected_directing_to_mr_flow,
+agent_push_to_feature_branch_succeeds,
+agent_deletion_of_default_branch_rejected,
+protection_resolves_real_default_branch_not_literal_main,
+human_push_to_default_branch_accepted_and_spec_lifecycle_runs;
+pr_hygiene tests: abandoned/unreviewed/conflicted/escalation/idempotency
+suites; jobs.rs pr_hygiene_check_registered_on_interval_not_daily),
+`cargo test -p gyre-server --test graph_integration` (merged task-276
+surface), and the full `cargo test --all` gate.
