@@ -201,6 +201,17 @@ pub async fn enroll_claude_max(
     let state_value = random_hex(32)?;
     let verifier = pkce_verifier()?;
     let now = now_secs();
+    // The persisted provider config is REDACTED: the optional
+    // client_secret is deliberately NOT written to the oauth_states
+    // table (review task-273 — it would sit in plaintext for the state
+    // TTL plus the cleanup interval). The callback re-derives the secret
+    // from the operator's environment (GYRE_CLAUDE_MAX_CLIENT_SECRET),
+    // the same source that produced it here; everything per-request
+    // (endpoints, client_id, redirect_uri, scope) IS captured so the
+    // callback uses exactly the provider config the admin was redirected
+    // to.
+    let mut persisted_provider = provider.clone();
+    persisted_provider.client_secret = None;
     let record = gyre_ports::OAuthStateRecord {
         state: state_value.clone(),
         tenant_id: tenant_id.clone(),
@@ -210,7 +221,7 @@ pub async fn enroll_claude_max(
         created_at: now,
         expires_at: now + STATE_TTL_SECS,
         consumed: false,
-        provider_config: serde_json::to_string(&provider)
+        provider_config: serde_json::to_string(&persisted_provider)
             .map_err(|e| ApiError::Internal(anyhow::anyhow!("serializing provider config: {e}")))?,
     };
     state
@@ -322,6 +333,14 @@ pub async fn claude_max_callback(
     let provider: ProviderConfig = serde_json::from_str(&record.provider_config).map_err(|e| {
         ApiError::Internal(anyhow::anyhow!("stored provider config is unreadable: {e}"))
     })?;
+    // The stored config is redacted (the client_secret is never persisted
+    // in the oauth_states table — review task-273): re-derive it from the
+    // operator's environment, the same source the initiation read. The
+    // exchange below uses it only in the token request, never at rest.
+    let mut provider = provider;
+    provider.client_secret = std::env::var("GYRE_CLAUDE_MAX_CLIENT_SECRET")
+        .ok()
+        .filter(|v| !v.trim().is_empty());
 
     // Authorization-code + PKCE exchange at the provider token endpoint.
     // state.http_client is built with a 30 s total timeout, so a hung
@@ -365,10 +384,21 @@ pub async fn claude_max_callback(
         .get("access_token")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
+    // No fabricated lifetime (review task-273): `expires_in` is
+    // RECOMMENDED, not guaranteed — but inventing a default would store
+    // an expiry the provider never stated, exactly what the rotation
+    // handler refuses to do (it fails the rotation when expires_in is
+    // missing, with a dedicated test). The enrollment fails honestly
+    // instead; the admin can retry once the provider states a lifetime.
     let expires_in = tokens
         .get("expires_in")
         .and_then(|v| v.as_u64())
-        .unwrap_or(3600);
+        .filter(|s| *s > 0)
+        .ok_or_else(|| {
+            ApiError::BadGateway(
+                "token response missing expires_in (cannot determine expiry)".to_string(),
+            )
+        })?;
 
     // Store the OAuth credential document (the refresh job's RFC 6749
     // handler keeps it fresh) as the scoped secret. Scope and tenant come
@@ -941,6 +971,172 @@ mod tests {
         std::env::remove_var("GYRE_CLAUDE_MAX_AUTH_ENDPOINT");
         std::env::remove_var("GYRE_CLAUDE_MAX_TOKEN_ENDPOINT");
         std::env::remove_var("GYRE_CLAUDE_MAX_REDIRECT_URI");
+    }
+
+    /// Review task-273: no fabricated expiry — a token response without
+    /// `expires_in` fails the enrollment honestly (502) instead of
+    /// storing a 3600 s lifetime the provider never stated, matching the
+    /// rotation handler's refusal to invent a lifetime.
+    #[tokio::test]
+    async fn callback_rejects_token_response_without_expires_in() {
+        let _guard = ENV_LOCK.lock().await;
+        let (auth_url, token_url, _seen) = spawn_provider(
+            serde_json::json!({
+                "access_token": "at-new",
+                "refresh_token": "rt-new"
+                // expires_in deliberately absent
+            }),
+            StatusCode::OK,
+        )
+        .await;
+        std::env::set_var("GYRE_CLAUDE_MAX_CLIENT_ID", "test-client");
+        std::env::set_var("GYRE_CLAUDE_MAX_AUTH_ENDPOINT", &auth_url);
+        std::env::set_var("GYRE_CLAUDE_MAX_TOKEN_ENDPOINT", &token_url);
+        std::env::set_var("GYRE_CLAUDE_MAX_REDIRECT_URI", "http://localhost:3000/cb");
+
+        let state = crate::mem::test_state();
+        let now = now_secs();
+        let provider = provider_config_from_env().unwrap();
+        state
+            .oauth_states
+            .create(&gyre_ports::OAuthStateRecord {
+                state: "st-no-expiry".to_string(),
+                tenant_id: "default".to_string(),
+                workspace_id: Some("ws-enroll".to_string()),
+                initiated_by: "user-admin".to_string(),
+                pkce_verifier: "test-verifier".to_string(),
+                created_at: now,
+                expires_at: now + 600,
+                consumed: false,
+                provider_config: serde_json::to_string(&provider).unwrap(),
+            })
+            .await
+            .unwrap();
+
+        let callback_app = app(state.clone());
+        let response = callback_app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/oauth/claude-max/callback?code=the-code&state=st-no-expiry")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_GATEWAY,
+            "a token response without expires_in must fail honestly, not \
+             fabricate a lifetime"
+        );
+
+        // No secret was stored (the enrollment did not complete).
+        let secrets = state
+            .secrets
+            .list_by_scope(SecretScope::Workspace, "ws-enroll", "default")
+            .await
+            .unwrap();
+        assert!(
+            !secrets.iter().any(|s| s.name == CLAUDE_MAX_SECRET_NAME),
+            "no enrollment secret may be stored without a provider-stated expiry"
+        );
+
+        std::env::remove_var("GYRE_CLAUDE_MAX_CLIENT_ID");
+        std::env::remove_var("GYRE_CLAUDE_MAX_AUTH_ENDPOINT");
+        std::env::remove_var("GYRE_CLAUDE_MAX_TOKEN_ENDPOINT");
+        std::env::remove_var("GYRE_CLAUDE_MAX_REDIRECT_URI");
+    }
+
+    /// Review task-273: the client_secret never rests in the oauth_states
+    /// table — the initiation persists a REDACTED provider config, and the
+    /// callback re-derives the secret from the operator environment for
+    /// the token exchange only.
+    #[tokio::test]
+    async fn enroll_redacts_client_secret_and_callback_sends_env_secret() {
+        let _guard = ENV_LOCK.lock().await;
+        let (auth_url, token_url, seen) = spawn_provider(
+            serde_json::json!({
+                "access_token": "at-cs",
+                "refresh_token": "rt-cs",
+                "expires_in": 3600
+            }),
+            StatusCode::OK,
+        )
+        .await;
+        std::env::set_var("GYRE_CLAUDE_MAX_CLIENT_ID", "test-client");
+        std::env::set_var("GYRE_CLAUDE_MAX_AUTH_ENDPOINT", &auth_url);
+        std::env::set_var("GYRE_CLAUDE_MAX_TOKEN_ENDPOINT", &token_url);
+        std::env::set_var("GYRE_CLAUDE_MAX_REDIRECT_URI", "http://localhost:3000/cb");
+        std::env::set_var("GYRE_CLAUDE_MAX_CLIENT_SECRET", "super-secret-value");
+
+        let state = crate::mem::test_state();
+        let enroll_app = app(state.clone());
+        let response = enroll_app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/admin/oauth/claude-max/enroll")
+                    .header("Authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let location = response
+            .headers()
+            .get("location")
+            .and_then(|l| l.to_str().ok())
+            .unwrap()
+            .to_string();
+        let state_param = location
+            .split("state=")
+            .nth(1)
+            .unwrap()
+            .split('&')
+            .next()
+            .unwrap();
+
+        // The persisted row carries NO client_secret.
+        let record = state
+            .oauth_states
+            .find_by_state(state_param)
+            .await
+            .unwrap()
+            .expect("state row persisted");
+        let stored: serde_json::Value = serde_json::from_str(&record.provider_config).unwrap();
+        assert!(
+            stored.get("client_secret").is_none(),
+            "the persisted provider config must not contain the client_secret: {stored}"
+        );
+
+        // The callback still authenticates the confidential client — the
+        // secret is re-derived from the environment for the exchange.
+        let callback_app = app(state.clone());
+        let response = callback_app
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/api/v1/oauth/claude-max/callback?code=the-code&state={state_param}"
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let posted = seen.lock().await.join("\n");
+        assert!(
+            posted.contains("client_secret=super-secret-value"),
+            "the env-derived client_secret must ride the token exchange: {posted}"
+        );
+
+        std::env::remove_var("GYRE_CLAUDE_MAX_CLIENT_ID");
+        std::env::remove_var("GYRE_CLAUDE_MAX_AUTH_ENDPOINT");
+        std::env::remove_var("GYRE_CLAUDE_MAX_TOKEN_ENDPOINT");
+        std::env::remove_var("GYRE_CLAUDE_MAX_REDIRECT_URI");
+        std::env::remove_var("GYRE_CLAUDE_MAX_CLIENT_SECRET");
     }
 
     #[tokio::test]
