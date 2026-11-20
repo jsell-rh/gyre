@@ -458,6 +458,22 @@ pub async fn archive_repo(
         }
     }
 
+    // 2b. agent-workflow.md §Parallel Work via Worktrees: every cancelled
+    // task's work is terminally complete — tear its agents' ephemeral
+    // worktrees down (the shared terminal cleanup; session end state is
+    // captured first, inside the helper). Runs after the agent stops
+    // above so no live process is left standing on a removed working
+    // copy. The repo directory itself stays until delete (archived repos
+    // are readable); only the working copies and their agent_worktrees
+    // records go.
+    for task_id in &repo_task_ids {
+        if let Ok(Some(task)) = state.tasks.find_by_id(&Id::new(task_id)).await {
+            if task.status == TaskStatus::Cancelled {
+                crate::api::spawn::cleanup_worktrees_for_task(&state, &task).await;
+            }
+        }
+    }
+
     // 3. Close open MRs in this repo.
     let mrs = state.merge_requests.list_by_repo(&repo.id).await?;
     for mut mr in mrs {

@@ -368,6 +368,17 @@ pub async fn transition_task_status(
     // caller-bound scope, search-indexed on write).
     super::analytics::record_task_status_changed(&state, &task, &old_status).await;
 
+    // agent-workflow.md §Parallel Work via Worktrees: worktrees are
+    // ephemeral — Cancelled is terminal (platform-model.md §Task Status:
+    // "cannot be re-opened"), so the cancelled task's agents have their
+    // worktrees torn down (session end state captured first, inside the
+    // shared helper — the working copy is that capture's data source).
+    // Not applied to a manual Done: the Done teardown fires on the Ralph
+    // loop's merge watcher, which owns the terminal transition.
+    if task.status == TaskStatus::Cancelled {
+        crate::api::spawn::cleanup_worktrees_for_task(&state, &task).await;
+    }
+
     Ok(Json(TaskResponse::from(task)))
 }
 
