@@ -814,6 +814,91 @@ pub async fn git_receive_pack(
     // Parse updated refs BEFORE forwarding to git (pkt-line ref-update commands).
     let ref_updates = parse_ref_updates(&body_bytes);
 
+    // Agent-principal default-branch protection (specs/development/
+    // agent-workflow.md §PRs as the Collaboration Primitive: "All code
+    // submission and collaboration happens via pull requests. No direct
+    // pushes to main"). The bullet governs agent code submission, so the
+    // rejection is scoped to AGENT principals: an `AuthenticatedAgent`
+    // with no backing user (`user_id` None) that is not the system
+    // principal — i.e. a caller authenticated via an agent token / agent
+    // identity. Human principals (user JWTs / API keys with push
+    // permission) and the system principal keep their default-branch
+    // push path: specs/system/spec-lifecycle.md §Automatic Task Creation
+    // normatively requires post-receive processing (task creation,
+    // persona changes, ledger sync) of default-branch pushes from anyone
+    // with push access, and §What This Does NOT Do forbids blocking them.
+    // This is an unconditional invariant for the caller class, not an
+    // opt-in named pre-accept gate (`check_pre_accept_gates` returns Ok
+    // early for repos with no gate names configured, so an opt-in gate
+    // would leave default repos unprotected). It runs BEFORE receive-pack
+    // executes, so on rejection the ref is never updated server-side;
+    // server-side landing (merge queue, post-merge reverts) goes through
+    // the git_ops/jj_ops ports and never through this handler. The target
+    // ref is compared against the repo's actual `default_branch` record —
+    // never a hardcoded "main" — so a repo whose default branch is e.g.
+    // "trunk" is protected on refs/heads/trunk while an agent push to a
+    // branch literally named "main" there is unaffected.
+    if auth.user_id.is_none() && !auth.is_system_principal() {
+        let default_ref = format!("refs/heads/{default_branch}");
+        // Match the RAW ref-update commands, not `ref_updates`:
+        // `parse_ref_updates` filters deletions out (new SHA all zeros
+        // carries no push-acceptance processing), so matching only the
+        // filtered list would let an agent principal DELETE the default
+        // branch — the protected target class in its most destructive
+        // form. The raw command list includes deletions.
+        if parse_ref_update_commands(&body_bytes)
+            .iter()
+            .any(|u| u.refname == default_ref)
+        {
+            let reason = format!(
+                "agent principals may not push directly to the default branch \
+                 '{default_branch}'; push a feature branch and signal completion \
+                 (gyre_agent_complete) to create a merge request instead"
+            );
+            warn!(
+                agent_id = %auth.agent_id,
+                %repo_id,
+                default_branch = %default_branch,
+                "git-receive-pack 403: agent-principal push to the default branch rejected"
+            );
+            state
+                .emit_event(
+                    repo_workspace_id.clone(),
+                    gyre_common::message::Destination::Workspace(repo_workspace_id.clone()),
+                    gyre_common::message::MessageKind::PushRejected,
+                    Some(serde_json::json!({
+                        "repo_id": repo_id,
+                        "branch": default_branch,
+                        "agent_id": auth.agent_id,
+                        "reason": reason,
+                    })),
+                )
+                .await;
+            // GitPushRejected audit event — the invariant rejected the push
+            // before git ever ran, so the ref was never updated.
+            emit_git_push_rejected_audit(
+                &state,
+                &repo_id,
+                &repo_workspace_id,
+                &auth.agent_id,
+                &default_branch,
+                "default-branch-protection",
+                &reason,
+            )
+            .await;
+            return (
+                StatusCode::FORBIDDEN,
+                format!(
+                    "push rejected: agents may not push directly to the default \
+                     branch '{default_branch}'. All code submission happens via merge \
+                     requests: push a feature branch and signal completion \
+                     (gyre_agent_complete) to create one."
+                ),
+            )
+                .into_response();
+        }
+    }
+
     let output = match run_git_stateless("receive-pack", &repo_path, &body_bytes).await {
         Ok(o) => o,
         Err(e) => return git_err(e),
@@ -1834,7 +1919,14 @@ fn is_valid_sha(s: &str) -> bool {
     s.len() == 40 && s.chars().all(|c| c.is_ascii_hexdigit())
 }
 
-fn parse_ref_updates(body: &[u8]) -> Vec<RefUpdate> {
+/// Parse EVERY pkt-line ref-update command in a receive-pack request
+/// body, INCLUDING deletions (new SHA all zeros). `parse_ref_updates`
+/// filters deletions out because they carry no commit content for
+/// push-acceptance processing, but protection checks must see them: a
+/// deletion targets a ref just as much as an update does, so a guard
+/// matching only the filtered list would let an agent principal delete a
+/// protected ref.
+fn parse_ref_update_commands(body: &[u8]) -> Vec<RefUpdate> {
     let mut updates = Vec::new();
     let mut pos = 0;
 
@@ -1866,7 +1958,6 @@ fn parse_ref_updates(body: &[u8]) -> Vec<RefUpdate> {
 
         let parts: Vec<&str> = line.splitn(3, ' ').collect();
         if parts.len() == 3 {
-            let zeros = "0000000000000000000000000000000000000000";
             let old = parts[0].to_string();
             let new = parts[1].to_string();
             // M-8 fix: validate SHA format to prevent git argument injection.
@@ -1874,18 +1965,27 @@ fn parse_ref_updates(body: &[u8]) -> Vec<RefUpdate> {
                 tracing::warn!("invalid SHA in push ref-update: old={old} new={new}");
                 continue;
             }
-            // Only record pushes of real commits (not deletions).
-            if new != zeros {
-                updates.push(RefUpdate {
-                    old_sha: old,
-                    new_sha: new,
-                    refname: parts[2].to_string(),
-                });
-            }
+            updates.push(RefUpdate {
+                old_sha: old,
+                new_sha: new,
+                refname: parts[2].to_string(),
+            });
         }
     }
 
     updates
+}
+
+/// Parse updated refs (pkt-line ref-update commands), EXCLUDING deletions
+/// (new SHA all zeros): deletions carry no commit content, so there is
+/// nothing for push-acceptance processing (pre-accept gates, push
+/// signaling, spec lifecycle) to act on.
+fn parse_ref_updates(body: &[u8]) -> Vec<RefUpdate> {
+    const ZERO_SHA: &str = "0000000000000000000000000000000000000000";
+    parse_ref_update_commands(body)
+        .into_iter()
+        .filter(|u| u.new_sha != ZERO_SHA)
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -8567,16 +8667,15 @@ specs:
     }
 
     /// Push a real commit into the bare repo via plumbing, returning the new SHA.
+    ///
+    /// The tree is built through a scratch index (`GIT_INDEX_FILE` +
+    /// `update-index --cacheinfo` + `write-tree`): `git mktree` rejects
+    /// paths containing '/' (tree entries are flat), so a file at a nested
+    /// path like "specs/system/foo.md" needs the index route, which builds
+    /// the intermediate tree objects.
     async fn make_commit(repo_path: &str, files: &[(&str, String)]) -> String {
-        // Build a tree from {path: content}.
-        let mut tree = std::process::Command::new("git")
-            .args(["-C", repo_path, "mktree"])
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .unwrap();
-        let mut input = String::new();
+        // Build {path: blob sha}.
+        let mut entries: Vec<(String, &str)> = Vec::new();
         for (path, content) in files {
             let mut blob_sha = std::process::Command::new("git")
                 .args(["-C", repo_path, "hash-object", "-w", "--stdin"])
@@ -8594,15 +8693,38 @@ specs:
                 .unwrap();
             let out = blob_sha.wait_with_output().unwrap();
             let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            input.push_str(&format!("100644 blob {sha}\t{path}\n"));
+            assert!(!sha.is_empty(), "hash-object failed for {path}");
+            entries.push((sha, path));
         }
-        use std::io::Write as _;
-        tree.stdin
-            .as_mut()
-            .unwrap()
-            .write_all(input.as_bytes())
+
+        // Scratch index → nested tree. The index file lives in its own
+        // tempdir so it never collides with (or pollutes) the repo's.
+        let scratch = tempfile::TempDir::new().unwrap();
+        let index_file = scratch.path().join("make-commit-index");
+        let index_file = index_file.to_str().unwrap();
+        for (sha, path) in &entries {
+            let out = std::process::Command::new("git")
+                .args(["-C", repo_path, "update-index", "--add", "--cacheinfo"])
+                .arg(format!("100644,{sha},{path}"))
+                .env("GIT_INDEX_FILE", index_file)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "update-index failed for {path}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        let out = std::process::Command::new("git")
+            .args(["-C", repo_path, "write-tree"])
+            .env("GIT_INDEX_FILE", index_file)
+            .output()
             .unwrap();
-        let out = tree.wait_with_output().unwrap();
+        assert!(
+            out.status.success(),
+            "write-tree failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
         let tree_sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
 
         // Commit the tree.
@@ -8628,6 +8750,53 @@ specs:
     fn receive_pack_body(new_sha: &str, refname: &str) -> Vec<u8> {
         let zeros = "0000000000000000000000000000000000000000";
         let line = format!("{zeros} {new_sha} {refname}\n");
+        let mut body = pkt_line(&line);
+        body.extend_from_slice(b"0000");
+        body
+    }
+
+    /// Build a packfile containing the objects reachable from `sha`.
+    /// `git receive-pack` applies NOTHING for a non-delete request that
+    /// carries no packfile (it exits 0 with an unpack error only visible
+    /// in the report stream), so any test asserting a pushed ref actually
+    /// lands must append the pack after the flush-pkt.
+    fn pack_objects_for(repo_path: &str, sha: &str) -> Vec<u8> {
+        use std::io::Write as _;
+        let mut child = std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo_path)
+            .args(["pack-objects", "--stdout"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(format!("{sha}\n").as_bytes())
+            .unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert!(out.status.success(), "pack-objects failed");
+        assert!(!out.stdout.is_empty(), "pack-objects produced empty pack");
+        out.stdout
+    }
+
+    /// Receive-pack body for a non-delete ref update INCLUDING the
+    /// packfile with the pushed objects — the body `git receive-pack`
+    /// actually applies (see `pack_objects_for`).
+    fn receive_pack_body_with_pack(repo_path: &str, new_sha: &str, refname: &str) -> Vec<u8> {
+        let mut body = receive_pack_body(new_sha, refname);
+        body.extend_from_slice(&pack_objects_for(repo_path, new_sha));
+        body
+    }
+
+    /// Build a ref-DELETION receive-pack body (`{old-sha} 000...0 ref`).
+    /// Deletions carry no packfile — commands + flush is a complete
+    /// request `git receive-pack` applies.
+    fn receive_pack_delete_body(old_sha: &str, refname: &str) -> Vec<u8> {
+        let zeros = "0000000000000000000000000000000000000000";
+        let line = format!("{old_sha} {zeros} {refname}\n");
         let mut body = pkt_line(&line);
         body.extend_from_slice(b"0000");
         body
@@ -8672,6 +8841,312 @@ specs:
 
     fn agent_auth(agent_id: &str) -> String {
         format!("Bearer tok-{agent_id}")
+    }
+
+    // ── Agent-principal default-branch push protection (task-270) ──
+    //
+    // specs/development/agent-workflow.md §PRs as the Collaboration
+    // Primitive: "All code submission and collaboration happens via pull
+    // requests. No direct pushes to main" — enforced for agent principals
+    // in the HTTP push path, while human/system default-branch pushes keep
+    // the spec-lifecycle.md §Automatic Task Creation path.
+
+    /// POST a stateless receive-pack body updating `refname` to `new_sha`
+    /// with the given Authorization header value. The body carries a real
+    /// packfile (see `receive_pack_body_with_pack`) so accepted pushes
+    /// actually land the ref server-side.
+    async fn push_ref_as(
+        app: Router,
+        ws_slug: &str,
+        repo_name: &str,
+        auth: &str,
+        new_sha: &str,
+        refname: &str,
+        repo_path: &str,
+    ) -> axum::response::Response {
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/git/{ws_slug}/{repo_name}/git-receive-pack"))
+                    .header("Authorization", auth)
+                    .header("content-type", "application/x-git-receive-pack-request")
+                    .body(Body::from(receive_pack_body_with_pack(
+                        repo_path, new_sha, refname,
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    /// True when the repo's git store currently resolves `refname`.
+    fn ref_exists(repo_path: &str, refname: &str) -> bool {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo_path)
+            .args(["rev-parse", "--verify", "--quiet", refname])
+            .status()
+            .unwrap()
+            .success()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn agent_push_to_default_branch_rejected_directing_to_mr_flow() {
+        let (app, state, _tmp, ws_slug, repo_name, repo_path) = git_app_with_repo().await;
+        seed_agent_token(&state, "agent-dbp").await;
+
+        let sha = make_commit(&repo_path, &[("dbp.md", "# dbp\n".to_string())]).await;
+
+        let resp = push_ref_as(
+            app,
+            &ws_slug,
+            &repo_name,
+            &agent_auth("agent-dbp"),
+            &sha,
+            "refs/heads/main",
+            &repo_path,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = String::from_utf8_lossy(&body);
+        assert!(
+            body.contains("merge request"),
+            "rejection must direct the agent to the MR flow, got: {body}"
+        );
+
+        // The rejection runs before receive-pack — the ref must never have
+        // been created server-side.
+        assert!(
+            !ref_exists(&repo_path, "refs/heads/main"),
+            "default-branch ref must not be updated by a rejected agent push"
+        );
+
+        // Synchronous rejection: the GitPushRejected audit event names the
+        // invariant and the caller.
+        let events = wait_for_audit_event(&state, "git_push_rejected").await;
+        let e = events
+            .iter()
+            .find(|e| e.detail["gate_name"] == "default-branch-protection")
+            .expect("default-branch-protection rejection audit event");
+        assert_eq!(e.agent_id.as_ref().unwrap().as_str(), "agent-dbp");
+        assert_eq!(e.detail["branch"], "main");
+        assert_eq!(e.outcome, gyre_domain::AuditOutcome::Blocked);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn agent_push_to_feature_branch_succeeds() {
+        let (app, state, _tmp, ws_slug, repo_name, repo_path) = git_app_with_repo().await;
+        seed_agent_token(&state, "agent-dbp-feat").await;
+
+        let sha = make_commit(&repo_path, &[("feat.md", "# dbp feat\n".to_string())]).await;
+
+        let resp = push_ref_as(
+            app,
+            &ws_slug,
+            &repo_name,
+            &agent_auth("agent-dbp-feat"),
+            &sha,
+            "refs/heads/feat/dbp",
+            &repo_path,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(
+            ref_exists(&repo_path, "refs/heads/feat/dbp"),
+            "agent feature-branch push must be accepted"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn agent_deletion_of_default_branch_rejected() {
+        // Review repair (task-270): `parse_ref_updates` filters deletions
+        // (new SHA all zeros) out of the ref-update list, so a guard
+        // matching only that list would let an agent principal DELETE the
+        // default branch — receive-pack applies delete commands, which
+        // carry no packfile. The protection must match the RAW ref-update
+        // commands.
+        let (app, state, _tmp, ws_slug, repo_name, repo_path) = git_app_with_repo().await;
+        seed_agent_token(&state, "agent-dbp-del").await;
+
+        // Seed the default branch directly in the bare store.
+        let seed = make_commit(&repo_path, &[("del.md", "# del\n".to_string())]).await;
+        let ok = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["update-ref", "refs/heads/main", &seed])
+            .status()
+            .unwrap();
+        assert!(ok.success(), "update-ref failed");
+        assert!(ref_exists(&repo_path, "refs/heads/main"));
+
+        // Deletion command for the default branch, authenticated with the
+        // agent token.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/git/{ws_slug}/{repo_name}/git-receive-pack"))
+                    .header("Authorization", agent_auth("agent-dbp-del"))
+                    .header("content-type", "application/x-git-receive-pack-request")
+                    .body(Body::from(receive_pack_delete_body(
+                        &seed,
+                        "refs/heads/main",
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "agent-principal deletion of the default branch must be rejected"
+        );
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = String::from_utf8_lossy(&body);
+        assert!(
+            body.contains("merge request"),
+            "rejection must direct the agent to the MR flow, got: {body}"
+        );
+
+        // The rejection runs before receive-pack — the default-branch ref
+        // must still exist server-side.
+        assert!(
+            ref_exists(&repo_path, "refs/heads/main"),
+            "default-branch ref must not be deleted by a rejected agent push"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn protection_resolves_real_default_branch_not_literal_main() {
+        // A repo whose default branch is "trunk": refs/heads/trunk is
+        // protected for agent principals, while a branch literally named
+        // "main" is an ordinary feature branch there and must NOT be
+        // rejected.
+        let (app, state, _tmp, ws_slug, repo_name, repo_path) = git_app_with_repo().await;
+
+        let mut repo = state
+            .repos
+            .find_by_id(&Id::new("repo-1"))
+            .await
+            .unwrap()
+            .expect("repo exists");
+        repo.default_branch = "trunk".to_string();
+        state.repos.update(&repo).await.unwrap();
+
+        seed_agent_token(&state, "agent-trunk").await;
+
+        let sha = make_commit(&repo_path, &[("t.md", "# trunk\n".to_string())]).await;
+
+        // Push to a branch literally named "main" on a trunk-default repo:
+        // ordinary feature branch, accepted.
+        let resp = push_ref_as(
+            app.clone(),
+            &ws_slug,
+            &repo_name,
+            &agent_auth("agent-trunk"),
+            &sha,
+            "refs/heads/main",
+            &repo_path,
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "agent push to a branch literally named 'main' must not be rejected \
+             when the repo's default branch is 'trunk'"
+        );
+
+        // Push to the real default branch "trunk": rejected.
+        let resp = push_ref_as(
+            app,
+            &ws_slug,
+            &repo_name,
+            &agent_auth("agent-trunk"),
+            &sha,
+            "refs/heads/trunk",
+            &repo_path,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        assert!(!ref_exists(&repo_path, "refs/heads/trunk"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn human_push_to_default_branch_accepted_and_spec_lifecycle_runs() {
+        // spec-lifecycle.md §Automatic Task Creation: a push-capable HUMAN
+        // token pushing a spec change to the default branch must stay
+        // accepted and still trigger spec-change task creation — the
+        // agent-principal protection must not over-block the human path.
+        let (app, state, _tmp, ws_slug, repo_name, repo_path) = git_app_with_repo().await;
+
+        // Human principal: API key + Developer workspace membership (Write
+        // repo permission).
+        let user_id = Id::new("user-human-push");
+        let mut user = gyre_domain::User::new(user_id.clone(), "ext-human-push", "human-push", 0);
+        user.tenant_id = Some(Id::new("default"));
+        user.global_role = gyre_domain::GlobalRole::Member;
+        user.roles = vec![gyre_domain::UserRole::Developer];
+        state.users.create(&user).await.unwrap();
+        let mut m = gyre_domain::WorkspaceMembership::new(
+            Id::new("m-human-push"),
+            user_id.clone(),
+            Id::new("ws-test"),
+            gyre_domain::WorkspaceRole::Developer,
+            Id::new("system"),
+            0,
+        );
+        m.accept(0);
+        state.workspace_memberships.create(&m).await.unwrap();
+        state
+            .api_keys
+            .create(
+                &crate::auth::hash_api_key("gyre-test-human-push-key"),
+                &user_id,
+                "test",
+            )
+            .await
+            .unwrap();
+
+        // Commit adding specs/system/human-push-spec.md.
+        let sha = make_commit(
+            &repo_path,
+            &[("specs/system/human-push-spec.md", "# spec\n".to_string())],
+        )
+        .await;
+
+        let resp = push_ref_as(
+            app,
+            &ws_slug,
+            &repo_name,
+            "Bearer gyre-test-human-push-key",
+            &sha,
+            "refs/heads/main",
+            &repo_path,
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "human push-capable token must keep default-branch push access"
+        );
+        assert!(ref_exists(&repo_path, "refs/heads/main"));
+
+        // process_spec_lifecycle ran: the spec change created a task.
+        let events = wait_for_audit_event(&state, "spec_changed").await;
+        let e = events
+            .iter()
+            .find(|e| e.detail["spec_path"] == "specs/system/human-push-spec.md")
+            .expect("spec_changed audit event for the human default-branch push");
+        assert!(
+            e.detail["task_id"].as_str().is_some(),
+            "spec-change task must be auto-created for a human default-branch push"
+        );
     }
 
     /// authorization-provenance.md §7.5 defines the payload schema for
@@ -10074,11 +10549,16 @@ specs:
 
         let tree = git(&["mktree"]);
         let base = git(&["commit-tree", &tree, "-m", "chore: base"]);
-        git(&["update-ref", "refs/heads/main", &base]);
-        let tip = git(&["commit-tree", &tree, "-p", &base, "-m", "feat: move main"]);
-        git(&["update-ref", "refs/heads/main", &tip]);
+        let tip = git(&["commit-tree", &tree, "-p", &base, "-m", "feat: move"]);
+        // Push target is a FEATURE branch: agent principals may not push
+        // to the repo's default branch (task-270 default-branch
+        // protection, which rejects with 403 before signing ever runs),
+        // and this test exercises the Fulcio signing-failure path (502),
+        // not the default-branch invariant.
+        let branch = "refs/heads/feat/fulcio-unreachable";
+        git(&["update-ref", branch, &base]);
 
-        let line = format!("{base} {tip} refs/heads/main");
+        let line = format!("{base} {tip} {branch}");
         let mut body = super::pkt_line(&line);
         body.extend_from_slice(b"0000");
         let pack = {
@@ -10133,7 +10613,7 @@ specs:
 
         // The refs were undone — the push did not land.
         assert_eq!(
-            git(&["rev-parse", "refs/heads/main"]),
+            git(&["rev-parse", branch]),
             base,
             "a push rejected for signing failure must undo its ref updates"
         );
