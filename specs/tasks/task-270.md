@@ -2,7 +2,7 @@
 title: "PR collaboration invariants: reject agent-principal pushes to the default branch (human push path preserved per spec-lifecycle.md) and continuously act on stale MRs (nudge, rebase, escalate, close)"
 spec_ref: "Spec gap spec-4c39ca6ea3e71ce8a53398f3 / pr-protection-and-hygiene / d30f233daf86"
 depends_on: []
-progress: complete
+progress: ready-for-review
 commits: ["5b5ac0852bdcf5b8bde0a960909262e8e175564a", "2f56050a4bed2981b1e84d5659112f5bb5125172", "1b0cbd6c15741fee50202fe06682344f7a91b176", "f48a62f6be9ea6b85b94f5dd1293e137e7b51504", "34f7878e3734df124067c20b225ad7e2a150ec70", "041bddcdd54e58930beb34cfc06ca12a0d16e9fa", "c9faf6a80ba0a216889c2d7efb5c82f71f58deee", "d5888ad56a3369911836d9ccaeb06995dd73de9d", "c269022921fb4faddc818da21fd2d834d00ab63e", "68564e547fc9677a2ce6b2590ec9a9d1f4aa272a"]
 ---
 
@@ -75,6 +75,17 @@ bodies), `1b0cbd6c` (rustfmt single-line assert), `2f56050a`
 `5b5ac085` (verification repair: spec-approval test pushes as system
 principal, see below).
 
+### Rebase repair round (f810255a)
+
+The published PR conflicted with current main (task-276 graph-diff work,
+cc61956d). The merge was resolved preserving the retained task-270
+implementation untouched — the only conflicts were web/dist build
+artifacts, taken from main's verified asset set; no task-270 source file
+(git_http.rs push protection, pr_hygiene.rs, jobs.rs registration) was
+modified by main. Probe evidence for the merged tree (saved under
+/tmp/stage/review-evidence): `cargo check -p gyre-server` exit 0 and
+`cargo check -p gyre-server --tests` exit 0, both with no warnings.
+
 ### Agent-principal default-branch push protection
 
 `git_receive_pack` (crates/gyre-server/src/git_http.rs) rejects, with 403
@@ -136,10 +147,21 @@ now-purposeless agent spawn. All assertions are unchanged.
 
 Local probe evidence (saved under /tmp/stage/review-evidence):
 `cargo check -p gyre-server --test git_integration` exit 0 (no
-warnings), rustfmt clean on the changed file. The test binary itself
-could not be executed in this sandbox — the build wrapper blocks
-gyre-server test compilation (4 GiB budget); that is a sandbox
-restriction, not a code defect. Verifier must run:
+warnings), rustfmt clean on the changed file; for the rebase round,
+`cargo check -p gyre-server` and `cargo check -p gyre-server --tests`
+exit 0 on the merged tree. The test binaries themselves could not be
+executed in this sandbox — the build wrapper blocks gyre-server test
+compilation (4 GiB budget); that is a sandbox restriction, not a code
+defect. Verifier must run:
 `cargo test -p gyre-server --test git_integration` (includes the
-repaired test plus the task-270 push-protection and PR-hygiene tests)
-and the full `cargo test --all` gate.
+repaired test plus the task-270 push-protection and PR-hygiene tests),
+`cargo test -p gyre-server --lib` (git_http push-protection tests:
+agent_push_to_default_branch_rejected_directing_to_mr_flow,
+agent_push_to_feature_branch_succeeds,
+agent_deletion_of_default_branch_rejected,
+protection_resolves_real_default_branch_not_literal_main,
+human_push_to_default_branch_accepted_and_spec_lifecycle_runs;
+pr_hygiene tests: abandoned/unreviewed/conflicted/escalation/idempotency
+suites; jobs.rs pr_hygiene_check_registered_on_interval_not_daily),
+`cargo test -p gyre-server --test graph_integration` (merged task-276
+surface), and the full `cargo test --all` gate.
