@@ -357,7 +357,12 @@ fn escape_like(term: &str) -> String {
 /// across both storage states (observability.md §Log Retention &
 /// Compression).
 fn detail_matches(row: &AuditEventRow, term: &str) -> bool {
-    let needle = term.to_ascii_lowercase();
+    // Full Unicode case folding — the same folding SQL LOWER() applies on
+    // both backends, so a row selected by the SQL LIKE cannot be dropped
+    // by the Rust re-filter (an ASCII-only fold here silently discarded
+    // Unicode-case hits; review task-273). The mem adapter uses the same
+    // to_lowercase().
+    let needle = term.to_lowercase();
     let haystack = match &row.detail_zstd {
         Some(z) if !z.is_empty() => match zstd::decode_all(z.as_slice()) {
             Ok(raw) => String::from_utf8_lossy(&raw).to_string(),
@@ -365,7 +370,7 @@ fn detail_matches(row: &AuditEventRow, term: &str) -> bool {
         },
         _ => row.detail.clone(),
     };
-    haystack.to_ascii_lowercase().contains(&needle)
+    haystack.to_lowercase().contains(&needle)
 }
 
 /// Fetch rows matching `filter`, honoring the free-text `q` term over both
@@ -520,11 +525,14 @@ fn apply_filters(mut query: BoxedAuditQuery, filter: &AuditQueryFilter) -> Boxed
             // Case-insensitive on both backends: LOWER(detail) LIKE the
             // lowercased pattern (SQLite's LIKE is case-insensitive by
             // default, PostgreSQL's is not — lowering both sides makes the
-            // behavior identical). Wildcards in the term are escaped so it
-            // matches literally. Compressed rows (detail blanked by the
-            // log-compression job) are decompressed and matched in the
-            // adapter — see `query_rows`.
-            let pattern = format!("%{}%", escape_like(&term.to_ascii_lowercase()));
+            // behavior identical). The pattern uses full Unicode
+            // to_lowercase() — the same folding SQL LOWER() and the Rust
+            // re-filter apply, so no Unicode-case hit is missed by a
+            // divergent ASCII-only fold (review task-273). Wildcards in
+            // the term are escaped so it matches literally. Compressed
+            // rows (detail blanked by the log-compression job) are
+            // decompressed and matched in the adapter — see `query_rows`.
+            let pattern = format!("%{}%", escape_like(&term.to_lowercase()));
             query = query.filter(
                 lower(audit_events::detail)
                     .like(pattern)
