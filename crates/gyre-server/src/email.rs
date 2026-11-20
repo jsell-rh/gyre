@@ -184,6 +184,11 @@ fn type_heading(nt: &NotificationType, locale: Locale) -> &'static str {
             NotificationType::SecretExpiring => "Secret expiring",
             NotificationType::PersonaChangePendingApproval => "Persona change awaiting approval",
             NotificationType::WorkspaceOwnerless => "Workspace has no owner",
+            NotificationType::ReviewerNudge => "Review requested",
+            NotificationType::MrUnreviewed => "Merge request needs reviewers",
+            NotificationType::MrNeedsRebase => "Merge request needs a rebase",
+            NotificationType::MrStaleEscalation => "Merge request open too long",
+            NotificationType::MrAutoClosed => "Merge request auto-closed",
         },
         Locale::De => match nt {
             NotificationType::SpecApprovalRequested => "Spec wartet auf Freigabe",
@@ -231,6 +236,11 @@ fn type_heading(nt: &NotificationType, locale: Locale) -> &'static str {
                 "Persona-Änderung wartet auf Freigabe"
             }
             NotificationType::WorkspaceOwnerless => "Workspace ohne Owner",
+            NotificationType::ReviewerNudge => "Review angefragt",
+            NotificationType::MrUnreviewed => "Merge-Request braucht Reviewer",
+            NotificationType::MrNeedsRebase => "Merge-Request braucht Rebase",
+            NotificationType::MrStaleEscalation => "Merge-Request zu lange offen",
+            NotificationType::MrAutoClosed => "Merge-Request automatisch geschlossen",
         },
     }
 }
