@@ -962,6 +962,25 @@ export const api = {
     const qs = new URLSearchParams(params).toString();
     return request(`/repos/${id}/graph/diff${qs ? '?' + qs : ''}`);
   },
+  // View-query diff scope (view-query-grammar.md §2 `diff`): resolve the
+  // SHA/ref-based commit-range change set server-side via the query-dryrun
+  // endpoint. The server computes the change set from real per-commit
+  // repository state (the shared two-commit graph-diff core — the same
+  // production path that serves GET /repos/{id}/graph/diff), so the client
+  // never guesses from the current snapshot's created_sha/last_modified_sha
+  // provenance (single-point stamps cannot express a commit range).
+  // Returns { matchedIds, warnings, matchedNodes }.
+  graphQueryDiffScope: async (repoId, query, selectedNodeId) => {
+    const result = await request(`/repos/${repoId}/graph/query-dryrun`, {
+      method: 'POST',
+      body: JSON.stringify({ query, selected_node_id: selectedNodeId ?? null }),
+    });
+    return {
+      matchedIds: Array.isArray(result?.matched_node_ids) ? result.matched_node_ids : [],
+      warnings: Array.isArray(result?.warnings) ? result.warnings : [],
+      matchedNodes: typeof result?.matched_nodes === 'number' ? result.matched_nodes : 0,
+    };
+  },
   // Workspace-scope concept search
   workspaceGraphConcept: (wsId, name) =>
     request(`/workspaces/${wsId}/graph/concept/${encodeURIComponent(name)}`),

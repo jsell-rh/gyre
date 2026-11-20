@@ -4,6 +4,17 @@ import ExplorerCanvas from '../lib/ExplorerCanvas.svelte';
 import { detectRiskAnomalies } from '../lib/risk-map.js';
 import { computeTimelineGhostOverlays } from '../lib/timeline-utils.js';
 
+// The SHA/ref-based diff scope resolves its matched set from the server
+// query-dryrun endpoint (shared two-commit graph-diff core) — the client no
+// longer computes a local SHA heuristic. Mock the API module so component
+// tests can control the server-returned change set.
+vi.mock('../lib/api.js', () => ({
+  api: {
+    graphQueryDiffScope: vi.fn().mockResolvedValue({ matchedIds: [], warnings: [], matchedNodes: 0 }),
+  },
+}));
+import { api } from '../lib/api.js';
+
 // Mock canvas context
 let mockCtx;
 beforeEach(() => {
@@ -386,27 +397,76 @@ describe('ExplorerCanvas — view queries', () => {
     expect(container.querySelector('.annotation-title')?.textContent).toContain('Hot paths');
   });
 
-  it('diff scope: {{count}} resolves against real commit fields in the component', () => {
-    // Behavioral test of the component's own diff resolution (not the mirror
-    // helper): reads created_sha/last_modified_sha — the fields
-    // GraphNodeResponse actually serializes. If the component reverts to the
-    // old dead field (last_commit_sha), the result set is null and the count
-    // renders as '?'.
+  it('diff scope (SHA): matched set and {{count}} come from the server query-dryrun response', async () => {
+    // Contract: a SHA/ref-based diff scope highlights exactly the ids the
+    // server's commit-range change set returned (query-dryrun endpoint,
+    // shared two-commit graph-diff core) and {{count}} resolves to that
+    // set's size. The fixture is the mid-range case the old local heuristic
+    // could not produce: fn2 and test1 were changed only by an intermediate
+    // commit (their snapshot provenance matches NEITHER boundary), while
+    // fn1's last_modified_sha WOULD prefix-match to_commit under the removed
+    // local heuristic. If the component reverted to local resolution from
+    // created_sha/last_modified_sha, it would highlight {fn1} (count 1)
+    // instead of the server set {fn2, test1} (count 2) — this test fails.
     const nodesWithSha = NODES.map(n => {
       if (n.id === 'fn1') return { ...n, created_sha: '1111111111111111', last_modified_sha: 'abcdef1234567890' };
-      if (n.id === 'fn2') return { ...n, created_sha: 'abcdef1234567890', last_modified_sha: 'abcdef1999999999' };
+      if (n.id === 'fn2') return { ...n, created_sha: '1111111111111111', last_modified_sha: '9999999999999999' };
+      if (n.id === 'test1') return { ...n, created_sha: '1111111111111111', last_modified_sha: '9999999999999999' };
       return { ...n, created_sha: '0000000aaaaaaaa', last_modified_sha: '0000000bbbbbbbb' };
+    });
+    api.graphQueryDiffScope.mockResolvedValue({
+      matchedIds: ['fn2', 'test1'], warnings: [], matchedNodes: 2,
     });
     const query = {
       scope: { type: 'diff', from_commit: 'abcdef1', to_commit: 'abcdef12' },
       annotation: { title: '{{count}} changed' },
     };
     const { container } = render(ExplorerCanvas, {
-      props: { nodes: nodesWithSha, edges: EDGES, activeQuery: query },
+      props: { repoId: 'repo-1', nodes: nodesWithSha, edges: EDGES, activeQuery: query },
     });
-    // fn1 matches to_commit via last_modified_sha and is not unchanged at
-    // from_commit; fn2 is unchanged at from_commit (both shas prefix-match);
-    // every other node never matches to_commit.
+    await vi.waitFor(() => {
+      expect(container.querySelector('.annotation-title')?.textContent).toContain('2 changed');
+    });
+    // The server set resolved without warnings: no status banner.
+    expect(container.querySelector('[data-diff-scope-status]')).toBeNull();
+    // The server was actually asked (repo + query passed through).
+    expect(api.graphQueryDiffScope).toHaveBeenCalledWith('repo-1', query, null);
+  });
+
+  it('diff scope (SHA): fetch error shows an explicit warning instead of an incorrect set', async () => {
+    api.graphQueryDiffScope.mockRejectedValue(new Error('network down'));
+    const query = {
+      scope: { type: 'diff', from_commit: 'abcdef1', to_commit: 'abcdef12' },
+      annotation: { title: '{{count}} changed' },
+    };
+    const { container } = render(ExplorerCanvas, {
+      props: { repoId: 'repo-1', nodes: NODES, edges: EDGES, activeQuery: query },
+    });
+    await vi.waitFor(() => {
+      const status = container.querySelector('[data-diff-scope-status="error"]');
+      expect(status?.textContent).toContain('could not be resolved server-side');
+    });
+    // No incorrect set: the count is unknown ('?'), never a local guess.
+    expect(container.querySelector('.annotation-title')?.textContent).toContain('? changed');
+  });
+
+  it('diff scope (SHA): server warnings (removed nodes) are surfaced', async () => {
+    api.graphQueryDiffScope.mockResolvedValue({
+      matchedIds: ['fn2'],
+      warnings: ['Diff removed 1 node(s) present at from_commit but absent at to_commit (cannot be rendered): lib::h'],
+      matchedNodes: 1,
+    });
+    const query = {
+      scope: { type: 'diff', from_commit: 'abcdef1', to_commit: 'abcdef12' },
+      annotation: { title: '{{count}} changed' },
+    };
+    const { container } = render(ExplorerCanvas, {
+      props: { repoId: 'repo-1', nodes: NODES, edges: EDGES, activeQuery: query },
+    });
+    await vi.waitFor(() => {
+      const status = container.querySelector('[data-diff-scope-status="warning"]');
+      expect(status?.textContent).toContain('lib::h');
+    });
     expect(container.querySelector('.annotation-title')?.textContent).toContain('1 changed');
   });
 
@@ -425,7 +485,7 @@ describe('ExplorerCanvas — view queries', () => {
 
 describe('ExplorerCanvas — view query opacity resolution', () => {
   // Unit test the queryNodeOpacity logic from ExplorerCanvas.svelte
-  function resolveQueryMatch(nodes, edges, scope) {
+  function resolveQueryMatch(nodes, edges, scope, serverDiffIds = null) {
     const nodeById = new Map();
     for (const n of nodes) nodeById.set(n.id, n);
 
@@ -535,11 +595,14 @@ describe('ExplorerCanvas — view query opacity resolution', () => {
     }
 
     if (scope.type === 'diff') {
-      // Mirrors ExplorerCanvas.svelte diff scope, which mirrors the server
-      // resolver (gyre-domain view_query_resolver.rs Scope::Diff). Reads the
-      // fields GraphNodeResponse actually serializes: created_sha,
-      // last_modified_sha, created_at, last_modified_at. There is no
-      // last_commit_sha field in production data.
+      // Mirrors ExplorerCanvas.svelte diff scope. Two query forms:
+      // - Temporal ("~<epoch>" on both boundaries): resolved locally against
+      //   created_at/last_modified_at.
+      // - SHA/ref-based: the matched set is exactly the server-returned id
+      //   set (query-dryrun endpoint, shared two-commit graph-diff core).
+      //   There is NO local SHA-prefix heuristic over
+      //   created_sha/last_modified_sha — single-snapshot provenance cannot
+      //   express a commit range.
       const fromCommit = (scope.from_commit ?? '').toLowerCase();
       const toCommit = (scope.to_commit ?? '').toLowerCase();
       if (!fromCommit || !toCommit) return new Set();
@@ -560,17 +623,12 @@ describe('ExplorerCanvas — view query opacity resolution', () => {
           }
         }
       } else {
-        // SHA diff: to_commit must be a >=7-char prefix of created_sha or
-        // last_modified_sha; nodes unchanged at from_commit (BOTH shas match
-        // from) are excluded.
-        const shaMatches = (sha, target) => {
-          if (!sha || target.length < 7) return false;
-          return String(sha).toLowerCase().startsWith(target);
-        };
-        for (const n of nodes) {
-          const matchesTo = shaMatches(n.created_sha, toCommit) || shaMatches(n.last_modified_sha, toCommit);
-          const unchangedAtFrom = shaMatches(n.created_sha, fromCommit) && shaMatches(n.last_modified_sha, fromCommit);
-          if (matchesTo && !unchangedAtFrom) matched.add(n.id);
+        // SHA/ref-based diff: consume the server-returned change-set ids —
+        // only ids present in the current graph are renderable. `null` means
+        // the server set has not arrived (loading/error): no matched set,
+        // never a local guess.
+        for (const id of serverDiffIds ?? []) {
+          if (nodes.some(n => n.id === id)) matched.add(id);
         }
       }
       return matched;
@@ -678,31 +736,75 @@ describe('ExplorerCanvas — view query opacity resolution', () => {
     expect(matched.has('fn2')).toBe(false); // no call connection to User
   });
 
-  it('diff scope (SHA): nodes modified at to_commit, excluding unchanged at from_commit', () => {
-    // Fields GraphNodeResponse actually serializes: created_sha/last_modified_sha
+  it('diff scope (SHA): matched set is exactly the server-returned change-set ids', () => {
+    // The mid-range case: fn2 and test1 were changed only by an intermediate
+    // commit — their snapshot provenance (created_sha/last_modified_sha)
+    // matches NEITHER boundary commit, so no local heuristic over those
+    // fields can produce them. fn1's last_modified_sha WOULD prefix-match
+    // to_commit under the removed local heuristic, but the server did not
+    // return it, so it must not be matched. If local SHA resolution were
+    // restored, this test fails: it would match {fn1} instead of
+    // {fn2, test1}.
     const nodesWithSha = NODES.map(n => {
-      // fn1: modified at to_commit, created elsewhere -> included
       if (n.id === 'fn1') return { ...n, created_sha: '1111111111111111', last_modified_sha: 'abcdef1234567890' };
-      // fn2: created AND last-modified at from_commit (both shas prefix-match
-      // from) -> excluded even though created_sha also matches to_commit
-      if (n.id === 'fn2') return { ...n, created_sha: 'abcdef1234567890', last_modified_sha: 'abcdef1999999999' };
+      if (n.id === 'fn2') return { ...n, created_sha: '1111111111111111', last_modified_sha: '9999999999999999' };
+      if (n.id === 'test1') return { ...n, created_sha: '1111111111111111', last_modified_sha: '9999999999999999' };
       return { ...n, created_sha: '0000000aaaaaaaa', last_modified_sha: '0000000bbbbbbbb' };
     });
-    const matched = resolveQueryMatch(nodesWithSha, EDGES, { type: 'diff', from_commit: 'abcdef1', to_commit: 'abcdef12' });
+    const matched = resolveQueryMatch(
+      nodesWithSha, EDGES,
+      { type: 'diff', from_commit: 'abcdef1', to_commit: 'abcdef12' },
+      ['fn2', 'test1'], // server query-dryrun response (commit-range change set)
+    );
 
-    expect(matched.has('fn1')).toBe(true); // last_modified_sha matches to_commit prefix
-    expect(matched.has('fn2')).toBe(false); // unchanged at from_commit -> excluded
-    expect(matched.has('type1')).toBe(false); // never matched to_commit
+    expect(matched.has('fn2')).toBe(true); // mid-range-changed node, server-returned
+    expect(matched.has('test1')).toBe(true); // second server-returned id
+    expect(matched.has('fn1')).toBe(false); // locally SHA-matchable but NOT server-returned
+    expect(matched.has('type1')).toBe(false); // never returned
+    expect(matched.size).toBe(2);
   });
 
-  it('diff scope (SHA): requires >=7-char to_commit prefix', () => {
-    // 'c0ffee' is only 6 chars: below the false-positive guard, so no match
+  it('diff scope (SHA): the client applies no SHA-prefix or length filtering — the server decides', () => {
+    // The >=7-hex-prefix rule and ref resolution live in the server's shared
+    // two-commit graph-diff core now. Whatever ids it returns are matched,
+    // even when the node's own sha fields bear no relation to the query
+    // refs (a 6-char to_commit, shas that prefix-match nothing).
     const nodesWithSha = NODES.map(n => ({
       ...n,
       created_sha: 'aaaaaa1aaaaaa',
       last_modified_sha: 'c0ffee000000',
     }));
-    const matched = resolveQueryMatch(nodesWithSha, EDGES, { type: 'diff', from_commit: 'aaaaaa1aaaaaa', to_commit: 'c0ffee' });
+    const matched = resolveQueryMatch(
+      nodesWithSha, EDGES,
+      { type: 'diff', from_commit: 'aaaaaa1aaaaaa', to_commit: 'c0ffee' },
+      ['fn2'],
+    );
+    expect(matched.size).toBe(1);
+    expect(matched.has('fn2')).toBe(true);
+  });
+
+  it('diff scope (SHA): server ids absent from the current graph are not rendered', () => {
+    // Removed nodes cannot be rendered — the server surfaces them by name in
+    // warnings instead; an id with no current node is dropped, not guessed.
+    const matched = resolveQueryMatch(
+      NODES, EDGES,
+      { type: 'diff', from_commit: 'abcdef1', to_commit: 'abcdef12' },
+      ['fn2', 'ghost-node-id'],
+    );
+    expect(matched.has('fn2')).toBe(true);
+    expect(matched.has('ghost-node-id')).toBe(false);
+    expect(matched.size).toBe(1);
+  });
+
+  it('diff scope (SHA): no server set yet (loading/error) matches nothing', () => {
+    // While the query-dryrun fetch is in flight or has failed, there is no
+    // matched set — never an incorrect local guess. The component surfaces
+    // an explicit warning banner instead.
+    const matched = resolveQueryMatch(
+      NODES, EDGES,
+      { type: 'diff', from_commit: 'abcdef1', to_commit: 'abcdef12' },
+      null,
+    );
     expect(matched.size).toBe(0);
   });
 
@@ -722,15 +824,10 @@ describe('ExplorerCanvas — view query opacity resolution', () => {
   });
 
   it('diff scope: missing to_commit resolves to no nodes', () => {
-    // The old client implementation read a nonexistent field (last_commit_sha)
-    // and ignored to_commit; with real data it matched nothing. The component
-    // requires both commits, mirroring the server resolver.
-    const nodesWithSha = NODES.map(n => ({
-      ...n,
-      created_sha: 'aaaaaa1aaaaaa',
-      last_modified_sha: 'c0ffee000000',
-    }));
-    const matched = resolveQueryMatch(nodesWithSha, EDGES, { type: 'diff', from_commit: 'aaaaaa1aaaaaa' });
+    // Both boundary refs are required (mirroring the server resolver); with
+    // to_commit missing the scope is not a resolvable diff — no fetch, no
+    // local guessing.
+    const matched = resolveQueryMatch(NODES, EDGES, { type: 'diff', from_commit: 'aaaaaa1aaaaaa' });
     expect(matched.size).toBe(0);
   });
 
