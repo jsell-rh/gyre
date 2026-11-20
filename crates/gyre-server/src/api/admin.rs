@@ -630,16 +630,13 @@ pub(crate) async fn kill_agent(
     }
 
     // Worktrees: preserved on budget kills (in-progress work must survive
-    // for reassignment), cleaned up on admin kills.
+    // for reassignment), cleaned up on admin kills — via the shared
+    // terminal teardown (`cleanup_agent_worktrees`: jj workspace forget +
+    // plain-git worktree removal + agent_worktrees record delete; the
+    // pre-helper inline block skipped the jj forget, leaking the workspace
+    // registration in `jj workspace list`).
     if !preserve_worktree {
-        if let Ok(worktrees) = state.worktrees.find_by_agent(&agent.id).await {
-            for wt in worktrees {
-                if let Ok(Some(repo)) = state.repos.find_by_id(&wt.repository_id).await {
-                    let _ = state.git_ops.remove_worktree(&repo.path, &wt.path).await;
-                }
-                let _ = state.worktrees.delete(&wt.id).await;
-            }
-        }
+        crate::api::spawn::cleanup_agent_worktrees(state, &agent.id).await;
     }
 
     // Block the agent's current task.
