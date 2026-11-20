@@ -697,11 +697,7 @@ fn new_id() -> Id {
 /// Scoping). Global tokens, API keys, and Keycloak JWTs do NOT satisfy this
 /// check and bypass repo-scope enforcement.
 fn is_agent_jwt(auth: &AuthenticatedAgent) -> bool {
-    auth.jwt_claims
-        .as_ref()
-        .and_then(|c| c.get("scope"))
-        .and_then(|s| s.as_array())
-        .is_some_and(|arr| !arr.is_empty())
+    auth.is_gyre_agent_jwt()
 }
 
 /// True when the caller's token carries at least one `repo:{name}:{right}`
@@ -785,6 +781,7 @@ async fn validate_tool_scope(
             if repo.is_empty() {
                 return Ok(()); // handler rejects the missing field — no write happens
             }
+            check_agent_mr_task_scope(state, auth, repo, tool_name).await?;
             check_repo_target_by_id(auth, repo, false, tool_name)
         }
         "gyre_list_mrs" => {
@@ -866,6 +863,12 @@ async fn validate_tool_scope(
         // repo/workspace from state and check it against the token. A
         // repo-tier token may act on tasks in its own repo; a
         // workspace-tier token on tasks in its own workspace.
+        //
+        // identity-security.md §Task-Scoped JWT Claims — hard task
+        // boundary: beyond the tier check, a task-bound agent token may
+        // only mutate the task its `task_id` claim names (the tier check
+        // alone resolves repo/workspace scope and never compares the
+        // claim).
         "gyre_update_task" | "gyre_decompose_spec" => {
             let id_key = if tool_name == "gyre_update_task" {
                 "id"
@@ -886,6 +889,14 @@ async fn validate_tool_scope(
                     ))
                 }
             };
+            if let Some(claim) = auth.agent_task_claim() {
+                if task_id != claim {
+                    return Err(format!(
+                        "PERMISSION_DENIED: agent token is scoped to task {claim}, \
+                         not task {task_id}"
+                    ));
+                }
+            }
             check_task_target(auth, &task, task_id, tool_name)
         }
         // Task creation: explicit repo_id/workspace_id targets must lie
@@ -1182,6 +1193,41 @@ async fn check_repo_read_target(
         Err(e) => return Err(format!("repo lookup failed, refusing {tool_name}: {e}")),
     };
     check_workspace_scope(auth, Some(&ws), false, tool_name)
+}
+
+/// MR-creation task-scope check (identity-security.md §Task-Scoped JWT
+/// Claims: an agent cannot "open MRs outside its task scope" — the repo
+/// scope alone is not the boundary). A task-bound agent token may only
+/// create MRs in the repo of its `task_id` claim (or its signed `repo_id`
+/// claim when the task row no longer resolves — the mint derived both from
+/// the same spawn context).
+async fn check_agent_mr_task_scope(
+    state: &AppState,
+    auth: &AuthenticatedAgent,
+    repo_id: &str,
+    tool_name: &str,
+) -> Result<(), String> {
+    let Some(claim) = auth.agent_task_claim() else {
+        return Ok(()); // not a task-bound agent token
+    };
+    let allowed = state
+        .tasks
+        .find_by_id(&Id::new(claim))
+        .await
+        .ok()
+        .flatten()
+        .map(|t| t.repo_id.to_string())
+        .or_else(|| auth.repo_id.clone());
+    match allowed {
+        Some(allowed) if allowed == repo_id => Ok(()),
+        Some(allowed) => Err(format!(
+            "PERMISSION_DENIED: agent token is scoped to task {claim} (repo {allowed}); \
+             {tool_name} targets repo {repo_id}"
+        )),
+        None => Err(format!(
+            "PERMISSION_DENIED: agent token carries no repo scope for {tool_name}"
+        )),
+    }
 }
 
 /// Task-targeted action (`gyre_update_task` / `gyre_decompose_spec`): the
@@ -11522,6 +11568,106 @@ concepts:
         assert!(
             !msg.contains("PERMISSION_DENIED"),
             "in-scope call must not be scope-denied: {msg}"
+        );
+    }
+
+    /// AC (task-263, identity-security.md §Task-Scoped JWT Claims): the
+    /// task-mutating MCP tools compare the caller's `task_id` claim
+    /// against the target — gyre_update_task and gyre_decompose_spec
+    /// (parent) return PERMISSION_DENIED for a foreign task even when the
+    /// tier scope alone would allow it (task-2 lives in the worker's own
+    /// workspace), and gyre_create_mr is denied outside the claim's task
+    /// repo. The caller's own task passes the boundary.
+    #[tokio::test]
+    async fn mcp_agent_jwt_task_scope_on_task_and_mr_tools() {
+        let state = orch_state().await;
+        // task-1 is the worker's claim target (repo r-1); task-2 lives in
+        // r-2, the SAME workspace — repo/workspace-tier containment alone
+        // would allow acting on it; the task claim must not.
+        for (tid, rid) in [("task-1", "r-1"), ("task-2", "r-2")] {
+            let mut t = gyre_domain::Task::new(gyre_common::Id::new(tid), tid, 0);
+            t.workspace_id = gyre_common::Id::new("ws-1");
+            t.repo_id = gyre_common::Id::new(rid);
+            state.tasks.create(&t).await.unwrap();
+        }
+        let (_id, token) = register_worker(&state, "w-task-scope", "r-1").await;
+        let app = crate::build_router(state.clone());
+
+        // gyre_update_task on the foreign task → PERMISSION_DENIED naming
+        // the claim and the target.
+        let (_s, json) = mcp_post_with_token(
+            app.clone(),
+            tool_call(
+                "gyre_update_task",
+                json!({ "id": "task-2", "title": "hijacked", "status": "done" }),
+            ),
+            &token,
+        )
+        .await;
+        assert!(json["error"].is_object(), "got: {json}");
+        let msg = json["error"]["message"].as_str().unwrap();
+        assert!(msg.contains("PERMISSION_DENIED"), "got: {msg}");
+        assert!(
+            msg.contains("task-1") && msg.contains("task-2"),
+            "error must name the claim and the target: {msg}"
+        );
+        // The foreign task was not mutated.
+        let t2 = state
+            .tasks
+            .find_by_id(&gyre_common::Id::new("task-2"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(t2.title, "task-2");
+        assert_eq!(t2.status, gyre_domain::TaskStatus::Backlog);
+
+        // The caller's own task passes the boundary and updates.
+        let (_s, json) = mcp_post_with_token(
+            app.clone(),
+            tool_call(
+                "gyre_update_task",
+                json!({ "id": "task-1", "title": "own-task edit" }),
+            ),
+            &token,
+        )
+        .await;
+        assert!(
+            !json["result"]["isError"].as_bool().unwrap_or(false),
+            "own-task update must pass the boundary: {json}"
+        );
+
+        // gyre_decompose_spec with the foreign task as parent → denied.
+        let (_s, json) = mcp_post_with_token(
+            app.clone(),
+            tool_call(
+                "gyre_decompose_spec",
+                json!({ "parent_task_id": "task-2", "subtasks": [{ "title": "Nope" }] }),
+            ),
+            &token,
+        )
+        .await;
+        assert!(json["error"].is_object(), "got: {json}");
+        let msg = json["error"]["message"].as_str().unwrap();
+        assert!(msg.contains("PERMISSION_DENIED"), "got: {msg}");
+        assert!(
+            msg.contains("task-2"),
+            "error must name the parent target: {msg}"
+        );
+
+        // gyre_create_mr outside the claim's task repo → denied (the
+        // worker's claim resolves to task-1 in r-1; r-2 is foreign).
+        let (_s, json) = mcp_post_with_token(
+            app.clone(),
+            tool_call("gyre_create_mr", json!({ "repository_id": "r-2" })),
+            &token,
+        )
+        .await;
+        assert!(json["error"].is_object(), "got: {json}");
+        let msg = json["error"]["message"].as_str().unwrap();
+        assert!(msg.contains("PERMISSION_DENIED"), "got: {msg}");
+        assert!(
+            msg.contains("r-2"),
+            "error must name the target repo: {msg}"
         );
     }
 
