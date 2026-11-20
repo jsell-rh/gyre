@@ -24,7 +24,27 @@ pub enum ApiError {
     /// (HTTP 502) — the failure is not this server's fault, but the
     /// request cannot be completed.
     BadGateway(String),
+    /// Keyless commit signing refused: the caller has no presentable OIDC
+    /// identity token (identity-security.md §Layer 3, task-264). HTTP 403.
+    CommitSigningRefused(String),
+    /// The configured commit-signing stack failed; no signature was
+    /// produced and no silent local-key fallback ran (task-264). The
+    /// message names the active signing mode. HTTP 502.
+    CommitSigningFailed(String),
     Internal(anyhow::Error),
+}
+
+impl From<crate::commit_signatures::CommitSigningError> for ApiError {
+    fn from(e: crate::commit_signatures::CommitSigningError) -> Self {
+        match e {
+            crate::commit_signatures::CommitSigningError::NoOidcIdentity(reason) => {
+                ApiError::CommitSigningRefused(reason)
+            }
+            crate::commit_signatures::CommitSigningError::SigningStackFailed { .. } => {
+                ApiError::CommitSigningFailed(e.describe())
+            }
+        }
+    }
 }
 
 impl ApiError {
@@ -65,6 +85,8 @@ impl IntoResponse for ApiError {
             ApiError::Forbidden(msg) => (StatusCode::FORBIDDEN, msg),
             ApiError::Conflict(msg) => (StatusCode::CONFLICT, msg),
             ApiError::UnsupportedMediaType(msg) => (StatusCode::UNSUPPORTED_MEDIA_TYPE, msg),
+            ApiError::CommitSigningRefused(msg) => (StatusCode::FORBIDDEN, msg),
+            ApiError::CommitSigningFailed(msg) => (StatusCode::BAD_GATEWAY, msg),
             ApiError::TooManyRequests(msg) => (StatusCode::TOO_MANY_REQUESTS, msg),
             ApiError::BadGateway(msg) => (StatusCode::BAD_GATEWAY, msg),
             ApiError::Internal(err) => {
@@ -90,7 +112,9 @@ impl std::fmt::Display for ApiError {
             | ApiError::Conflict(m)
             | ApiError::TooManyRequests(m)
             | ApiError::UnsupportedMediaType(m)
-            | ApiError::BadGateway(m) => f.write_str(m),
+            | ApiError::BadGateway(m)
+            | ApiError::CommitSigningRefused(m)
+            | ApiError::CommitSigningFailed(m) => f.write_str(m),
             ApiError::RateLimited(secs) => write!(f, "rate limit exceeded, retry after {secs}s"),
             ApiError::LlmUnavailable => f.write_str("llm unavailable"),
             ApiError::Internal(err) => write!(f, "internal error: {err:#}"),

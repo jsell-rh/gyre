@@ -35,5 +35,5 @@ pub use mem_graph::MemGraphStore;
 pub use mem_saved_view::MemSavedViewRepository;
 pub use mem_search::MemSearchAdapter;
 pub use postgres::PgStorage;
-pub use rekor::NoopRekorClient;
+pub use rekor::HttpRekorClient;
 pub use sqlite::SqliteStorage;
