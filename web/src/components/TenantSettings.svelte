@@ -129,6 +129,17 @@
   let auditError = $state(null);
   let auditFilterType = $state('');
   let auditSearch = $state('');
+  // TASK-273 (review): the Audit tab renders the SAME filter set
+  // /audit/events supports — agent/workspace/user/repo/resource/outcome
+  // plus since/until time bounds — not just event_type + q.
+  let auditFilterAgent = $state('');
+  let auditFilterWorkspace = $state('');
+  let auditFilterUser = $state('');
+  let auditFilterRepo = $state('');
+  let auditFilterResource = $state('');
+  let auditFilterOutcome = $state('');
+  let auditFilterSince = $state('');
+  let auditFilterUntil = $state('');
 
   // ── Health ────────────────────────────────────────────────────────────
   let health = $state(null);
@@ -149,6 +160,10 @@
   let serverLogsError = $state(null);
   let serverLogLevel = $state('');
   let serverLogLimit = $state(200);
+  // TASK-273 (review): the Server Logs tab exposes the `since` filter its
+  // subtitle advertises (level, since, limit) — as a relative window
+  // converted to the endpoint's epoch-millisecond `since`.
+  let serverLogWindow = $state('');
 
   // ── Compute CRUD ─────────────────────────────────────────────────────
   let showComputeForm = $state(false);
@@ -553,6 +568,22 @@
       const params = {};
       if (auditFilterType) params.event_type = auditFilterType;
       if (auditSearch.trim()) params.q = auditSearch.trim();
+      if (auditFilterAgent.trim()) params.agent_id = auditFilterAgent.trim();
+      if (auditFilterWorkspace.trim()) params.workspace_id = auditFilterWorkspace.trim();
+      if (auditFilterUser.trim()) params.user_id = auditFilterUser.trim();
+      if (auditFilterRepo.trim()) params.repo_id = auditFilterRepo.trim();
+      if (auditFilterResource.trim()) params.resource_type = auditFilterResource.trim();
+      if (auditFilterOutcome) params.outcome = auditFilterOutcome;
+      // datetime-local (local time) → Unix epoch seconds; the endpoint's
+      // since/until bound the durable timestamps (seconds).
+      if (auditFilterSince) {
+        const secs = Math.floor(new Date(auditFilterSince).getTime() / 1000);
+        if (!Number.isNaN(secs)) params.since = secs;
+      }
+      if (auditFilterUntil) {
+        const secs = Math.floor(new Date(auditFilterUntil).getTime() / 1000);
+        if (!Number.isNaN(secs)) params.until = secs;
+      }
       const data = await api.adminAudit(params);
       // TASK-273: the durable admin trail ({events, count}) — the same
       // filter set /audit/events supports, plus free-text `q` search.
@@ -576,6 +607,11 @@
       const params = {};
       if (serverLogLevel) params.level = serverLogLevel;
       params.limit = serverLogLimit;
+      // Relative window → the endpoint's epoch-millisecond `since`.
+      if (serverLogWindow) {
+        const windowMs = Number(serverLogWindow);
+        if (windowMs > 0) params.since = Date.now() - windowMs;
+      }
       const data = await api.adminServerLogs(params);
       serverLogs = data?.entries ?? [];
     } catch (e) {
@@ -1579,6 +1615,90 @@
             onkeydown={(e) => { if (e.key === 'Enter') refreshAudit(); }}
             data-testid="audit-search-input"
           />
+          <!-- TASK-273 (review): the same filter set /audit/events supports —
+               agent/workspace/user/repo/resource/outcome and since/until —
+               not just event_type + q. -->
+          <label for="audit-filter-agent" class="filter-label">{$t('tenant_settings.audit.filter_agent')}</label>
+          <input
+            id="audit-filter-agent"
+            class="filter-input"
+            type="search"
+            placeholder="agent-…"
+            bind:value={auditFilterAgent}
+            onkeydown={(e) => { if (e.key === 'Enter') refreshAudit(); }}
+            data-testid="audit-filter-agent"
+          />
+          <label for="audit-filter-workspace" class="filter-label">{$t('tenant_settings.audit.filter_workspace')}</label>
+          <input
+            id="audit-filter-workspace"
+            class="filter-input"
+            type="search"
+            placeholder="ws-…"
+            bind:value={auditFilterWorkspace}
+            onkeydown={(e) => { if (e.key === 'Enter') refreshAudit(); }}
+            data-testid="audit-filter-workspace"
+          />
+          <label for="audit-filter-user" class="filter-label">{$t('tenant_settings.audit.filter_user')}</label>
+          <input
+            id="audit-filter-user"
+            class="filter-input"
+            type="search"
+            placeholder="user-…"
+            bind:value={auditFilterUser}
+            onkeydown={(e) => { if (e.key === 'Enter') refreshAudit(); }}
+            data-testid="audit-filter-user"
+          />
+          <label for="audit-filter-repo" class="filter-label">{$t('tenant_settings.audit.filter_repo')}</label>
+          <input
+            id="audit-filter-repo"
+            class="filter-input"
+            type="search"
+            placeholder="repo-…"
+            bind:value={auditFilterRepo}
+            onkeydown={(e) => { if (e.key === 'Enter') refreshAudit(); }}
+            data-testid="audit-filter-repo"
+          />
+          <label for="audit-filter-resource" class="filter-label">{$t('tenant_settings.audit.filter_resource')}</label>
+          <input
+            id="audit-filter-resource"
+            class="filter-input"
+            type="search"
+            placeholder="agent | workspace | …"
+            bind:value={auditFilterResource}
+            onkeydown={(e) => { if (e.key === 'Enter') refreshAudit(); }}
+            data-testid="audit-filter-resource"
+          />
+          <label for="audit-filter-outcome" class="filter-label">{$t('tenant_settings.audit.filter_outcome')}</label>
+          <select
+            id="audit-filter-outcome"
+            class="filter-select"
+            bind:value={auditFilterOutcome}
+            onchange={refreshAudit}
+            data-testid="audit-filter-outcome"
+          >
+            <option value="">{$t('tenant_settings.audit.filter_outcome_all')}</option>
+            <option value="success">{$t('tenant_settings.audit.filter_outcome_success')}</option>
+            <option value="failure">{$t('tenant_settings.audit.filter_outcome_failure')}</option>
+            <option value="blocked">{$t('tenant_settings.audit.filter_outcome_blocked')}</option>
+          </select>
+          <label for="audit-filter-since" class="filter-label">{$t('tenant_settings.audit.filter_since')}</label>
+          <input
+            id="audit-filter-since"
+            class="filter-input"
+            type="datetime-local"
+            bind:value={auditFilterSince}
+            onchange={refreshAudit}
+            data-testid="audit-filter-since"
+          />
+          <label for="audit-filter-until" class="filter-label">{$t('tenant_settings.audit.filter_until')}</label>
+          <input
+            id="audit-filter-until"
+            class="filter-input"
+            type="datetime-local"
+            bind:value={auditFilterUntil}
+            onchange={refreshAudit}
+            data-testid="audit-filter-until"
+          />
           <button class="refresh-btn" onclick={refreshAudit} aria-label={$t('tenant_settings.refresh')} data-testid="audit-refresh">
             {$t('tenant_settings.refresh')}
           </button>
@@ -1796,6 +1916,22 @@
             <option value="INFO">INFO</option>
             <option value="WARN">WARN</option>
             <option value="ERROR">ERROR</option>
+          </select>
+          <!-- TASK-273 (review): the `since` filter the tab's subtitle
+               advertises — a relative window converted to the endpoint's
+               epoch-millisecond `since`. -->
+          <label for="server-logs-since" class="filter-label">{$t('tenant_settings.logs.since')}</label>
+          <select
+            id="server-logs-since"
+            class="filter-select"
+            bind:value={serverLogWindow}
+            onchange={loadServerLogs}
+            data-testid="server-logs-since"
+          >
+            <option value="">{$t('tenant_settings.logs.since_all')}</option>
+            <option value={300000}>{$t('tenant_settings.logs.since_5m')}</option>
+            <option value={3600000}>{$t('tenant_settings.logs.since_1h')}</option>
+            <option value={86400000}>{$t('tenant_settings.logs.since_24h')}</option>
           </select>
           <label for="server-logs-limit" class="filter-label">{$t('tenant_settings.logs.limit')}</label>
           <select
