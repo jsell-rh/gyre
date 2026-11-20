@@ -218,9 +218,15 @@ impl VaultSecretRepository {
             .clone()
             .context("no Vault secret_id configured")?;
         let url = format!("{}/v1/auth/approle/login", self.config.addr);
-        let resp = self
-            .http
-            .post(&url)
+        let mut req = self.http.post(&url);
+        // The namespace header must ride the LOGIN too: with
+        // GYRE_VAULT_NAMESPACE set, a namespace-less login authenticates
+        // against the root namespace while every KV operation targets the
+        // configured one — both paths would fail (review task-273).
+        if let Some(ns) = &self.config.namespace {
+            req = req.header("X-Vault-Namespace", ns);
+        }
+        let resp = req
             .json(&serde_json::json!({ "role_id": role_id, "secret_id": secret_id }))
             .send()
             .await
@@ -267,9 +273,15 @@ impl VaultSecretRepository {
             "{}/v1/auth/{}/login",
             self.config.addr, self.config.jwt_mount
         );
-        let resp = self
-            .http
-            .post(&url)
+        let mut req = self.http.post(&url);
+        // Same namespace requirement as the AppRole login (review
+        // task-273): a namespace-less JWT login would mint a token in the
+        // root namespace that cannot read the configured namespace's KV
+        // data.
+        if let Some(ns) = &self.config.namespace {
+            req = req.header("X-Vault-Namespace", ns);
+        }
+        let resp = req
             .json(&serde_json::json!({
                 "jwt": agent_jwt,
                 "role": self.config.jwt_role,
