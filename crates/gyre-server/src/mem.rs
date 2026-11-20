@@ -3277,7 +3277,7 @@ impl ScimMappingRepository for MemScimMappingRepository {
             .filter(|m| m.idp_group == idp_group)
             .cloned()
             .collect();
-        mappings.sort_by(|a, b| a.workspace_id.to_string().cmp(&b.workspace_id.to_string()));
+        mappings.sort_by_key(|m| m.workspace_id.to_string());
         Ok(mappings)
     }
 }
