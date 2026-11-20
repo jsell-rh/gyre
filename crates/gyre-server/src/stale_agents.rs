@@ -118,30 +118,11 @@ pub async fn run_once(state: &Arc<AppState>) -> anyhow::Result<()> {
                     crate::agent_audit::attested_pid_alive(state, &agent.id.to_string()).await;
                 crate::agent_audit::emit_dead(state, &agent, agent.last_heartbeat, pid_alive).await;
 
-                // Clean up worktrees
-                if let Ok(worktrees) = state.worktrees.find_by_agent(&agent.id).await {
-                    for wt in worktrees {
-                        if let Ok(Some(repo)) = state.repos.find_by_id(&wt.repository_id).await {
-                            // jj workspace teardown (source-control.md §4):
-                            // forget the workspace from the shared jj
-                            // checkout and remove the working copy dir.
-                            crate::api::spawn::cleanup_jj_workspace(
-                                state,
-                                &agent.id.to_string(),
-                                &repo.path,
-                                &wt.path,
-                                &format!("agent-{}", agent.id),
-                            )
-                            .await;
-                            if let Err(e) =
-                                state.git_ops.remove_worktree(&repo.path, &wt.path).await
-                            {
-                                warn!("remove_worktree failed for agent {}: {e}", agent.id);
-                            }
-                        }
-                        let _ = state.worktrees.delete(&wt.id).await;
-                    }
-                }
+                // Clean up worktrees (agent-workflow.md §Parallel Work via
+                // Worktrees — the shared terminal teardown: jj workspace
+                // forget + working-copy removal, plain-git worktree removal,
+                // agent_worktrees record delete).
+                crate::api::spawn::cleanup_agent_worktrees(state, &agent.id).await;
 
                 // Block the assigned task
                 if let Some(task_id) = &agent.current_task_id {
