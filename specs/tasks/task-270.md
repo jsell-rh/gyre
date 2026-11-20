@@ -3,7 +3,7 @@ title: "PR collaboration invariants: reject agent-principal pushes to the defaul
 spec_ref: "Spec gap spec-4c39ca6ea3e71ce8a53398f3 / pr-protection-and-hygiene / d30f233daf86"
 depends_on: []
 progress: ready-for-review
-commits: ["1b0cbd6c15741fee50202fe06682344f7a91b176", "f48a62f6be9ea6b85b94f5dd1293e137e7b51504", "34f7878e3734df124067c20b225ad7e2a150ec70", "041bddcdd54e58930beb34cfc06ca12a0d16e9fa", "c9faf6a80ba0a216889c2d7efb5c82f71f58deee", "d5888ad56a3369911836d9ccaeb06995dd73de9d", "c269022921fb4faddc818da21fd2d834d00ab63e"]
+commits: ["2f56050a4bed2981b1e84d5659112f5bb5125172", "1b0cbd6c15741fee50202fe06682344f7a91b176", "f48a62f6be9ea6b85b94f5dd1293e137e7b51504", "34f7878e3734df124067c20b225ad7e2a150ec70", "041bddcdd54e58930beb34cfc06ca12a0d16e9fa", "c9faf6a80ba0a216889c2d7efb5c82f71f58deee", "d5888ad56a3369911836d9ccaeb06995dd73de9d", "c269022921fb4faddc818da21fd2d834d00ab63e"]
 ---
 
 ## Required behavior
@@ -70,8 +70,9 @@ Product commits (oldest first): `c2690229` (push protection), `d5888ad5`
 (PR hygiene job), `c9faf6a8` (formatting), `041bddcd` (review repair:
 deletion bypass + agent nudge dedup), `34f7878e` (rustfmt/clippy
 repair), `f48a62f6` (review repair: packfile-carrying test receive-pack
-bodies), `1b0cbd6c` (review repair: rustfmt single-line assert in
-`pack_objects_for`).
+bodies), `1b0cbd6c` (rustfmt single-line assert), `2f56050a`
+(verification repair: nested-path test commits + Fulcio test ref, see
+below).
 
 ### Agent-principal default-branch push protection
 
@@ -116,50 +117,58 @@ events). Thresholds configurable via
 GYRE_PR_HYGIENE_{NUDGE,ESCALATE,CLOSE}_SECS (defaults 2d/7d/30d). The
 daily abandoned_branch_check job is untouched.
 
-### Review repairs
+### Verification repair (2f56050a)
 
-Round bc9fa879: the task's receive-pack test bodies carried a
-ref-update command + flush but NO packfile, and `git receive-pack`
-applies nothing for such a non-delete request while still exiting 0.
-Fixed in `f48a62f6` with the `pack_objects_for` /
-`receive_pack_body_with_pack` helpers; `push_ref_as` now carries the
-packfile so accepted pushes actually land server-side. Round 6d79dadd
-(this assignment): CI rustfmt flagged the assert inside
-`pack_objects_for` as wrapped across four lines where rustfmt requires
-the single-line form (the identical pre-existing pattern sits at the two
-other `pack-objects` call sites in the same file). Fixed in `1b0cbd6c`
-by collapsing it to one line — behavior unchanged, formatting only; no
-cold rebuild performed for this formatting-only repair, per the
-assignment contract.
+The independent verification run (`cargo test --all`, attempt
+8ddc4ea6) failed two git_http tests; both are repaired in `2f56050a`
+with behavior-preserving test-infrastructure fixes:
+
+- `human_push_to_default_branch_accepted_and_spec_lifecycle_runs`
+  panicked "commit-tree failed": the `make_commit` helper built trees
+  with `git mktree`, which rejects paths containing '/' ("fatal: path
+  specs/system/human-push-spec.md contains slash" — tree entries are
+  flat), so the nested specs/ commit never got a tree. `make_commit`
+  now builds the tree through a scratch index (`GIT_INDEX_FILE` +
+  `update-index --cacheinfo` + `write-tree`), which creates the
+  intermediate tree objects. Root cause reproduced with plain git and
+  the repaired construction validated end-to-end (nested blob → tree →
+  commit → packfile → `git receive-pack --stateless-rpc` applies the
+  ref).
+- `push_rejected_loudly_when_fulcio_unreachable` expected 502 but got
+  403: the new agent-principal default-branch protection correctly
+  rejects the test's agent-JWT push to refs/heads/main before the
+  commit-signing stage runs. That test exercises the Fulcio
+  signing-failure path, not the default-branch invariant, so its push
+  is retargeted to a feature branch (refs/heads/feat/
+  fulcio-unreachable) seeded at the base commit; all assertions (502
+  naming fulcio, ref undo to base, no local-key signature record,
+  GitPushRejected audit naming the commit-signing gate) are unchanged.
 
 ### Test evidence
 
-In-sandbox evidence (no server build, per the 4 GiB budget policy):
-- `cargo check -p gyre-server` and `cargo check -p gyre-server --tests`:
-  clean (exit 0) at head `f48a62f6`; the `1b0cbd6c` repair is
-  formatting-only (whitespace collapse inside an assert macro, no token
-  or type changes).
-- Plain-git probe replicating the exact test construction (objects
-  created in a bare repo via mktree/commit-tree, body = pkt-line create
-  command + flush [+ pack] piped to `git receive-pack --stateless-rpc`):
-  packfile-less body → exit 0, ref NOT created (reproduces the finding);
-  packfile-carrying body → ref created. Script and output retained at
-  /tmp/stage/review-evidence/receive_pack_packfile_probe{.py,.out}.
-- Rustfmt repair evidence at
-  /tmp/stage/review-evidence/rustfmt-repair-1b0cbd6c.out:
-  `python3 scripts/check-rustfmt-diff.py 00669baa` (the CI hard fmt
-  job's changed-lines check against the assignment base merged at
-  `f433afcf`) → "rustfmt: changed lines clean (9 Rust files checked)",
-  exit 0; `cargo fmt -p gyre-server -- --check` → exit 0.
+In-sandbox evidence (server test compilation deferred to the
+independent verifier per the 4 GiB budget policy):
+
+- `cargo check -p gyre-server --lib --tests` at `2f56050a`: clean,
+  exit 0 (10m05s; includes the edited test code under cfg(test)).
+- `cargo fmt -p gyre-server`: no changes; mechanical checks
+  (check-byte-slice-truncation, check-relative-path-defaults,
+  check-inert-enforcement, check-lossy-secret-conversion,
+  check-assertionless-tests, check-conditional-test-guards,
+  check-aspirational-test-names, check-dead-test-code) all pass.
+- Plain-git probes retained under /tmp/stage/review-evidence:
+  mktree slash rejection (the defect) and the repaired scratch-index
+  construction applied through `git receive-pack --stateless-rpc`.
 
 Deferred to the independent verifier (gyre-server test compilation must
-run there): `cargo test -p gyre-server` with the filter
-`agent_push_to_default_branch_rejected_directing_to_mr_flow
-agent_push_to_feature_branch_succeeds
-agent_deletion_of_default_branch_rejected
-protection_resolves_real_default_branch_not_literal_main
-human_push_to_default_branch_accepted_and_spec_lifecycle_runs` plus the
-pr_hygiene suite (`abandoned_mr_is_closed_with_explanation_delivered_to_author`,
+run there): `cargo test -p gyre-server` with the filters
+`agent_push_to_default_branch_rejected_directing_to_mr_flow`,
+`agent_push_to_feature_branch_succeeds`,
+`agent_deletion_of_default_branch_rejected`,
+`protection_resolves_real_default_branch_not_literal_main`,
+`human_push_to_default_branch_accepted_and_spec_lifecycle_runs`,
+`push_rejected_loudly_when_fulcio_unreachable`, plus the pr_hygiene
+suite (`abandoned_mr_is_closed_with_explanation_delivered_to_author`,
 `unreviewed_mr_nudges_assigned_reviewers`,
 `unreviewed_mr_without_reviewers_escalates_to_developers_and_admins`,
 `fresh_mr_under_nudge_threshold_gets_no_action`,
@@ -168,5 +177,6 @@ pr_hygiene suite (`abandoned_mr_is_closed_with_explanation_delivered_to_author`,
 `conflicted_mr_without_agent_raises_rebase_required_escalation`,
 `long_open_mr_escalates_to_admins_at_higher_priority`,
 `consecutive_evaluations_do_not_duplicate_notifications`,
-`consecutive_evaluations_do_not_duplicate_agent_reviewer_nudges`) and the
-jobs.rs registration test `pr_hygiene_check_registered_on_interval_not_daily`.
+`consecutive_evaluations_do_not_duplicate_agent_reviewer_nudges`) and
+the jobs.rs registration test
+`pr_hygiene_check_registered_on_interval_not_daily`.
