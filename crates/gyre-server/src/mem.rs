@@ -3314,6 +3314,171 @@ impl WorkspaceMembershipRepository for MemWorkspaceMembershipRepository {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// SCIM groups + group-to-workspace mappings (identity-security.md
+// §SCIM Provisioning / §Group-to-Workspace Mapping, task-266)
+// ──────────────────────────────────────────────────────────────────────────────
+
+use gyre_domain::{ScimGroup, ScimGroupMember, ScimWorkspaceMapping};
+use gyre_ports::{ScimGroupRepository, ScimMappingRepository};
+
+#[derive(Default)]
+pub struct MemScimGroupRepository {
+    groups: Arc<Mutex<HashMap<String, ScimGroup>>>,
+    members: Arc<Mutex<Vec<ScimGroupMember>>>,
+}
+
+#[async_trait]
+impl ScimGroupRepository for MemScimGroupRepository {
+    async fn create(&self, group: &ScimGroup) -> Result<()> {
+        let mut groups = self.groups.lock().await;
+        // Port contract: create fails when a group with the same
+        // non-empty external_id already exists. The mem adapter has no
+        // schema, so the guard lives in code (check-mem-port-contracts).
+        if !group.external_id.is_empty()
+            && groups.values().any(|g| g.external_id == group.external_id)
+        {
+            return Err(anyhow::anyhow!(
+                "SCIM group with external_id {:?} already exists",
+                group.external_id
+            ));
+        }
+        groups.insert(group.id.to_string(), group.clone());
+        Ok(())
+    }
+
+    async fn find_by_id(&self, id: &Id) -> Result<Option<ScimGroup>> {
+        Ok(self.groups.lock().await.get(id.as_str()).cloned())
+    }
+
+    async fn find_by_external_id(&self, external_id: &str) -> Result<Option<ScimGroup>> {
+        Ok(self
+            .groups
+            .lock()
+            .await
+            .values()
+            .find(|g| !g.external_id.is_empty() && g.external_id == external_id)
+            .cloned())
+    }
+
+    async fn list(&self) -> Result<Vec<ScimGroup>> {
+        let mut groups: Vec<ScimGroup> = self.groups.lock().await.values().cloned().collect();
+        groups.sort_by(|a, b| {
+            (a.created_at, &a.id.to_string()).cmp(&(b.created_at, &b.id.to_string()))
+        });
+        Ok(groups)
+    }
+
+    async fn update(&self, group: &ScimGroup) -> Result<()> {
+        self.groups
+            .lock()
+            .await
+            .insert(group.id.to_string(), group.clone());
+        Ok(())
+    }
+
+    async fn delete(&self, id: &Id) -> Result<()> {
+        self.groups.lock().await.remove(id.as_str());
+        self.members.lock().await.retain(|m| m.group_id != *id);
+        Ok(())
+    }
+
+    async fn list_members(&self, group_id: &Id) -> Result<Vec<ScimGroupMember>> {
+        let mut members: Vec<ScimGroupMember> = self
+            .members
+            .lock()
+            .await
+            .iter()
+            .filter(|m| m.group_id == *group_id)
+            .cloned()
+            .collect();
+        members.sort_by(|a, b| {
+            (a.added_at, &a.user_id.to_string()).cmp(&(b.added_at, &b.user_id.to_string()))
+        });
+        Ok(members)
+    }
+
+    async fn add_member(&self, member: &ScimGroupMember) -> Result<()> {
+        let mut members = self.members.lock().await;
+        // Port contract: idempotent row-wise — adding an existing member
+        // is Ok() and never duplicates the row. A push carrying a
+        // `display` refreshes the stored one (upsert, same contract as
+        // the SQLite/PostgreSQL adapters); a push without one leaves any
+        // previously stored `display` untouched.
+        if let Some(existing) = members
+            .iter_mut()
+            .find(|m| m.group_id == member.group_id && m.user_id == member.user_id)
+        {
+            if member.display.is_some() {
+                existing.display = member.display.clone();
+            }
+        } else {
+            members.push(member.clone());
+        }
+        Ok(())
+    }
+
+    async fn remove_member(&self, group_id: &Id, user_id: &Id) -> Result<()> {
+        self.members
+            .lock()
+            .await
+            .retain(|m| !(m.group_id == *group_id && m.user_id == *user_id));
+        Ok(())
+    }
+
+    async fn replace_members(&self, group_id: &Id, members: &[ScimGroupMember]) -> Result<()> {
+        let mut store = self.members.lock().await;
+        store.retain(|m| m.group_id != *group_id);
+        store.extend_from_slice(members);
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+pub struct MemScimMappingRepository {
+    mappings: Arc<Mutex<Vec<ScimWorkspaceMapping>>>,
+}
+
+#[async_trait]
+impl ScimMappingRepository for MemScimMappingRepository {
+    async fn replace_for_workspace(
+        &self,
+        workspace_id: &Id,
+        mappings: &[ScimWorkspaceMapping],
+    ) -> Result<()> {
+        let mut store = self.mappings.lock().await;
+        store.retain(|m| m.workspace_id != *workspace_id);
+        store.extend_from_slice(mappings);
+        Ok(())
+    }
+
+    async fn list_by_workspace(&self, workspace_id: &Id) -> Result<Vec<ScimWorkspaceMapping>> {
+        let mut mappings: Vec<ScimWorkspaceMapping> = self
+            .mappings
+            .lock()
+            .await
+            .iter()
+            .filter(|m| m.workspace_id == *workspace_id)
+            .cloned()
+            .collect();
+        mappings.sort_by(|a, b| a.idp_group.cmp(&b.idp_group));
+        Ok(mappings)
+    }
+
+    async fn list_by_idp_group(&self, idp_group: &str) -> Result<Vec<ScimWorkspaceMapping>> {
+        let mut mappings: Vec<ScimWorkspaceMapping> = self
+            .mappings
+            .lock()
+            .await
+            .iter()
+            .filter(|m| m.idp_group == idp_group)
+            .cloned()
+            .collect();
+        mappings.sort_by_key(|m| m.workspace_id.to_string());
+        Ok(mappings)
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // Repo access overrides (user-management.md §Repo Access)
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -5918,6 +6083,8 @@ fn test_state_inner(
         notifications: Arc::new(MemNotificationRepository::default()),
         tenant_invitations: Arc::new(MemTenantInvitationRepository::default()),
         workspace_invitations: Arc::new(MemWorkspaceInvitationRepository::default()),
+        scim_groups: Arc::new(MemScimGroupRepository::default()),
+        scim_mappings: Arc::new(MemScimMappingRepository::default()),
         graph_store: Arc::new(gyre_adapters::MemGraphStore::new()),
         saved_views: Arc::new(gyre_adapters::MemSavedViewRepository::default()),
         wg_config: crate::WireGuardConfig::from_env(),
