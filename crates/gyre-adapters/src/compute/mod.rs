@@ -30,9 +30,7 @@ mod tests {
     #[test]
     fn container_already_gone_matches_only_no_such_container() {
         // Already-gone shapes (successful kill).
-        assert!(container_already_gone(
-            "Error: No such container: abc123"
-        ));
+        assert!(container_already_gone("Error: No such container: abc123"));
         assert!(container_already_gone(
             "Error response from daemon: No such container: deadbeef"
         ));
