@@ -174,6 +174,11 @@ async fn full_ralph_loop_via_gyre() {
     let work_tmp = Arc::new(TempDir::new().unwrap());
     let work_tmp_c = work_tmp.clone();
     let agent_token_c = agent_token.clone();
+    // task-270: agent principals may not push directly to the default
+    // branch (specs/development/agent-workflow.md §PRs as the Collaboration
+    // Primitive), so the base `main` push uses the server (system) token;
+    // the agent pushes only its feature branch.
+    let system_token_c = auth_token.to_string();
     let clone_url_c = clone_url.clone();
 
     tokio::task::spawn_blocking(move || {
@@ -203,8 +208,11 @@ async fn full_ralph_loop_via_gyre() {
         git_local(&["add", "."], &work_dir);
         git_local(&["commit", "-m", "chore: initial commit"], &work_dir);
 
-        // Push HEAD to establish the base branch as `main` on the remote.
-        let push_main = git_with_token(&["push", "origin", "HEAD:main"], &work_dir, &agent_token_c);
+        // Push HEAD to establish the base branch as `main` on the remote —
+        // with the system token (the default branch is protected from
+        // agent-principal pushes, task-270).
+        let push_main =
+            git_with_token(&["push", "origin", "HEAD:main"], &work_dir, &system_token_c);
         assert!(
             push_main.status.success(),
             "git push main failed: {}",

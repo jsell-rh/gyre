@@ -38,4 +38,8 @@ export const NOTIF_TYPE_IDS = [
   // user-management.md §Ownership Transfer & Reclamation (task-121 lineage):
   // sent to every TenantAdmin when a workspace loses its last active Owner.
   'WorkspaceOwnerless',
+  // specs/development/agent-workflow.md §PRs as the Collaboration
+  // Primitive (task-270): PR-hygiene actions on stale merge requests.
+  'ReviewerNudge', 'MrUnreviewed', 'MrNeedsRebase', 'MrStaleEscalation',
+  'MrAutoClosed',
 ];
