@@ -350,10 +350,13 @@ fn escape_like(term: &str) -> String {
 /// across both storage states (observability.md §Log Retention &
 /// Compression).
 fn detail_matches(row: &AuditEventRow, term: &str) -> bool {
-    // Full Unicode case folding — the same folding SQL LOWER() applies on
-    // both backends, so a row selected by the SQL LIKE cannot be dropped
-    // by the Rust re-filter (an ASCII-only fold here silently discarded
-    // Unicode-case hits; review task-273). The mem adapter uses the same
+    // Full Unicode case folding. The SQL LIKE pre-filter only applies to
+    // ASCII terms (SQLite's LOWER() folds ASCII exclusively), so a row
+    // selected by the SQL LIKE can never be dropped by this re-filter,
+    // and non-ASCII terms — which skip the pre-filter — are matched here
+    // over the structured-filtered candidate pages (review task-273: an
+    // ASCII-only SQL fold previously excluded Unicode-case hits before
+    // this re-filter ever saw them). The mem adapter uses the same
     // to_lowercase().
     let needle = term.to_lowercase();
     let haystack = match &row.detail_zstd {
@@ -525,20 +528,29 @@ fn apply_filters(mut query: BoxedAuditQuery, filter: &AuditQueryFilter) -> Boxed
             // Case-insensitive on both backends: LOWER(detail) LIKE the
             // lowercased pattern (SQLite's LIKE is case-insensitive by
             // default, PostgreSQL's is not — lowering both sides makes the
-            // behavior identical). The pattern uses full Unicode
-            // to_lowercase() — the same folding SQL LOWER() and the Rust
-            // re-filter apply, so no Unicode-case hit is missed by a
-            // divergent ASCII-only fold (review task-273). Wildcards in
-            // the term are escaped so it matches literally. Compressed
-            // rows (detail blanked by the log-compression job) are
-            // decompressed and matched in the adapter — see `query_rows`.
-            let pattern = format!("%{}%", escape_like(&term.to_lowercase()));
-            query = query.filter(
-                lower(audit_events::detail)
-                    .like(pattern)
-                    .escape('\\')
-                    .or(audit_events::detail_zstd.is_not_null()),
-            );
+            // behavior identical). Wildcards in the term are escaped so it
+            // matches literally. Compressed rows (detail blanked by the
+            // log-compression job) are decompressed and matched in the
+            // adapter — see `query_rows`.
+            //
+            // The LIKE pre-filter applies to ASCII terms ONLY: SQLite's
+            // LOWER() folds ASCII characters exclusively, so a non-ASCII
+            // term ('café' against a detail containing 'CAFÉ') would be
+            // excluded by the pre-filter before the Unicode-folding Rust
+            // re-filter (detail_matches) ever saw the row — a false
+            // negative (review task-273). Non-ASCII terms skip the
+            // pre-filter entirely and are matched by the Rust re-filter
+            // over the structured-filtered candidate pages (correctness
+            // is unchanged: the re-filter is exact).
+            if term.is_ascii() {
+                let pattern = format!("%{}%", escape_like(&term.to_lowercase()));
+                query = query.filter(
+                    lower(audit_events::detail)
+                        .like(pattern)
+                        .escape('\\')
+                        .or(audit_events::detail_zstd.is_not_null()),
+                );
+            }
         }
     }
     query
@@ -1304,5 +1316,122 @@ mod tests {
         // A row that fails to decompress never matches (fail closed).
         let corrupt = row_with(String::new(), Some(vec![0xff, 0xfe, 0xfd]));
         assert!(!detail_matches(&corrupt, "anything"));
+    }
+
+    /// Review task-273: a free-text term whose match relies on NON-ASCII
+    /// case folding ('café' against a detail containing 'CAFÉ') must not
+    /// be excluded by the SQL pre-filter — SQLite's LOWER() folds ASCII
+    /// only, so the pre-filter is skipped for non-ASCII terms and the
+    /// Unicode-folding re-filter matches over the candidate pages
+    /// (previously the row was excluded before the re-filter ever saw
+    /// it — a false negative).
+    #[tokio::test]
+    async fn audit_free_text_search_folds_non_ascii_case() {
+        let (_tmp, s) = setup();
+        let mut hit = make_event("e-cafe", "a1", AuditEventType::FileAccess, 100);
+        hit.detail = serde_json::json!({ "label": "CAFÉ AU LAIT" });
+        let mut miss = make_event("e-other", "a2", AuditEventType::FileAccess, 200);
+        miss.detail = serde_json::json!({ "label": "plain tea" });
+        record(&s, &hit).await;
+        record(&s, &miss).await;
+
+        let filter = AuditQueryFilter {
+            q: Some("café".to_string()),
+            ..all()
+        };
+        let results = AuditRepository::query(&s, &filter).await.unwrap();
+        assert_eq!(
+            results.len(),
+            1,
+            "a non-ASCII case-fold match must be found (no false negative)"
+        );
+        assert_eq!(results[0].id, Id::new("e-cafe"));
+        assert_eq!(
+            AuditRepository::count_filtered(&s, &filter).await.unwrap(),
+            1
+        );
+
+        // Correctness is unchanged: a non-matching non-ASCII term still
+        // returns nothing (no false positives from the skip).
+        let filter = AuditQueryFilter {
+            q: Some("thé".to_string()),
+            ..all()
+        };
+        assert_eq!(AuditRepository::query(&s, &filter).await.unwrap().len(), 0);
+    }
+
+    /// Review task-273: the durable admin trail survives a storage
+    /// rebuild (server restart) — the same reopen-durability pattern the
+    /// other task-273 stores carry (secret, job_run, agent_instance,
+    /// oauth_state), including tenant scoping and free-text search over
+    /// a zstd-compressed detail.
+    #[tokio::test]
+    async fn audit_survives_storage_rebuild_restart_durability() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_str().unwrap().to_string();
+        {
+            let s = SqliteStorage::new(&path).unwrap();
+            let mut mine = make_event("e-mine", "a1", AuditEventType::FileAccess, 100);
+            mine.detail = serde_json::json!({ "note": "restart-durable-needle" });
+            mine.tenant_id = Some("tenant-1".to_string());
+            record(&s, &mine).await;
+            let mut other = make_event("e-other", "a2", AuditEventType::FileAccess, 200);
+            other.detail = serde_json::json!({ "note": "restart-durable-needle" });
+            other.tenant_id = Some("tenant-2".to_string());
+            record(&s, &other).await;
+
+            // Compress the older row so the restart-query exercises the
+            // decompressing q path too.
+            let stats = AuditRepository::compress_details_before(&s, 150, 10)
+                .await
+                .unwrap();
+            assert_eq!(stats.compressed, 1);
+        }
+        // Storage rebuilt against the same file — exactly the shape of a
+        // server restart (new process, same database).
+        let s2 = SqliteStorage::new(&path).unwrap();
+        let results = AuditRepository::query(
+            &s2,
+            &AuditQueryFilter {
+                tenant_id: Some("tenant-1".to_string()),
+                ..all()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(results.len(), 1, "only the caller-tenant row is visible");
+        assert_eq!(results[0].id, Id::new("e-mine"));
+
+        // Free-text q over the COMPRESSED detail still matches after the
+        // rebuild.
+        let results = AuditRepository::query(
+            &s2,
+            &AuditQueryFilter {
+                tenant_id: Some("tenant-1".to_string()),
+                q: Some("restart-durable-needle".to_string()),
+                ..all()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            results.len(),
+            1,
+            "the compressed detail must remain searchable after the rebuild"
+        );
+        assert_eq!(results[0].id, Id::new("e-mine"));
+
+        // A second tenant's caller sees only its own row.
+        let results = AuditRepository::query(
+            &s2,
+            &AuditQueryFilter {
+                tenant_id: Some("tenant-2".to_string()),
+                ..all()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, Id::new("e-other"));
     }
 }

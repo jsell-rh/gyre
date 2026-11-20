@@ -357,11 +357,14 @@ fn escape_like(term: &str) -> String {
 /// across both storage states (observability.md §Log Retention &
 /// Compression).
 fn detail_matches(row: &AuditEventRow, term: &str) -> bool {
-    // Full Unicode case folding — the same folding SQL LOWER() applies on
-    // both backends, so a row selected by the SQL LIKE cannot be dropped
-    // by the Rust re-filter (an ASCII-only fold here silently discarded
-    // Unicode-case hits; review task-273). The mem adapter uses the same
-    // to_lowercase().
+    // Full Unicode case folding. The SQL LIKE pre-filter only applies to
+    // ASCII terms (LOWER() folds non-ASCII only under a Unicode-aware
+    // collation), so a row selected by the SQL LIKE can never be dropped
+    // by this re-filter, and non-ASCII terms — which skip the pre-filter
+    // — are matched here over the structured-filtered candidate pages
+    // (review task-273: an ASCII-only SQL fold previously excluded
+    // Unicode-case hits before this re-filter ever saw them). The mem
+    // adapter uses the same to_lowercase().
     let needle = term.to_lowercase();
     let haystack = match &row.detail_zstd {
         Some(z) if !z.is_empty() => match zstd::decode_all(z.as_slice()) {
@@ -525,20 +528,29 @@ fn apply_filters(mut query: BoxedAuditQuery, filter: &AuditQueryFilter) -> Boxed
             // Case-insensitive on both backends: LOWER(detail) LIKE the
             // lowercased pattern (SQLite's LIKE is case-insensitive by
             // default, PostgreSQL's is not — lowering both sides makes the
-            // behavior identical). The pattern uses full Unicode
-            // to_lowercase() — the same folding SQL LOWER() and the Rust
-            // re-filter apply, so no Unicode-case hit is missed by a
-            // divergent ASCII-only fold (review task-273). Wildcards in
-            // the term are escaped so it matches literally. Compressed
-            // rows (detail blanked by the log-compression job) are
-            // decompressed and matched in the adapter — see `query_rows`.
-            let pattern = format!("%{}%", escape_like(&term.to_lowercase()));
-            query = query.filter(
-                lower(audit_events::detail)
-                    .like(pattern)
-                    .escape('\\')
-                    .or(audit_events::detail_zstd.is_not_null()),
-            );
+            // behavior identical). Wildcards in the term are escaped so it
+            // matches literally. Compressed rows (detail blanked by the
+            // log-compression job) are decompressed and matched in the
+            // adapter — see `query_rows`.
+            //
+            // The LIKE pre-filter applies to ASCII terms ONLY, mirroring
+            // the sqlite sibling: PostgreSQL's LOWER() folds non-ASCII
+            // characters only under a Unicode-aware collation — a `C`
+            // collation folds ASCII exclusively, so a non-ASCII term
+            // ('café' against a detail containing 'CAFÉ') could be
+            // excluded by the pre-filter before the Unicode-folding Rust
+            // re-filter ever saw the row (review task-273). Non-ASCII
+            // terms skip the pre-filter and are matched by the Rust
+            // re-filter over the structured-filtered candidate pages.
+            if term.is_ascii() {
+                let pattern = format!("%{}%", escape_like(&term.to_lowercase()));
+                query = query.filter(
+                    lower(audit_events::detail)
+                        .like(pattern)
+                        .escape('\\')
+                        .or(audit_events::detail_zstd.is_not_null()),
+                );
+            }
         }
     }
     query
@@ -645,6 +657,24 @@ mod tests {
         assert!(
             !both.contains("\"tenant_id\" IS NULL"),
             "tenant scoping must stay a bare equality when combined with q: {both}"
+        );
+    }
+
+    #[test]
+    fn free_text_filter_skips_like_for_non_ascii_terms() {
+        // A non-ASCII term must NOT emit the LOWER() LIKE pre-filter
+        // (mirroring the sqlite sibling): LOWER() folds non-ASCII only
+        // under a Unicode-aware collation, so the pre-filter could
+        // exclude Unicode-case matches before the Rust re-filter saw
+        // them. The term is instead matched by the adapter's
+        // Unicode-folding re-filter over the candidate pages.
+        let filtered = sql(&AuditQueryFilter {
+            q: Some("café".to_string()),
+            ..all()
+        });
+        assert!(
+            !filtered.contains("LIKE"),
+            "a non-ASCII q must not emit the ASCII-folding LIKE pre-filter: {filtered}"
         );
     }
 
