@@ -8383,6 +8383,45 @@ specs:
         body
     }
 
+    /// Build a packfile containing the objects reachable from `sha`.
+    /// `git receive-pack` applies NOTHING for a non-delete request that
+    /// carries no packfile (it exits 0 with an unpack error only visible
+    /// in the report stream), so any test asserting a pushed ref actually
+    /// lands must append the pack after the flush-pkt.
+    fn pack_objects_for(repo_path: &str, sha: &str) -> Vec<u8> {
+        use std::io::Write as _;
+        let mut child = std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo_path)
+            .args(["pack-objects", "--stdout"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(format!("{sha}\n").as_bytes())
+            .unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert!(out.status.success(), "pack-objects failed");
+        assert!(
+            !out.stdout.is_empty(),
+            "pack-objects produced empty pack"
+        );
+        out.stdout
+    }
+
+    /// Receive-pack body for a non-delete ref update INCLUDING the
+    /// packfile with the pushed objects — the body `git receive-pack`
+    /// actually applies (see `pack_objects_for`).
+    fn receive_pack_body_with_pack(repo_path: &str, new_sha: &str, refname: &str) -> Vec<u8> {
+        let mut body = receive_pack_body(new_sha, refname);
+        body.extend_from_slice(&pack_objects_for(repo_path, new_sha));
+        body
+    }
+
     /// Build a ref-DELETION receive-pack body (`{old-sha} 000...0 ref`).
     /// Deletions carry no packfile — commands + flush is a complete
     /// request `git receive-pack` applies.
@@ -8444,7 +8483,9 @@ specs:
     // the spec-lifecycle.md §Automatic Task Creation path.
 
     /// POST a stateless receive-pack body updating `refname` to `new_sha`
-    /// with the given Authorization header value.
+    /// with the given Authorization header value. The body carries a real
+    /// packfile (see `receive_pack_body_with_pack`) so accepted pushes
+    /// actually land the ref server-side.
     async fn push_ref_as(
         app: Router,
         ws_slug: &str,
@@ -8452,6 +8493,7 @@ specs:
         auth: &str,
         new_sha: &str,
         refname: &str,
+        repo_path: &str,
     ) -> axum::response::Response {
         app.clone()
             .oneshot(
@@ -8460,7 +8502,9 @@ specs:
                     .uri(format!("/git/{ws_slug}/{repo_name}/git-receive-pack"))
                     .header("Authorization", auth)
                     .header("content-type", "application/x-git-receive-pack-request")
-                    .body(Body::from(receive_pack_body(new_sha, refname)))
+                    .body(Body::from(receive_pack_body_with_pack(
+                        repo_path, new_sha, refname,
+                    )))
                     .unwrap(),
             )
             .await
@@ -8492,6 +8536,7 @@ specs:
             &agent_auth("agent-dbp"),
             &sha,
             "refs/heads/main",
+            &repo_path,
         )
         .await;
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
@@ -8537,6 +8582,7 @@ specs:
             &agent_auth("agent-dbp-feat"),
             &sha,
             "refs/heads/feat/dbp",
+            &repo_path,
         )
         .await;
         assert_eq!(resp.status(), StatusCode::OK);
@@ -8637,6 +8683,7 @@ specs:
             &agent_auth("agent-trunk"),
             &sha,
             "refs/heads/main",
+            &repo_path,
         )
         .await;
         assert_eq!(
@@ -8654,6 +8701,7 @@ specs:
             &agent_auth("agent-trunk"),
             &sha,
             "refs/heads/trunk",
+            &repo_path,
         )
         .await;
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
@@ -8710,6 +8758,7 @@ specs:
             "Bearer gyre-test-human-push-key",
             &sha,
             "refs/heads/main",
+            &repo_path,
         )
         .await;
         assert_eq!(
