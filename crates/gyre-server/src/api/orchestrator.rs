@@ -168,6 +168,20 @@ pub(crate) struct LaunchOutcome {
     pub compute_target_label: String,
 }
 
+/// Connection parameters for an SSH-launched orchestrator process —
+/// everything the out-of-band liveness probe in `launch_orchestrator_process`
+/// needs to rebuild the `SshTarget` connection (user, host, identity_file,
+/// port, ssh_path). A named struct, not a tuple: the monitor consumes it
+/// field-by-field, and the 5-element nested-Option tuple tripped
+/// clippy::type_complexity.
+struct SshLaunchProbe {
+    user: String,
+    host: String,
+    identity_file: Option<String>,
+    port: Option<u16>,
+    ssh_path: Option<String>,
+}
+
 /// Launch the orchestrator process on the workspace's compute target (§3:
 /// both orchestrator tiers use the workspace's configured compute target).
 ///
@@ -381,12 +395,10 @@ pub(crate) async fn launch_orchestrator_process(
     // Probe info for the exit monitor: it must probe liveness with the same
     // target type the process launched on (a container handle has no pid, so
     // a LocalTarget probe would report dead instantly). SSH liveness probes
-    // re-open a connection, so the monitor keeps the connection parameters.
+    // re-open a connection, so the monitor keeps the connection parameters
+    // (user, host, identity_file, port, ssh_path) on this struct.
     let mut launch_image: Option<String> = None;
-    // (user, host, identity_file, port, ssh_path) — everything the
-    // out-of-band liveness probe needs to rebuild the connection.
-    let mut launch_ssh: Option<(String, String, Option<String>, Option<u16>, Option<String>)> =
-        None;
+    let mut launch_ssh: Option<SshLaunchProbe> = None;
 
     // Launch on the resolved target. Mirrors api/spawn.rs: container via
     // ContainerTarget (G8 security defaults), ssh via SshTarget (with
@@ -416,13 +428,13 @@ pub(crate) async fn launch_orchestrator_process(
                 .as_str()
                 .unwrap_or("localhost")
                 .to_string();
-            launch_ssh = Some((
-                user.clone(),
-                host.clone(),
-                cfg.config["identity_file"].as_str().map(str::to_string),
-                cfg.config["port"].as_u64().map(|p| p as u16),
-                cfg.config["ssh_path"].as_str().map(str::to_string),
-            ));
+            launch_ssh = Some(SshLaunchProbe {
+                user: user.clone(),
+                host: host.clone(),
+                identity_file: cfg.config["identity_file"].as_str().map(str::to_string),
+                port: cfg.config["port"].as_u64().map(|p| p as u16),
+                ssh_path: cfg.config["ssh_path"].as_str().map(str::to_string),
+            });
             let mut ssh_target = gyre_adapters::compute::SshTarget::new(user, host);
             if let Some(id_file) = cfg.config["identity_file"].as_str() {
                 ssh_target = ssh_target.with_identity(id_file);
@@ -523,18 +535,18 @@ pub(crate) async fn launch_orchestrator_process(
                             // dead — the stale detector still owns
                             // heartbeat-based recovery.
                             match &launch_ssh {
-                                Some((user, host, id_file, port, ssh_path)) => {
+                                Some(probe_info) => {
                                     let mut probe = gyre_adapters::compute::SshTarget::new(
-                                        user.clone(),
-                                        host.clone(),
+                                        probe_info.user.clone(),
+                                        probe_info.host.clone(),
                                     );
-                                    if let Some(f) = id_file {
+                                    if let Some(f) = &probe_info.identity_file {
                                         probe = probe.with_identity(f.clone());
                                     }
-                                    if let Some(p) = port {
-                                        probe = probe.with_port(*p);
+                                    if let Some(p) = probe_info.port {
+                                        probe = probe.with_port(p);
                                     }
-                                    if let Some(bin) = ssh_path {
+                                    if let Some(bin) = &probe_info.ssh_path {
                                         probe = probe.with_ssh_path(bin.clone());
                                     }
                                     gyre_ports::ComputeTarget::is_alive(&probe, &handle).await
