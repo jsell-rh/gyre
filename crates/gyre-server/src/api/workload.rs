@@ -248,7 +248,10 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(
             json["spiffe_id"],
-            format!("spiffe://gyre.example.com/agent/test-persona/session/{id}")
+            format!(
+                "spiffe://gyre.example.com/agent/test-persona/session/{}",
+                crate::auth::agent_subject(&id)
+            )
         );
 
         // The attestation record now carries the verification result.
@@ -262,7 +265,10 @@ mod tests {
         assert_eq!(rec["alive"], true);
         assert_eq!(
             rec["spiffe_id"],
-            format!("spiffe://gyre.example.com/agent/test-persona/session/{id}")
+            format!(
+                "spiffe://gyre.example.com/agent/test-persona/session/{}",
+                crate::auth::agent_subject(&id)
+            )
         );
         assert!(rec["svid_serial"].is_string());
     }
@@ -282,7 +288,8 @@ mod tests {
         let foreign = foreign_ca
             .issue_svid(
                 &gyre_spiffe::SpiffeId::parse(&format!(
-                    "spiffe://attacker.example/agent/test-persona/session/{id}"
+                    "spiffe://attacker.example/agent/test-persona/session/{}",
+                    crate::auth::agent_subject(&id)
                 ))
                 .expect("foreign SPIFFE ID must parse"),
                 gyre_spiffe::BASE_SVID_TTL_SECS,

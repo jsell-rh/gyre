@@ -353,15 +353,49 @@ pub async fn update_repo(
     Ok(Json(repo_response_with_clone_url(&state, repo).await))
 }
 
+/// POST /api/v1/repos/:id/archive
+///
+/// By-effect task-scope surface (identity-security.md §Task-Scoped JWT
+/// Claims): archiving cancels every active task in the repo and revokes its
+/// agents' Task-scoped secrets. The route sits in the ABAC exemption file
+/// (no middleware policy runs), so the per-handler check is the only
+/// authorization: the caller must be contained in the repo's tenant, and a
+/// task-bound agent principal is denied outright — no task claim can cover
+/// a repo-wide destructive action.
 pub async fn archive_repo(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    auth: crate::auth::AuthenticatedAgent,
 ) -> Result<Json<RepoResponse>, ApiError> {
     let mut repo = state
         .repos
         .find_by_id(&Id::new(&id))
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("repo {id} not found")))?;
+    if auth.agent_task_claim().is_some() {
+        return Err(ApiError::Forbidden(
+            "agent tokens cannot archive repositories".to_string(),
+        ));
+    }
+    if !auth.is_system_principal() {
+        let ws = state
+            .workspaces
+            .find_by_id(&repo.workspace_id)
+            .await
+            .map_err(ApiError::Internal)?
+            .ok_or_else(|| {
+                ApiError::NotFound(format!(
+                    "workspace {} for repo {} not found",
+                    repo.workspace_id, repo.id
+                ))
+            })?;
+        if auth.tenant_id != ws.tenant_id.to_string() {
+            return Err(ApiError::Forbidden(format!(
+                "repo {} belongs to another tenant",
+                repo.id
+            )));
+        }
+    }
 
     if repo.is_archived() {
         return Err(ApiError::InvalidInput(
@@ -1843,6 +1877,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri(format!("/api/v1/repos/{id}/archive"))
+                    .header("authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -1899,6 +1934,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri(format!("/api/v1/repos/{id}/archive"))
+                    .header("authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -2215,6 +2251,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri(format!("/api/v1/repos/{id}/archive"))
+                    .header("authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -2267,6 +2304,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri(format!("/api/v1/repos/{id}/archive"))
+                    .header("authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )

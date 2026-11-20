@@ -472,9 +472,9 @@ mod tests {
             );
             state.repos.create(&repo).await.unwrap();
             let app = crate::api::api_router().with_state(state.clone());
-            // create_mr extracts AuthenticatedAgent; seed the MR with the
-            // global test token (system/Admin) so the seed itself is
-            // authorized.
+            // create_mr takes the auth extractor (task-263 MR-scope
+            // boundary); seed the MR with the global test token
+            // (system/Admin) so the seed itself is authorized.
             let resp = app
                 .clone()
                 .oneshot(
@@ -483,6 +483,7 @@ mod tests {
                         .uri("/api/v1/merge-requests")
                         .header("Authorization", "Bearer test-token")
                         .header("Content-Type", "application/json")
+                        .header("authorization", "Bearer test-token")
                         .body(Body::from(
                             serde_json::to_string(&serde_json::json!({
                                 "repository_id": "repo-1",

@@ -269,7 +269,7 @@ pub struct AppState {
     /// Merge attestation bundle verification (agent-gates.md §Part 3
     /// Verification). Stateless — holds only the forge key handle.
     pub attestation_verifier: Arc<dyn gyre_ports::AttestationVerifier>,
-    /// Agent JWT TTL in seconds. Configurable via GYRE_AGENT_JWT_TTL (default: 300, M27.5).
+    /// Agent JWT TTL in seconds. Configurable via GYRE_AGENT_JWT_TTL (default: 3600).
     pub agent_jwt_ttl_secs: u64,
     /// Lifetime of a meta-spec preview run before the GC sweep tears it down.
     /// Configurable via GYRE_META_SPEC_PREVIEW_TTL_HOURS (default: 24 h).
@@ -1888,6 +1888,22 @@ pub fn build_state(
     // JWKS (message-bus.md §Edge Cases "Signature key rotation").
     let (agent_signing_key, signing_key_history) =
         load_or_persist_agent_signing_key(&sqlite_db, &pg_db);
+    // identity-security.md §Task-Scoped JWT Claims: aud is `gyre`, or
+    // GYRE_OIDC_AUDIENCE when the operator configured one. Carried on
+    // the key so every mint and every validation agree on the audience.
+    // The audience is mint/validation metadata, not key material, so the
+    // override keeps the kid (and the retained history) consistent.
+    let agent_signing_key = {
+        let audience = std::env::var("GYRE_OIDC_AUDIENCE")
+            .ok()
+            .filter(|a| !a.is_empty())
+            .unwrap_or_else(|| crate::auth::DEFAULT_AGENT_JWT_AUDIENCE.to_string());
+        if agent_signing_key.audience() == audience {
+            agent_signing_key
+        } else {
+            Arc::new((*agent_signing_key).clone().with_audience(audience))
+        }
+    };
 
     // Rekor transparency-log publication for merge attestation bundles
     // (task-264): the REAL HTTP client replaces the old no-op stub. It is
@@ -1954,11 +1970,14 @@ pub fn build_state(
         attestation_verifier: Arc::new(crate::merge_attestation::ForgeAttestationVerifier::new(
             agent_signing_key.clone(),
         )),
-        // M27.5: Default reduced from 3600 to 300 s (5 min) to limit JWT exposure window.
+        // Agent JWT TTL (identity-security.md §Task-Scoped JWT Claims:
+        // configurable via GYRE_AGENT_JWT_TTL, default 3600 s). The earlier
+        // 300 s default was an undocumented M27.5 deviation from the claims
+        // table; the spec default is restored here.
         agent_jwt_ttl_secs: std::env::var("GYRE_AGENT_JWT_TTL")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(300),
+            .unwrap_or(3600),
         // Meta-spec preview mode (meta-spec-reconciliation.md §5).
         preview_ttl_secs: api::meta_specs::preview_ttl_secs_from_env(),
         preview_jwt_ttl_secs: api::meta_specs::preview_jwt_ttl_secs_from_env(),

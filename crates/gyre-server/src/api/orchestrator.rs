@@ -849,6 +849,27 @@ pub(crate) async fn spawn_workspace_orchestrator_core(
     .await
 }
 
+/// identity-security.md §Task-Scoped JWT Claims — shared per-handler check
+/// for the orchestrator-mint surfaces (task-263 review repair): a worker-tier,
+/// task-bound agent JWT may not mint an orchestrator JWT. The minted token
+/// carries `orchestrator_type`, so `agent_task_claim()` is `None` for it —
+/// it crosses every claims-based agent boundary (task mutation, agent
+/// lifecycle, spawn, MR, git push) and holds no `repo_id` claim, so the
+/// seeded `agent-repo-scope` containment never denies it. No task claim can
+/// authorize minting a broader-scoped principal, so the denial is outright,
+/// mirroring `archive_repo`/`compose apply`; non-agent principals
+/// (users, orchestrators, system, gate, API keys) pass through untouched
+/// (`agent_task_claim()` is `None` for them).
+fn deny_task_bound_agent(auth: &AuthenticatedAgent) -> Result<(), ApiError> {
+    if auth.agent_task_claim().is_some() {
+        return Err(ApiError::Forbidden(
+            "agent tokens cannot spawn orchestrators: a task-scoped worker JWT cannot mint a broader-scoped principal"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// POST /api/v1/workspaces/:id/orchestrator/spawn
 ///
 /// Spawn the single workspace orchestrator for a workspace.
@@ -871,12 +892,33 @@ pub(crate) async fn spawn_workspace_orchestrator_core(
 /// `orchestrator_spawn_denied_across_tenants` regression test).
 /// The shared core re-checks containment for every caller (it is also the
 /// MCP spawn path, which runs without middleware ABAC).
+///
+/// identity-security.md §Task-Scoped JWT Claims — by-effect task-scope
+/// surface (task-263 review repair): the route MINTS a workspace-scoped
+/// orchestrator JWT, and that token crosses every task-263 agent boundary
+/// — `agent_task_claim()` is `None` for orchestrator JWTs (they carry
+/// `orchestrator_type`), so the claims-based checks on task mutation,
+/// agent lifecycle, spawn, MR creation, and git push all pass for it, and
+/// it holds no `repo_id` claim so the seeded `agent-repo-scope` containment
+/// never denies it either. Under the default seeded configuration the
+/// only guard above the registry exemption is the (workspace, write)
+/// middleware policy, where the `agent-scoped-access` builtin (priority
+/// 700) Allows write for Agent-role subjects and `agent-repo-scope`
+/// structurally cannot fire on a workspace-tier resource — so a task-A
+/// worker JWT could otherwise mint itself an orchestrator identity with
+/// two HTTP calls and pivot to any task in the workspace. A task-bound
+/// agent principal is therefore denied outright (see
+/// `deny_task_bound_agent`): no task claim can authorize minting a
+/// broader-scoped principal. Non-agent principals (Admin users, the
+/// system token, orchestrators) keep the right.
 pub async fn spawn_workspace_orchestrator(
     State(state): State<Arc<AppState>>,
     auth: AuthenticatedAgent,
     Path(workspace_id): Path<String>,
     Json(req): Json<SpawnOrchestratorRequest>,
 ) -> Result<(StatusCode, Json<SpawnOrchestratorResponse>), ApiError> {
+    deny_task_bound_agent(&auth)?;
+
     // Role gate (task-206 review F1): spawning the workspace orchestrator is
     // an operator action — it decomposes specs into tasks and spawns worker
     // agents, durable ledger footprint. The route is not repo-addressed, so
@@ -1115,12 +1157,28 @@ pub(crate) fn parse_priority(s: &str) -> gyre_domain::TaskPriority {
 /// its containment holds for every caller.) The shared core re-checks
 /// containment for every caller (it is also the MCP spawn path, which runs
 /// without middleware ABAC).
+///
+/// identity-security.md §Task-Scoped JWT Claims — by-effect task-scope
+/// surface (task-263 review repair): a task-bound agent principal may not
+/// mint an orchestrator JWT on ANY route (see
+/// `spawn_workspace_orchestrator` for the full chain — the minted token
+/// crosses every claims-based agent boundary). On this repo-tier route the
+/// same escape exists within the worker's own repo: the seeded
+/// `agent-repo-scope` containment (priority 750) does not fire when the
+/// target is the worker's scoped repo, so the `agent-scoped-access` role
+/// Allow (priority 700) passes the worker through `check_repo_abac` under
+/// the default configuration. The MCP twin (`gyre_spawn_repo_orchestrator`)
+/// already requires workspace-orchestrator tool scope, so this closes the
+/// REST/MCP asymmetry. Non-agent principals (Admin users, the system
+/// token, orchestrators) keep the right.
 pub async fn spawn_repo_orchestrator(
     State(state): State<Arc<AppState>>,
     auth: AuthenticatedAgent,
     Path(repo_id): Path<String>,
     Json(req): Json<SpawnOrchestratorRequest>,
 ) -> Result<(StatusCode, Json<SpawnOrchestratorResponse>), ApiError> {
+    deny_task_bound_agent(&auth)?;
+
     // Role gate (task-206 review F1, repo tier): spawning the repo
     // orchestrator is an operator action — it decomposes specs into tasks
     // and spawns worker agents, durable ledger footprint. The route is
@@ -2434,8 +2492,8 @@ mod tests {
 
         let code = crate::api::spawn::fail_agent(
             State(state.clone()),
-            auth_in_tenant("t1"),
             Path(repo_orch.id.to_string()),
+            auth_in_tenant("t1"),
         )
         .await
         .unwrap();
@@ -2479,8 +2537,8 @@ mod tests {
 
         let code = crate::api::spawn::stop_agent(
             State(state.clone()),
-            auth_in_tenant("t1"),
             Path(agent.id.to_string()),
+            auth_in_tenant("t1"),
         )
         .await
         .unwrap();
@@ -2607,16 +2665,16 @@ mod tests {
         let id = agent.id.to_string();
         let code = crate::api::spawn::stop_agent(
             State(state.clone()),
-            auth_in_tenant("t1"),
             Path(id.clone()),
+            auth_in_tenant("t1"),
         )
         .await
         .unwrap();
         assert_eq!(code, StatusCode::OK);
         let code = crate::api::spawn::fail_agent(
             State(state.clone()),
-            auth_in_tenant("t1"),
             Path(id.clone()),
+            auth_in_tenant("t1"),
         )
         .await
         .unwrap();
@@ -2683,8 +2741,8 @@ mod tests {
 
         let code = crate::api::spawn::fail_agent(
             State(state.clone()),
-            auth_in_tenant("t1"),
             Path(agent.id.to_string()),
+            auth_in_tenant("t1"),
         )
         .await
         .unwrap();

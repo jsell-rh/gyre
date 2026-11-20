@@ -57,12 +57,23 @@ pub struct TeardownRequest {
 /// reconciliation §5): compose_apply creates task and agent rows, a direct
 /// bypass of the guarded `POST /api/v1/tasks` route that would leave durable
 /// ledger footprint from throwaway preview scratch.
+/// identity-security.md §Task-Scoped JWT Claims — by-effect task-scope
+/// surface: compose apply creates task rows and agents, and compose
+/// teardown kills the session's agents (revoking their Task-scoped
+/// secrets). A task-bound agent principal is denied on both — its token
+/// authorizes its own task, not the composition graph of other agents.
+/// Non-agent principals are unaffected.
 pub async fn compose_apply(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     auth: crate::auth::AuthenticatedAgent,
+    headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Result<(StatusCode, Json<ComposeApplyResponse>), ApiError> {
+    if auth.agent_task_claim().is_some() {
+        return Err(ApiError::Forbidden(
+            "agent tokens cannot apply compose graphs".to_string(),
+        ));
+    }
     // meta-spec reconciliation §5 (task-206 review F1): preview agents may
     // not mint task/agent rows — the same ceremony the guarded
     // POST /api/v1/tasks route already refuses for them.
@@ -219,11 +230,19 @@ pub async fn compose_status(
 /// Authorization: same per-handler preview-agent refusal as compose_apply —
 /// the guard runs BEFORE the session lookup so a preview caller cannot
 /// teardown any compose session (killing its agents) nor probe session ids.
+/// See `compose_apply`'s doc comment: teardown kills the session's agents
+/// and revokes their Task-scoped secrets, so task-bound agent principals are
+/// denied; non-agent principals are unaffected.
 pub async fn compose_teardown(
     State(state): State<Arc<AppState>>,
     auth: crate::auth::AuthenticatedAgent,
     Json(req): Json<TeardownRequest>,
 ) -> Result<StatusCode, ApiError> {
+    if auth.agent_task_claim().is_some() {
+        return Err(ApiError::Forbidden(
+            "agent tokens cannot tear down compose sessions".to_string(),
+        ));
+    }
     // meta-spec reconciliation §5 (task-206 review F1): preview agents may
     // not kill other runs' agents.
     if crate::api::meta_specs::caller_is_preview_agent(&state, &auth).await {
@@ -370,6 +389,7 @@ mod tests {
                     .uri("/api/v1/compose/apply")
                     .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&compose).unwrap()))
                     .unwrap(),
             )
@@ -421,6 +441,7 @@ mod tests {
                     .uri("/api/v1/compose/apply")
                     .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&compose).unwrap()))
                     .unwrap(),
             )
@@ -487,6 +508,7 @@ mod tests {
                     .uri("/api/v1/compose/apply")
                     .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&compose).unwrap()))
                     .unwrap(),
             )
@@ -505,6 +527,7 @@ mod tests {
                     .uri("/api/v1/compose/teardown")
                     .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&teardown_body).unwrap()))
                     .unwrap(),
             )
@@ -583,6 +606,7 @@ agents:
                     .uri("/api/v1/compose/apply")
                     .header("authorization", "Bearer test-token")
                     .header("content-type", "application/yaml")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(yaml))
                     .unwrap(),
             )
@@ -621,6 +645,7 @@ agents:
                     .uri("/api/v1/compose/apply")
                     .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&compose).unwrap()))
                     .unwrap(),
             )
@@ -666,6 +691,7 @@ agents:
                     .uri("/api/v1/compose/apply")
                     .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&compose).unwrap()))
                     .unwrap(),
             )
@@ -698,6 +724,7 @@ agents:
                     .uri("/api/v1/compose/teardown")
                     .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&teardown_body).unwrap()))
                     .unwrap(),
             )

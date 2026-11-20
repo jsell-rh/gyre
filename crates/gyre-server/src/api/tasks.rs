@@ -182,11 +182,21 @@ fn parse_task_priority(s: &str) -> Result<TaskPriority, ApiError> {
     }
 }
 
+/// POST /api/v1/tasks
+///
+/// identity-security.md §Task-Scoped JWT Claims — task-row mutation
+/// surface: an agent principal may only create tasks inside its token's
+/// scope. Explicit `workspace_id`/`repo_id` targets must match the caller's
+/// verified claims; absent targets are clamped to them (the same contract
+/// the MCP `gyre_create_task` path enforces via `check_create_task_target` —
+/// a scoped caller cannot create floating unscoped tasks). Non-agent
+/// principals are unaffected.
 pub async fn create_task(
     State(state): State<Arc<AppState>>,
     auth: crate::auth::AuthenticatedAgent,
     Json(req): Json<CreateTaskRequest>,
 ) -> Result<(StatusCode, Json<TaskResponse>), ApiError> {
+    let mut req = req;
     // Preview agents (meta-spec reconciliation §5) run ceremony-free: no task
     // ledger writes. The MCP dispatch already refuses `gyre_create_task` for
     // preview agents, but allowedTools is advisory and builtin policy grants
@@ -199,6 +209,26 @@ pub async fn create_task(
              the preview branch is the deliverable"
                 .to_string(),
         ));
+    }
+    if auth.agent_task_claim().is_some() {
+        if let Some(ws_id) = req.workspace_id.as_deref() {
+            if Some(ws_id.to_string()) != auth.workspace_id {
+                return Err(ApiError::Forbidden(format!(
+                    "agent token is not scoped to workspace {ws_id}"
+                )));
+            }
+        } else {
+            req.workspace_id = auth.workspace_id.clone();
+        }
+        if let Some(repo_id) = req.repo_id.as_deref() {
+            if Some(repo_id.to_string()) != auth.repo_id {
+                return Err(ApiError::Forbidden(format!(
+                    "agent token is not scoped to repo {repo_id}"
+                )));
+            }
+        } else {
+            req.repo_id = auth.repo_id.clone();
+        }
     }
     let now = now_secs();
     let mut task = Task::new(new_id(), req.title, now);
@@ -300,10 +330,34 @@ pub async fn get_task(
     Ok(Json(TaskResponse::from(task)))
 }
 
+/// PUT /api/v1/tasks/:id
+///
+/// identity-security.md §Task-Scoped JWT Claims — shared per-handler check:
+/// an agent principal (worker-tier, task-bound JWT) may only mutate the
+/// task its token names. Returns 403 on mismatch; non-agent principals
+/// (users, system, orchestrators) pass through untouched.
+fn require_task_claim(auth: &crate::auth::AuthenticatedAgent, task: &Task) -> Result<(), ApiError> {
+    if let Some(claim) = auth.agent_task_claim() {
+        if task.id.to_string() != claim {
+            return Err(ApiError::Forbidden(format!(
+                "agent token is scoped to task {claim}, not task {}",
+                task.id
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// identity-security.md §Task-Scoped JWT Claims — hard task-scope boundary:
+/// this handler mutates title, description, priority, assigned_to (with
+/// generation bump), branch, pr_link, and labels, so an agent principal
+/// whose `task_id` claim does not match the target task gets 403 — tier-level
+/// ABAC scoping alone does not enforce the task boundary. Non-agent
+/// principals are unaffected.
 pub async fn update_task(
     State(state): State<Arc<AppState>>,
-    auth: crate::auth::AuthenticatedAgent,
     Path(id): Path<String>,
+    auth: crate::auth::AuthenticatedAgent,
     Json(req): Json<UpdateTaskRequest>,
 ) -> Result<Json<TaskResponse>, ApiError> {
     // Preview agents may not mutate the task ledger (meta-spec reconciliation
@@ -320,6 +374,7 @@ pub async fn update_task(
         .find_by_id(&Id::new(&id))
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("task {id} not found")))?;
+    require_task_claim(&auth, &task)?;
     if let Some(title) = req.title {
         task.title = title;
     }
@@ -355,11 +410,15 @@ pub async fn update_task(
     Ok(Json(TaskResponse::from(task)))
 }
 
-#[instrument(skip(state, req, auth), fields(task_id = %id, new_status = %req.status))]
+/// identity-security.md §Task-Scoped JWT Claims — hard task-scope boundary:
+/// the status transition mutates task-owned state, so an agent principal
+/// whose `task_id` claim does not match the target task gets 403.
+/// Non-agent principals are unaffected.
+#[instrument(skip(state, auth, req), fields(task_id = %id, new_status = %req.status))]
 pub async fn transition_task_status(
     State(state): State<Arc<AppState>>,
-    auth: crate::auth::AuthenticatedAgent,
     Path(id): Path<String>,
+    auth: crate::auth::AuthenticatedAgent,
     Json(req): Json<TransitionStatusRequest>,
 ) -> Result<Json<TaskResponse>, ApiError> {
     // Preview agents may not transition task status (meta-spec reconciliation
@@ -380,6 +439,7 @@ pub async fn transition_task_status(
         .find_by_id(&Id::new(&id))
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("task {id} not found")))?;
+    require_task_claim(&auth, &task)?;
     let new_status = parse_task_status(&req.status)?;
     let old_status = task.status.clone();
     task.transition_status(new_status.clone())
@@ -449,6 +509,7 @@ mod tests {
                     .uri("/api/v1/tasks")
                     .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -510,6 +571,7 @@ mod tests {
                     .uri(format!("/api/v1/tasks/{id}"))
                     .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&update_body).unwrap()))
                     .unwrap(),
             )
@@ -518,6 +580,190 @@ mod tests {
         assert_eq!(update_resp.status(), StatusCode::OK);
         let updated = body_json(update_resp).await;
         assert_eq!(updated["priority"], "high");
+    }
+
+    /// Mint a worker JWT bound to `task_id` and register it in
+    /// agent_tokens so the auth extractor resolves the agent principal
+    /// (task-263 task-scope boundary probes).
+    async fn agent_token_for_task(
+        state: &std::sync::Arc<crate::AppState>,
+        task_id: &str,
+    ) -> String {
+        let token = state
+            .agent_signing_key
+            .mint_worker_scoped(
+                "agent-scope-1",
+                task_id,
+                "system",
+                &state.base_url,
+                3600,
+                "default",
+                "ws-1",
+                "repo-1",
+                "repo-1",
+                None,
+                Some(1),
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        state
+            .kv_store
+            .kv_set("agent_tokens", "agent-scope-1", token.clone())
+            .await
+            .unwrap();
+        token
+    }
+
+    /// AC (task-263): a valid, non-expired agent JWT spawned for task A
+    /// gets 403 on PUT /api/v1/tasks/:id for task B — the FULL content
+    /// update (title/description/priority/assigned_to/branch/pr_link/
+    /// labels), not only the status transition — and on the task-status
+    /// transition of task B; its own task still works.
+    #[tokio::test]
+    async fn agent_jwt_cannot_mutate_foreign_task() {
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let (app, task_a) = create_test_task(app, "Task A").await;
+        let (app, task_b) = create_test_task(app, "Task B").await;
+        let token = agent_token_for_task(&state, &task_a).await;
+
+        // Full content update of task B → 403.
+        let body = serde_json::json!({
+            "title": "hijacked",
+            "description": "hijacked",
+            "priority": "urgent",
+            "branch": "feat/evil",
+            "pr_link": "https://example.com/pr",
+            "labels": ["hijacked"],
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/tasks/{task_b}"))
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        // Task B is untouched.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/tasks/{task_b}"))
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let got = body_json(resp).await;
+        assert_eq!(got["title"], "Task B");
+
+        // Status transition of task B → 403.
+        let body = serde_json::json!({ "status": "in_progress" });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/tasks/{task_b}/status"))
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // The agent's own task is not locked out: content update and
+        // transition both pass the boundary (non-agent principals keep
+        // their rights — asserted by every pre-existing test above).
+        let body = serde_json::json!({ "title": "A updated by its agent" });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/tasks/{task_a}"))
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = serde_json::json!({ "status": "in_progress" });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/tasks/{task_a}/status"))
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    /// Task creation by an agent principal is clamped to its token's scope
+    /// (the MCP gyre_create_task contract): explicit foreign targets are
+    /// rejected, absent targets inherit the caller's claims.
+    #[tokio::test]
+    async fn agent_jwt_create_task_clamped_to_claims() {
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let token = agent_token_for_task(&state, "task-own").await;
+
+        // Explicit foreign workspace → 403.
+        let body = serde_json::json!({ "title": "foreign", "workspace_id": "ws-other" });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/tasks")
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // Absent targets → clamped to the token's workspace/repo claims.
+        let body = serde_json::json!({ "title": "scoped" });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/tasks")
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let json = body_json(resp).await;
+        assert_eq!(json["workspace_id"], "ws-1");
+        assert_eq!(json["repo_id"], "repo-1");
     }
 
     #[tokio::test]
@@ -533,6 +779,7 @@ mod tests {
                     .uri(format!("/api/v1/tasks/{id}/status"))
                     .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -557,6 +804,7 @@ mod tests {
                     .uri(format!("/api/v1/tasks/{id}/status"))
                     .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -622,6 +870,7 @@ mod tests {
                     .uri("/api/v1/tasks")
                     .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -640,6 +889,7 @@ mod tests {
                     .uri(format!("/api/v1/tasks/{id}/status"))
                     .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -691,6 +941,7 @@ mod tests {
                     .uri(format!("/api/v1/tasks/{id}/status"))
                     .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -729,6 +980,7 @@ mod tests {
                     .uri(format!("/api/v1/tasks/{id}"))
                     .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&assign_body).unwrap()))
                     .unwrap(),
             )
@@ -744,6 +996,7 @@ mod tests {
                     .uri(format!("/api/v1/tasks/{id}/status"))
                     .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
