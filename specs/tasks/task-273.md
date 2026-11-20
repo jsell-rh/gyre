@@ -3,7 +3,7 @@ title: "Admin Panel completion: SOPS/Vault secret backends, durable job history 
 spec_ref: "Spec gap spec-5b647653a4554eea3e93ac19 / admin-panel-remaining-gap / e61ffd082155"
 depends_on: []
 progress: ready-for-review
-commits: ["db320101b1540a35cf9986408e70ac46008b1982", "ee253c8854f16664f91d16171e08414effc314b7", "b101d27aafb7bde0907a568e7bb8a3ffbdd3ae67", "f6e31cf57779a7e117f5a0b9bd75720aed90ca56", "a2b31ac19c05310ebd05a072ddde1acf0c51f2ec", "1bc00b6cb9212e6ac6dfc7c764afede98ae8fd64", "0fda00bfe9860c8c8b66ea1235f0d2e3251df67a", "9b81c9816f13a3d637057a6c3149c9be92f38a3c", "3ebd143d29eb52bb2bc0bd748f60fe52fa960f66", "210dfa61bc1ea637a29a79c26af80746b2fb002c", "b979fefeeb7a6bb8340ccd85c64b467e0f46c553", "808e3c10c035c9fc6fe8c5ee96d474fc5468acf3", "cd2f616e3ebd96addab2dcaf78242d31c58efc04", "d6f32bd0269314f9ee552ed72df33322b0fe2238"]
+commits: ["d6f32bd0269314f9ee552ed72df33322b0fe2238", "cd2f616e3ebd96addab2dcaf78242d31c58efc04", "808e3c10c035c9fc6fe8c5ee96d474fc5468acf3", "b979fefeeb7a6bb8340ccd85c64b467e0f46c553", "210dfa61bc1ea637a29a79c26af80746b2fb002c", "3ebd143d29eb52bb2bc0bd748f60fe52fa960f66", "9b81c9816f13a3d637057a6c3149c9be92f38a3c", "0fda00bfe9860c8c8b66ea1235f0d2e3251df67a", "1bc00b6cb9212e6ac6dfc7c764afede98ae8fd64", "a2b31ac19c05310ebd05a072ddde1acf0c51f2ec", "f6e31cf57779a7e117f5a0b9bd75720aed90ca56", "b101d27aafb7bde0907a568e7bb8a3ffbdd3ae67", "ee253c8854f16664f91d16171e08414effc314b7", "db320101b1540a35cf9986408e70ac46008b1982"]
 ---
 
 ## Required behavior
