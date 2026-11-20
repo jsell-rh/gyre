@@ -753,7 +753,16 @@ pub async fn git_receive_pack(
     // branch literally named "main" there is unaffected.
     if auth.user_id.is_none() && !auth.is_system_principal() {
         let default_ref = format!("refs/heads/{default_branch}");
-        if ref_updates.iter().any(|u| u.refname == default_ref) {
+        // Match the RAW ref-update commands, not `ref_updates`:
+        // `parse_ref_updates` filters deletions out (new SHA all zeros
+        // carries no push-acceptance processing), so matching only the
+        // filtered list would let an agent principal DELETE the default
+        // branch — the protected target class in its most destructive
+        // form. The raw command list includes deletions.
+        if parse_ref_update_commands(&body_bytes)
+            .iter()
+            .any(|u| u.refname == default_ref)
+        {
             let reason = format!(
                 "agent principals may not push directly to the default branch \
                  '{default_branch}'; push a feature branch and signal completion \
@@ -1823,7 +1832,14 @@ fn is_valid_sha(s: &str) -> bool {
     s.len() == 40 && s.chars().all(|c| c.is_ascii_hexdigit())
 }
 
-fn parse_ref_updates(body: &[u8]) -> Vec<RefUpdate> {
+/// Parse EVERY pkt-line ref-update command in a receive-pack request
+/// body, INCLUDING deletions (new SHA all zeros). `parse_ref_updates`
+/// filters deletions out because they carry no commit content for
+/// push-acceptance processing, but protection checks must see them: a
+/// deletion targets a ref just as much as an update does, so a guard
+/// matching only the filtered list would let an agent principal delete a
+/// protected ref.
+fn parse_ref_update_commands(body: &[u8]) -> Vec<RefUpdate> {
     let mut updates = Vec::new();
     let mut pos = 0;
 
@@ -1855,7 +1871,6 @@ fn parse_ref_updates(body: &[u8]) -> Vec<RefUpdate> {
 
         let parts: Vec<&str> = line.splitn(3, ' ').collect();
         if parts.len() == 3 {
-            let zeros = "0000000000000000000000000000000000000000";
             let old = parts[0].to_string();
             let new = parts[1].to_string();
             // M-8 fix: validate SHA format to prevent git argument injection.
@@ -1863,18 +1878,27 @@ fn parse_ref_updates(body: &[u8]) -> Vec<RefUpdate> {
                 tracing::warn!("invalid SHA in push ref-update: old={old} new={new}");
                 continue;
             }
-            // Only record pushes of real commits (not deletions).
-            if new != zeros {
-                updates.push(RefUpdate {
-                    old_sha: old,
-                    new_sha: new,
-                    refname: parts[2].to_string(),
-                });
-            }
+            updates.push(RefUpdate {
+                old_sha: old,
+                new_sha: new,
+                refname: parts[2].to_string(),
+            });
         }
     }
 
     updates
+}
+
+/// Parse updated refs (pkt-line ref-update commands), EXCLUDING deletions
+/// (new SHA all zeros): deletions carry no commit content, so there is
+/// nothing for push-acceptance processing (pre-accept gates, push
+/// signaling, spec lifecycle) to act on.
+fn parse_ref_updates(body: &[u8]) -> Vec<RefUpdate> {
+    const ZERO_SHA: &str = "0000000000000000000000000000000000000000";
+    parse_ref_update_commands(body)
+        .into_iter()
+        .filter(|u| u.new_sha != ZERO_SHA)
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -8346,6 +8370,17 @@ specs:
         body
     }
 
+    /// Build a ref-DELETION receive-pack body (`{old-sha} 000...0 ref`).
+    /// Deletions carry no packfile — commands + flush is a complete
+    /// request `git receive-pack` applies.
+    fn receive_pack_delete_body(old_sha: &str, refname: &str) -> Vec<u8> {
+        let zeros = "0000000000000000000000000000000000000000";
+        let line = format!("{old_sha} {zeros} {refname}\n");
+        let mut body = pkt_line(&line);
+        body.extend_from_slice(b"0000");
+        body
+    }
+
     /// Seed an agent with a registered stack AND a per-agent push token, so
     /// the test pushes AS the agent (the global test token authenticates as
     /// "system", which would resolve the wrong attestation context).
@@ -8495,6 +8530,67 @@ specs:
         assert!(
             ref_exists(&repo_path, "refs/heads/feat/dbp"),
             "agent feature-branch push must be accepted"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn agent_deletion_of_default_branch_rejected() {
+        // Review repair (task-270): `parse_ref_updates` filters deletions
+        // (new SHA all zeros) out of the ref-update list, so a guard
+        // matching only that list would let an agent principal DELETE the
+        // default branch — receive-pack applies delete commands, which
+        // carry no packfile. The protection must match the RAW ref-update
+        // commands.
+        let (app, state, _tmp, ws_slug, repo_name, repo_path) = git_app_with_repo().await;
+        seed_agent_token(&state, "agent-dbp-del").await;
+
+        // Seed the default branch directly in the bare store.
+        let seed = make_commit(&repo_path, &[("del.md", "# del\n".to_string())]).await;
+        let ok = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["update-ref", "refs/heads/main", &seed])
+            .status()
+            .unwrap();
+        assert!(ok.success(), "update-ref failed");
+        assert!(ref_exists(&repo_path, "refs/heads/main"));
+
+        // Deletion command for the default branch, authenticated with the
+        // agent token.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/git/{ws_slug}/{repo_name}/git-receive-pack"))
+                    .header("Authorization", agent_auth("agent-dbp-del"))
+                    .header("content-type", "application/x-git-receive-pack-request")
+                    .body(Body::from(receive_pack_delete_body(
+                        &seed,
+                        "refs/heads/main",
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "agent-principal deletion of the default branch must be rejected"
+        );
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = String::from_utf8_lossy(&body);
+        assert!(
+            body.contains("merge request"),
+            "rejection must direct the agent to the MR flow, got: {body}"
+        );
+
+        // The rejection runs before receive-pack — the default-branch ref
+        // must still exist server-side.
+        assert!(
+            ref_exists(&repo_path, "refs/heads/main"),
+            "default-branch ref must not be deleted by a rejected agent push"
         );
     }
 

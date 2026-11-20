@@ -41,9 +41,10 @@
 //! defaults (see [`HygieneThresholds`]). All notification actions dedupe
 //! through the notification store's exact (workspace, user, type,
 //! entity_ref) active-notification lookup — the same mechanism as
-//! `abandoned_branch_check` — so consecutive runs are idempotent, and
-//! every action is observable (notification rows, audit events, persisted
-//! MR state).
+//! `abandoned_branch_check` — and agent-reviewer bus emissions dedupe
+//! through a KV backoff keyed (MR, agent), so consecutive runs are
+//! idempotent, and every action is observable (notification rows, audit
+//! events, persisted MR state).
 
 use std::sync::Arc;
 
@@ -63,6 +64,18 @@ pub const JOB_NAME: &str = "pr_hygiene_check";
 /// double-rebasing the same workspace inside 60s.
 const JJ_REBASE_BACKOFF_NS: &str = "jj_rebase_backoff";
 const JJ_REBASE_WINDOW_SECS: u64 = 60;
+
+/// KV namespace deduplicating agent-reviewer nudges: key =
+/// `{mr_id}:{agent_id}`, value = epoch seconds of the last nudge emitted
+/// to that agent for that MR. Agent reviewers have no notification-inbox
+/// row to dedupe against (the user path dedupes through
+/// `has_active_notification`), so the message-bus emission is rate-limited
+/// here instead — without it, the job's short cadence would re-emit a
+/// duplicate `review_nudge` on every evaluation. The window is the nudge
+/// threshold: after it elapses since the last nudge the agent may be
+/// nudged again, mirroring the user path's re-notify-after-dismissal
+/// semantics.
+const NUDGE_BACKOFF_NS: &str = "pr_hygiene_nudge_backoff";
 
 /// Stale-class thresholds. Defaults: nudge after 2 days without a review,
 /// escalate to Admins after 7 days of inactivity, auto-close after 30
@@ -195,7 +208,7 @@ async fn evaluate_workspace(
                 .map(|rs| rs.len())
                 .unwrap_or(0);
             if review_count == 0 {
-                nudge_unreviewed(state, ws, &mr, now).await;
+                nudge_unreviewed(state, ws, &mr, thresholds, now).await;
             }
         }
     }
@@ -401,6 +414,41 @@ async fn persist_rebase_backoff(state: &Arc<AppState>, agent_id: &Id) {
     }
 }
 
+/// KV key scoping one agent's review nudge for one MR.
+fn nudge_backoff_key(mr: &gyre_domain::MergeRequest, agent_id: &Id) -> String {
+    format!("{}:{}", mr.id.as_str(), agent_id.as_str())
+}
+
+/// True while the nudge backoff window is active for the (MR, agent)
+/// pair — at most one `review_nudge` emission per window per pair. A KV
+/// read failure fails open (the nudge proceeds): the backoff is a
+/// deduplication rate limit, not an enforcement gate, and dropping the
+/// nudge entirely on an infra blip would leave a stale MR silent — the
+/// exact failure class this job exists to prevent.
+async fn in_nudge_backoff(state: &Arc<AppState>, key: &str, window_secs: u64, now: u64) -> bool {
+    match state.kv_store.kv_get(NUDGE_BACKOFF_NS, key).await {
+        Ok(Some(v)) => match v.parse::<u64>() {
+            Ok(last) => now.saturating_sub(last) < window_secs,
+            Err(_) => false,
+        },
+        Ok(None) => false,
+        Err(e) => {
+            warn!(key = %key, error = %e, "pr_hygiene_check: cannot read nudge backoff, proceeding");
+            false
+        }
+    }
+}
+
+async fn persist_nudge_backoff(state: &Arc<AppState>, key: &str, now: u64) {
+    if let Err(e) = state
+        .kv_store
+        .kv_set(NUDGE_BACKOFF_NS, key, now.to_string())
+        .await
+    {
+        warn!(key = %key, error = %e, "pr_hygiene_check: failed to persist nudge backoff");
+    }
+}
+
 /// Act on a conflicted MR: attempt the rebase via the existing jj
 /// machinery when applicable (agent-authored branch with a live worktree),
 /// otherwise (or when the rebase itself conflicts) raise a rebase-required
@@ -594,6 +642,7 @@ async fn nudge_unreviewed(
     state: &Arc<AppState>,
     ws: &gyre_domain::Workspace,
     mr: &gyre_domain::MergeRequest,
+    thresholds: &HygieneThresholds,
     now: u64,
 ) {
     if mr.reviewers.is_empty() {
@@ -659,6 +708,20 @@ async fn nudge_unreviewed(
             .flatten()
             .is_some()
         {
+            // Agent reviewer: no notification inbox row, so the bus
+            // emission is deduplicated via the KV nudge backoff — the
+            // same idempotence guarantee the user path gets from
+            // `has_active_notification`. Without it, every evaluation
+            // would emit a duplicate `review_nudge` to the agent.
+            let backoff_key = nudge_backoff_key(mr, reviewer);
+            if in_nudge_backoff(state, &backoff_key, thresholds.nudge_after_secs, now).await {
+                debug!(
+                    mr = %mr.id,
+                    agent = %reviewer,
+                    "pr_hygiene_check: suppressed agent review_nudge (nudge backoff active)"
+                );
+                continue;
+            }
             state
                 .emit_event(
                     ws.id.clone(),
@@ -671,6 +734,7 @@ async fn nudge_unreviewed(
                     })),
                 )
                 .await;
+            persist_nudge_backoff(state, &backoff_key, now).await;
             nudged += 1;
         } else {
             warn!(mr_id = %mr.id, reviewer = %reviewer, "pr_hygiene_check: reviewer resolves to neither user nor agent");
@@ -1555,6 +1619,65 @@ mod tests {
                 .len(),
             1,
             "second evaluation must not duplicate the escalation"
+        );
+    }
+
+    #[tokio::test]
+    async fn consecutive_evaluations_do_not_duplicate_agent_reviewer_nudges() {
+        // Review repair (task-270): an AGENT reviewer has no notification
+        // inbox row to dedupe against — the nudge is delivered on the
+        // message bus (`review_nudge`). The KV nudge backoff must keep
+        // that emission idempotent across consecutive evaluations, the
+        // same guarantee the user path gets from `has_active_notification`.
+        let state = test_state();
+        let now = now_secs();
+        let ws = make_workspace("ws-agent-idem");
+        state.workspaces.create(&ws).await.unwrap();
+        let repo = gyre_domain::Repository::new(
+            Id::new("repo-agent-idem"),
+            ws.id.clone(),
+            "agent-idem-repo",
+            "/tmp/agent-idem-repo.git",
+            0,
+        );
+        state.repos.create(&repo).await.unwrap();
+
+        let reviewer = Agent::new(Id::new("agent-reviewer"), "reviewer", 1000);
+        state.agents.create(&reviewer).await.unwrap();
+
+        let mut mr = make_mr("mr-agent-idem", "ws-agent-idem", &repo.id, now - 2000);
+        mr.reviewers = vec![Id::new("agent-reviewer")];
+        state.merge_requests.create(&mr).await.unwrap();
+
+        let mut rx = state.message_broadcast_tx.subscribe();
+        // Two evaluations inside the test window.
+        run_with(&state, &thresholds()).await.unwrap();
+        run_with(&state, &thresholds()).await.unwrap();
+
+        let nudges = {
+            let mut n = 0;
+            while let Ok(msg) = rx.try_recv() {
+                if let gyre_common::message::Destination::Agent(a) = &msg.to {
+                    if a.as_str() == "agent-reviewer" && msg.kind.as_str() == "review_nudge" {
+                        n += 1;
+                    }
+                }
+            }
+            n
+        };
+        assert_eq!(
+            nudges, 1,
+            "second evaluation must not duplicate the agent review nudge"
+        );
+
+        // The dedup is persisted in the KV store — the backoff key is
+        // (MR, agent), so a different MR's nudge to the same agent is
+        // still delivered on the first evaluation.
+        let key = nudge_backoff_key(&mr, &Id::new("agent-reviewer"));
+        let persisted = state.kv_store.kv_get(NUDGE_BACKOFF_NS, &key).await.unwrap();
+        assert!(
+            persisted.is_some(),
+            "nudge backoff must be persisted so restarts stay idempotent"
         );
     }
 }
