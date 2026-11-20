@@ -3,7 +3,7 @@ title: "Admin Panel completion: SOPS/Vault secret backends, durable job history 
 spec_ref: "Spec gap spec-5b647653a4554eea3e93ac19 / admin-panel-remaining-gap / e61ffd082155"
 depends_on: []
 progress: ready-for-review
-commits: ["7fe530de59c902ef18f9aadc7448aa6ff8acb3fe", "fa69e871b93d4c6e1cf2f6aeb2b39332dd9d7524", "44eb55a239681f4510d8388525ddf7a3257226dd", "3f51333665c3ad4284f27996e79c14af545db856", "56e5ea5f797f1f19037b40e65f529239c550d649", "a0dc3e637e6ffbae976675b755abf0b2891bf481", "4c71fe4827a62f792912b4e5ab257a50c1882860", "d6f32bd0269314f9ee552ed72df33322b0fe2238", "cd2f616e3ebd96addab2dcaf78242d31c58efc04", "808e3c10c035c9fc6fe8c5ee96d474fc5468acf3", "b979fefeeb7a6bb8340ccd85c64b467e0f46c553", "210dfa61bc1ea637a29a79c26af80746b2fb002c", "3ebd143d29eb52bb2bc0bd748f60fe52fa960f66", "9b81c9816f13a3d637057a6c3149c9be92f38a3c", "0fda00bfe9860c8c8b66ea1235f0d2e3251df67a", "1bc00b6cb9212e6ac6dfc7c764afede98ae8fd64", "a2b31ac19c05310ebd05a072ddde1acf0c51f2ec", "f6e31cf57779a7e117f5a0b9bd75720aed90ca56", "b101d27aafb7bde0907a568e7bb8a3ffbdd3ae67", "ee253c8854f16664f91d16171e08414effc314b7", "db320101b1540a35cf9986408e70ac46008b1982"]
+commits: ["7fe530de59c902ef18f9aadc7448aa6ff8acb3fe", "fa69e871b93d4c6e1cf2f6aeb2b39332dd9d7524", "44eb55a239681f4510d8388525ddf7a3257226dd", "3f51333665c3ad4284f27996e79c14af545db856", "56e5ea5f797f1f19037b40e65f529239c550d649", "a0dc3e637e6ffbae976675b755abf0b2891bf481", "4c71fe4827a62f792912b4e5ab257a50c1882860", "d6f32bd0269314f9ee552ed72df33322b0fe2238", "cd2f616e3ebd96addab2dcaf78242d31c58efc04", "808e3c10c035c9fc6fe8c5ee96d474fc5468acf3", "b979fefeeb7a6bb8340ccd85c64b467e0f46c553", "210dfa61bc1ea637a29a79c26af80746b2fb002c", "3ebd143d29eb52bb2bc0bd748f60fe52fa960f66", "9b81c9816f13a3d637057a6c3149c9be92f38a3c", "0fda00bfe9860c8c8b66ea1235f0d2e3251df67a", "1bc00b6cb9212e6ac6dfc7c764afede98ae8fd64", "a2b31ac19c05310ebd05a072ddde1acf0c51f2ec", "f6e31cf57779a7e117f5a0b9bd75720aed90ca56", "b101d27aafb7bde0907a568e7bb8a3ffbdd3ae67", "ee253c8854f16664f91d16171e08414effc314b7", "db320101b1540a35cf9986408e70ac46008b1982", "3001d786ac8a5548e81d6f892d6f0dc4d596a87e"]
 ---
 
 ## Required behavior
@@ -123,98 +123,59 @@ Canonical spec: `specs/system/admin-panel.md`. Source: `fb1424fbac55cd23cb08606f
 ## Shipped
 
 The eight admin-panel deliverables shipped in the earlier rounds on this
-branch and are carried through the base merges, behavior preserved:
-SOPS-default/Vault-option secret backends (genuine SOPS documents with
-an age-wrapped data key; Vault KV v2 with agent-JWT resolution, server
+branch (see the commits list) and are carried through the base merges,
+behavior preserved: SOPS-default/Vault-option secret backends (genuine
+SOPS documents with an age-wrapped data key, decryptable with the sops
+CLI; Vault KV v2 with agent-JWT resolution per platform-model §7, server
 AppRole writes, fail-closed on unreachable Vault), durable job history
 with per-run logs through the `JobRunRepository` port (SQLite +
 PostgreSQL + mem parity), the `repo_maintenance` / `oauth_state_cleanup`
 / `remote_agent_cleanup` / `job_history_cleanup` scheduled jobs,
-document-shape token-refresh dispatch (RFC 6749 refresh, GCP SA RS256
-JWT-bearer grant, per-secret outcomes in run logs), the durable
-OAuth-state Claude Max enrollment flow, the ring-buffer server-log
-viewer (`GET /admin/server/logs` + Server Logs tab), and the durable
-tenant-scoped searchable admin audit (`tenant_id` on AuditEvent with
-portable backfill migration, free-text `q` in both SQL adapters). The
-prior review-repair and verification-repair rounds are recorded in the
-commits list above.
+document-shape token-refresh dispatch (RFC 6749 refresh grant, GCP SA
+RS256 JWT-bearer grant, per-secret outcomes in run logs), the durable
+OAuth-state Claude Max enrollment flow with PKCE, the ring-buffer
+server-log viewer (`GET /admin/server/logs` + Server Logs tab), and the
+durable tenant-scoped searchable admin audit (`tenant_id` on AuditEvent
+with portable backfill migration, free-text `q` in both SQL adapters,
+zstd-transparent matching).
 
-### This round: review-repair of the nine findings against candidate 2dd4a799
+### This round: rebase repair onto 0a70b31e (merge commit 3001d786)
 
-1. **Failed kill no longer marks the durable instance terminated**
-   (`3f513336`): `kill_agent` marks the durable agent-instance record
-   terminated only when the instance's process was verifiably stopped.
-   The in-memory branch restores the fast-path registries on a failed
-   kill so `remote_agent_cleanup` retries with the real backend; the
-   restart-orphan branch kills and marks through the sweep's own
-   `kill_and_mark` (mark strictly after `kill_process` returns Ok).
-   Pinned by `kill_and_mark_failure_leaves_record_running` (failing
-   `ComputeTarget` double) and
-   `admin_kill_refuses_recycled_pid_and_leaves_record_running`.
-2. **Restart-orphan kills verify pid identity** (`3f513336`): the admin
-   kill of a restart orphan now runs the sweep's `local_pid_check`
-   (`/proc/<pid>/stat` starttime vs the recorded `spawned_at`) before
-   killing a reconstructed local handle — a recycled pid is refused and
-   left for the sweep, exactly like `remote_agent_cleanup`
-   (mirrors its `remote_agent_cleanup_refuses_recycled_pid` test).
-3. **Spawn-path durable recording is regression-protected**
-   (`3f513336`): `register_spawned_agent_records_backend_owning_handle`
-   asserts the durable record (backend descriptor, handle id, pid);
-   `admin_kill_terminates_process_via_registered_backend` asserts the
-   spawn-path record is marked terminated `admin_kill`; the new
-   `exit_monitor_marks_durable_record_on_clean_exit` asserts the exit
-   monitor's `clean_exit` marking. Deleting the production
-   `record_spawned` / marking calls now fails the suite.
-4. **Vault logins carry X-Vault-Namespace** (`44eb55a2`): both the
-   AppRole login and the agent JWT login send the configured namespace
-   header (previously only KV data/metadata calls did); the stub server
-   records the header on the login routes and the namespace test
-   asserts it rides both logins.
-5. **No fabricated OAuth expiry** (`fa69e871`): the Claude Max callback
-   rejects a token response without `expires_in` (502) instead of
-   storing an invented 3600 s lifetime — the same honesty the rotation
-   handler applies; test
-   `callback_rejects_token_response_without_expires_in`.
-6. **client_secret no longer rests in oauth_states** (`fa69e871`): the
-   initiation persists a redacted provider config; the callback
-   re-derives the secret from `GYRE_CLAUDE_MAX_CLIENT_SECRET` for the
-   token exchange only. Test
-   `enroll_redacts_client_secret_and_callback_sends_env_secret`.
-7. **Admin-audit test gaps** (`3f513336`, `7fe530de`): reopen-same-DB
-   restart-durability test for the audit store (tenant scoping + q over
-   a zstd-compressed detail) and a full-stack non-Admin 403 test for
-   `GET /admin/audit`. The PostgreSQL q/zstd path remains
-   SQL-shape-asserted only (no PG harness — repo precedent, disclosed
-   in-code).
-8. **Audit q non-ASCII recall** (`7fe530de`): the ASCII-only
-   `LOWER(detail) LIKE` pre-filter is skipped for non-ASCII terms in
-   BOTH adapters (SQLite's LOWER() folds ASCII exclusively; PG's
-   depends on collation), so Unicode-case matches reach the
-   Unicode-folding re-filter instead of being silently excluded; the
-   overclaiming comments are corrected. Test:
-   `audit_free_text_search_folds_non_ascii_case`.
-9. **Coverage citations fixed** (`7fe530de`): the coverage rows cite
-   the real migration directories (000071 job runs, 000072 oauth
-   states, 000073 agent instances, 000074 audit tenant backfill; the
-   000070 sequence is unused) instead of the wrong 000067–000070.
+The saved source was rebased onto base 0a70b31e (task-270: PR hygiene
+job + PR-collaboration push invariants). Conflicts in
+`crates/gyre-server/src/jobs.rs` and `crates/gyre-server/src/main.rs`
+resolved by keeping both sides: task-270's `pr_hygiene_check`
+registration, interval scheduler spawn and registration test alongside
+the task-273 maintenance jobs and durable job-run store tests. The one
+semantic adaptation: `pr_hygiene`'s handler registration now uses the
+task-273 two-argument handler signature (`|state, _log|`), matching how
+`email_digest` was adapted — `pr_hygiene::run_once` itself is unchanged.
+No other behavior changed in this round.
 
-### Verification evidence
+### Verification evidence (this round)
 
-- Executed locally (this sandbox, via the build wrapper):
-  `cargo check -p gyre-server --all-targets` and
-  `-p gyre-adapters --all-targets` (clean, including all new test
-  code); `cargo test -p gyre-adapters --lib sqlite::audit` (24 passed),
-  `vault::` (12 passed), `postgres::audit` (6 passed); clippy on the
-  touched crates with no new warnings in touched files; all mechanical
-  invariant scripts pass (arch, migration versions/portability, mem
-  contracts, in-memory stores, ABAC registry + exempt handlers,
-  unbounded HTTP, forwarded headers, byte-slice, relative paths,
-  fail-open refs, dead message kinds, lossy secrets, scope defaults,
-  inert enforcement, forged scope fields, MCP write tools).
-- `cargo test -p gyre-server` is blocked in this sandbox by the build
-  wrapper's 4 GiB guard (infrastructure restriction recorded in
-  `/tmp/stage/review-evidence/probes.md`, not a code defect). The
-  verifier must execute the gyre-server test selection listed there:
-  `maintenance_jobs::`, `api::admin::tests::` (kill/audit/server-logs),
-  `api::oauth::tests::`, and the three named `api::spawn::tests::`
-  tests.
+- `cargo check -p gyre-server` and `cargo check -p gyre-server --tests`
+  pass on the merged tree (type-level proof that both test modules and
+  both registration sets coexist).
+- `scripts/check-abac-route-registry.sh`: OK, no exemption growth (route
+  tables union-merged cleanly).
+- `scripts/check-migration-versions.sh`: OK, no duplicate versions.
+- web/dist left at the assignment-base state (executor owns asset
+  rebuild/publication); the local build.rs regeneration was discarded.
+
+### Deferred to the independent verifier (gyre-server test compilation
+exceeds the in-sandbox memory budget)
+
+- `cargo test -p gyre-server --lib jobs::` — covers both the task-273
+  durable-store tests (`trigger_persists_runs_through_the_durable_store`,
+  `record_run_retries_transient_durable_failures`,
+  `record_run_counts_runs_lost_after_exhausted_retries`) and the task-270
+  `pr_hygiene_check_registered_on_interval_not_daily`.
+- `cargo test -p gyre-server --lib pr_hygiene` and the maintenance-job
+  tests (`maintenance_jobs`, `repo_maintenance`, `oauth_state`,
+  `remote_agent_cleanup`, `job_history_cleanup` modules).
+- `cargo test -p gyre-server --test git_integration` and
+  `--test e2e_ralph_loop` (both touched by the base merge).
+- Full gates: check-arch.sh, check-migration-sql-portability.sh,
+  check-mem-port-contracts.sh, check-in-memory-state-stores.sh,
+  check-unbounded-external-http.sh, all-target Clippy, GitHub CI.
