@@ -42,6 +42,7 @@ pub mod metrics;
 pub mod middleware;
 pub mod mirror_sync;
 pub(crate) mod oidc;
+pub mod pr_hygiene;
 pub mod pre_accept;
 pub mod prompt_assembly;
 pub mod ralph_loop;

@@ -144,6 +144,24 @@ pub enum NotificationType {
     /// must reassign ownership (user-management.md §Ownership Transfer &
     /// Reclamation). Sent to every TenantAdmin of the workspace's tenant.
     WorkspaceOwnerless,
+    /// Priority 7 — reviewer nudge: an open MR has been waiting for the
+    /// assigned reviewer's review beyond the nudge threshold
+    /// (specs/development/agent-workflow.md §PRs as the Collaboration
+    /// Primitive, task-270).
+    ReviewerNudge,
+    /// Priority 5 — an open MR has no reviewers at all; workspace
+    /// Developers/Admins are asked to assign one (agent-workflow.md,
+    /// task-270).
+    MrUnreviewed,
+    /// Priority 4 — a conflicted MR needs a rebase onto its target branch
+    /// (agent-workflow.md, task-270).
+    MrNeedsRebase,
+    /// Priority 3 — a long-open MR escalated to workspace Admins
+    /// (agent-workflow.md, task-270).
+    MrStaleEscalation,
+    /// Priority 6 — an abandoned MR was auto-closed by PR hygiene with an
+    /// explanation delivered to the author (agent-workflow.md, task-270).
+    MrAutoClosed,
 }
 
 impl NotificationType {
@@ -193,6 +211,11 @@ impl NotificationType {
             Self::SecretExpiring => "SecretExpiring",
             Self::PersonaChangePendingApproval => "PersonaChangePendingApproval",
             Self::WorkspaceOwnerless => "WorkspaceOwnerless",
+            Self::ReviewerNudge => "ReviewerNudge",
+            Self::MrUnreviewed => "MrUnreviewed",
+            Self::MrNeedsRebase => "MrNeedsRebase",
+            Self::MrStaleEscalation => "MrStaleEscalation",
+            Self::MrAutoClosed => "MrAutoClosed",
         }
     }
 
@@ -247,6 +270,11 @@ impl NotificationType {
             "SecretExpiring" => Some(Self::SecretExpiring),
             "PersonaChangePendingApproval" => Some(Self::PersonaChangePendingApproval),
             "WorkspaceOwnerless" => Some(Self::WorkspaceOwnerless),
+            "ReviewerNudge" => Some(Self::ReviewerNudge),
+            "MrUnreviewed" => Some(Self::MrUnreviewed),
+            "MrNeedsRebase" => Some(Self::MrNeedsRebase),
+            "MrStaleEscalation" => Some(Self::MrStaleEscalation),
+            "MrAutoClosed" => Some(Self::MrAutoClosed),
             _ => None,
         }
     }
@@ -255,7 +283,7 @@ impl NotificationType {
     /// enumeration the `?priority=` band filter expands from
     /// (see [`NotificationPriority::notification_type_strings`]) — callers
     /// never hand-maintain a parallel type list.
-    pub fn all() -> [Self; 41] {
+    pub fn all() -> [Self; 46] {
         [
             // user-management.md §Notification Entity
             Self::SpecApprovalRequested,
@@ -300,6 +328,11 @@ impl NotificationType {
             Self::SecretExpiring,
             Self::PersonaChangePendingApproval,
             Self::WorkspaceOwnerless,
+            Self::ReviewerNudge,
+            Self::MrUnreviewed,
+            Self::MrNeedsRebase,
+            Self::MrStaleEscalation,
+            Self::MrAutoClosed,
         ]
     }
 
@@ -381,6 +414,11 @@ impl NotificationType {
             Self::SecretExpiring => 7,
             Self::PersonaChangePendingApproval => 2,
             Self::WorkspaceOwnerless => 2,
+            Self::ReviewerNudge => 7,
+            Self::MrUnreviewed => 5,
+            Self::MrNeedsRebase => 4,
+            Self::MrStaleEscalation => 3,
+            Self::MrAutoClosed => 6,
         }
     }
 }
@@ -542,7 +580,9 @@ impl NotificationPriority {
             | T::AgentFailed
             | T::BreakingChangeDetected
             | T::SystemAlert
-            | T::WorkspaceOwnerless => Self::High,
+            | T::WorkspaceOwnerless
+            | T::MrNeedsRebase
+            | T::MrStaleEscalation => Self::High,
             // Medium — needs attention eventually: spec drift (spec example),
             // stale-dependency-adjacent and review-arbitration items.
             T::MetaSpecDrift
@@ -551,7 +591,10 @@ impl NotificationPriority {
             | T::DependencyChainTooDeep
             | T::SpecAssertionFailure
             | T::SpecDriftDetected
-            | T::DependencyStale => Self::Medium,
+            | T::DependencyStale
+            | T::ReviewerNudge
+            | T::MrUnreviewed
+            | T::MrAutoClosed => Self::Medium,
             // Low — informational (MR merged, gate passed — spec examples):
             // completions, suggestions, notices.
             T::AgentCompleted
@@ -797,6 +840,8 @@ mod tests {
             T::BreakingChangeDetected,
             T::SystemAlert,
             T::WorkspaceOwnerless,
+            T::MrNeedsRebase,
+            T::MrStaleEscalation,
         ];
         let medium = [
             T::MetaSpecDrift,
@@ -806,6 +851,9 @@ mod tests {
             T::SpecAssertionFailure,
             T::SpecDriftDetected,
             T::DependencyStale,
+            T::ReviewerNudge,
+            T::MrUnreviewed,
+            T::MrAutoClosed,
         ];
         let low = [
             T::AgentCompleted,

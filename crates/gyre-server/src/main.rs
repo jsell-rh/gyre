@@ -148,6 +148,19 @@ async fn main() -> Result<()> {
         Arc::clone(&state),
     );
 
+    // PR hygiene (specs/development/agent-workflow.md §PRs as the
+    // Collaboration Primitive, task-270): continuously (minutes-scale
+    // interval) monitors open MRs for stale classes — unreviewed,
+    // conflicted, long-open, abandoned — and acts: nudge reviewers,
+    // rebase, escalate, or close with explanation. Registered in the job
+    // registry (manual trigger + status); spawn_job is the executing
+    // interval loop (NOT run_at_utc_hour daily).
+    jobs::spawn_job(
+        Arc::clone(&state.job_registry),
+        gyre_server::pr_hygiene::JOB_NAME.to_string(),
+        Arc::clone(&state),
+    );
+
     // ── TASK-273 maintenance jobs (admin-panel.md §Background Jobs) ─────────
 
     // Self-managing job history cleanup — daily 03:00 UTC.
