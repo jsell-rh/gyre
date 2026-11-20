@@ -338,6 +338,11 @@ impl ResourceResolver {
                     "message",
                     None,
                 ),
+                RouteResourceMapping::api(
+                    "/api/v1/workspaces/:workspace_id/activity",
+                    "activity",
+                    None,
+                ),
                 RouteResourceMapping::api("/api/v1/agents/:id/touched-paths", "agent", None),
                 RouteResourceMapping::api("/api/v1/agents/:id/logs", "agent", None),
                 RouteResourceMapping::api("/api/v1/agents/:id/logs/stream", "agent", None),
