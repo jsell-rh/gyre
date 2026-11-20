@@ -3,7 +3,7 @@ title: "PR collaboration invariants: reject agent-principal pushes to the defaul
 spec_ref: "Spec gap spec-4c39ca6ea3e71ce8a53398f3 / pr-protection-and-hygiene / d30f233daf86"
 depends_on: []
 progress: ready-for-review
-commits: ["041bddcdd54e58930beb34cfc06ca12a0d16e9fa", "c9faf6a80ba0a216889c2d7efb5c82f71f58deee", "d5888ad56a3369911836d9ccaeb06995dd73de9d", "c269022921fb4faddc818da21fd2d834d00ab63e"]
+commits: ["041bddcdd54e58930beb34cfc06ca12a0d16e9fa", "c9faf6a80ba0a216889c2d7efb5c82f71f58deee", "d5888ad56a3369911836d9ccaeb06995dd73de9d", "c269022921fb4faddc818da21fd2d834d00ab63e", "34f7878e3734df124067c20b225ad7e2a150ec70"]
 ---
 
 ## Required behavior
@@ -68,7 +68,8 @@ Both normative bullets of specs/development/agent-workflow.md §PRs as the
 Collaboration Primitive are enforced in production code. Task commits:
 `c2690229` (push protection), `d5888ad5` (PR hygiene job), `c9faf6a8`
 (formatting pass), `041bddcd` (review repair: deletion bypass + agent
-nudge dedup).
+nudge dedup), `34f7878e` (verification repair: rustfmt module ordering
++ clippy argument budget, merged with base `9f0c709f`).
 
 ### Agent-principal default-branch push protection
 
@@ -87,20 +88,17 @@ system principal are exempt, preserving specs/system/spec-lifecycle.md
 §Automatic Task Creation (post-receive task creation, persona changes,
 ledger sync run unchanged); server-side landing (merge queue, post-merge
 reverts) goes through the git_ops/jj_ops ports and never through this
-handler.
-
-Review repair (`041bddcd`): the guard originally matched only
-`parse_ref_updates` output, which filters ref deletions (new SHA all
-zeros), so an agent token could DELETE the default branch. The guard now
-matches the raw pkt-line ref-update commands via
-`parse_ref_update_commands` (deletions included);
-`parse_ref_updates` remains a deletion-filtering wrapper over it with
-unchanged semantics for push-acceptance processing.
+handler. The guard matches the raw pkt-line ref-update commands
+(`parse_ref_update_commands`, deletions included), so an agent token
+cannot delete the default branch either; `parse_ref_updates` remains a
+deletion-filtering wrapper with unchanged semantics for push-acceptance
+processing. Verified intact after the merge with base `9f0c709f` (the
+merge only added session attribution to `record_pushed_commits`).
 
 Tests: `agent_push_to_default_branch_rejected_directing_to_mr_flow`,
 `agent_push_to_feature_branch_succeeds`,
 `protection_resolves_real_default_branch_not_literal_main`,
-`agent_deletion_of_default_branch_rejected` (new),
+`agent_deletion_of_default_branch_rejected`,
 `human_push_to_default_branch_accepted_and_spec_lifecycle_runs`, and
 merge-queue landing coverage.
 
@@ -123,12 +121,10 @@ is recorded (notification rows, message-bus events, `pr_hygiene` audit
 events). Thresholds are configurable via
 GYRE_PR_HYGIENE_{NUDGE,ESCALATE,CLOSE}_SECS with sane defaults
 (2d/7d/30d). The daily abandoned_branch_check job is untouched.
-
-Review repair (`041bddcd`): agent-reviewer nudges are now deduplicated
-across evaluations via a KV backoff (`pr_hygiene_nudge_backoff`, key
-`{mr_id}:{agent_id}`, window = nudge threshold) — agents have no
-notification inbox row, so the user path's `has_active_notification`
-dedup never applied to the message-bus `review_nudge` emission.
+Deduplication is real on both reviewer paths: user reviewers through the
+notification store's active-notification lookup, agent reviewers through
+the `pr_hygiene_nudge_backoff` KV window keyed `{mr_id}:{agent_id}` — so
+consecutive evaluations never duplicate notifications.
 
 Tests: `abandoned_mr_is_closed_with_explanation_delivered_to_author`,
 `unreviewed_mr_nudges_assigned_reviewers`,
@@ -138,16 +134,33 @@ Tests: `abandoned_mr_is_closed_with_explanation_delivered_to_author`,
 `conflicted_mr_without_agent_raises_rebase_required_escalation`,
 `long_open_mr_escalates_to_admins_at_higher_priority`,
 `consecutive_evaluations_do_not_duplicate_notifications`,
-`consecutive_evaluations_do_not_duplicate_agent_reviewer_nudges` (new).
+`consecutive_evaluations_do_not_duplicate_agent_reviewer_nudges`.
+
+### Verification-repair round (`34f7878e`)
+
+Deterministic verification (finding `d2d8bca30d4146938346f10450da8dd6`)
+failed on two findings, both repaired with behavior preserved: (1)
+rustfmt module ordering in gyre-server/src/lib.rs (`pr_hygiene` now
+declared before `pre_accept`); (2) clippy `too_many_arguments` (8/7) on
+`create_notification` and `notify_members` in pr_hygiene.rs — the
+(type, title, body) delivery triple is now bundled into a `MrNotice`
+payload struct taken by reference (helpers at 6/6/5 arguments, no
+`#[allow]`), same notification rows, dedup keys, bus payloads, and audit
+events. Probes run in this sandbox (logs retained under
+/tmp/stage/review-evidence/): `rustfmt --check` over every `crates/**/*.rs`
+exit 0 with zero diffs; `SKIP_WEB_BUILD=1 cargo clippy -p gyre-server
+--lib` and `--all-targets` (through the build wrapper) exit 0 with zero
+warnings in pr_hygiene.rs and zero errors — remaining
+`too_many_arguments` hits are the pre-existing baseline in files
+task-270 did not touch, identical to what the failing verification already
+tolerated.
 
 ### Test evidence and deferred verification
 
-`SKIP_WEB_BUILD=1 cargo check -p gyre-server --tests` (type check
-including all test code) passes on the fix commit `041bddcd`. The
-gyre-server test binary cannot be built in this sandbox: the build
-wrapper blocks it (gyre-server code generation plus the model exceeds
-the 4 GiB budget — exit 64, infrastructure policy, not a code defect).
-The independent verifier must execute (see
+gyre-server test codegen exceeds this sandbox's 4 GiB budget (build
+wrapper exit 64 — infrastructure policy, not a code defect); test targets
+type-check clean under `cargo clippy -p gyre-server --all-targets`. The
+independent verifier must execute (see
 /tmp/stage/review-evidence/task-270-repair.md):
 
 - `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib pr_hygiene`
