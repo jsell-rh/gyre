@@ -445,8 +445,11 @@ async fn validate_scope_target(
 
 /// Re-write a secret row with updated metadata, preserving the caller's new
 /// value. The port's `rotate()` only touches value + `last_rotated_at`, so
-/// metadata changes (expiry, type) go through delete + create. The value is
-/// re-supplied from the caller's request (never read back out of storage).
+/// metadata changes (expiry, type) need a row rewrite — done with the
+/// port's single atomic `replace` operation, never a delete + create pair
+/// (a crash between the two would permanently lose the credential;
+/// review task-273). The value is re-supplied from the caller's request
+/// (never read back out of storage).
 async fn rewrite_secret(
     state: &Arc<AppState>,
     secret: &Secret,
@@ -454,12 +457,7 @@ async fn rewrite_secret(
 ) -> Result<(), ApiError> {
     state
         .secrets
-        .delete(&secret.id, &secret.tenant_id)
-        .await
-        .map_err(ApiError::Internal)?;
-    state
-        .secrets
-        .create(secret, value)
+        .replace(secret, value)
         .await
         .map_err(ApiError::Internal)?;
     Ok(())

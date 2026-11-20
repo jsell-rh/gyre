@@ -46,6 +46,20 @@ pub trait SecretRepository: Send + Sync {
     /// Replace a secret's value with `new_value` and update `last_rotated_at`.
     async fn rotate(&self, id: &Id, new_value: &[u8], tenant_id: &str) -> Result<()>;
 
+    /// Atomically replace an existing secret's full row — metadata AND
+    /// value — in a single storage operation.
+    ///
+    /// Used where a delete + create pair would risk losing the credential
+    /// (a crash between the two steps permanently drops the row, and a
+    /// concurrent `resolve_for_agent` in the window sees it missing): the
+    /// rotation job's expiry-extending rewrite and the OAuth re-enrollment
+    /// rewrite. `secret.id` identifies the row; every other field
+    /// (including `expires_at` / `last_rotated_at`) is overwritten from
+    /// `secret`, and the stored value becomes `value`.
+    ///
+    /// Fails if no secret with `secret.id` exists in `secret.tenant_id`.
+    async fn replace(&self, secret: &Secret, value: &[u8]) -> Result<()>;
+
     /// Collect the secrets an agent receives, from all applicable scopes
     /// (tenant -> workspace -> repo -> task), as `(name, plaintext value)`
     /// pairs.

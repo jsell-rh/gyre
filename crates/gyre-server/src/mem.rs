@@ -6379,6 +6379,28 @@ impl gyre_ports::SecretRepository for MemSecretRepository {
         }
     }
 
+    async fn replace(&self, secret: &gyre_common::Secret, value: &[u8]) -> Result<()> {
+        // Port contract (mirrors the SQL adapters' single-statement UPDATE):
+        // rewrite the whole row in place — never a delete + create pair —
+        // and fail when the id does not exist in the tenant.
+        let mut store = self.store.lock().await;
+        let entry = store
+            .iter_mut()
+            .find(|(tid, s, _)| tid == &secret.tenant_id && s.id == secret.id);
+        match entry {
+            Some((_, s, v)) => {
+                *s = secret.clone();
+                *v = value.to_vec();
+                Ok(())
+            }
+            None => anyhow::bail!(
+                "secret {} not found in tenant {}",
+                secret.id,
+                secret.tenant_id
+            ),
+        }
+    }
+
     async fn resolve_for_agent(
         &self,
         tenant_id: &str,

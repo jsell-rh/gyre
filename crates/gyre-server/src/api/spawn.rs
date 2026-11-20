@@ -9084,6 +9084,13 @@ exit 1\n"
             ) -> anyhow::Result<()> {
                 anyhow::bail!("failing secrets port")
             }
+            async fn replace(
+                &self,
+                _secret: &gyre_common::Secret,
+                _value: &[u8],
+            ) -> anyhow::Result<()> {
+                anyhow::bail!("failing secrets port")
+            }
             async fn resolve_for_agent(
                 &self,
                 _tenant_id: &str,
