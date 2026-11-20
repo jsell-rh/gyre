@@ -1544,6 +1544,17 @@ pub async fn reject_spec(
                         .await;
                 }
             }
+
+            // agent-workflow.md §Parallel Work via Worktrees: the
+            // cancelled task's work is terminally complete — tear its
+            // agents' ephemeral worktrees down via the shared terminal
+            // cleanup (session end state captured first, inside the
+            // helper). The 60-second shutdown grace in the spec is for
+            // in-process work; the working copy itself is no longer
+            // needed once the task is terminal and the agents are stopped
+            // above. The pushed branch and any commits survive
+            // server-side.
+            crate::api::spawn::cleanup_worktrees_for_task(&state, &task).await;
         }
     }
 

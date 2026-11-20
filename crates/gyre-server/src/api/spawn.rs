@@ -398,6 +398,106 @@ pub async fn cleanup_jj_workspace(
     }
 }
 
+/// Tear down an agent's worktrees on a terminal path — the ONE shared
+/// teardown for every path where the agent's work is terminally complete
+/// (agent-workflow.md §Parallel Work via Worktrees: "worktrees are ephemeral
+/// — created at task start, cleaned up on completion"): the stale-agent Dead
+/// transition, the admin kill, task Done after MR merge (the Ralph-loop
+/// watcher), the Phase 7 iteration ceiling, fail_agent, and task
+/// cancellation.
+///
+/// This is the real VCS operation, not just a DB row delete: each worktree's
+/// jj workspace is forgotten from the repo's shared jj checkout and its
+/// working-copy directory removed ([`cleanup_jj_workspace`]), the plain-git
+/// worktree is removed via the git_ops port, and only then is the
+/// `agent_worktrees` DB record deleted. The pushed branch, the MR, the
+/// commits, and the snapshot refs stay intact server-side — only the
+/// working copy and its record go.
+///
+/// Ordering contract: snapshot refs are written against the bare repo (not
+/// the worktree) at completion, and callers must capture session end state
+/// (`agent_sessions::end_session` observes the worktree's real branch and
+/// dirty state) BEFORE invoking this — the working copy is that
+/// observation's data source. Ralph-loop gate-failure respawns REUSE the
+/// worktree (`relaunch_agent_session`), so this must never fire at
+/// MR-creation completion — only on terminal states.
+pub async fn cleanup_agent_worktrees(state: &AppState, agent_id: &Id) {
+    let worktrees = match state.worktrees.find_by_agent(agent_id).await {
+        Ok(wts) => wts,
+        Err(e) => {
+            tracing::warn!(
+                agent_id = %agent_id,
+                "worktree cleanup: find_by_agent failed: {e}"
+            );
+            return;
+        }
+    };
+    for wt in worktrees {
+        if let Ok(Some(repo)) = state.repos.find_by_id(&wt.repository_id).await {
+            // Plain-git worktree removal via the git_ops port FIRST, while
+            // the working copy still exists: `git worktree remove` deletes
+            // the directory AND its administrative metadata (the registered
+            // entry under .git/worktrees) in one real VCS operation. A
+            // plain-git worktree is not a jj workspace, so the jj forget
+            // below just warns; a jj workspace is not a registered git
+            // worktree, so this call just warns — each kind is torn down by
+            // its own operation.
+            if let Err(e) = state.git_ops.remove_worktree(&repo.path, &wt.path).await {
+                tracing::warn!("remove_worktree failed for agent {agent_id}: {e}");
+            }
+            // jj workspace teardown (source-control.md §4): forget the
+            // workspace from the shared jj checkout and remove the working
+            // copy dir (also the filesystem backstop when the git removal
+            // above could not run — e.g. a dirty plain-git worktree that
+            // `git worktree remove` refuses without --force).
+            cleanup_jj_workspace(
+                state,
+                &agent_id.to_string(),
+                &repo.path,
+                &wt.path,
+                &format!("agent-{agent_id}"),
+            )
+            .await;
+        }
+        let _ = state.worktrees.delete(&wt.id).await;
+    }
+}
+
+/// Terminal worktree teardown for a CANCELLED task
+/// (agent-workflow.md §Parallel Work via Worktrees: a cancelled task's work
+/// is terminally complete — platform-model.md §Task Status: "Cancelled …
+/// terminal — cannot be re-opened"). Resolves every agent that worked the
+/// task — the assignee plus any agent whose current task is this task —
+/// captures each agent's session end state (BEFORE removing the working
+/// copy it observes), then tears the worktrees down via
+/// [`cleanup_agent_worktrees`]. Shared by every task-cancellation surface
+/// (the HTTP status endpoint, the MCP task-update tool, repo archival, spec
+/// rejection) so none can drift.
+pub async fn cleanup_worktrees_for_task(state: &Arc<AppState>, task: &gyre_domain::Task) {
+    let mut agent_ids: Vec<Id> = Vec::new();
+    if let Some(assignee) = &task.assigned_to {
+        agent_ids.push(assignee.clone());
+    }
+    if let Ok(agents) = state.agents.list().await {
+        for agent in agents {
+            if agent.current_task_id.as_ref() == Some(&task.id) && !agent_ids.contains(&agent.id) {
+                agent_ids.push(agent.id.clone());
+            }
+        }
+    }
+    for agent_id in agent_ids {
+        let Ok(Some(agent)) = state.agents.find_by_id(&agent_id).await else {
+            continue;
+        };
+        // Session capture before working-copy removal (source-control.md
+        // §Agent-to-Commit Tracking): records the worktree's real current
+        // branch and dirty state while it still exists. Best-effort no-op
+        // when no session is open.
+        crate::agent_sessions::end_session(state, &agent).await;
+        cleanup_agent_worktrees(state, &agent_id).await;
+    }
+}
+
 // ── Handlers ──────────────────────────────────────────────────────────────────
 
 // ── Shared agent-process launch ──────────────────────────────────────────
@@ -2171,6 +2271,51 @@ pub(crate) async fn launch_agent_process(
         container_env.insert("GYRE_AGENT_ID".to_string(), agent.id.to_string());
         container_env.insert("GYRE_TASK_ID".to_string(), task.id.to_string());
         container_env.insert("GYRE_REPO_ID".to_string(), repo.id.to_string());
+        // agent-workflow.md §Immediate Feedback (task-268): pre-PR local
+        // verification. Resolve the repo's locally-runnable command gates
+        // from the REAL QualityGateRepository config (pre-merge
+        // TestCommand/LintCommand rows — the per-MR checks that must pass
+        // before merge; never hardcoded commands) and deliver them to the
+        // container as machine-readable GYRE_LOCAL_GATES JSON. The
+        // reference runner (docker/gyre-agent/agent-runner.mjs) executes
+        // each command in the agent's working directory after the agent
+        // query loop and BEFORE completion/MR creation, feeding failures
+        // back to the agent for remediation. Post-merge gates validate the
+        // new default-branch HEAD after merge, so they are not pre-PR
+        // checks; non-command gates (RequiredApprovals, AgentReview, ...)
+        // are not locally runnable. A repo with no command gates gets an
+        // empty list. Resolution failure fails the launch closed: an
+        // unreadable gate config must not silently degrade to "no local
+        // verification" and let an MR open anyway.
+        let local_gates: Vec<serde_json::Value> = state
+            .quality_gates
+            .list_by_repo_id_and_phase(&repo.id.to_string(), gyre_domain::GatePhase::PreMerge)
+            .await
+            .map_err(ApiError::Internal)?
+            .into_iter()
+            .filter(|g| {
+                matches!(
+                    g.gate_type,
+                    gyre_domain::GateType::TestCommand | gyre_domain::GateType::LintCommand
+                )
+            })
+            .filter_map(|g| {
+                let command = g.command.as_deref()?.trim().to_string();
+                if command.is_empty() {
+                    return None;
+                }
+                Some(serde_json::json!({
+                    "id": g.id.to_string(),
+                    "name": g.name,
+                    "command": command,
+                    "timeout_secs": g.timeout_secs,
+                }))
+            })
+            .collect();
+        container_env.insert(
+            "GYRE_LOCAL_GATES".to_string(),
+            serde_json::to_string(&local_gates).unwrap_or_else(|_| "[]".to_string()),
+        );
         // Layer 1 workload identity (identity-security.md): the session's
         // X.509-SVID. The workload presents GYRE_SVID_PEM on the
         // attestation path (heartbeat/attest) for fail-closed
@@ -3696,6 +3841,14 @@ pub async fn fail_agent(
     // and dirty state, and stamps ended_at. Best-effort: never fails the
     // failure path.
     crate::agent_sessions::end_session(&state, &agent).await;
+
+    // agent-workflow.md §Parallel Work via Worktrees: Failed is terminal,
+    // so the ephemeral worktree is torn down (jj workspace/git worktree
+    // removal + agent_worktrees record delete) AFTER the session end-state
+    // capture above — the working copy is that capture's data source. A
+    // later orchestrator replacement is a fresh entity with no worktree
+    // (`restart_orchestrator`), so teardown here cannot break a restart.
+    cleanup_agent_worktrees(&state, &agent.id).await;
 
     // M22.2: Decrement budget active-agent counter.
     let workspace_id = agent.workspace_id.to_string();
@@ -9643,6 +9796,201 @@ exit 1\n"
                 "pod manifest must carry GYRE_PROMPT_PROTOCOL alongside GYRE_PROTOCOL_PROMPT"
             ),
             "both protocol env injections must serve the identical protocol norms text"
+        );
+    }
+
+    /// Seed a real QualityGate row for a repo (task-268 test fixture —
+    /// the spawn path must read the repo's actual gate configuration,
+    /// never hardcoded commands).
+    async fn seed_quality_gate(
+        state: &Arc<AppState>,
+        id: &str,
+        repo_id: &str,
+        name: &str,
+        gate_type: gyre_domain::GateType,
+        command: Option<&str>,
+        phase: gyre_domain::GatePhase,
+    ) {
+        state
+            .quality_gates
+            .save(&gyre_domain::QualityGate {
+                id: Id::new(id),
+                repo_id: Id::new(repo_id),
+                name: name.to_string(),
+                gate_type,
+                command: command.map(String::from),
+                required_approvals: None,
+                persona: None,
+                validation_type: None,
+                required: true,
+                gate_phase: phase,
+                timeout_secs: None,
+                position: 0,
+                created_at: 1,
+            })
+            .await
+            .expect("seeding quality gate must succeed");
+    }
+
+    /// agent-workflow.md §Immediate Feedback (task-268): pre-PR local
+    /// verification — server-side gate delivery. The spawn path must
+    /// resolve the repo's locally-runnable command gates from the REAL
+    /// QualityGateRepository rows and inject them as machine-readable
+    /// GYRE_LOCAL_GATES JSON: pre-merge TestCommand/LintCommand gates are
+    /// delivered with their configured commands; RequiredApprovals (no
+    /// command — not locally runnable) and PostMerge gates (validation
+    /// against the new default-branch HEAD after merge, not a pre-PR
+    /// check) are excluded. Removing the container_env injection or
+    /// hardcoding commands instead of reading the repository fails this
+    /// test while the runner suite alone stays green.
+    #[tokio::test]
+    async fn spawn_delivers_local_gates_from_repo_gate_config() {
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let dump_path = temp
+            .path()
+            .join("local-gates-dump")
+            .to_string_lossy()
+            .into_owned();
+
+        let (app, ws_id) = create_workspace(app, "local-gates-ws").await;
+        let (app, repo_id) = create_repo_in_workspace(app, &ws_id).await;
+        let (app, task_id) = create_task(app, "Local gates delivery task").await;
+        let (app, ct_id) =
+            create_meta_prompt_dump_compute_target(app, "local-gates-ct", &dump_path).await;
+
+        // Real gate rows for this repo: a TestCommand gate, a LintCommand
+        // gate, a RequiredApprovals gate (no command — not locally
+        // runnable), and a PostMerge TestCommand gate (post-merge
+        // validation, not a pre-PR check).
+        seed_quality_gate(
+            &state,
+            "gate-local-tests",
+            &repo_id,
+            "unit tests",
+            gyre_domain::GateType::TestCommand,
+            Some("cargo test --all"),
+            gyre_domain::GatePhase::PreMerge,
+        )
+        .await;
+        seed_quality_gate(
+            &state,
+            "gate-local-lint",
+            &repo_id,
+            "lint",
+            gyre_domain::GateType::LintCommand,
+            Some("cargo clippy --all-targets"),
+            gyre_domain::GatePhase::PreMerge,
+        )
+        .await;
+        seed_quality_gate(
+            &state,
+            "gate-local-approvals",
+            &repo_id,
+            "approvals",
+            gyre_domain::GateType::RequiredApprovals,
+            None,
+            gyre_domain::GatePhase::PreMerge,
+        )
+        .await;
+        seed_quality_gate(
+            &state,
+            "gate-local-post",
+            &repo_id,
+            "post-merge tests",
+            gyre_domain::GateType::TestCommand,
+            Some("cargo test --release"),
+            gyre_domain::GatePhase::PostMerge,
+        )
+        .await;
+
+        create_worktree_dir(&state, &ws_id, "wt-repo", "feat/local-gates");
+        let (_, json) =
+            do_spawn_with_target(app, &repo_id, &task_id, "feat/local-gates", &ct_id).await;
+        assert_eq!(json["agent"]["status"], "active");
+
+        let dump = wait_for_dump(&dump_path)
+            .await
+            .expect("kubectl stub should have captured the applied Pod manifest");
+        let env = pod_env_map(&dump);
+
+        let raw = env
+            .get("GYRE_LOCAL_GATES")
+            .expect("pod manifest must carry GYRE_LOCAL_GATES");
+        let gates: serde_json::Value =
+            serde_json::from_str(raw).expect("GYRE_LOCAL_GATES must be valid JSON");
+        let arr = gates
+            .as_array()
+            .expect("GYRE_LOCAL_GATES must be a JSON array");
+        assert_eq!(
+            arr.len(),
+            2,
+            "exactly the two pre-merge command gates: {raw}"
+        );
+        let commands: Vec<&str> = arr
+            .iter()
+            .map(|g| g["command"].as_str().unwrap_or(""))
+            .collect();
+        assert!(
+            commands.contains(&"cargo test --all"),
+            "TestCommand gate command must be delivered from the repo's gate row: {raw}"
+        );
+        assert!(
+            commands.contains(&"cargo clippy --all-targets"),
+            "LintCommand gate command must be delivered from the repo's gate row: {raw}"
+        );
+        for g in arr {
+            assert!(
+                g["id"].is_string() && g["name"].is_string(),
+                "each delivered gate carries id and name: {raw}"
+            );
+        }
+        assert!(
+            !raw.contains("cargo test --release"),
+            "PostMerge gates run against the new default-branch HEAD after merge — not pre-PR checks: {raw}"
+        );
+        assert!(
+            !raw.contains("gate-local-approvals"),
+            "RequiredApprovals gates have no command — not locally runnable: {raw}"
+        );
+    }
+
+    /// Complement of `spawn_delivers_local_gates_from_repo_gate_config`: a
+    /// repo that configures no command gates yields an EMPTY list — never
+    /// a missing variable (the runner must see `[]`) and never fabricated
+    /// default commands.
+    #[tokio::test]
+    async fn spawn_local_gates_empty_when_repo_configures_none() {
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let dump_path = temp
+            .path()
+            .join("local-gates-empty-dump")
+            .to_string_lossy()
+            .into_owned();
+
+        let (app, ws_id) = create_workspace(app, "local-gates-empty-ws").await;
+        let (app, repo_id) = create_repo_in_workspace(app, &ws_id).await;
+        let (app, task_id) = create_task(app, "No local gates task").await;
+        let (app, ct_id) =
+            create_meta_prompt_dump_compute_target(app, "local-gates-empty-ct", &dump_path).await;
+
+        // No gate rows seeded for this repo.
+        create_worktree_dir(&state, &ws_id, "wt-repo", "feat/local-gates-empty");
+        let (_, json) =
+            do_spawn_with_target(app, &repo_id, &task_id, "feat/local-gates-empty", &ct_id).await;
+        assert_eq!(json["agent"]["status"], "active");
+
+        let dump = wait_for_dump(&dump_path)
+            .await
+            .expect("kubectl stub should have captured the applied Pod manifest");
+        let env = pod_env_map(&dump);
+        assert_eq!(
+            env.get("GYRE_LOCAL_GATES").map(String::as_str),
+            Some("[]"),
+            "a repo with no command gates must deliver an empty JSON list"
         );
     }
 
