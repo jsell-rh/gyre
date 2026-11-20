@@ -2061,6 +2061,14 @@
       "heading": [
         "Admin Panel"
       ]
+    },
+    "backlog/629ddb2f3b21a81f49e78ca3": {
+      "file": "specs/system/view-query-grammar.md",
+      "heading": [
+        "View Query Grammar",
+        "Primitives",
+        "2. Scope — What Subgraph to Show"
+      ]
     }
   },
   "bindings": {
@@ -2837,6 +2845,9 @@
     ],
     "Spec gap spec-5b647653a4554eea3e93ac19 / admin-panel-remaining-gap / e61ffd082155": [
       "backlog/42df7a7e48e1904b76eface1"
+    ],
+    "Spec gap spec-57c2a110e6b0a8363571ac4d / diff-scope-commit-range / 78cf53a9a787": [
+      "backlog/629ddb2f3b21a81f49e78ca3"
     ]
   }
 }
