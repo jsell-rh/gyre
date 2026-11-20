@@ -3,7 +3,7 @@ title: "Admin Panel completion: SOPS/Vault secret backends, durable job history 
 spec_ref: "Spec gap spec-5b647653a4554eea3e93ac19 / admin-panel-remaining-gap / e61ffd082155"
 depends_on: []
 progress: ready-for-review
-commits: ["0fda00bfe9860c8c8b66ea1235f0d2e3251df67a", "1bc00b6cb9212e6ac6dfc7c764afede98ae8fd64", "a2b31ac19c05310ebd05a072ddde1acf0c51f2ec", "f6e31cf57779a7e117f5a0b9bd75720aed90ca56", "b101d27aafb7bde0907a568e7bb8a3ffbdd3ae67", "ee253c8854f16664f91d16171e08414effc314b7", "db320101b1540a35cf9986408e70ac46008b1982"]
+commits: ["db320101", "ee253c88", "b101d27a", "f6e31cf5", "a2b31ac1", "1bc00b6c", "0fda00bf"]
 ---
 
 ## Required behavior
@@ -123,55 +123,43 @@ Canonical spec: `specs/system/admin-panel.md`. Source: `fb1424fbac55cd23cb08606f
 ## Shipped
 
 All eight admin-panel deliverables are implemented on this branch,
-carried through the independent review-repair round (`0fda00bf`,
-13/13 findings fixed with focused tests) and rebased onto base
-`2f33a117` (task-265/task-258) in merge commit `6b897ab8` with
+carried through the independent review-repair round (`0fda00bf`, 13/13
+findings fixed with focused tests), rebased onto base `2f33a117`
+(task-265/task-258) in merge commit `6b897ab8`, and now onto base
+`00669baa` (task-263 Agent JWT claims) in merge commit `7add1d8d`,
 behavior preserved. The acceptance checkboxes above remain for the
 independent verifier.
 
-### Rebase repair round (`6b897ab8`)
+### Rebase repair round (`7add1d8d`)
 
-Merged base `2f33a117` into the pipeline branch. The two content
-conflicts were resolved as unions: `crates/gyre-ports/src/lib.rs`
-(base's `AgentSessionRepository` export alongside this task's
-`AgentInstanceRepository`) and `crates/gyre-server/src/mem.rs` (import
-list unioning `AgentSessionRepository` with this task's
-`AgentInstanceRepository` / `JobRunRepository` / `OAuthStateRepository`;
-both sides' impl blocks coexist untouched). The base consumed migration
-sequence 000067 (`user_manager_id`, `agent_sessions`), colliding with
-this task's `2026-11-13-000067_job_runs` (identical full Diesel
-version 20261113000067, so one would silently never run), so this
-task's four migrations were renumbered to the next unused sequences —
-`000071_job_runs`, `000072_oauth_states`, `000073_agent_instances`,
-`000074_audit_events_tenant_id` — as directory renames only (SQL
-unchanged; they had never shipped on main). Post-merge evidence:
+Merged base `00669baa` (task-263) into the pipeline branch. The single
+content conflict (`crates/gyre-server/src/lib.rs`, AppState construction)
+was resolved as a union of two independent changes: the base's
+`agent_jwt_ttl_secs` default 3600 (task-263's spec restoration,
+documented in the adjacent comment) and this branch's `users_repo`
+hoisting, which the merged mem-audit `set_tenant_sources` wiring
+requires. All other hunks across the 30 auto-merged files (agent audit,
+API handlers, auth, mcp, rbac, spiffe, gyre-spiffe id, server tests,
+docs, task-263 specs) merged cleanly. The merge changed no
+gyre-adapters / gyre-ports / gyre-common / gyre-domain files relative
+to the candidate. Post-merge evidence (recorded under
+`/tmp/stage/review-evidence/rebase-repair.md`):
 
 - `cargo check -p gyre-server` and `cargo check -p gyre-server
   --all-targets`: clean (lib plus every test target).
-- `cargo test -p gyre-adapters --lib`: **655 passed, 0 failed** —
-  including the vault suite (KV v2 CRUD, agent-JWT resolution,
-  AppRole re-login, namespace rides, path-unsafe names,
-  unreachable-Vault fails closed), plus the sops, oauth_state,
-  job_run and audit tenant-scoping suites.
-- `cargo test -p gyre-ports -p gyre-common -p gyre-domain`:
-  129 + 570 + 8 passed.
-- `cd web && npm test`: **2571 passed, 41 skipped** across 127 test
-  files — including the TenantSettings server-logs / jobs / audit
-  tab tests.
-- All 15 mechanical invariant scripts pass with no new exemption
-  entries, including check-migration-versions (the duplicate
-  20261113000067 is resolved), check-migration-sql-portability,
-  check-arch, check-mem-port-contracts,
-  check-in-memory-state-stores, check-abac-route-registry and
-  check-unbounded-external-http.
+- `cargo fmt --check -p gyre-server`: clean.
+- `check-task-commit-attribution.sh` passes with the seven
+  product-surface task-273 commits recorded in the frontmatter.
 
 gyre-server test *execution* is deferred to the independent verifier
 per the 4 GiB build budget; the required commands and module filters
 are recorded in `/tmp/stage/review-evidence/required-server-tests.txt`
-(api::oauth, api::secrets, api::admin, jobs, telemetry, mem audit
-tenant tests, secret_rotation modules).
+(api::oauth, api::secrets, api::admin, jobs, secret_rotation, mem audit
+tenant tests, auth/spiffe/agent_audit for the merged task-263 surface,
+api_integration / m18_oidc_integration / tenant_isolation, plus the
+adapter suites and the mechanical invariant scripts).
 
-### Standing behavior (unchanged through the rebase)
+### Standing behavior (unchanged through both rebases)
 
 SOPS default (genuine age-encrypted SOPS documents in the existing
 columns, legacy AES-256-GCM values re-encrypted on first access);
