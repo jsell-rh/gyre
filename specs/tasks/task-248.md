@@ -159,33 +159,46 @@ merge with base 9f0c709f, plus this round's CI repair (001f585a).
    (nothing stored or broadcast), including Server-origin global-token
    callers. An unresolvable workspace record rejects fail-closed.
 
-### This round — CI repair after merge with 9f0c709f
+### This round — verification repair: commit attribution
 
-CI run 44662219386 (PR head 324daddf) failed to compile the gyre-server
-lib test: the merge with base 9f0c709f brought task-258's new
+Verification at candidate f33d1224 (CI run on PR head) passed every
+gate except `check-task-commit-attribution.sh`: commit 001f585a
+(`fix(task-248): add auth_mechanism to merged task-258 spawn test
+fixture`) names both task-248 and task-258 in its subject and touches
+product surface (crates/gyre-server/src/api/spawn.rs), so the check
+requires its SHA in BOTH tasks' `commits:` frontmatter — it was
+recorded in task-248.md only. This round records
+`001f585ac686c90f601fd210ca4a40cc5cad7c9d` in
+specs/tasks/task-258.md's `commits:` frontmatter (the drift fix the
+check's message prescribes — frontmatter recording, never an
+exemption entry). No production code changed this round.
+
+Context for that commit, carried from the prior round: CI run
+44662219386 (PR head 324daddf) failed to compile the gyre-server lib
+test because the merge with base 9f0c709f brought task-258's new
 `complete_agent_ends_session_with_real_dirty_state` fixture in
-crates/gyre-server/src/api/spawn.rs constructing `AuthenticatedAgent`
-without the `auth_mechanism` field task-248 added to the extractor.
-001f585a sets it to `AuthMechanism::AgentToken`, matching the sibling
-spawner fixtures in the same test module — a one-line test-fixture
-repair, no production or task-248 guard code changed. Formatting
-verified clean (`cargo fmt --check`, no diff).
+spawn.rs constructing `AuthenticatedAgent` without the
+`auth_mechanism` field task-248 added to the extractor; 001f585a sets
+it to `AuthMechanism::AgentToken`, matching the sibling spawner
+fixtures in the same test module — a one-line test-fixture repair, no
+task-248 guard code changed.
 
 ### Test evidence
 
-- In-sandbox type/format gates this round (build-budget limit — large
-  gyre-server test compilation deferred to the verifier):
-  `SKIP_WEB_BUILD=1 cargo check -p gyre-server --tests` — clean, exit 0
-  (proves the CI E0063 is fixed; this is the exact job that failed);
-  `cargo fmt --check` — clean, exit 0.
-- Prior-round probes, unchanged by the merge and this round's one-line
-  fixture repair: origin-table probes (Admin API-key/OIDC server_only
-  403, directed-send membership 403, global-token Server origin +
+- In-sandbox probes this round (build-budget limit — large gyre-server
+  test compilation deferred to the verifier): `cargo fmt --check` —
+  clean, exit 0; `bash scripts/check-task-commit-attribution.sh` —
+  now passes (exit 0) with 001f585a recorded in both task-248.md and
+  task-258.md frontmatter (it failed on task-258 before the fix).
+- Prior-round probes, unchanged by this round's docs-only repair:
+  `SKIP_WEB_BUILD=1 cargo check -p gyre-server --tests` — clean;
+  origin-table probes (Admin API-key/OIDC server_only 403,
+  directed-send membership 403, global-token Server origin +
   Broadcast authority, rule-6 Admin-Broadcast allowance), rule-1
   cross-tenant 403 with empty store (REST + MCP), WS live/replay
   `acknowledged` exclusion, GET inbox keeps `acknowledged`, mem-store
-  Err-on-None contract test, scopeless-guard Err + error-level log with
-  empty store/broadcast.
+  Err-on-None contract test, scopeless-guard Err + error-level log
+  with empty store/broadcast.
 - Deferred to the independent verifier: `cargo test -p gyre-server`
   (the task-248 guard tests in api/messages.rs, mcp.rs, ws.rs, mem.rs,
   lib.rs test modules, and the repaired
