@@ -552,9 +552,7 @@ mod tests {
         ));
         assert!(pod_already_gone("error: pods \"x\" not found"));
         // Real failures must NOT be treated as already-gone.
-        assert!(!pod_already_gone(
-            "error: context \"prod\" does not exist"
-        ));
+        assert!(!pod_already_gone("error: context \"prod\" does not exist"));
         assert!(!pod_already_gone(
             "Error from server (Forbidden): pods \"agent-1\" is forbidden"
         ));
@@ -651,15 +649,15 @@ mod tests {
         let recorded = dir.path().join("invoked.txt");
         std::fs::write(
             &stub,
-            format!(
-                "#!/bin/sh\necho \"$@\" > {}\n",
-                recorded.to_str().unwrap()
-            ),
+            format!("#!/bin/sh\necho \"$@\" > {}\n", recorded.to_str().unwrap()),
         )
         .unwrap();
         make_executable(&stub);
         std::mem::forget(dir);
-        (stub.to_str().unwrap().to_string(), recorded.to_str().unwrap().to_string())
+        (
+            stub.to_str().unwrap().to_string(),
+            recorded.to_str().unwrap().to_string(),
+        )
     }
 
     fn make_executable(path: &std::path::Path) {

@@ -2253,7 +2253,11 @@ impl AuditRepository for MemAuditRepository {
                 if let Some(agent_id) = e.agent_id.as_ref() {
                     let agent_tenant = async {
                         let agent = agent_repo.as_ref()?.find_by_id(agent_id).await.ok()??;
-                        let ws = ws_repo.as_ref()?.find_by_id(&agent.workspace_id).await.ok()??;
+                        let ws = ws_repo
+                            .as_ref()?
+                            .find_by_id(&agent.workspace_id)
+                            .await
+                            .ok()??;
                         Some(ws.tenant_id.to_string())
                     }
                     .await;
@@ -2366,7 +2370,11 @@ mod mem_audit_tenant_tests {
         agent_event(workspace_id, user_id, None)
     }
 
-    fn agent_event(workspace_id: Option<Id>, user_id: Option<Id>, agent_id: Option<Id>) -> AuditEvent {
+    fn agent_event(
+        workspace_id: Option<Id>,
+        user_id: Option<Id>,
+        agent_id: Option<Id>,
+    ) -> AuditEvent {
         let mut e = AuditEvent::new(
             Id::new("evt-1"),
             gyre_domain::AuditEventType::ProcessExec,
@@ -2391,7 +2399,11 @@ mod mem_audit_tenant_tests {
         workspaces: MemWorkspaceRepository,
         users: MemUserRepository,
         agents: MemAgentRepository,
-    ) -> (Arc<dyn gyre_ports::WorkspaceRepository>, Arc<dyn gyre_ports::UserRepository>, Arc<dyn gyre_ports::AgentRepository>) {
+    ) -> (
+        Arc<dyn gyre_ports::WorkspaceRepository>,
+        Arc<dyn gyre_ports::UserRepository>,
+        Arc<dyn gyre_ports::AgentRepository>,
+    ) {
         (
             Arc::new(workspaces) as Arc<dyn gyre_ports::WorkspaceRepository>,
             Arc::new(users) as Arc<dyn gyre_ports::UserRepository>,
@@ -2439,11 +2451,8 @@ mod mem_audit_tenant_tests {
         ws_repo.create(&ws).await.unwrap();
         let users_repo = MemUserRepository::default();
         let audit2 = MemAuditRepository::default();
-        let (ws_src, user_src, agent_src) = sources(
-            ws_repo,
-            users_repo,
-            MemAgentRepository::default(),
-        );
+        let (ws_src, user_src, agent_src) =
+            sources(ws_repo, users_repo, MemAgentRepository::default());
         audit2.set_tenant_sources(ws_src, user_src, agent_src);
         audit2
             .record(&event(Some(Id::new("ws-1")), None))
@@ -2460,11 +2469,8 @@ mod mem_audit_tenant_tests {
         let users_repo = MemUserRepository::default();
         users_repo.create(&user).await.unwrap();
         let audit3 = MemAuditRepository::default();
-        let (ws_src, user_src, agent_src) = sources(
-            ws_repo,
-            users_repo,
-            MemAgentRepository::default(),
-        );
+        let (ws_src, user_src, agent_src) =
+            sources(ws_repo, users_repo, MemAgentRepository::default());
         audit3.set_tenant_sources(ws_src, user_src, agent_src);
         audit3
             .record(&event(None, Some(Id::new("user-1"))))
@@ -2490,8 +2496,7 @@ mod mem_audit_tenant_tests {
         // are stored tenant_id NULL and vanish from the tenant-scoped
         // admin audit trail. The agent's tenant is derived via its
         // governing workspace.
-        let ws =
-            gyre_domain::Workspace::new(Id::new("ws-a"), Id::new("tenant-a"), "A", "a", 1_000);
+        let ws = gyre_domain::Workspace::new(Id::new("ws-a"), Id::new("tenant-a"), "A", "a", 1_000);
         let mut agent = gyre_domain::Agent::new(Id::new("agent-1"), "worker", 1_000);
         agent.workspace_id = ws.id.clone();
         let ws_repo = MemWorkspaceRepository::default();
@@ -2500,11 +2505,8 @@ mod mem_audit_tenant_tests {
         agents_repo.create(&agent).await.unwrap();
 
         let audit = MemAuditRepository::default();
-        let (ws_src, user_src, agent_src) = sources(
-            ws_repo,
-            MemUserRepository::default(),
-            agents_repo,
-        );
+        let (ws_src, user_src, agent_src) =
+            sources(ws_repo, MemUserRepository::default(), agents_repo);
         audit.set_tenant_sources(ws_src, user_src, agent_src);
 
         // The container_audit::emit shape: agent_id set, workspace/user
