@@ -25,6 +25,11 @@ struct Observed {
     /// (403) by the data/metadata handlers — the test flips this to
     /// simulate a cached server token whose TTL expired.
     reject_approle_upto: Arc<std::sync::atomic::AtomicUsize>,
+    /// Path prefixes the AGENT token ("test-agent-token") is denied (403)
+    /// on — simulates Vault policy scoping: the agent's role may read only
+    /// part of the cascade subtree (review task-273: policy denial must
+    /// scope the resolution, not abort it).
+    agent_denied_prefixes: Arc<Mutex<Vec<String>>>,
 }
 
 /// Spawn the stub Vault server; returns (base_url, store, observed).
@@ -38,6 +43,8 @@ async fn spawn_vault() -> (String, VaultStore, Observed) {
     let jwt_logins = Arc::clone(&observed.jwt_logins);
     let namespaces = Arc::clone(&observed.namespaces);
     let reject_approle_upto = Arc::clone(&observed.reject_approle_upto);
+    let agent_denied_reads = Arc::clone(&observed.agent_denied_prefixes);
+    let agent_denied_lists = Arc::clone(&observed.agent_denied_prefixes);
     let store_reads = Arc::clone(&store);
     let store_writes = Arc::clone(&store);
     let store_list = Arc::clone(&store);
@@ -118,6 +125,21 @@ async fn spawn_vault() -> (String, VaultStore, Observed) {
                                 axum::Json(serde_json::json!({"errors": ["permission denied"]})),
                             );
                         }
+                        // Agent-token policy scoping: a denied prefix is a
+                        // real Vault policy denial (403), not a token
+                        // failure.
+                        if token == "test-agent-token"
+                            && agent_denied_reads
+                                .lock()
+                                .await
+                                .iter()
+                                .any(|p| path.starts_with(p.as_str()))
+                        {
+                            return (
+                                axum::http::StatusCode::FORBIDDEN,
+                                axum::Json(serde_json::json!({"errors": ["permission denied"]})),
+                            );
+                        }
                         namespaces.lock().await.push((
                             "data_read",
                             headers
@@ -183,6 +205,7 @@ async fn spawn_vault() -> (String, VaultStore, Observed) {
                       headers: axum::http::HeaderMap| {
                     let store = Arc::clone(&store_list);
                     let reject_upto = reject_list;
+                    let agent_denied = agent_denied_lists;
                     async move {
                         let token = headers
                             .get("X-Vault-Token")
@@ -190,6 +213,18 @@ async fn spawn_vault() -> (String, VaultStore, Observed) {
                             .unwrap_or_default()
                             .to_string();
                         if !token_accepted(&token, &reject_upto) {
+                            return (
+                                axum::http::StatusCode::FORBIDDEN,
+                                axum::Json(serde_json::json!({"errors": ["permission denied"]})),
+                            );
+                        }
+                        if token == "test-agent-token"
+                            && agent_denied
+                                .lock()
+                                .await
+                                .iter()
+                                .any(|p| path.starts_with(p.as_str()))
+                        {
                             return (
                                 axum::http::StatusCode::FORBIDDEN,
                                 axum::Json(serde_json::json!({"errors": ["permission denied"]})),
@@ -435,6 +470,115 @@ async fn agent_resolution_authenticates_with_agent_jwt() {
         !agent_reads.iter().any(|(_, t)| t == "static-token"),
         "the server token must not be used for agent-scoped reads"
     );
+}
+
+#[tokio::test]
+async fn agent_resolution_policy_denial_scopes_instead_of_aborting() {
+    // platform-model.md §7 (review task-273): Vault policies scope the
+    // secrets an agent receives. An operator-scoped role that is DENIED
+    // the tenant-level subtree must still receive the workspace/repo
+    // scopes it may read — the resolution yields the permitted subset,
+    // it does not fail (and everything that is not an explicit policy
+    // denial still fails closed).
+    let (addr, _store, observed) = spawn_vault().await;
+    let repo = VaultSecretRepository::new(config(&addr)).unwrap();
+
+    repo.create(
+        &sample_secret("TENANT_KEY", SecretScope::Tenant, "t1", "t1"),
+        b"tenant-value",
+    )
+    .await
+    .unwrap();
+    repo.create(
+        &sample_secret("WORKSPACE_KEY", SecretScope::Workspace, "ws-1", "t1"),
+        b"workspace-value",
+    )
+    .await
+    .unwrap();
+    repo.create(
+        &sample_secret("REPO_KEY", SecretScope::Repo, "repo-1", "t1"),
+        b"repo-value",
+    )
+    .await
+    .unwrap();
+
+    // The agent's Vault policy denies the tenant subtree (list AND read).
+    observed
+        .agent_denied_prefixes
+        .lock()
+        .await
+        .push("gyre-secrets/t1/tenant".to_string());
+
+    let resolved = repo
+        .resolve_for_agent_as("t1", "ws-1", "repo-1", None, "agent-jwt-abc")
+        .await
+        .expect("a policy denial must scope the resolution, not fail it");
+    let map: HashMap<String, Vec<u8>> = resolved.into_iter().collect();
+    assert_eq!(
+        map.get("WORKSPACE_KEY").unwrap(),
+        b"workspace-value",
+        "the permitted workspace scope must still resolve"
+    );
+    assert_eq!(
+        map.get("REPO_KEY").unwrap(),
+        b"repo-value",
+        "the permitted repo scope must still resolve"
+    );
+    assert!(
+        !map.contains_key("TENANT_KEY"),
+        "the policy-denied tenant scope must not be delivered: {map:?}"
+    );
+
+    // The SERVER path is not scoped by agent policy denials: a 403 there
+    // is a token/misconfiguration failure that must surface, never a
+    // silent subset. (The static server token is accepted everywhere in
+    // this stub, so the server resolution still sees everything.)
+    let server_resolved = repo
+        .resolve_for_agent("t1", "ws-1", "repo-1", None)
+        .await
+        .unwrap();
+    assert_eq!(server_resolved.len(), 3);
+}
+
+#[tokio::test]
+async fn replace_rewrites_value_and_metadata_as_one_versioned_write() {
+    // review task-273: credential rewrites (rotation, re-enrollment) go
+    // through the port's atomic `replace` — never delete + create.
+    let (addr, store, _observed) = spawn_vault().await;
+    let repo = VaultSecretRepository::new(config(&addr)).unwrap();
+
+    let secret = sample_secret("DATABASE_URL", SecretScope::Repo, "repo-1", "t1");
+    repo.create(&secret, b"postgres://old").await.unwrap();
+
+    // Replace value + metadata in one call.
+    let mut updated = secret.clone();
+    updated.expires_at = Some(1_700_000_900);
+    updated.last_rotated_at = Some(1_700_000_100);
+    repo.replace(&updated, b"postgres://new").await.unwrap();
+
+    let value = repo.get_value(&secret.id, "t1").await.unwrap().unwrap();
+    assert_eq!(value, b"postgres://new");
+    let found = repo.find_by_id(&secret.id, "t1").await.unwrap().unwrap();
+    assert_eq!(found.expires_at, Some(1_700_000_900));
+    assert_eq!(found.last_rotated_at, Some(1_700_000_100));
+
+    // The old data path was reused (a versioned overwrite, not a second
+    // location): exactly one data entry and one index entry exist.
+    {
+        let s = store.lock().await;
+        let data_entries: Vec<&String> = s
+            .keys()
+            .filter(|k| k.starts_with("secret/data/gyre-secrets/t1/repo/repo-1/"))
+            .collect();
+        assert_eq!(data_entries.len(), 1, "replace must not fork locations");
+        assert!(s.contains_key("secret/data/gyre-secrets/t1/_idx/id-DATABASE_URL-repo-1"));
+    }
+
+    // Port contract: replacing an unknown id fails.
+    let mut ghost = sample_secret("GHOST", SecretScope::Repo, "repo-1", "t1");
+    ghost.id = Id::new("id-ghost");
+    let err = repo.replace(&ghost, b"v").await.unwrap_err();
+    assert!(err.to_string().contains("not found"));
 }
 
 #[tokio::test]
