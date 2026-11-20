@@ -19,6 +19,7 @@ pub mod email;
 pub mod gate_executor;
 pub(crate) mod git_http;
 pub mod git_refs;
+pub mod graph_diff_core;
 pub mod graph_extraction;
 pub mod procfs_monitor;
 pub mod sigstore;
