@@ -12,6 +12,13 @@ pub struct SshTarget {
     pub identity_file: Option<String>,
     /// Optional SSH port (default: 22).
     pub port: Option<u16>,
+    /// Optional local ssh client binary (default: `ssh` from PATH).
+    /// Deployment knob for pinned or non-standard client locations —
+    /// mirrors `kubectl_path` on the Kubernetes target. Applies to every
+    /// client invocation this target makes (tunnels, bare-process
+    /// spawn/kill/liveness, and the docker-over-SSH commands of
+    /// [`SshDockerTarget`]).
+    pub ssh_path: Option<String>,
 }
 
 impl SshTarget {
@@ -21,6 +28,7 @@ impl SshTarget {
             host: host.into(),
             identity_file: None,
             port: None,
+            ssh_path: None,
         }
     }
 
@@ -32,6 +40,18 @@ impl SshTarget {
     pub fn with_port(mut self, port: u16) -> Self {
         self.port = Some(port);
         self
+    }
+
+    /// Pin the local ssh client binary (see [`SshTarget::ssh_path`]).
+    pub fn with_ssh_path(mut self, path: impl Into<String>) -> Self {
+        self.ssh_path = Some(path.into());
+        self
+    }
+
+    /// The ssh client binary to invoke: the pinned `ssh_path` when set,
+    /// else `ssh` resolved from PATH.
+    fn ssh_bin(&self) -> &str {
+        self.ssh_path.as_deref().unwrap_or("ssh")
     }
 
     /// Reconstruct a target from a recorded handle so out-of-band
@@ -131,7 +151,7 @@ impl SshTarget {
         args.push(spec);
         args.push(self.destination());
 
-        let child = Command::new("ssh")
+        let child = Command::new(self.ssh_bin())
             .args(&args)
             // Redirect I/O so the background process does not block the server
             .stdin(std::process::Stdio::null())
@@ -245,7 +265,7 @@ impl ComputeTarget for SshTarget {
         ssh_args.push(self.destination());
         ssh_args.push(remote_cmd);
 
-        let output = Command::new("ssh")
+        let output = Command::new(self.ssh_bin())
             .args(&ssh_args)
             .output()
             .await
@@ -289,7 +309,7 @@ impl ComputeTarget for SshTarget {
             ssh_args.push(self.destination());
             ssh_args.push(remote_cmd);
 
-            let status = Command::new("ssh")
+            let status = Command::new(self.ssh_bin())
                 .args(&ssh_args)
                 .status()
                 .await
@@ -309,7 +329,7 @@ impl ComputeTarget for SshTarget {
             ssh_args.push(self.destination());
             ssh_args.push(remote_cmd);
 
-            let output = Command::new("ssh")
+            let output = Command::new(self.ssh_bin())
                 .args(&ssh_args)
                 .output()
                 .await
@@ -458,7 +478,7 @@ impl SshDockerTarget {
         let mut ssh_args = self.ssh.base_ssh_args();
         ssh_args.push(self.ssh.destination());
         ssh_args.push(remote_cmd);
-        let output = Command::new("ssh")
+        let output = Command::new(self.ssh.ssh_bin())
             .args(&ssh_args)
             .output()
             .await
@@ -593,7 +613,8 @@ fn remote_container_is_missing(err: &anyhow::Error) -> bool {
 /// (agent-runtime.md §3 Supported Backends — SSH).
 ///
 /// Recognized keys: `user` (required in practice; defaults `root`),
-/// `host`, `port`, `identity_file`, `image`, `network`, `memory_limit`,
+/// `host`, `port`, `identity_file`, `ssh_path` (local ssh client binary;
+/// defaults to `ssh` from PATH), `image`, `network`, `memory_limit`,
 /// `pids_limit`, `user_as` (container `--user`; named `user_as` to avoid
 /// colliding with the SSH login user), `docker_binary`.
 /// Absent security keys fall back to the spec defaults
@@ -615,6 +636,9 @@ pub fn ssh_docker_target_from_config(config: &serde_json::Value) -> SshDockerTar
     }
     if let Some(port) = config.get("port").and_then(|v| v.as_u64()) {
         ssh = ssh.with_port(port as u16);
+    }
+    if let Some(bin) = config.get("ssh_path").and_then(|v| v.as_str()) {
+        ssh = ssh.with_ssh_path(bin);
     }
     let mut t = SshDockerTarget::new(
         ssh,
@@ -858,6 +882,68 @@ mod tests {
         let t = SshDockerTarget::new(SshTarget::new("user", "host"), "gyre-agent:latest");
         let res = t.spawn_process(&ssh_docker_config("agent-x")).await;
         assert!(res.is_err(), "spawn must fail when ssh is missing");
+    }
+
+    /// `ssh_path` must drive the actual binary `spawn_process` invokes —
+    /// a stub ssh that answers `docker run` with a container id (and
+    /// records the invocation) proves the config override reaches the
+    /// Command invocation. Mirrors `spawn_uses_configured_kubectl_path`.
+    #[tokio::test]
+    async fn ssh_docker_spawn_uses_configured_ssh_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("saw-docker-run");
+        let stub = dir.path().join("ssh-stub");
+        std::fs::write(
+            &stub,
+            format!(
+                "#!/bin/sh\ncmd=\nfor arg in \"$@\"; do cmd=$arg; done\ncmd=$(printf '%s' \"$cmd\" | tr -d \"'\")\ncase $cmd in\n  'docker run '*) echo stubcontainer000000000; touch {marker} ;;\n  *) echo \"stub ssh: unhandled: $cmd\" >&2; exit 1 ;;\nesac\n",
+                marker = marker.display()
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let t = ssh_docker_target_from_config(&serde_json::json!({
+            "user": "ci",
+            "host": "fake-remote",
+            "ssh_path": stub.to_str().unwrap()
+        }));
+        assert_eq!(
+            t.ssh.ssh_path.as_deref(),
+            Some(stub.to_str().unwrap()),
+            "config ssh_path must be parsed onto the target"
+        );
+        let handle = gyre_ports::ComputeTarget::spawn_process(&t, &ssh_docker_config("path-agent"))
+            .await
+            .expect("spawn via stub ssh must succeed");
+        assert_eq!(handle.id, "stubcontainer000000000");
+        assert!(
+            handle.pid.is_none(),
+            "remote-container handles are pid-less"
+        );
+        assert!(
+            marker.exists(),
+            "the stub ssh must have received the remote docker run command"
+        );
+    }
+
+    /// No `ssh_path` in the config must leave the binary at the PATH
+    /// default (`ssh`), never a fabricated or empty client path.
+    #[test]
+    fn ssh_docker_config_without_ssh_path_defaults_to_path_ssh() {
+        let t = ssh_docker_target_from_config(&serde_json::json!({
+            "user": "ci",
+            "host": "fake-remote"
+        }));
+        assert!(
+            t.ssh.ssh_path.is_none(),
+            "no config ssh_path must fall back to ssh from PATH"
+        );
+        assert_eq!(t.ssh.ssh_bin(), "ssh");
     }
 
     fn which_exists(bin: &str) -> bool {

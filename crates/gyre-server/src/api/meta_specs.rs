@@ -3821,31 +3821,6 @@ mod tests {
         );
     }
 
-    /// Run `f` with `dir` prepended to PATH, restoring the original value
-    /// afterwards even on panic. PATH is process-global and read at spawn
-    /// time by every `Command::new(<name>)`, so the same ENV_LOCK that
-    /// serializes `GYRE_AGENT_COMMAND` tests serializes PATH shadowing —
-    /// and prepending (rather than replacing) keeps git/sleep/kill
-    /// resolvable for concurrently running tests that hold no lock.
-    /// Like `with_agent_command`, the lock is intentionally held across
-    /// the awaited body: the PATH mutation must span the whole test run,
-    /// and tests are serialized on this lock process-wide.
-    #[allow(clippy::await_holding_lock)]
-    async fn with_path_prepend<F, Fut>(dir: &std::path::Path, f: F)
-    where
-        F: FnOnce() -> Fut,
-        Fut: std::future::Future<Output = ()>,
-    {
-        let _env = ENV_LOCK.lock();
-        let orig = std::env::var("PATH").unwrap_or_default();
-        std::env::set_var("PATH", format!("{}:{}", dir.display(), orig));
-        let result = std::panic::AssertUnwindSafe(f()).catch_unwind().await;
-        std::env::set_var("PATH", orig);
-        if let Err(panic) = result {
-            std::panic::resume_unwind(panic);
-        }
-    }
-
     /// A fake `ssh` binary emulating a remote docker host: the remote
     /// command (`docker <subcmd> ...`, the last argument) is answered the
     /// way the remote daemon would, and markers are written next to the
@@ -3953,7 +3928,8 @@ mod tests {
     /// the actually-running remote container orphaned, no diff ever
     /// produced — §5 preview mode broken on two of the five compute
     /// backends. No remote host exists in tests, so the ssh-docker
-    /// dispatch runs end to end against a fake `ssh` binary on PATH that
+    /// dispatch runs end to end against a fake `ssh` binary (wired via
+    /// the target's `ssh_path` config, the `kubectl_path` pattern) that
     /// emulates the remote docker daemon; the contract under test is that
     /// a pid-less remote-container handle is a START, and that the run
     /// stays killable through the recorded backend.
@@ -3963,86 +3939,91 @@ mod tests {
         let (app, state, repo_id) = preview_app(dir.path(), 86_400, None).await;
 
         // container_mode defaults to true in the dispatch — the spec
-        // default ("SSH to remote host, docker run there").
+        // default ("SSH to remote host, docker run there"). The ssh
+        // client is pinned to the fake via the target's `ssh_path` config
+        // (same wiring pattern as the kubernetes sibling's `kubectl_path`,
+        // no PATH shadowing — a PATH-wide `ssh` swap would leak into every
+        // concurrently running test in this process).
+        let ssh_bin = fake_ssh_script(dir.path());
+        let fake_dir = ssh_bin.parent().unwrap().to_path_buf();
         attach_compute_target(
             &state,
             &repo_id,
             gyre_domain::ComputeTargetType::Ssh,
-            serde_json::json!({"user": "ci", "host": "fake-remote"}),
+            serde_json::json!({
+                "user": "ci",
+                "host": "fake-remote",
+                "ssh_path": ssh_bin.to_str().unwrap(),
+            }),
         )
         .await;
-        let ssh_bin = fake_ssh_script(dir.path());
-        let fake_dir = ssh_bin.parent().unwrap().to_path_buf();
 
-        with_path_prepend(&fake_dir, || async {
-            let resp = post_preview(&app, preview_body(&repo_id, &["specs/system/search.md"])).await;
-            assert_eq!(
-                resp.status(),
-                StatusCode::ACCEPTED,
-                "a successful remote-container launch must start the preview"
-            );
-            let json = body_json(resp).await;
-            let preview_id = json["preview_id"].as_str().unwrap().to_string();
-            let agent_id = json["agents"][0]["agent_id"].as_str().unwrap().to_string();
+        let resp = post_preview(&app, preview_body(&repo_id, &["specs/system/search.md"])).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::ACCEPTED,
+            "a successful remote-container launch must start the preview"
+        );
+        let json = body_json(resp).await;
+        let preview_id = json["preview_id"].as_str().unwrap().to_string();
+        let agent_id = json["agents"][0]["agent_id"].as_str().unwrap().to_string();
 
-            // The remote docker really was asked to run a container.
-            assert!(
-                fake_dir.join("ssh-saw-run").exists(),
-                "the ssh-docker dispatch must invoke the remote docker run"
-            );
+        // The remote docker really was asked to run a container.
+        assert!(
+            fake_dir.join("ssh-saw-run").exists(),
+            "the ssh-docker dispatch must invoke the remote docker run"
+        );
 
-            // The registered handle is the pid-less remote-container shape
-            // (target_type ssh, id = remote container id, no pid) and its
-            // backend was recorded alongside — the exact shapes the
-            // pre-fix check misread as \"never started\".
-            let handle = state
-                .process_registry
-                .lock()
-                .await
-                .get(&agent_id)
-                .cloned()
-                .expect("remote-container handle must be registered");
-            assert_eq!(handle.target_type, "ssh");
-            assert!(
-                handle.pid.is_none(),
-                "SshDocker handles are pid-less by design — the shape the started check must not guess from"
-            );
-            assert!(state.spawned_backends.lock().await.contains_key(&agent_id));
+        // The registered handle is the pid-less remote-container shape
+        // (target_type ssh, id = remote container id, no pid) and its
+        // backend was recorded alongside — the exact shapes the
+        // pre-fix check misread as \"never started\".
+        let handle = state
+            .process_registry
+            .lock()
+            .await
+            .get(&agent_id)
+            .cloned()
+            .expect("remote-container handle must be registered");
+        assert_eq!(handle.target_type, "ssh");
+        assert!(
+            handle.pid.is_none(),
+            "SshDocker handles are pid-less by design — the shape the started check must not guess from"
+        );
+        assert!(state.spawned_backends.lock().await.contains_key(&agent_id));
 
-            // THE regression: the agent is Active (pre-fix: Failed from the
-            // first moment, with the remote container still running).
-            let agent = state
-                .agents
-                .find_by_id(&gyre_common::Id::new(&agent_id))
-                .await
-                .unwrap()
-                .unwrap();
-            assert_eq!(
-                agent.status,
-                gyre_domain::AgentStatus::Active,
-                "a successfully started remote container must not be reported failed"
-            );
+        // THE regression: the agent is Active (pre-fix: Failed from the
+        // first moment, with the remote container still running).
+        let agent = state
+            .agents
+            .find_by_id(&gyre_common::Id::new(&agent_id))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            agent.status,
+            gyre_domain::AgentStatus::Active,
+            "a successfully started remote container must not be reported failed"
+        );
 
-            // Status derives from the real row: running, not failed.
-            let status_resp = get_preview_status(&app, &preview_id).await;
-            assert_eq!(status_resp.status(), StatusCode::OK);
-            let status = body_json(status_resp).await;
-            assert_eq!(status["state"].as_str().unwrap(), "running");
-            assert_eq!(status["agents"][0]["status"].as_str().unwrap(), "running");
+        // Status derives from the real row: running, not failed.
+        let status_resp = get_preview_status(&app, &preview_id).await;
+        assert_eq!(status_resp.status(), StatusCode::OK);
+        let status = body_json(status_resp).await;
+        assert_eq!(status["state"].as_str().unwrap(), "running");
+        assert_eq!(status["agents"][0]["status"].as_str().unwrap(), "running");
 
-            // Teardown kills through the recorded SshDocker backend — the
-            // remote daemon sees the `docker rm` — and purges both
-            // lifecycle registries.
-            let del = delete_preview(&app, &preview_id).await;
-            assert_eq!(del.status(), StatusCode::NO_CONTENT);
-            assert!(
-                fake_dir.join("ssh-saw-rm").exists(),
-                "DELETE must kill the remote container through the recorded backend"
-            );
-            assert!(!state.process_registry.lock().await.contains_key(&agent_id));
-            assert!(!state.spawned_backends.lock().await.contains_key(&agent_id));
-        })
-        .await;
+        // Teardown kills through the recorded SshDocker backend — the
+        // remote daemon sees the `docker rm` — and purges both
+        // lifecycle registries.
+        let del = delete_preview(&app, &preview_id).await;
+        assert_eq!(del.status(), StatusCode::NO_CONTENT);
+        assert!(
+            fake_dir.join("ssh-saw-rm").exists(),
+            "DELETE must kill the remote container through the recorded backend"
+        );
+        assert!(!state.process_registry.lock().await.contains_key(&agent_id));
+        assert!(!state.spawned_backends.lock().await.contains_key(&agent_id));
     }
 
     /// Kubernetes sibling of the ssh-docker regression above: a Pod handle
@@ -9319,8 +9300,11 @@ pub async fn delete_meta_spec_registry(
     // membership for Workspace entries), so a workspace Owner may delete
     // their workspace's entries without holding the tenant Admin role.
     // Load the entity, derive scope from the record (never the request), and
-    // check tenant containment before deleting.
-    require_meta_spec_access(&state, &auth, &id).await?;
+    // check tenant containment before deleting. The containment check for
+    // an EXISTING row lives inside `authorize_meta_spec_delete` (per-scope,
+    // cross-tenant → 403) — a leading `require_meta_spec_access` here would
+    // return its raw NotFound for a missing row and leak existence to
+    // unprivileged callers before the ordering below runs.
     let rid = Id::new(&id);
     // Authorization ordering: a missing row must not become an existence
     // oracle for unprivileged callers (403 precedes 404). A tenant Admin —

@@ -1872,6 +1872,9 @@ async fn dispatch_agent_launch(
                 if let Some(port) = cfg.config["port"].as_u64() {
                     ssh_target = ssh_target.with_port(port as u16);
                 }
+                if let Some(bin) = cfg.config["ssh_path"].as_str() {
+                    ssh_target = ssh_target.with_ssh_path(bin);
+                }
                 match gyre_ports::ComputeTarget::spawn_process(&ssh_target, &ssh_spawn_config).await
                 {
                     Ok(handle) => {
