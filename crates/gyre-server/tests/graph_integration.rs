@@ -1132,7 +1132,10 @@ async fn test_view_query_diff_scope_commit_range() {
         }
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     }
-    assert!(extracted, "extraction at commit C did not produce f/g/h nodes");
+    assert!(
+        extracted,
+        "extraction at commit C did not produce f/g/h nodes"
+    );
 
     // ── Acceptance 1: Diff{A, C} matches exactly {f, g} ─────────────────────
     //
@@ -1198,13 +1201,16 @@ async fn test_view_query_diff_scope_commit_range() {
         .filter_map(|n| n.as_str().map(|s| s.to_string()))
         .collect();
     assert_eq!(
-        names, vec!["f".to_string()],
+        names,
+        vec!["f".to_string()],
         "Diff{{A, B}} must match exactly f (to_commit older than HEAD); got {names:?}"
     );
 
     // ── Criterion 8: GET /graph/diff serves the SAME change set ────────────
     let body: Value = client
-        .get(format!("{api}/repos/{repo_id}/graph/diff?from=tagA&to=tagC"))
+        .get(format!(
+            "{api}/repos/{repo_id}/graph/diff?from=tagA&to=tagC"
+        ))
         .header("Authorization", &auth)
         .send()
         .await
@@ -1228,7 +1234,9 @@ async fn test_view_query_diff_scope_commit_range() {
     assert!(body["nodes"]["removed"].as_array().unwrap().is_empty());
     // A..B through the same shared core.
     let body: Value = client
-        .get(format!("{api}/repos/{repo_id}/graph/diff?from=tagA&to=tagB"))
+        .get(format!(
+            "{api}/repos/{repo_id}/graph/diff?from=tagA&to=tagB"
+        ))
         .header("Authorization", &auth)
         .send()
         .await
@@ -1357,7 +1365,9 @@ async fn test_view_query_diff_scope_commit_range() {
 
     // Shared core consistency for the removal range too.
     let body: Value = client
-        .get(format!("{api}/repos/{repo_id}/graph/diff?from=tagA&to=tagD"))
+        .get(format!(
+            "{api}/repos/{repo_id}/graph/diff?from=tagA&to=tagD"
+        ))
         .header("Authorization", &auth)
         .send()
         .await

@@ -227,7 +227,9 @@ mod tests {
 
     #[test]
     fn substantive_field_differences_count_as_modified() {
-        let cases: Vec<(fn(&mut GraphNode), &str)> = vec![
+        // Clippy: a bare fn-pointer pair reads as a complex type — name it.
+        type Mutator = fn(&mut GraphNode);
+        let cases: Vec<(Mutator, &str)> = vec![
             (
                 |n: &mut GraphNode| n.doc_comment = Some("fn f(x: u64)".into()),
                 "doc/signature",

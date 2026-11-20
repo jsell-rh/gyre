@@ -3549,9 +3549,7 @@ async fn execute_tool(
                     // core.
                     let diff_changes =
                         crate::graph_diff_core::resolve_view_query_diff_changes_for_state(
-                            state,
-                            repo_id,
-                            &query,
+                            state, repo_id, &query,
                         )
                         .await;
                     let result = gyre_domain::view_query_resolver::dry_run_with_diff_change_set(
@@ -3991,10 +3989,9 @@ async fn self_check_dry_run(
         serde_json::from_value::<gyre_common::view_query::ViewQuery>(query_json.clone()).ok()?;
     let validation_errors = query.validate();
     let validation_warnings = query.warnings();
-    let diff_changes = crate::graph_diff_core::resolve_view_query_diff_changes_for_state(
-        state, repo_id, &query,
-    )
-    .await;
+    let diff_changes =
+        crate::graph_diff_core::resolve_view_query_diff_changes_for_state(state, repo_id, &query)
+            .await;
     let mut dr = gyre_domain::view_query_resolver::dry_run_with_diff_change_set(
         &query,
         nodes,

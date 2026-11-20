@@ -2854,12 +2854,9 @@ pub async fn view_query_dryrun(
     // real git via the shared two-commit graph-diff core (the same path that
     // serves GET /repos/{id}/graph/diff) and inject it into the pure domain
     // resolver — no git knowledge enters gyre-domain.
-    let diff_changes = crate::graph_diff_core::resolve_view_query_diff_changes_for_state(
-        &state,
-        &id,
-        &req.query,
-    )
-    .await;
+    let diff_changes =
+        crate::graph_diff_core::resolve_view_query_diff_changes_for_state(&state, &id, &req.query)
+            .await;
     let result = gyre_domain::view_query_resolver::dry_run_with_diff_change_set(
         &req.query,
         &nodes,

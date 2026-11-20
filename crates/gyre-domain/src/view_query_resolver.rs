@@ -591,7 +591,15 @@ pub fn resolve_scope_with_depths(
     selected_node_id: Option<&str>,
 ) -> ScopeResult {
     let (outgoing, incoming) = build_adjacency(edges);
-    resolve_scope_with_adjacency(scope, nodes, edges, selected_node_id, &outgoing, &incoming, None)
+    resolve_scope_with_adjacency(
+        scope,
+        nodes,
+        edges,
+        selected_node_id,
+        &outgoing,
+        &incoming,
+        None,
+    )
 }
 
 /// [`resolve_scope_with_depths`] with a server-computed commit-range change
@@ -4794,10 +4802,7 @@ mod tests {
             "untouched node must not be matched"
         );
         assert!(
-            result
-                .warnings
-                .iter()
-                .all(|w| !w.contains("approximate")),
+            result.warnings.iter().all(|w| !w.contains("approximate")),
             "the old approximation warning is gone"
         );
     }
@@ -4849,10 +4854,7 @@ mod tests {
         let result = resolve_scope_with_diff_change_set(&scope, &nodes, &edges, None, Some(&cs));
         assert!(result.matched.contains("n1"));
         assert!(
-            result
-                .warnings
-                .iter()
-                .any(|w| w.contains("pkg.Gone")),
+            result.warnings.iter().any(|w| w.contains("pkg.Gone")),
             "removed node must be named in warnings"
         );
     }
@@ -4868,9 +4870,7 @@ mod tests {
             to_commit: "2222222".to_string(),
         };
         let cs = InjectedDiffChangeSet {
-            warnings: vec![
-                "Diff from_commit 'no-such-branch' could not be resolved".to_string(),
-            ],
+            warnings: vec!["Diff from_commit 'no-such-branch' could not be resolved".to_string()],
             ..Default::default()
         };
         let result = resolve_scope_with_diff_change_set(&scope, &nodes, &edges, None, Some(&cs));
@@ -5315,10 +5315,7 @@ mod tests {
         let result = dry_run_with_diff_change_set(&query, &nodes, &edges, None, None, Some(&cs));
         assert_eq!(result.matched_nodes, 0);
         assert!(
-            !result
-                .warnings
-                .iter()
-                .any(|w| w.contains("approximate")),
+            !result.warnings.iter().any(|w| w.contains("approximate")),
             "no approximation warning may fire"
         );
         // Matched ids are exposed for the renderer's server-driven diff
@@ -5363,7 +5360,10 @@ mod tests {
         ids.sort();
         assert_eq!(ids, vec!["n1".to_string(), "n2".to_string()]);
         assert_eq!(
-            result.resolved_annotation.as_ref().and_then(|a| a.title.clone()),
+            result
+                .resolved_annotation
+                .as_ref()
+                .and_then(|a| a.title.clone()),
             Some("2 changed".to_string())
         );
     }
