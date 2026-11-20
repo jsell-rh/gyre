@@ -343,7 +343,10 @@ impl VaultSecretRepository {
         )
     }
 
-    /// GET a KV v2 data path with `token`; `Ok(None)` on HTTP 404.
+    /// GET a KV v2 data path with `token`; `Ok(None)` on HTTP 404. A 403
+    /// is a typed [`VaultPermissionDenied`] so callers can distinguish
+    /// policy denial (scope the result) from transport failure (fail
+    /// closed).
     async fn kv_read(&self, path: &str, token: &str) -> Result<Option<VaultSecretPayload>> {
         let url = format!("{}/v1/{path}", self.config.addr);
         let mut req = self.http.get(&url);
@@ -351,6 +354,9 @@ impl VaultSecretRepository {
         let resp = req.send().await.context("Vault read request failed")?;
         if resp.status() == reqwest::StatusCode::NOT_FOUND {
             return Ok(None);
+        }
+        if resp.status() == reqwest::StatusCode::FORBIDDEN {
+            return Err(permission_denied(path));
         }
         anyhow::ensure!(
             resp.status().is_success(),
@@ -406,7 +412,11 @@ impl VaultSecretRepository {
 
     /// LIST the keys under a KV v2 metadata path. Vault's HTTP API accepts
     /// the list operation as `GET <path>?list=true` on metadata paths
-    /// (equivalent to the LIST verb).
+    /// (equivalent to the LIST verb). A 403 is a typed
+    /// [`VaultPermissionDenied`]. A malformed 2xx response (missing
+    /// `/data/keys`) is an ERROR, not an empty list — silently mapping it
+    /// to `[]` would make list_by_scope return nothing with no failure
+    /// (fail-open; review task-273).
     async fn kv_list(&self, path: &str, token: &str) -> Result<Vec<String>> {
         let url = format!("{}/v1/{path}?list=true", self.config.addr);
         let mut req = self.http.get(&url);
@@ -415,21 +425,23 @@ impl VaultSecretRepository {
         if resp.status() == reqwest::StatusCode::NOT_FOUND {
             return Ok(Vec::new());
         }
+        if resp.status() == reqwest::StatusCode::FORBIDDEN {
+            return Err(permission_denied(path));
+        }
         anyhow::ensure!(
             resp.status().is_success(),
             "Vault list of {path} failed: HTTP {}",
             resp.status()
         );
         let body: serde_json::Value = resp.json().await.context("Vault list response")?;
-        Ok(body
+        let keys = body
             .pointer("/data/keys")
             .and_then(|k| k.as_array())
-            .map(|keys| {
-                keys.iter()
-                    .filter_map(|k| k.as_str().map(str::to_string))
-                    .collect()
-            })
-            .unwrap_or_default())
+            .with_context(|| format!("Vault list of {path} returned no key list"))?;
+        Ok(keys
+            .iter()
+            .filter_map(|k| k.as_str().map(str::to_string))
+            .collect())
     }
 
     fn with_auth(
@@ -488,11 +500,110 @@ impl VaultSecretRepository {
             }
         }
     }
+
+    /// POST a KV v2 data write of `payload` at `path` with the server
+    /// token (a versioned append: the new version atomically supersedes
+    /// the previous one). Shared by `create` and `replace` so both write
+    /// paths enforce the identical success/namespace/retry contract.
+    async fn kv_write<T: serde::Serialize>(&self, path: &str, payload: &T) -> Result<()> {
+        let path = path.to_string();
+        self.server_token_retry(|token| {
+            let path = path.clone();
+            async move {
+                let url = format!("{}/v1/{}", self.config.addr, path);
+                let mut req = self.http.post(&url);
+                req = Self::with_auth(req, &token, self.config.namespace.as_deref());
+                let resp = req
+                    .json(&serde_json::json!({ "data": payload }))
+                    .send()
+                    .await
+                    .with_context(|| format!("Vault write of {path} failed"))?;
+                anyhow::ensure!(
+                    resp.status().is_success(),
+                    "Vault write of {path} failed: HTTP {}",
+                    resp.status()
+                );
+                Ok(())
+            }
+        })
+        .await
+    }
+
+    /// DELETE a KV v2 metadata path (destroys every version) with the
+    /// server token; a 404 is success (already gone).
+    async fn kv_delete_metadata(&self, path: &str) -> Result<()> {
+        let path = path.to_string();
+        self.server_token_retry(|token| {
+            let path = path.clone();
+            async move {
+                let url = format!("{}/v1/{}", self.config.addr, path);
+                let mut req = self.http.delete(&url);
+                req = Self::with_auth(req, &token, self.config.namespace.as_deref());
+                let resp = req.send().await.context("Vault delete request failed")?;
+                anyhow::ensure!(
+                    resp.status().is_success() || resp.status() == reqwest::StatusCode::NOT_FOUND,
+                    "Vault delete of {path} failed: HTTP {}",
+                    resp.status()
+                );
+                Ok(())
+            }
+        })
+        .await
+    }
 }
 
-/// Whether an error is Vault rejecting our token (403 on read paths) —
+/// Vault explicitly rejected the request with HTTP 403: the authenticated
+/// principal's policy denies this path. Distinguished from transport and
+/// server failures so the agent-scoped resolution cascade can YIELD the
+/// permitted subset instead of failing the whole resolution
+/// (platform-model.md §7: "Vault returns scoped secrets" — a denial scopes,
+/// it does not abort) while the server-token path still treats it as a
+/// relogin signal.
+#[derive(Debug)]
+struct VaultPermissionDenied {
+    path: String,
+}
+
+impl std::fmt::Display for VaultPermissionDenied {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Vault denied access to {} (permission denied, HTTP 403)",
+            self.path
+        )
+    }
+}
+
+impl std::error::Error for VaultPermissionDenied {}
+
+fn permission_denied(path: &str) -> anyhow::Error {
+    anyhow::Error::new(VaultPermissionDenied {
+        path: path.to_string(),
+    })
+}
+
+/// How the agent/server scope cascade treats a Vault policy denial
+/// (HTTP 403) encountered while listing or reading a scope.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CascadeDenial {
+    /// Fail the resolution. Server-token path: a 403 is an expired
+    /// AppRole token (the retry wrapper re-logins) or a real
+    /// misconfiguration — either way it must surface, never scope.
+    Fail,
+    /// Yield the permitted subset. Agent-JWT path (platform-model.md §7):
+    /// Vault policies scope the secrets an agent receives — a role denied
+    /// the tenant-level list still gets the workspace/repo/task scopes it
+    /// may read. Fail-closed on everything that is not an explicit policy
+    /// denial.
+    YieldPermitted,
+}
+
+/// Whether an error is Vault rejecting our token (403/401 on read paths) —
 /// signals the AppRole token needs re-login.
 fn is_auth_rejected(e: &anyhow::Error) -> bool {
+    if e.downcast_ref::<VaultPermissionDenied>().is_some() {
+        return true;
+    }
     e.chain()
         .any(|c| c.to_string().contains("HTTP 403") || c.to_string().contains("HTTP 401"))
 }
@@ -727,7 +838,9 @@ impl SecretRepository for VaultSecretRepository {
         // backends implement (used by internal callers without an agent
         // identity). Under the retry wrapper — an expired AppRole token
         // must re-login, not 403 the resolution forever (review
-        // task-273).
+        // task-273). A denial here FAILS: the server token is the broad
+        // admin identity, so a 403 is a relogin signal or a real
+        // misconfiguration, never a per-agent policy boundary.
         let tenant = tenant_id.to_string();
         let ws = workspace_id.to_string();
         let repo = repo_id.to_string();
@@ -738,8 +851,15 @@ impl SecretRepository for VaultSecretRepository {
             let repo = repo.clone();
             let task = task.clone();
             async move {
-                self.resolve_cascade(&token, &tenant, &ws, &repo, task.as_deref())
-                    .await
+                self.resolve_cascade(
+                    &token,
+                    &tenant,
+                    &ws,
+                    &repo,
+                    task.as_deref(),
+                    CascadeDenial::Fail,
+                )
+                .await
             }
         })
         .await
@@ -755,10 +875,73 @@ impl SecretRepository for VaultSecretRepository {
     ) -> Result<Vec<(String, Vec<u8>)>> {
         // platform-model.md §7: authenticate to Vault with the agent's JWT
         // (JWT auth backend) so Vault policies scope the returned secrets.
-        // The agent never receives the server's token.
+        // The agent never receives the server's token. A policy denial
+        // (403) on a scope YIELDS the permitted subset — the §7 property
+        // is that Vault's policies scope what the agent receives, not that
+        // a restricted role fails the entire resolution (review
+        // task-273).
         let token = self.agent_token(agent_jwt).await?;
-        self.resolve_cascade(&token, tenant_id, workspace_id, repo_id, task_id)
-            .await
+        self.resolve_cascade(
+            &token,
+            tenant_id,
+            workspace_id,
+            repo_id,
+            task_id,
+            CascadeDenial::YieldPermitted,
+        )
+        .await
+    }
+
+    async fn replace(&self, secret: &Secret, value: &[u8]) -> Result<()> {
+        let tenant_id = secret.tenant_id.clone();
+        // Port contract: fail when the id is unknown.
+        let Some(idx) = self.read_index(&tenant_id, secret.id.as_str()).await? else {
+            anyhow::bail!(
+                "secret {} not found in tenant {}",
+                secret.id,
+                secret.tenant_id
+            );
+        };
+        Self::validate_name(&secret.name)?;
+
+        // KV v2 writes are versioned appends at a path: posting the new
+        // payload atomically supersedes the previous version — there is no
+        // delete + create window in which the credential could be lost
+        // (review task-273). When the (scope, scope_id, name) location is
+        // unchanged — the rotation / re-enrollment cases — this is a
+        // single write.
+        let payload = VaultSecretPayload::from_secret(secret, value);
+        let new_path = self.data_path(
+            &tenant_id,
+            secret.scope.as_str(),
+            &secret.scope_id,
+            &secret.name,
+        );
+        self.kv_write(&new_path, &payload).await?;
+
+        // Location changed (scope/name rewrite): repoint the id index and
+        // remove the old data path. Order matters — the index is only
+        // moved once the new payload is durable, and a crash before the
+        // old-path delete leaves an orphaned KV entry (recoverable
+        // housekeeping), never a lost credential.
+        let location_changed = idx.scope != secret.scope.as_str()
+            || idx.scope_id != secret.scope_id
+            || idx.name != secret.name;
+        if location_changed {
+            let index = VaultIndexEntry {
+                scope: secret.scope.as_str().to_string(),
+                scope_id: secret.scope_id.clone(),
+                name: secret.name.clone(),
+            };
+            let index_path = self.index_path(&tenant_id, secret.id.as_str());
+            self.kv_write(&index_path, &index).await?;
+            let old_data_meta = format!(
+                "{}/metadata/gyre-secrets/{tenant_id}/{}/{}/{}",
+                self.config.kv_mount, idx.scope, idx.scope_id, idx.name
+            );
+            self.kv_delete_metadata(&old_data_meta).await?;
+        }
+        Ok(())
     }
 }
 
@@ -773,6 +956,7 @@ impl VaultSecretRepository {
         workspace_id: &str,
         repo_id: &str,
         task_id: Option<&str>,
+        denial: CascadeDenial,
     ) -> Result<Vec<(String, Vec<u8>)>> {
         let now = now_secs();
         let mut scope_targets: Vec<(String, String)> = vec![
@@ -790,20 +974,42 @@ impl VaultSecretRepository {
             scope_targets.push((SecretScope::Task.as_str().to_string(), tid.to_string()));
         }
 
+        // Whether an error is an explicit Vault policy denial (HTTP 403)
+        // — the only error class the YieldPermitted mode tolerates.
+        let is_denial = |e: &anyhow::Error| {
+            denial == CascadeDenial::YieldPermitted
+                && e.downcast_ref::<VaultPermissionDenied>().is_some()
+        };
+
         // Finer scopes overwrite coarser same-name entries (nearest scope
         // wins), mirroring the database adapters.
         let mut by_name: std::collections::HashMap<String, VaultSecretPayload> =
             std::collections::HashMap::new();
         for (scope, sid) in &scope_targets {
             let list_path = self.metadata_path(tenant_id, scope, sid);
-            for name in self.kv_list(&list_path, token).await? {
+            let names = match self.kv_list(&list_path, token).await {
+                Ok(names) => names,
+                // Policy-denied scope: the agent's role may not list
+                // this subtree — the permitted scopes still resolve (§7
+                // scoping, review task-273). Everything else fails
+                // closed.
+                Err(e) if is_denial(&e) => continue,
+                Err(e) => return Err(e),
+            };
+            for name in names {
                 let path = self.data_path(tenant_id, scope, sid, &name);
-                if let Some(p) = self.kv_read(&path, token).await? {
-                    // Expired secrets are never delivered.
-                    let expired = p.expires_at.map(|e| e <= now).unwrap_or(false);
-                    if !expired {
-                        by_name.insert(p.name.clone(), p);
+                match self.kv_read(&path, token).await {
+                    Ok(Some(p)) => {
+                        // Expired secrets are never delivered.
+                        let expired = p.expires_at.map(|e| e <= now).unwrap_or(false);
+                        if !expired {
+                            by_name.insert(p.name.clone(), p);
+                        }
                     }
+                    Ok(None) => {}
+                    // Policy-denied secret: skip it, keep the rest.
+                    Err(e) if is_denial(&e) => continue,
+                    Err(e) => return Err(e),
                 }
             }
         }
