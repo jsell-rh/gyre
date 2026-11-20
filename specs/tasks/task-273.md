@@ -3,7 +3,7 @@ title: "Admin Panel completion: SOPS/Vault secret backends, durable job history 
 spec_ref: "Spec gap spec-5b647653a4554eea3e93ac19 / admin-panel-remaining-gap / e61ffd082155"
 depends_on: []
 progress: ready-for-review
-commits: ["0fda00bfe9860c8c8b66ea1235f0d2e3251df67a", "1bc00b6cb9212e6ac6dfc7c764afede98ae8fd64", "a2b31ac19c05310ebd05a072ddde1acf0c51f2ec", "f6e31cf57779a7e117f5a0b9bd75720aed90ca56", "b101d27aafb7bde0907a568e7bb8a3ffbdd3ae67", "ee253c8854f16664f91d16171e08414effc314b7", "db320101b1540a35cf9986408e70ac46008b1982"]
+commits: ["db320101b1540a35cf9986408e70ac46008b1982", "ee253c8854f16664f91d16171e08414effc314b7", "b101d27aafb7bde0907a568e7bb8a3ffbdd3ae67", "f6e31cf57779a7e117f5a0b9bd75720aed90ca56", "a2b31ac19c05310ebd05a072ddde1acf0c51f2ec", "1bc00b6cb9212e6ac6dfc7c764afede98ae8fd64", "0fda00bfe9860c8c8b66ea1235f0d2e3251df67a", "9b81c9816f13a3d637057a6c3149c9be92f38a3c", "3ebd143d29eb52bb2bc0bd748f60fe52fa960f66", "210dfa61bc1ea637a29a79c26af80746b2fb002c", "b979fefeeb7a6bb8340ccd85c64b467e0f46c553", "808e3c10c035c9fc6fe8c5ee96d474fc5468acf3", "cd2f616e3ebd96addab2dcaf78242d31c58efc04", "d6f32bd0269314f9ee552ed72df33322b0fe2238"]
 ---
 
 ## Required behavior
@@ -122,55 +122,82 @@ Canonical spec: `specs/system/admin-panel.md`. Source: `fb1424fbac55cd23cb08606f
 
 ## Shipped
 
-All eight admin-panel deliverables are implemented on this branch,
-carried through the independent review-repair round (`0fda00bf`, 13/13
-findings fixed with focused tests), rebased onto base `2f33a117`
-(task-265/task-258) in merge commit `6b897ab8`, and now onto base
-`00669baa` (task-263 Agent JWT claims) in merge commit `7add1d8d`,
-behavior preserved. The acceptance checkboxes above remain for the
-independent verifier.
+The eight admin-panel deliverables (SOPS/Vault secret backends, durable
+job history with logs, maintenance jobs, complete token refresh, the
+OAuth enrollment flow, remote-agent cleanup, the server-log viewer, the
+durable searchable admin audit) shipped in the earlier rounds on this
+branch and carried through two base rebases (`7add1d8d`, `f54b1057`),
+behavior preserved. This round repairs the ten findings of the
+independent review (`41d97abf`, checkpoint `c19d16de`) in seven
+conventional commits, all recorded in the frontmatter:
 
-### Rebase repair round (`7add1d8d`)
+### Review-repair round (commits `9b81c981`…`d6f32bd0`)
 
-Merged base `00669baa` (task-263) into the pipeline branch. The single
-content conflict (`crates/gyre-server/src/lib.rs`, AppState construction)
-was resolved as a union of two independent changes: the base's
-`agent_jwt_ttl_secs` default 3600 (task-263's spec restoration,
-documented in the adjacent comment) and this branch's `users_repo`
-hoisting, which the merged mem-audit `set_tenant_sources` wiring
-requires. All other hunks across the 30 auto-merged files (agent audit,
-API handlers, auth, mcp, rbac, spiffe, gyre-spiffe id, server tests,
-docs, task-263 specs) merged cleanly. The merge changed no
-gyre-adapters / gyre-ports / gyre-common / gyre-domain files relative
-to the candidate. Post-merge evidence (recorded under
-`/tmp/stage/review-evidence/rebase-repair.md`):
+1. **Atomic credential rewrites** — new `SecretRepository::replace`
+   port operation (single UPDATE in SQLite/PostgreSQL, in-place under
+   the lock in mem with the same not-found failure contract, versioned
+   KV v2 write in Vault): the rotation job's `attempt_rotation`, the
+   Admin `rewrite_secret`, and the Claude Max re-enrollment no longer
+   use delete+create pairs, so a crash can never lose a live
+   credential mid-rewrite.
+2. **Refresh cadence** — `should_refresh` derives the refresh threshold
+   from the granted lifetime (`expires_at − last_rotated_at`, one
+   fifth, clamped to [10 min, 1 h]): a 3600 s Google access token is
+   refreshed when ~12 minutes remain, not on every 5-minute cycle; a
+   token response without `expires_in` fails the rotation honestly
+   (notification + untouched stored value) instead of fabricating a
+   3600 s lifetime.
+3. **Durable job history authoritative** — `GET /admin/jobs` no longer
+   resurrects runs pruned by `job_history_cleanup` from the in-memory
+   ring (an intentionally-empty durable result is authoritative; only
+   a loud read error or pure-mem mode serves the ring); `record_run`
+   retries a transient durable-write failure (3 attempts) and counts
+   exhausted ones in `durable_persist_failures`.
+4. **Vault policy scoping** — a 403 is a typed `VaultPermissionDenied`:
+   the agent-JWT cascade skips the denied scope/secret and returns the
+   permitted subset (platform-model §7), everything else fails closed;
+   the server path still re-logins an expired AppRole token;
+   `kv_list` errors on a malformed 2xx instead of returning `[]`.
+5. **Audit backfill + search folding** — migration 000074 backfills
+   user-scoped rows' `tenant_id` from the users table (second
+   correlated UPDATE, portable SQL); the free-text `q` re-filter and
+   LIKE pattern use full Unicode `to_lowercase` in both SQL adapters,
+   matching SQL `LOWER()` and the mem adapter.
+6. **Maintenance jobs** — `repo_maintenance` also maintains
+   unregistered git repos under `repos_root` (canonical-path
+   deduplication); local restart-orphans are killed only after the
+   pid's `/proc` start time matches the recorded spawn time (recycled
+   pids refused, exited orphans marked terminated); unreapable SSH
+   instances are retried for 7 days then retired with an escalation
+   log line; `LocalTarget::kill_process` verifies the process is
+   actually gone (SIGTERM → wait → SIGKILL → wait → error).
+7. **Admin UI** — the Server Logs tab gains the advertised `since`
+   filter (relative window → epoch-ms); the Audit tab renders the full
+   `/audit/events` filter set (agent/workspace/user/repo/resource/
+   outcome/since/until + q), with the `outcome` filter added to
+   `GET /admin/audit` (validated like `/audit/events`).
 
-- `cargo check -p gyre-server` and `cargo check -p gyre-server
-  --all-targets`: clean (lib plus every test target).
-- `cargo fmt --check -p gyre-server`: clean.
-- `check-task-commit-attribution.sh` passes with the seven
-  product-surface task-273 commits recorded in the frontmatter.
+### Test evidence
+
+Executed in this sandbox (passing): `cargo test -p gyre-adapters
+vault::` (12, including the new policy-denial scoping and atomic
+replace tests), `compute::local` (4, including dead-pid idempotence),
+`sqlite::audit` (22), `sqlite::secret` (23); web
+`vitest run src/__tests__/TenantSettings.test.js` (61, including the
+new since/outcome/scope filter tests). `cargo check -p gyre-server -p
+gyre-adapters --all-targets` clean; `cargo fmt --check` clean. All
+mechanical invariant scripts re-run and passing with no new exemption
+entries (arch, migration versions/portability, mem-port-contracts,
+in-memory-state-stores, abac-route-registry, unbounded-external-http,
+inert-enforcement, lossy-secret-conversion, byte-slice-truncation,
+relative-path-defaults, fail-open-ref-resolution,
+fabricated/scope-literal defaults, dead-message-kinds,
+forwarded-header-trust, mcp-write-tools, abac-exempt-handlers).
 
 gyre-server test *execution* is deferred to the independent verifier
-per the 4 GiB build budget; the required commands and module filters
-are recorded in `/tmp/stage/review-evidence/required-server-tests.txt`
-(api::oauth, api::secrets, api::admin, jobs, secret_rotation, mem audit
-tenant tests, auth/spiffe/agent_audit for the merged task-263 surface,
-api_integration / m18_oidc_integration / tenant_isolation, plus the
-adapter suites and the mechanical invariant scripts).
+per the 4 GiB build budget; the required module filters (jobs,
+secret_rotation, maintenance_jobs, api::admin, api::secrets, api::oauth,
+mem) are recorded in `/tmp/stage/review-evidence/required-server-tests.txt`
+along with the executed-probe list.
 
-### Standing behavior (unchanged through both rebases)
-
-SOPS default (genuine age-encrypted SOPS documents in the existing
-columns, legacy AES-256-GCM values re-encrypted on first access);
-Vault KV v2 backend with agent-JWT resolution, server AppRole/token
-writes and fail-closed behavior when unreachable; durable job history
-with run-scoped logs and the Jobs tab; `repo_maintenance` /
-`oauth_state_cleanup` / `remote_agent_cleanup` /
-`job_history_cleanup` registered + scheduled jobs; Claude Max
-enrollment (Admin-only initiation, PKCE, atomic single-use state,
-latency-bounded token exchange); document-shape-driven token refresh
-(RFC 6749 refresh grant + GCP SA RS256 JWT-bearer, no-refresh-mechanism
-escalation recorded in run logs); server-logs capture layer + Admin
-endpoint + UI tab; durable searchable admin audit with tenant scoping
-and zstd-transparent `q` search.
+The acceptance checkboxes remain for the independent verifier.
