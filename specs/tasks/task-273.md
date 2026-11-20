@@ -2,8 +2,8 @@
 title: "Admin Panel completion: SOPS/Vault secret backends, durable job history with logs, maintenance jobs, complete token refresh, server-log viewer, durable searchable admin audit"
 spec_ref: "Spec gap spec-5b647653a4554eea3e93ac19 / admin-panel-remaining-gap / e61ffd082155"
 depends_on: []
-progress: not-started
-commits: ["a2b31ac19c05310ebd05a072ddde1acf0c51f2ec", "f6e31cf57779a7e117f5a0b9bd75720aed90ca56", "b101d27aafb7bde0907a568e7bb8a3ffbdd3ae67", "ee253c8854f16664f91d16171e08414effc314b7", "db320101b1540a35cf9986408e70ac46008b1982"]
+progress: ready-for-review
+commits: ["a2b31ac19c05310ebd05a072ddde1acf0c51f2ec", "f6e31cf57779a7e117f5a0b9bd75720aed90ca56", "b101d27aafb7bde0907a568e7bb8a3ffbdd3ae67", "ee253c8854f16664f91d16171e08414effc314b7", "db320101b1540a35cf9986408e70ac46008b1982", "1bc00b6cb9212e6ac6dfc7c764afede98ae8fd64"]
 ---
 
 ## Required behavior
@@ -119,3 +119,154 @@ Canonical spec: `specs/system/admin-panel.md`. Source: `fb1424fbac55cd23cb08606f
     ]
   }
 ]
+
+## Shipped
+
+All eight deliverables are implemented in production code on this branch
+(`db320101` + the checkpoint/rustfmt/rebase commits, review-repair `f6e31cf5`,
+and the final-round fix `1bc00b6c` after merging the assigned base
+`e9f6a31c`, which brought only docs and no source conflicts). The acceptance
+checkboxes above remain for the independent verifier.
+
+### Secrets backends (SOPS default, Vault option)
+
+- `crates/gyre-adapters/src/sops/` implements the genuine SOPS JSON envelope
+  (age-armored data key, AES-256-GCM values with sops's 32-byte IVs and path
+  AAD, SHA-512 MAC sealed with lastmodified AAD); a cross-implementation
+  vector from sops's own Go test suite (`sops/tests.rs`) proves
+  byte-compatibility with the sops CLI cipher.
+- `sqlite/secret.rs` + `postgres/secret.rs` store SOPS documents by default
+  (`GYRE_SECRET_BACKEND`, default `sops`), resolve the age identity from
+  `GYRE_SOPS_AGE_KEY` / `GYRE_SOPS_AGE_KEY_FILE` / an auto-generated identity
+  persisted in kv_store, and re-encrypt legacy AES-256-GCM rows to SOPS on
+  first access (get_value / resolve_for_agent).
+- `crates/gyre-adapters/src/vault/` serves the whole `SecretRepository` port
+  from Vault KV v2 (30 s latency-bounded client, AppRole/token auth for the
+  admin path, JWT-auth login with the agent's own JWT for
+  `resolve_for_agent_as` per platform-model §7, base64 value transport — no
+  from_utf8_lossy on secret material, structurally no DB fallback).
+  `build_state` wires it on `GYRE_SECRET_BACKEND=vault` and panics on
+  misconfiguration (fail-closed startup); `spawn.rs` resolves agent secrets
+  with `resolve_for_agent_as(..., &agent_jwt)`.
+
+### Durable job history with logs
+
+- `gyre_ports::JobRunRepository` (record / list_by_job / list_recent /
+  delete_older_than) with SQLite + PostgreSQL adapters (portable migrations
+  000067–000070) and a mem adapter enforcing the port constraints in code;
+  `JobRun` carries `logs` + `duration_secs()`; handlers write to a run-scoped
+  `JobRunLog` sink; every recorded run is persisted through
+  `JobRegistry::set_durable_store`, so history survives a restart (the
+  in-memory HashMap is a fronting cache only).
+- `GET /admin/jobs` serves the durable history (logs + derived duration);
+  the TenantSettings Jobs tab renders status, duration, failures and
+  expandable run logs.
+- `job_history_cleanup` (daily 03:00 UTC, `GYRE_JOB_HISTORY_RETENTION_DAYS`,
+  default 30) prunes finished runs via `delete_older_than` and is visible in
+  the Jobs UI like every other job.
+
+### Maintenance jobs (`maintenance_jobs.rs`)
+
+- `repo_maintenance` (daily 04:00 UTC): real `git gc --prune=now` per stored
+  repository through the git CLI layer with a 10-minute per-repo bound,
+  per-repo outcomes in the run logs, failures recorded without aborting the
+  rest.
+- `oauth_state_cleanup` (hourly): deletes only expired OAuth state rows.
+- `remote_agent_cleanup` (10 min): kills still-recorded-running instances
+  whose agent is Dead/Stopped/absent — including restart orphans
+  (container/kubernetes/local backends reconstructed from the durable
+  descriptor; unreconstructable SSH descriptors reported, not silently
+  skipped) — via `ComputeTarget::kill_process`, marks them terminated, and
+  names what was reaped in the run logs.
+
+### OAuth state + Claude Max enrollment
+
+- `gyre_ports::OAuthStateRepository` (+ adapters + migration 000068);
+  `POST /api/v1/admin/oauth/claude-max/enroll` (Admin-only, ABAC
+  `secret:write`) generates state + PKCE S256 verifier, persists the row with
+  server-derived admin/tenant scope, and 302-redirects; `GET
+  /api/v1/oauth/claude-max/callback` (resolver-exempt; the single-use state
+  row is the per-handler capability) validates exists/unexpired/unconsumed,
+  consumes BEFORE the exchange, exchanges the code with the verifier at the
+  token endpoint (latency-bounded HTTP), and stores/rotates the scoped
+  `claude_max_refresh_token` credential document, which the existing refresh
+  job keeps fresh.
+
+### Token refresh coverage
+
+- `secret_rotation.rs` dispatch matches credential-document SHAPE, not name
+  suffix: the RFC 6749 §6 refresh-token grant applies to any secret whose
+  value is an OAuth credential document regardless of name, and a
+  `GcpServiceAccountHandler` exchanges SA JSON for short-lived access tokens
+  via a real RS256-signed JWT-bearer grant (RFC 7523, ring over the SA's
+  PKCS#8 key) to Google's token endpoint (latency-bounded HTTP). The SA
+  document is refreshed as a whole JSON document with only `access_token`
+  overwritten (review fix `f6e31cf5`), so every Google-issued field survives
+  verbatim.
+- Per-secret outcomes (refreshed / no-refresh-mechanism / failed: reason) are
+  written to the run-scoped log sink and land in the durable run record;
+  secrets with no refresh mechanism still emit SecretExpiring — no expiring
+  credential is silently skipped.
+
+### Server logs + durable searchable admin audit
+
+- `telemetry.rs` gained a `ServerLogLayer` tracing capture layer (bounded
+  ring buffer, installed alongside the unchanged stdout/JSON/OTel layers);
+  Admin-only `GET /api/v1/admin/server/logs` (level/since/limit filters,
+  ABAC-registered, no exemption growth) serves it; a Server Logs tab in
+  TenantSettings renders it.
+- `GET /api/v1/admin/audit` queries the durable audit repository instead of
+  the in-memory TelemetryBuffer; `AuditEvent.tenant_id` is derived
+  server-side at emit (never client-supplied) with migration 000070
+  backfilling from workspace scope; `tenant_id` + free-text `q` filters are
+  enforced in SQL by BOTH adapters (portable lower() LIKE with escaped
+  wildcards; zstd-compressed rows decompressed and matched in the adapter);
+  the TenantSettings Audit tab renders durable events with the same filter
+  set including search.
+
+### Final-round fix (`1bc00b6c`)
+
+Merging the assigned base regressed `scripts/check-tenant-filter.sh` (the
+new `audit_events.tenant_id` column and `oauth_states` table brought this
+task's reads into the lint's checked set): the tenant filter now applies
+lexically inside `query_rows`/`count_rows` in both adapters (same predicate,
+behavior identical; PG SQL-shape test updated to mirror the entry-point
+scoping), and the script's documented spec §3 SKIP_LIST carries rationales
+for the three deployment-wide audit housekeeping reads, the pre-auth
+`oauth_state::find_by_state` capability lookup, and the user-keyed judgment
+ledger `list_for_user`. `scripts/*-exemptions.txt` untouched.
+
+### Test evidence
+
+Run in this sandbox this round (logs under
+`/tmp/stage/review-evidence/task-273-final/`):
+
+- `cargo check --workspace` — clean; `cargo check -p gyre-server --tests` —
+  clean; `cargo fmt --all -- --check` — clean.
+- `cargo test -p gyre-adapters --lib` — **635 passed, 0 failed** (vault KV
+  v2/JWT-auth/fail-closed, sops cross-implementation vector, job_run /
+  oauth_state / agent_instance sqlite+pg adapters, audit tenant + q
+  filters; re-run green after the tenant-filter fix).
+- `cd web && npm test` — **127 files, 2571 passed, 41 skipped, 0 failed**
+  (includes the task-273 TenantSettings Jobs/Audit/Server-Logs tab tests).
+- Mechanical gates: every `scripts/check-*.sh` that passes on the assigned
+  base also passes on HEAD; the 36 scripts failing on HEAD fail IDENTICALLY
+  on the base (verified via a worktree of `e9f6a31c` — pre-existing
+  environment/baseline issues, e.g. mawk dialect errors). The only
+  HEAD-vs-base deltas were check-task-commit-attribution (fixed by this
+  attribution commit) and check-tenant-filter (fixed by `1bc00b6c`).
+
+Server test BUILDS exceed the model sandbox's 4 GiB budget (build wrapper);
+the verifier must run `cargo test -p gyre-server --lib -- secret_rotation::
+maintenance_jobs:: api::admin::tests::admin_jobs api::admin::tests::admin_audit
+api::oauth:: telemetry::jobs` (full rationale in
+`/tmp/stage/review-evidence/task-273-final/README.md`). Those tests cover the
+real RS256 JWT-bearer grant against a signature-verifying stub token
+endpoint, SA document preservation, shape-based dispatch under a
+non-`_refresh_token` name, no-refresh-mechanism run-log outcomes,
+repo_maintenance object reclamation and corrupted-repo failure isolation,
+finished-only history pruning, only-expired OAuth state cleanup,
+remote_agent_cleanup orphan kill via `ComputeTarget::kill_process`, the
+admin_jobs status-pill ordering, admin_audit durability/tenant scoping/q
+search, OAuth enrollment + callback with replayed/expired state rejection,
+and the server-log capture layer.
