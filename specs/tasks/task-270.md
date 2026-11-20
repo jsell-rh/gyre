@@ -3,7 +3,7 @@ title: "PR collaboration invariants: reject agent-principal pushes to the defaul
 spec_ref: "Spec gap spec-4c39ca6ea3e71ce8a53398f3 / pr-protection-and-hygiene / d30f233daf86"
 depends_on: []
 progress: ready-for-review
-commits: ["c9faf6a80ba0a216889c2d7efb5c82f71f58deee", "d5888ad56a3369911836d9ccaeb06995dd73de9d", "c269022921fb4faddc818da21fd2d834d00ab63e"]
+commits: ["c269022921fb4faddc818da21fd2d834d00ab63e", "d5888ad56a3369911836d9ccaeb06995dd73de9d", "c9faf6a80ba0a216889c2d7efb5c82f71f58deee", "041bddcdd54e58930beb34cfc06ca12a0d16e9fa"]
 ---
 
 ## Required behavior
@@ -65,11 +65,10 @@ Canonical spec: `specs/development/agent-workflow.md`. Source: `fb1424fbac55cd23
 ## Shipped
 
 Both normative bullets of specs/development/agent-workflow.md §PRs as the
-Collaboration Primitive are now enforced in production code. Source
-commits: `c2690229` (push protection), `d5888ad5` (PR hygiene job),
-`c9faf6a8` (formatting-only finalizer pass: rustfmt over pr_hygiene.rs
-and the task-added test regions of git_http.rs / e2e_ralph_loop.rs; no
-behavior change).
+Collaboration Primitive are enforced in production code. Task commits:
+`c2690229` (push protection), `d5888ad5` (PR hygiene job), `c9faf6a8`
+(formatting pass), `041bddcd` (review repair: deletion bypass + agent
+nudge dedup).
 
 ### Agent-principal default-branch push protection
 
@@ -77,96 +76,84 @@ behavior change).
 and an explicit reason directing the agent to the MR flow, any push whose
 target ref is `refs/heads/{default_branch}` — resolved from the
 Repository record's `default_branch` field, never a hardcoded "main" —
-when the caller is an agent principal (`auth.user_id.is_none() && !auth.is_system_principal()`).
-The check is a direct, unconditional check in the push handler (not an
-opt-in named pre-accept gate) and runs BEFORE `git receive-pack` executes,
-so the ref is never updated server-side on rejection. The rejection emits
-a `PushRejected` message-bus event and a `GitPushRejected` audit event
-(gate_name `default-branch-protection`). Human principals (user API keys
-/ JWTs with push permission) and the system principal are explicitly
-exempt, preserving specs/system/spec-lifecycle.md §Automatic Task Creation
-(post-receive task creation, persona changes, ledger sync run unchanged);
-server-side landing (merge queue, post-merge reverts) goes through the
-git_ops/jj_ops ports and never through this handler.
+when the caller is an agent principal (`auth.user_id.is_none() &&
+!auth.is_system_principal()`). The check is a direct, unconditional check
+in the push handler (not an opt-in named pre-accept gate) and runs BEFORE
+`git receive-pack` executes, so the ref is never updated server-side on
+rejection. The rejection emits a `PushRejected` message-bus event and a
+`GitPushRejected` audit event (gate_name `default-branch-protection`).
+Human principals (user JWTs / API keys with push permission) and the
+system principal are exempt, preserving specs/system/spec-lifecycle.md
+§Automatic Task Creation (post-receive task creation, persona changes,
+ledger sync run unchanged); server-side landing (merge queue, post-merge
+reverts) goes through the git_ops/jj_ops ports and never through this
+handler.
 
-Tests in git_http.rs (`agent_push_to_default_branch_rejected_directing_to_mr_flow`,
+Review repair (`041bddcd`): the guard originally matched only
+`parse_ref_updates` output, which filters ref deletions (new SHA all
+zeros), so an agent token could DELETE the default branch. The guard now
+matches the raw pkt-line ref-update commands via
+`parse_ref_update_commands` (deletions included);
+`parse_ref_updates` remains a deletion-filtering wrapper over it with
+unchanged semantics for push-acceptance processing.
+
+Tests: `agent_push_to_default_branch_rejected_directing_to_mr_flow`,
 `agent_push_to_feature_branch_succeeds`,
 `protection_resolves_real_default_branch_not_literal_main`,
-`human_push_to_default_branch_accepted_and_spec_lifecycle_runs`) cover all
-four acceptance criteria for the push path. Integration tests that
-established the base branch with an agent token (git_integration.rs
-provenance + merge-queue tests, e2e_ralph_loop.rs) now use the system
-token for the base push; the merge-queue e2e still lands the agent's MR
-on main server-side, proving landing is unaffected.
+`agent_deletion_of_default_branch_rejected` (new),
+`human_push_to_default_branch_accepted_and_spec_lifecycle_runs`, and
+merge-queue landing coverage.
 
-### Continuous PR hygiene
+### Continuous PR hygiene job
 
-New `pr_hygiene_check` background job (crates/gyre-server/src/pr_hygiene.rs,
-registered in jobs.rs with `run_at_utc_hour: None` and a minutes-scale
-interval, default 300 s via `GYRE_PR_HYGIENE_INTERVAL_SECS`; executing
-loop spawned in main.rs). Every evaluation walks each workspace's open
-MRs against the stale classes using real persisted state and takes one
-recorded action per MR, most severe first:
+`pr_hygiene_check` (crates/gyre-server/src/pr_hygiene.rs) is registered
+in jobs.rs on a short interval (default 5 minutes, not the daily
+abandoned_branch_check cadence). Each pass evaluates every open MR per
+workspace against the stale classes using real persisted state: unreviewed
+beyond the nudge threshold nudges assigned reviewers (or escalates to
+workspace Developers/Admins when there are none); conflicted MRs get a
+real rebase attempt via the jj machinery for agent-authored branches with
+live worktrees (rate-limited by the shared jj_rebase_backoff KV window)
+and otherwise a rebase-required escalation; long-open MRs beyond the
+escalation threshold notify workspace Admins/Owners at higher priority;
+abandoned MRs beyond the hard close threshold are closed with a persisted
+status transition, an explanatory MR comment, and delivery to the author
+(user notification / agent message) — never a silent close. Every action
+is recorded (notification rows, message-bus events, `pr_hygiene` audit
+events). Thresholds are configurable via
+GYRE_PR_HYGIENE_{NUDGE,ESCALATE,CLOSE}_SECS with sane defaults
+(2d/7d/30d). The daily abandoned_branch_check job is untouched.
 
-- abandoned (updated_at beyond `GYRE_PR_HYGIENE_CLOSE_SECS`, default 30 d):
-  closed — status transition persisted, gate trace deleted (same
-  lifecycle as the close endpoint), explanatory MR comment from "system",
-  MrAutoClosed notification/agent message to the author, MrStatusChanged
-  event, `pr_hygiene` audit event;
-- conflicted (persisted `has_conflicts` or a real merge-base conflict
-  check via `GitOpsPort::can_merge`): rebase through the existing jj
-  machinery when the author is an active agent with a live worktree in
-  the repo (same safeguards and shared `jj_rebase_backoff` KV window as
-  the merge processor), otherwise a MrNeedsRebase escalation to
-  Developers/Admins — either way a jj_rebase/rebase_required audit event
-  or notification rows exist, never silence;
-- long-open (beyond `GYRE_PR_HYGIENE_ESCALATE_SECS`, default 7 d): rank-3
-  MrStaleEscalation notification to workspace Admins/Owners;
-- unreviewed (zero review records, beyond `GYRE_PR_HYGIENE_NUDGE_SECS`,
-  default 2 d): ReviewerNudge to assigned reviewers (user inbox rows or
-  agent message-bus nudges); no reviewers → MrUnreviewed escalation to
-  Developers/Admins.
+Review repair (`041bddcd`): agent-reviewer nudges are now deduplicated
+across evaluations via a KV backoff (`pr_hygiene_nudge_backoff`, key
+`{mr_id}:{agent_id}`, window = nudge threshold) — agents have no
+notification inbox row, so the user path's `has_active_notification`
+dedup never applied to the message-bus `review_nudge` emission.
 
-All notification actions dedupe via the notification store's exact
-(workspace, user, type, entity_ref) active-notification lookup, so
-consecutive runs are idempotent. Five new NotificationType variants were
-added with ranks/bands, email copy (en/de), profile toggles and locale
-labels (check-notification-toggle-coverage.sh: 46 enum variants, 46
-toggles, labels in lockstep). The daily abandoned_branch_check job is
-untouched.
+Tests: `abandoned_mr_is_closed_with_explanation_delivered_to_author`,
+`unreviewed_mr_nudges_assigned_reviewers`,
+`unreviewed_mr_without_reviewers_escalates_to_developers_and_admins`,
+`fresh_mr_under_nudge_threshold_gets_no_action`,
+`conflicted_mr_with_active_agent_worktree_is_rebased`,
+`conflicted_mr_without_agent_raises_rebase_required_escalation`,
+`long_open_mr_escalates_to_admins_at_higher_priority`,
+`consecutive_evaluations_do_not_duplicate_notifications`,
+`consecutive_evaluations_do_not_duplicate_agent_reviewer_nudges` (new).
 
-### Test evidence
+### Test evidence and deferred verification
 
-- `cargo test -p gyre-common --lib`: 129 passed, 0 failed (includes the
-  notification-taxonomy partition tests covering the new variants).
-- web vitest `UserProfile.test.js` (38 passed, includes the
-  NOTIF_TYPE_IDS ↔ Rust enum lockstep test), `Inbox.test.js` +
-  `NotificationDrawer.test.js` (87 passed).
-- `cargo check -p gyre-server --lib --tests`: clean (all new server test
-  code type-checks).
-- Mechanical checks pass: check-arch, check-abac-route-registry,
-  check-dead-message-kinds, check-inert-enforcement,
-  check-notification-toggle-coverage, check-mem-port-contracts, and the
-  other source lints relevant to the change.
+`SKIP_WEB_BUILD=1 cargo check -p gyre-server --tests` (type check
+including all test code) passes on the fix commit `041bddcd`. The
+gyre-server test binary cannot be built in this sandbox: the build
+wrapper blocks it (gyre-server code generation plus the model exceeds
+the 4 GiB budget — exit 64, infrastructure policy, not a code defect).
+The independent verifier must execute (see
+/tmp/stage/review-evidence/task-270-repair.md):
 
-### Deferred to the independent verifier (sandbox 4 GiB build budget)
-
-gyre-server test binaries could not be compiled in this sandbox (cgroup
-memory limit; check-profile type-checking only). The verifier must run:
-
-- `cargo test -p gyre-server --lib pr_hygiene` (9 tests incl. the
-  close/nudge/escalation/conflict/idempotence acceptance behaviors),
-- `cargo test -p gyre-server --lib jobs::` (registration on interval,
-  not daily; manual trigger runs a real evaluation),
-- `cargo test -p gyre-server --lib git_http::` (4 new push-protection
-  tests plus the existing system-token default-branch push tests),
-- `cargo test -p gyre-server --test git_integration` and
-  `--test e2e_ralph_loop` (updated caller-class split; merge-queue
-  landing on main),
-- `cargo test -p gyre-server --lib merge_processor` (server-side landing
-  on the default branch unaffected).
-
-Evidence details saved at /tmp/stage/review-evidence/task-270-evidence.md.
-Note: specs/development/* specs have no coverage matrix rows
-(specs/coverage/ covers specs/system/* only), so there are no coverage
-rows to update for this spec; this task file is the progress record.
+- `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib pr_hygiene`
+- `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib agent_deletion_of_default_branch_rejected`
+- `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib agent_push_to_default_branch_rejected_directing_to_mr_flow`
+- `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib agent_push_to_feature_branch_succeeds`
+- `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib protection_resolves_real_default_branch_not_literal_main`
+- `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib human_push_to_default_branch_accepted_and_spec_lifecycle_runs`
+- `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib parse_ref_updates`
