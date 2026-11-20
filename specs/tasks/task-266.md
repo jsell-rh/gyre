@@ -3,7 +3,7 @@ title: "SCIM groups and group-to-workspace role mapping"
 spec_ref: "Spec gap spec-31d3ae72e12e22c52442e309 / scim-groups-workspace-mapping / b60edce5bc49"
 depends_on: [task-265]
 progress: not-started
-commits: []
+commits: ["eee34c67807e51536f21fd3bc3b8ec91604bf9a9"]
 ---
 
 ## Required behavior
