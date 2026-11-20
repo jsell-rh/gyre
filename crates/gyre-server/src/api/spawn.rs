@@ -7642,6 +7642,28 @@ mod tests {
                 .contains_key("agt-backend-1"),
             "backend must be registered so kill routes to docker, not LocalTarget"
         );
+
+        // TASK-273 (review): the spawn path must ALSO persist the durable
+        // agent-instance record — backend descriptor, handle id and pid —
+        // so orphan sweeps survive a server restart. Deleting the
+        // production record_spawned call in register_spawned_agent leaves
+        // this assertion failing (previously the entire suite stayed
+        // green with only hand-seeded records).
+        let record = state
+            .agent_instances
+            .find_by_agent("agt-backend-1")
+            .await
+            .unwrap()
+            .expect("register_spawned_agent must persist the instance record");
+        assert_eq!(record.backend, "container");
+        assert_eq!(record.target_type, "container");
+        assert_eq!(record.handle_id, "fake-container-id");
+        assert_eq!(record.pid, None);
+        assert!(
+            record.terminated_at.is_none(),
+            "a just-spawned instance is recorded-running"
+        );
+
         // Unregister so the background monitor's first poll breaks cleanly
         // (it observes the missing entry and exits without touching state).
         state.process_registry.lock().await.remove("agt-backend-1");
@@ -7734,6 +7756,112 @@ mod tests {
             .lock()
             .await
             .contains_key("agt-kill-1"));
+
+        // TASK-273 (review): the durable instance record — persisted by
+        // the SPAWN path (register_spawned_agent) — is marked terminated
+        // by the successful admin kill, so the orphan sweep no longer
+        // considers it running. This pins the spawn-path recording AND
+        // the kill-path marking end-to-end (previously only hand-seeded
+        // records were asserted on).
+        let record = state
+            .agent_instances
+            .find_by_agent("agt-kill-1")
+            .await
+            .unwrap()
+            .expect("the spawn path must have persisted the instance record");
+        assert_eq!(record.backend, "local");
+        assert_eq!(record.pid, Some(pid));
+        assert!(
+            record.terminated_at.is_some(),
+            "a successful admin kill must mark the durable record terminated"
+        );
+        assert_eq!(record.terminated_reason.as_deref(), Some("admin_kill"));
+    }
+
+    /// TASK-273 (review): the exit monitor must mark the durable instance
+    /// record terminated on CLEAN exit — an instance whose backend reports
+    /// not-alive (here: a container handle for a container that no longer
+    /// exists — `docker inspect` of an unknown id is not-alive on every
+    /// environment, and a missing runtime surfaces as an error the probe
+    /// treats as not-alive) is marked `clean_exit` without any kill.
+    /// Previously no test covered the monitor's durable marking.
+    #[tokio::test]
+    async fn exit_monitor_marks_durable_record_on_clean_exit() {
+        let state = test_state();
+
+        // A pid-less container handle — the production shape for
+        // container/Pod spawns. Its backend probe deterministically
+        // reports not-alive (no such container), so the monitor takes the
+        // clean-exit path on its first poll.
+        let handle = gyre_ports::ProcessHandle {
+            id: "no-such-container-clean-exit".to_string(),
+            target_type: "container".to_string(),
+            pid: None,
+        };
+
+        let mut agent =
+            gyre_domain::Agent::new(gyre_common::Id::new("agt-clean-exit-1"), "ce1", 100);
+        agent
+            .transition_status(gyre_domain::AgentStatus::Active)
+            .unwrap();
+        state.agents.create(&agent).await.unwrap();
+        register_spawned_agent(
+            &state,
+            &agent,
+            handle,
+            SpawnBackend::Container(gyre_adapters::compute::ContainerTarget::new(
+                "gyre-agent:latest",
+            )),
+            &None,
+        )
+        .await;
+
+        // The spawn path recorded the instance as running.
+        let record = state
+            .agent_instances
+            .find_by_agent("agt-clean-exit-1")
+            .await
+            .unwrap()
+            .expect("the spawn path must have persisted the instance record");
+        assert!(record.terminated_at.is_none());
+
+        // The monitor polls every EXIT_MONITOR_POLL_SECS — wait for it to
+        // observe the exit and mark the record terminated.
+        let deadline = std::time::Instant::now()
+            + std::time::Duration::from_secs(
+                crate::api::spawn::EXIT_MONITOR_POLL_SECS as u64 * 3 + 5,
+            );
+        loop {
+            let record = state
+                .agent_instances
+                .find_by_agent("agt-clean-exit-1")
+                .await
+                .unwrap()
+                .expect("record must survive");
+            if record.terminated_at.is_some() {
+                assert_eq!(
+                    record.terminated_reason.as_deref(),
+                    Some("clean_exit"),
+                    "a clean exit must be marked clean_exit"
+                );
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the exit monitor did not mark the durable record terminated \
+                 within the deadline"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+
+        // The monitor also transitioned the agent out of Active.
+        let agent = state
+            .agents
+            .find_by_id(&gyre_common::Id::new("agt-clean-exit-1"))
+            .await
+            .unwrap()
+            .expect("agent must survive");
+        assert_ne!(agent.status, gyre_domain::AgentStatus::Active);
     }
     /// TASK-077 (F6): `create_interrogation_policies` must fail closed — if
     /// a policy cannot be created (e.g. duplicate id), the error propagates

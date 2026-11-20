@@ -435,8 +435,11 @@ pub async fn remote_agent_cleanup(state: Arc<AppState>, log: JobRunLog) -> Resul
 const UNREAPABLE_RETENTION_SECS: u64 = 7 * 86_400;
 
 /// Outcome of verifying a recorded local pid against the instance record.
+/// `pub(crate)` so the admin kill path can share the sweep's pid-identity
+/// verification (review task-273: a reconstructed local pid was previously
+/// killed without it).
 #[derive(Debug, PartialEq, Eq)]
-enum PidCheck {
+pub(crate) enum PidCheck {
     /// The process behind `pid` started at the recorded spawn time — it is
     /// the instance's process (safe to kill).
     Matches,
@@ -490,6 +493,16 @@ fn local_pid_matches_record(pid: u32, spawned_at: u64) -> PidCheck {
     }
 }
 
+/// Whether a recorded local pid may be killed by THIS process: the same
+/// identity verification the sweep performs, shared with the admin kill
+/// path. Returns `Some(PidCheck)` for local-backend records carrying a
+/// pid; `None` when there is no pid to verify (nothing to mis-kill).
+pub(crate) fn local_pid_check(instance: &gyre_ports::AgentInstanceRecord) -> Option<PidCheck> {
+    instance
+        .pid
+        .map(|pid| local_pid_matches_record(pid, instance.spawned_at))
+}
+
 /// Kernel boot time (Unix epoch seconds) from `/proc/stat` `btime`.
 fn boot_time_secs() -> Option<u64> {
     let proc_stat = std::fs::read_to_string("/proc/stat").ok()?;
@@ -503,8 +516,9 @@ fn boot_time_secs() -> Option<u64> {
 
 /// Mark an already-exited instance terminated and clean the in-memory
 /// fast-path registries (the kill path of [`kill_and_mark`] without a
-/// kill: there is no process left to signal).
-async fn mark_gone(
+/// kill: there is no process left to signal). `pub(crate)` so the admin
+/// kill path shares it for verifiably-exited instances.
+pub(crate) async fn mark_gone(
     state: &AppState,
     instance: &gyre_ports::AgentInstanceRecord,
     reason: &str,
@@ -526,8 +540,12 @@ async fn mark_gone(
     Ok(())
 }
 
-/// Kill `instance` via `target` and mark it terminated with `reason`.
-async fn kill_and_mark(
+/// Kill `instance` via `target` and mark it terminated with `reason` —
+/// but ONLY after `kill_process` returns Ok: a failed kill leaves the
+/// record running so the sweep (or a later admin kill) retries it instead
+/// of permanently hiding a live orphan (review task-273). `pub(crate)` so
+/// the admin kill path shares these exact semantics.
+pub(crate) async fn kill_and_mark(
     state: &AppState,
     target: &dyn gyre_ports::ComputeTarget,
     instance: &gyre_ports::AgentInstanceRecord,
@@ -1360,6 +1378,80 @@ mod tests {
         assert!(
             !lines2.iter().any(|l| l.contains("agent-ssh-old")),
             "a retired instance must not be re-emitted, got: {lines2:?}"
+        );
+    }
+
+    /// A compute target whose kill deterministically fails (test double
+    /// for an unkillable process — e.g. a permission mismatch or a
+    /// process that survives SIGKILL).
+    struct FailingKillTarget;
+
+    #[async_trait::async_trait]
+    impl gyre_ports::ComputeTarget for FailingKillTarget {
+        fn name(&self) -> &str {
+            "failing-test-target"
+        }
+        fn target_type(&self) -> &'static str {
+            "local"
+        }
+        async fn spawn_process(
+            &self,
+            _config: &gyre_ports::SpawnConfig,
+        ) -> anyhow::Result<gyre_ports::ProcessHandle> {
+            Err(anyhow::anyhow!("not a spawn target"))
+        }
+        async fn kill_process(&self, _handle: &gyre_ports::ProcessHandle) -> anyhow::Result<()> {
+            Err(anyhow::anyhow!("kill -KILL failed (test double)"))
+        }
+        async fn is_alive(&self, _handle: &gyre_ports::ProcessHandle) -> anyhow::Result<bool> {
+            Ok(true)
+        }
+    }
+
+    /// Review task-273: a FAILED kill must not mark the durable instance
+    /// record terminated — kill_and_mark (shared by remote_agent_cleanup
+    /// and the admin kill path) marks only after kill_process returns Ok,
+    /// so a still-running instance stays visible to the next sweep
+    /// instead of being permanently hidden (the exact hazard the admin
+    /// kill handler was previously guilty of).
+    #[tokio::test]
+    async fn kill_and_mark_failure_leaves_record_running() {
+        let state = crate::mem::test_state();
+        let instance = AgentInstanceRecord {
+            agent_id: "agent-failed-kill".to_string(),
+            backend: "local".to_string(),
+            target_type: "local".to_string(),
+            handle_id: "4242".to_string(),
+            pid: Some(4242),
+            spawned_at: now_secs(),
+            terminated_at: None,
+            terminated_reason: None,
+        };
+        state
+            .agent_instances
+            .record_spawned(&instance)
+            .await
+            .unwrap();
+
+        let result = kill_and_mark(&state, &FailingKillTarget, &instance, "admin_kill").await;
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("kill -KILL failed"),
+            "the kill failure must surface, got: {err:#}"
+        );
+
+        // The record is NOT marked terminated — the instance is still
+        // recorded-running for the next sweep / admin kill to retry.
+        let record = state
+            .agent_instances
+            .find_by_agent("agent-failed-kill")
+            .await
+            .unwrap()
+            .expect("record must survive");
+        assert!(
+            record.terminated_at.is_none(),
+            "a failed kill must leave the record running (retryable), \
+             not mark it terminated"
         );
     }
 }
