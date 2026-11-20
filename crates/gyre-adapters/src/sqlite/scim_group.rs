@@ -85,7 +85,12 @@ impl MappingRow {
             workspace_id: Id::new(self.workspace_id),
             idp_group: self.idp_group,
             workspace_role: gyre_domain::WorkspaceRole::parse_role(&self.workspace_role)
-                .ok_or_else(|| anyhow!("unknown workspace role in SCIM mapping: {}", self.workspace_role))?,
+                .ok_or_else(|| {
+                    anyhow!(
+                        "unknown workspace role in SCIM mapping: {}",
+                        self.workspace_role
+                    )
+                })?,
             updated_at: self.updated_at as u64,
         })
     }
@@ -103,12 +108,17 @@ struct NewMappingRow<'a> {
 /// True when `err` is the unique index on `scim_groups.external_id` — the
 /// database-level enforcement of the "one group per externalId" port
 /// contract (mirrors the invitation adapters' scope-violation matchers).
+/// SQLite reports the partial-index violation by column list
+/// (`UNIQUE constraint failed: scim_groups.external_id`) while PostgreSQL
+/// names the index — both must match, and the `scim_groups.id` primary
+/// key must NOT (it is a different constraint and names its own column).
 fn is_external_id_violation(err: &diesel::result::Error) -> bool {
     use diesel::result::{DatabaseErrorKind, Error};
     match err {
-        Error::DatabaseError(DatabaseErrorKind::UniqueViolation, e) => e
-            .message()
-            .contains("idx_scim_groups_external_id"),
+        Error::DatabaseError(DatabaseErrorKind::UniqueViolation, e) => {
+            let msg = e.message();
+            msg.contains("idx_scim_groups_external_id") || msg.contains("scim_groups.external_id")
+        }
         _ => false,
     }
 }
@@ -136,7 +146,10 @@ impl ScimGroupRepository for SqliteStorage {
                 .execute(&mut *conn)
                 .map_err(|e| {
                     if is_external_id_violation(&e) {
-                        anyhow!("SCIM group with external_id {:?} already exists", g.external_id)
+                        anyhow!(
+                            "SCIM group with external_id {:?} already exists",
+                            g.external_id
+                        )
                     } else {
                         anyhow::Error::from(e).context("insert SCIM group")
                     }
@@ -368,5 +381,162 @@ impl ScimMappingRepository for SqliteStorage {
                 .and_then(|rows| rows.into_iter().map(MappingRow::into_mapping).collect())
         })
         .await?
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gyre_domain::WorkspaceRole;
+    use tempfile::NamedTempFile;
+
+    fn setup() -> (NamedTempFile, SqliteStorage) {
+        let tmp = NamedTempFile::new().unwrap();
+        let s = SqliteStorage::new(tmp.path().to_str().unwrap()).unwrap();
+        (tmp, s)
+    }
+
+    fn make_group(id: &str, external_id: &str, display_name: &str) -> ScimGroup {
+        ScimGroup::new(
+            Id::new(id),
+            external_id.to_string(),
+            display_name.to_string(),
+            1000,
+        )
+    }
+
+    #[tokio::test]
+    async fn create_rejects_duplicate_external_id() {
+        // Port contract: a group with the same non-empty external_id
+        // must not be created twice. The HTTP handler checks
+        // find_by_external_id first (idempotent re-push → 200), so the
+        // SQL-level guard is the only enforcement left when two creates
+        // race — this test proves it fires (partial unique index
+        // idx_scim_groups_external_id, mapped to a named error).
+        let (_tmp, s) = setup();
+        s.create(&make_group("g1", "cn=eng,dc=example,dc=com", "Eng"))
+            .await
+            .unwrap();
+        let err = s
+            .create(&make_group("g2", "cn=eng,dc=example,dc=com", "Eng Again"))
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("already exists"),
+            "duplicate external_id must fail with the contract error, got: {err}"
+        );
+        // The rejected create left no row behind.
+        assert_eq!(s.list().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn external_id_less_groups_coexist() {
+        // The unique index is partial (WHERE external_id IS NOT NULL):
+        // IdPs that push no externalId may create any number of
+        // displayName-keyed groups.
+        let (_tmp, s) = setup();
+        s.create(&make_group("g1", "", "Leads")).await.unwrap();
+        s.create(&make_group("g2", "", "Leads")).await.unwrap();
+        assert_eq!(s.list().await.unwrap().len(), 2);
+        assert!(s.find_by_external_id("Leads").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn add_member_is_idempotent() {
+        // Port contract / task-266 idempotency: re-pushing the same
+        // (group, user) membership must not duplicate the row
+        // (composite primary key + ON CONFLICT DO NOTHING).
+        let (_tmp, s) = setup();
+        let g = make_group("g1", "cn=eng,dc=example,dc=com", "Eng");
+        s.create(&g).await.unwrap();
+        let m = ScimGroupMember {
+            group_id: g.id.clone(),
+            user_id: Id::new("u1"),
+            added_at: 1000,
+        };
+        s.add_member(&m).await.unwrap();
+        s.add_member(&m).await.unwrap();
+        s.add_member(&m).await.unwrap();
+        assert_eq!(s.list_members(&g.id).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn delete_removes_group_and_membership_rows() {
+        let (_tmp, s) = setup();
+        let g = make_group("g1", "cn=eng,dc=example,dc=com", "Eng");
+        s.create(&g).await.unwrap();
+        s.add_member(&ScimGroupMember {
+            group_id: g.id.clone(),
+            user_id: Id::new("u1"),
+            added_at: 1000,
+        })
+        .await
+        .unwrap();
+        s.delete(&g.id).await.unwrap();
+        assert!(s.find_by_id(&g.id).await.unwrap().is_none());
+        assert!(s.list_members(&g.id).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn replace_for_workspace_swaps_the_whole_set() {
+        // PUT semantics: the request body is the authoritative set — an
+        // omitted entry is removed, and list_by_idp_group finds the
+        // mappings the group-membership effect consults.
+        let (_tmp, s) = setup();
+        let ws = Id::new("ws1");
+        let other = Id::new("ws2");
+        s.replace_for_workspace(
+            &ws,
+            &[
+                ScimWorkspaceMapping::new(
+                    ws.clone(),
+                    "cn=a,dc=x".to_string(),
+                    WorkspaceRole::Developer,
+                    1000,
+                ),
+                ScimWorkspaceMapping::new(
+                    ws.clone(),
+                    "cn=b,dc=x".to_string(),
+                    WorkspaceRole::Viewer,
+                    1000,
+                ),
+            ],
+        )
+        .await
+        .unwrap();
+        s.replace_for_workspace(
+            &other,
+            &[ScimWorkspaceMapping::new(
+                other.clone(),
+                "cn=a,dc=x".to_string(),
+                WorkspaceRole::Admin,
+                1000,
+            )],
+        )
+        .await
+        .unwrap();
+
+        // Swap ws1's set down to one entry: cn=b is gone.
+        s.replace_for_workspace(
+            &ws,
+            &[ScimWorkspaceMapping::new(
+                ws.clone(),
+                "cn=a,dc=x".to_string(),
+                WorkspaceRole::Developer,
+                2000,
+            )],
+        )
+        .await
+        .unwrap();
+
+        let ws_mappings = s.list_by_workspace(&ws).await.unwrap();
+        assert_eq!(ws_mappings.len(), 1);
+        assert_eq!(ws_mappings[0].idp_group, "cn=a,dc=x");
+        assert_eq!(ws_mappings[0].workspace_role, WorkspaceRole::Developer);
+
+        // The other workspace's mapping is untouched, and the
+        // by-idp-group lookup (the effect's join) sees both.
+        let by_group = s.list_by_idp_group("cn=a,dc=x").await.unwrap();
+        assert_eq!(by_group.len(), 2);
     }
 }

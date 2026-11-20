@@ -1200,10 +1200,7 @@ pub fn api_router() -> Router<Arc<AppState>> {
             get(scim::scim_service_provider_config),
         )
         .route("/scim/v2/Schemas", get(scim::scim_schemas))
-        .route(
-            "/scim/v2/ResourceTypes",
-            get(scim::scim_resource_types),
-        )
+        .route("/scim/v2/ResourceTypes", get(scim::scim_resource_types))
         .route(
             "/scim/v2/Groups",
             get(scim::scim_list_groups).post(scim::scim_create_group),

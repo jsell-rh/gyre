@@ -3147,9 +3147,7 @@ impl ScimGroupRepository for MemScimGroupRepository {
         // non-empty external_id already exists. The mem adapter has no
         // schema, so the guard lives in code (check-mem-port-contracts).
         if !group.external_id.is_empty()
-            && groups
-                .values()
-                .any(|g| g.external_id == group.external_id)
+            && groups.values().any(|g| g.external_id == group.external_id)
         {
             return Err(anyhow::anyhow!(
                 "SCIM group with external_id {:?} already exists",
@@ -3205,10 +3203,9 @@ impl ScimGroupRepository for MemScimGroupRepository {
             .filter(|m| m.group_id == *group_id)
             .cloned()
             .collect();
-        members.sort_by(|a, b| (a.added_at, &a.user_id.to_string()).cmp(&(
-            b.added_at,
-            &b.user_id.to_string(),
-        )));
+        members.sort_by(|a, b| {
+            (a.added_at, &a.user_id.to_string()).cmp(&(b.added_at, &b.user_id.to_string()))
+        });
         Ok(members)
     }
 

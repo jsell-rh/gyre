@@ -76,7 +76,12 @@ pub struct ScimWorkspaceMapping {
 }
 
 impl ScimWorkspaceMapping {
-    pub fn new(workspace_id: Id, idp_group: String, workspace_role: WorkspaceRole, now: u64) -> Self {
+    pub fn new(
+        workspace_id: Id,
+        idp_group: String,
+        workspace_role: WorkspaceRole,
+        now: u64,
+    ) -> Self {
         Self {
             workspace_id,
             idp_group,

@@ -86,7 +86,10 @@ impl MappingRow {
             idp_group: self.idp_group,
             workspace_role: gyre_domain::WorkspaceRole::parse_role(&self.workspace_role)
                 .ok_or_else(|| {
-                    anyhow!("unknown workspace role in SCIM mapping: {}", self.workspace_role)
+                    anyhow!(
+                        "unknown workspace role in SCIM mapping: {}",
+                        self.workspace_role
+                    )
                 })?,
             updated_at: self.updated_at as u64,
         })
@@ -108,9 +111,9 @@ struct NewMappingRow<'a> {
 fn is_external_id_violation(err: &diesel::result::Error) -> bool {
     use diesel::result::{DatabaseErrorKind, Error};
     match err {
-        Error::DatabaseError(DatabaseErrorKind::UniqueViolation, e) => e
-            .message()
-            .contains("idx_scim_groups_external_id"),
+        Error::DatabaseError(DatabaseErrorKind::UniqueViolation, e) => {
+            e.message().contains("idx_scim_groups_external_id")
+        }
         _ => false,
     }
 }
@@ -138,7 +141,10 @@ impl ScimGroupRepository for PgStorage {
                 .execute(&mut *conn)
                 .map_err(|e| {
                     if is_external_id_violation(&e) {
-                        anyhow!("SCIM group with external_id {:?} already exists", g.external_id)
+                        anyhow!(
+                            "SCIM group with external_id {:?} already exists",
+                            g.external_id
+                        )
                     } else {
                         anyhow::Error::from(e).context("insert SCIM group")
                     }

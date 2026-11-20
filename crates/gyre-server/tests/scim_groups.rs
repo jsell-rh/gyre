@@ -140,7 +140,11 @@ async fn make_user(app: &axum::Router, username: &str) -> (String, String) {
         })),
     )
     .await;
-    assert_eq!(resp.status(), StatusCode::CREATED, "user provisioning failed");
+    assert_eq!(
+        resp.status(),
+        StatusCode::CREATED,
+        "user provisioning failed"
+    );
     let j = body_json(resp).await;
     (
         j["user"]["id"].as_str().expect("user id").to_string(),
@@ -159,7 +163,11 @@ async fn make_workspace(app: &axum::Router, owner_key: &str, name: &str) -> Stri
         Some(serde_json::json!({ "name": name })),
     )
     .await;
-    assert_eq!(resp.status(), StatusCode::CREATED, "workspace creation failed");
+    assert_eq!(
+        resp.status(),
+        StatusCode::CREATED,
+        "workspace creation failed"
+    );
     body_json(resp).await["id"]
         .as_str()
         .expect("workspace id")
@@ -296,7 +304,10 @@ async fn groups_crud_surface_per_rfc7644() {
     assert_eq!(page["itemsPerPage"], 2);
     let resources = page["Resources"].as_array().unwrap();
     assert_eq!(resources.len(), 2);
-    assert_eq!(resources[0]["id"], list["Resources"].as_array().unwrap()[1]["id"]);
+    assert_eq!(
+        resources[0]["id"],
+        list["Resources"].as_array().unwrap()[1]["id"]
+    );
 
     // Filter: displayName eq "...".
     let resp = scim_call(
@@ -395,7 +406,13 @@ async fn groups_crud_surface_per_rfc7644() {
 
     // DELETE: 204, then the resource is gone (404) and its membership
     // rows are gone too.
-    let resp = scim_call(&app, Method::DELETE, &format!("/scim/v2/Groups/{gid}"), None).await;
+    let resp = scim_call(
+        &app,
+        Method::DELETE,
+        &format!("/scim/v2/Groups/{gid}"),
+        None,
+    )
+    .await;
     assert_eq!(resp.status(), StatusCode::NO_CONTENT);
     let resp = scim_call(&app, Method::GET, &format!("/scim/v2/Groups/{gid}"), None).await;
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
@@ -529,7 +546,10 @@ async fn mapping_effect_creates_and_revokes_membership() {
     )
     .await;
     assert_eq!(resp.status(), StatusCode::OK);
-    assert_eq!(body_json(resp).await["mappings"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        body_json(resp).await["mappings"].as_array().unwrap().len(),
+        1
+    );
 
     // Control: U has no membership before the push.
     assert!(membership(&state, &u_id, &ws_id).await.is_none());
@@ -634,7 +654,10 @@ async fn mapping_effect_creates_and_revokes_membership() {
         .await
         .unwrap();
     assert_eq!(mappings.len(), 1);
-    assert_eq!(mappings[0].workspace_role, gyre_domain::WorkspaceRole::Developer);
+    assert_eq!(
+        mappings[0].workspace_role,
+        gyre_domain::WorkspaceRole::Developer
+    );
 
     // REMOVE U from the group (PATCH, path-filter form): the membership
     // is revoked.
@@ -831,7 +854,10 @@ async fn mappings_and_groups_survive_restart() {
         .unwrap();
     assert_eq!(mappings.len(), 1, "mapping must survive a restart");
     assert_eq!(mappings[0].idp_group, group_key);
-    assert_eq!(mappings[0].workspace_role, gyre_domain::WorkspaceRole::Developer);
+    assert_eq!(
+        mappings[0].workspace_role,
+        gyre_domain::WorkspaceRole::Developer
+    );
 
     // The group and its id survived.
     let resp = scim_call(&app2, Method::GET, &format!("/scim/v2/Groups/{gid}"), None).await;

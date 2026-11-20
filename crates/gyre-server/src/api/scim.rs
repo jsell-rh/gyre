@@ -1166,7 +1166,10 @@ fn patch_member_refs(value: &serde_json::Value) -> Vec<ScimGroupMemberRef> {
             if let Some(v) = o.get("value").and_then(|v| v.as_str()) {
                 vec![ScimGroupMemberRef {
                     value: v.to_string(),
-                    display: o.get("display").and_then(|d| d.as_str()).map(str::to_string),
+                    display: o
+                        .get("display")
+                        .and_then(|d| d.as_str())
+                        .map(str::to_string),
                 }]
             } else {
                 Vec::new()
@@ -1272,7 +1275,10 @@ pub async fn scim_create_group(
 
     if !ext_id.is_empty() {
         if let Some(existing) = state.scim_groups.find_by_external_id(&ext_id).await? {
-            return Ok((StatusCode::OK, Json(group_to_scim(&state, &existing).await?)));
+            return Ok((
+                StatusCode::OK,
+                Json(group_to_scim(&state, &existing).await?),
+            ));
         }
     }
 
@@ -1292,7 +1298,10 @@ pub async fn scim_create_group(
     }
 
     let created = load_group(&state, group.id.as_str()).await?;
-    Ok((StatusCode::CREATED, Json(group_to_scim(&state, &created).await?)))
+    Ok((
+        StatusCode::CREATED,
+        Json(group_to_scim(&state, &created).await?),
+    ))
 }
 
 /// Add one member reference to a group and run the mapping effect.
@@ -1501,7 +1510,10 @@ pub async fn scim_patch_group(
                 "unsupported PATCH op: {kind}"
             )));
         }
-        let path = op.path.as_deref().map(|p| p.split('[').next().unwrap_or(p).to_string());
+        let path = op
+            .path
+            .as_deref()
+            .map(|p| p.split('[').next().unwrap_or(p).to_string());
         let value = op.value.unwrap_or(serde_json::Value::Null);
 
         match path.as_deref() {
