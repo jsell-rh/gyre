@@ -1485,6 +1485,35 @@ async fn merge_atomic_group(
                     "atomic group member merged successfully"
                 );
 
+                // task-264 (identity-security.md §Layer 3): sign the merge
+                // commit BEFORE declaring the member merged. A signing
+                // failure fails loudly — the group is rolled back, exactly
+                // like a dependency-health or trust-hold failure; no
+                // local-key record is produced by default.
+                if let Err(signing_failure) =
+                    sign_merge_commit(state, &repo, &mr, &merge_commit_sha).await
+                {
+                    error!(
+                        group = %group_name,
+                        mr_id = %mr.id,
+                        error = %signing_failure,
+                        "merge commit signing failed — rolling back the atomic group"
+                    );
+                    rollback_atomic_group(
+                        state,
+                        group_name,
+                        &repo,
+                        target_branch,
+                        pre_group_sha.as_deref(),
+                        &merged_entries,
+                        &group_entries,
+                        &signing_failure,
+                        &mr.id,
+                    )
+                    .await?;
+                    return Ok(());
+                }
+
                 // Update MR status to Merged.
                 let mut updated_mr = mr.clone();
                 let now = std::time::SystemTime::now()
@@ -1527,13 +1556,20 @@ async fn merge_atomic_group(
                 .await
                 {
                     Ok(signed) => {
-                        crate::merge_attestation::store_merge_attestation_bundle(
+                        if let Err(e) = crate::merge_attestation::store_merge_attestation_bundle(
                             state,
                             &updated_mr,
                             &repo,
                             &signed,
                         )
-                        .await;
+                        .await
+                        {
+                            warn!(
+                                mr_id = %updated_mr.id,
+                                error = %e,
+                                "merge attestation bundle not fully stored/recorded for atomic group member"
+                            );
+                        }
                     }
                     Err(e) => {
                         warn!(
@@ -2634,6 +2670,31 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
         Ok(MergeResult::Success { merge_commit_sha }) => {
             info!(entry_id = %entry.id, sha = %merge_commit_sha, "merge succeeded");
 
+            // task-264 (identity-security.md §Layer 3): sign the merge
+            // commit BEFORE updating the MR to Merged. A signing failure
+            // fails loudly — the same recovery protocol as a post-merge
+            // gate failure (pause queue, revert the merge, escalate to a
+            // human); no local-key record is produced by default.
+            if let Err(signing_failure) =
+                sign_merge_commit(state, &repo, &mr, &merge_commit_sha).await
+            {
+                error!(
+                    entry_id = %entry.id,
+                    mr_id = %mr.id,
+                    error = %signing_failure,
+                    "merge commit signing failed — reverting the merge and escalating"
+                );
+                recover_from_post_merge_failure(
+                    state,
+                    &repo,
+                    &mr,
+                    &merge_commit_sha,
+                    &signing_failure,
+                )
+                .await;
+                return Ok(());
+            }
+
             // Update MR status to Merged
             let mut updated_mr = mr;
             let now = std::time::SystemTime::now()
@@ -2800,13 +2861,20 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
             .await
             {
                 Ok(signed) => {
-                    crate::merge_attestation::store_merge_attestation_bundle(
+                    if let Err(e) = crate::merge_attestation::store_merge_attestation_bundle(
                         state,
                         &updated_mr,
                         &repo,
                         &signed,
                     )
-                    .await;
+                    .await
+                    {
+                        warn!(
+                            mr_id = %updated_mr.id,
+                            error = %e,
+                            "merge attestation bundle not fully stored/recorded"
+                        );
+                    }
                 }
                 Err(e) => {
                     warn!(
@@ -3366,6 +3434,133 @@ pub(crate) async fn resume_merge_queue(state: &AppState, repo: &gyre_domain::Rep
             })),
         )
         .await;
+}
+
+/// Sign a merge commit through the server's configured signing mode
+/// (task-264, identity-security.md §Layer 3: MR merge-commit creation is a
+/// commit-producing surface and must leave a persisted `CommitSignature`).
+///
+/// The merge committer is the forge's merge queue. For keyless (fulcio)
+/// signing — the default — the forge resolves a REAL identity for the
+/// committer by minting its own short-lived merge-actor JWT (the same
+/// issuer every agent JWT uses, presentable to a Fulcio configured to
+/// trust this forge); an empty bearer is never presented. The attribution
+/// bound into the signature is the MR author agent's task/spawner context,
+/// resolved from the author's stored agent record — never fabricated.
+///
+/// Fails loudly (task-264): a signing failure is an explicit `Err` naming
+/// the active mode; callers treat it like a post-merge gate failure
+/// (revert/rollback + escalation), and no local-key record is produced
+/// unless the operator explicitly configured
+/// `GYRE_SIGNING_FULCIO_FALLBACK=local`.
+async fn sign_merge_commit(
+    state: &AppState,
+    repo: &gyre_domain::Repository,
+    mr: &MergeRequest,
+    merge_commit_sha: &str,
+) -> Result<(), String> {
+    use crate::commit_signatures::{sign_commit, SigningAttribution, SigningMode};
+
+    // Attribution: the MR's author agent and its resolved task/spawner
+    // context. A human-authored MR has no agent identity — the forge merge
+    // queue itself is the signer, with empty (not fabricated) task/user
+    // fields.
+    let (agent_id, task_id, spawned_by) = match &mr.author_agent_id {
+        Some(author) => {
+            let (tid, _parent, spawned) =
+                crate::git_http::resolve_agent_context(state, author.as_str()).await;
+            (
+                author.to_string(),
+                tid.unwrap_or_default(),
+                spawned.unwrap_or_default(),
+            )
+        }
+        None => (
+            "forge-merge-queue".to_string(),
+            String::new(),
+            String::new(),
+        ),
+    };
+    let attribution = SigningAttribution {
+        agent_id: agent_id.clone(),
+        task_id,
+        spawned_by,
+    };
+
+    // Keyless mode: mint the forge's short-lived merge-actor JWT — a real,
+    // forge-issued identity for the committer. The workspace tenant is
+    // resolved from the workspace record (fail loudly when unresolvable —
+    // never a fabricated scope).
+    let merge_jwt = match state.signing_config.mode {
+        SigningMode::Fulcio => {
+            let workspace = state
+                .workspaces
+                .find_by_id(&mr.workspace_id)
+                .await
+                .map_err(|e| {
+                    format!(
+                        "merge-actor identity: cannot look up workspace {} for MR {}: {e}",
+                        mr.workspace_id, mr.id
+                    )
+                })?
+                .ok_or_else(|| {
+                    format!(
+                        "merge-actor identity: workspace {} for MR {} not found",
+                        mr.workspace_id, mr.id
+                    )
+                })?;
+            state
+                .agent_signing_key
+                .mint(
+                    &agent_id,
+                    &attribution.task_id,
+                    &attribution.spawned_by,
+                    &state.base_url,
+                    // Short-lived: just the Fulcio round trip.
+                    600,
+                    &workspace.tenant_id.to_string(),
+                    &mr.workspace_id.to_string(),
+                    &repo.id.to_string(),
+                    &repo.name,
+                )
+                .map_err(|e| format!("merge-actor identity: forge failed to mint the JWT: {e}"))?
+        }
+        _ => String::new(),
+    };
+    let jwt_opt = if merge_jwt.is_empty() {
+        None
+    } else {
+        Some(merge_jwt.as_str())
+    };
+
+    match sign_commit(
+        state,
+        &repo.id.to_string(),
+        merge_commit_sha,
+        &attribution,
+        jwt_opt,
+    )
+    .await
+    {
+        Ok(Some(record)) => {
+            state.commit_signatures.save(&record).await.map_err(|e| {
+                format!(
+                    "failed to persist the merge commit signature for MR {}: {e}",
+                    mr.id
+                )
+            })?;
+            info!(
+                mr_id = %mr.id,
+                sha = %merge_commit_sha,
+                mode = ?record.sigstore_mode,
+                "merge commit signed (task-264)"
+            );
+            Ok(())
+        }
+        // GYRE_SIGNING_MODE=none: explicit operator opt-in — unsigned.
+        Ok(None) => Ok(()),
+        Err(e) => Err(e.describe()),
+    }
 }
 
 /// Post-merge validation failure recovery (platform-model.md §6):
@@ -13398,5 +13593,138 @@ mod tests {
                 "{uid} must not be notified for a queue pause"
             );
         }
+    }
+}
+
+// ── Merge-commit signing tests (task-264) ────────────────────────────────────
+
+#[cfg(test)]
+mod merge_signing_tests {
+    use super::*;
+    use crate::mem::test_state;
+    use gyre_domain::{Agent, MergeRequest, Repository, Workspace};
+
+    /// Repo + workspace + MR authored by an agent whose stored record
+    /// carries real task/spawner provenance.
+    async fn signing_fixture() -> (Arc<crate::AppState>, Repository, MergeRequest) {
+        let state = test_state();
+
+        let ws = Workspace {
+            id: Id::new("ws-sign"),
+            tenant_id: Id::new("default"),
+            name: "Signing WS".to_string(),
+            slug: "signing-ws".to_string(),
+            description: None,
+            budget: None,
+            max_repos: None,
+            max_agents_per_repo: None,
+            trust_level: gyre_domain::TrustLevel::Guided,
+            llm_model: None,
+            created_at: 0,
+            compute_target_id: None,
+        };
+        state.workspaces.create(&ws).await.unwrap();
+
+        let repo = Repository::new(
+            Id::new("repo-sign"),
+            Id::new("ws-sign"),
+            "sign-repo",
+            "/tmp/gyre-sign-test-repo.git",
+            0,
+        );
+        state.repos.create(&repo).await.unwrap();
+
+        let mut agent = Agent::new(Id::new("agent-author"), "author", 0);
+        agent.workspace_id = Id::new("ws-sign");
+        agent.current_task_id = Some(Id::new("task-merge"));
+        agent.spawned_by = Some("user-spawner".to_string());
+        state.agents.create(&agent).await.unwrap();
+
+        let mut mr = MergeRequest::new(
+            Id::new("mr-sign"),
+            Id::new("repo-sign"),
+            Id::new("ws-sign"),
+            "signed merge",
+            "feat/x",
+            "main",
+            0,
+        );
+        mr.author_agent_id = Some(Id::new("agent-author"));
+        state.merge_requests.create(&mr).await.unwrap();
+
+        (state, repo, mr)
+    }
+
+    /// task-264: MR merge-commit creation is a commit-producing surface —
+    /// `sign_merge_commit` persists a CommitSignature whose attribution
+    /// comes from the AUTHOR AGENT'S stored record (a real lookup), and
+    /// the shared verification path validates it (real Ed25519 check over
+    /// the attribution-bound payload).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn merge_commit_signing_persists_attribution_bound_record() {
+        let (state, repo, mr) = signing_fixture().await;
+
+        sign_merge_commit(&state, &repo, &mr, "mergec0mmitsha")
+            .await
+            .expect("local-mode merge-commit signing must succeed");
+
+        let record = state
+            .commit_signatures
+            .find("repo-sign", "mergec0mmitsha")
+            .await
+            .unwrap()
+            .expect("the merge commit must carry a persisted CommitSignature");
+        assert_eq!(record.sigstore_mode, gyre_ports::SigstoreMode::Local);
+        // Attribution resolved from the author agent's stored record —
+        // never placeholder literals.
+        assert_eq!(record.signer_id, "agent-author");
+        assert_eq!(record.task_id, "task-merge");
+        assert_eq!(record.spawned_by, "user-spawner");
+
+        let verification =
+            crate::sigstore::verify_state_commit_signature(&state, "repo-sign", "mergec0mmitsha")
+                .await
+                .unwrap()
+                .expect("record must exist");
+        assert!(
+            verification.valid,
+            "the merge-commit signature must verify: {:?}",
+            verification.reason
+        );
+        assert_eq!(verification.task_id, "task-merge");
+        assert_eq!(verification.spawned_by, "user-spawner");
+    }
+
+    /// task-264 (fail-loudly): in keyless (fulcio) mode with an
+    /// unreachable Fulcio, merge-commit signing FAILS with an explicit
+    /// error naming the signing mode — the caller (the merge processor)
+    /// treats that as a merge failure — and NO record signed with the
+    /// local forge key is produced.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn merge_commit_signing_fails_loudly_when_fulcio_unreachable() {
+        let (mut state, repo, mr) = signing_fixture().await;
+        let state_mut = Arc::get_mut(&mut state).expect("sole owner");
+        state_mut.signing_config = crate::commit_signatures::SigningConfig {
+            mode: crate::commit_signatures::SigningMode::Fulcio,
+            fulcio_url: "https://fulcio.invalid".to_string(),
+            rekor_url: "https://rekor.invalid".to_string(),
+        };
+
+        let err = sign_merge_commit(&state, &repo, &mr, "mergec0mmitful")
+            .await
+            .expect_err("unreachable Fulcio must fail merge-commit signing loudly");
+        assert!(
+            err.contains("fulcio"),
+            "the failure must name the active signing mode: {err}"
+        );
+        assert!(
+            state
+                .commit_signatures
+                .find("repo-sign", "mergec0mmitful")
+                .await
+                .unwrap()
+                .is_none(),
+            "no local-key record may be produced for a failed keyless merge-commit signing"
+        );
     }
 }

@@ -231,6 +231,31 @@ impl ResourceResolver {
                     Some("write"),
                 ),
                 RouteResourceMapping::api("/api/v1/repos/:id/agent-commits", "repo", None),
+                // Agent-session tracking (source-control.md §Agent-to-Commit
+                // Tracking): session list, commits-by-session, by-file /
+                // by-commit session queries, branch lifecycle, time-travel.
+                RouteResourceMapping::api("/api/v1/repos/:id/agent-sessions", "repo", None),
+                RouteResourceMapping::api("/api/v1/repos/:id/agent-sessions/by-file", "repo", None),
+                RouteResourceMapping::api(
+                    "/api/v1/repos/:id/agent-sessions/by-commit",
+                    "repo",
+                    None,
+                ),
+                RouteResourceMapping::api(
+                    "/api/v1/repos/:id/agent-sessions/:session_id/commits",
+                    "repo",
+                    None,
+                ),
+                RouteResourceMapping::api(
+                    "/api/v1/repos/:id/agent-sessions/:session_id/state",
+                    "repo",
+                    None,
+                ),
+                RouteResourceMapping::api(
+                    "/api/v1/repos/:id/agents/:agent_id/branch-lifecycle",
+                    "repo",
+                    None,
+                ),
                 RouteResourceMapping::api("/api/v1/repos/:id/worktrees", "worktree", None),
                 RouteResourceMapping::api(REPOS_WORKTREES_ID_ROUTE, "worktree", None),
                 RouteResourceMapping::api(REPOS_GATES_ROUTE, "gate", None),
@@ -531,6 +556,12 @@ impl ResourceResolver {
                 RouteResourceMapping::api("/api/v1/dependencies/graph", "dependency", None),
                 // ── Federation ─────────────────────────────────────────────
                 RouteResourceMapping::api("/api/v1/federation/trusted-issuers", "federation", None),
+                RouteResourceMapping::api(
+                    "/api/v1/federation/spiffe/attest",
+                    "federation",
+                    Some("write"),
+                ),
+                RouteResourceMapping::api("/api/v1/federation/spiffe/workload", "federation", None),
                 // ── Budget ─────────────────────────────────────────────────
                 RouteResourceMapping::api("/api/v1/workspaces/:id/budget", "budget", None),
                 RouteResourceMapping::api("/api/v1/budget/summary", "budget", None),

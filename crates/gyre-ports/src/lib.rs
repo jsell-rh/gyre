@@ -73,7 +73,7 @@ pub mod workspace;
 pub mod workspace_membership;
 
 pub use agent::AgentRepository;
-pub use agent_tracking::{AgentCommitRepository, WorktreeRepository};
+pub use agent_tracking::{AgentCommitRepository, AgentSessionRepository, WorktreeRepository};
 pub use analytics::{AnalyticsGroupBy, AnalyticsQueryFilter, AnalyticsRepository, CostRepository};
 pub use attestation_repo::AttestationRepository;
 pub use attestation_signer::AttestationSigner;
@@ -96,7 +96,7 @@ pub use dependency_policy::DependencyPolicyRepository;
 pub use git_ops::GitOpsPort;
 pub use graph::GraphPort;
 pub use invitation::{TenantInvitationRepository, WorkspaceInvitationRepository};
-pub use jj_ops::{JjChange, JjOpsPort, JjRebaseOutcome};
+pub use jj_ops::{JjChange, JjNewChange, JjOpsPort, JjRebaseOutcome};
 pub use key_binding_repo::KeyBindingRepository;
 pub use kv_store::KvJsonStore;
 pub use llm::{

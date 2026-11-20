@@ -9,21 +9,21 @@ use gyre_domain::{
     Agent, AgentCommit, AgentStatus, AgentUsage, AgentWorktree, AnalyticsEvent, AuditEvent,
     CostEntry, DependencyEdge, LlmFunctionConfig, MergeQueueEntry, MergeQueueEntryStatus,
     MergeRequest, MrStatus, NetworkPeer, Persona, PersonaScope, Repository, Review, ReviewComment,
-    ReviewDecision, Task, TaskStatus, Tenant, User, Workspace,
+    ReviewDecision, Session, Task, TaskStatus, Tenant, User, Workspace,
 };
 #[cfg(test)]
 use gyre_domain::{BranchInfo, CommitInfo, DiffResult, MergeResult};
 use gyre_ports::{
-    AgentCommitRepository, AgentRepository, AnalyticsQueryFilter, AnalyticsRepository,
-    ApiKeyRepository, AuditQueryFilter, AuditRepository, BudgetRepository, BudgetUsageRepository,
-    CostRepository, DependencyRepository, KvJsonStore, LlmConfigRepository, MergeQueueRepository,
-    MergeRequestRepository, MetaSpecSetRepository, NetworkPeerRepository, PersonaRepository,
-    RepoRepository, ReviewRepository, RolloutPolicyRepository, SpawnLogEntry, SpawnLogRepository,
-    TaskRepository, TenantMetaSpecSetRepository, TenantRepository, UserRepository,
-    UserWorkspaceStateRepository, WorkspaceRepository, WorktreeRepository,
+    AgentCommitRepository, AgentRepository, AgentSessionRepository, AnalyticsQueryFilter,
+    AnalyticsRepository, ApiKeyRepository, AuditQueryFilter, AuditRepository, BudgetRepository,
+    BudgetUsageRepository, CostRepository, DependencyRepository, KvJsonStore, LlmConfigRepository,
+    MergeQueueRepository, MergeRequestRepository, MetaSpecSetRepository, NetworkPeerRepository,
+    PersonaRepository, RepoRepository, ReviewRepository, RolloutPolicyRepository, SpawnLogEntry,
+    SpawnLogRepository, TaskRepository, TenantMetaSpecSetRepository, TenantRepository,
+    UserRepository, UserWorkspaceStateRepository, WorkspaceRepository, WorktreeRepository,
 };
 #[cfg(test)]
-use gyre_ports::{GitOpsPort, JjChange, JjOpsPort};
+use gyre_ports::{GitOpsPort, JjChange, JjNewChange, JjOpsPort};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -424,8 +424,14 @@ impl JjOpsPort for NoopJjOps {
         Ok(())
     }
 
-    async fn jj_new(&self, _repo_path: &str, _description: &str) -> Result<String> {
-        Ok("noop-change-id".to_string())
+    async fn jj_new(&self, _repo_path: &str, _description: &str) -> Result<JjNewChange> {
+        Ok(JjNewChange {
+            change_id: "noop-change-id".to_string(),
+            // Distinct from the NoopJjOps squash SHA so both surfaces can
+            // be exercised against the same repo in one test without
+            // colliding on the (repo_id, commit_sha) signature key.
+            commit_id: "0000000000000000000000000000000000000001".to_string(),
+        })
     }
 
     async fn jj_describe(
@@ -542,8 +548,11 @@ impl JjOpsPort for ConfigurableJjOps {
         Ok(())
     }
 
-    async fn jj_new(&self, _repo_path: &str, _description: &str) -> Result<String> {
-        Ok("cfg-change-id".to_string())
+    async fn jj_new(&self, _repo_path: &str, _description: &str) -> Result<JjNewChange> {
+        Ok(JjNewChange {
+            change_id: "cfg-change-id".to_string(),
+            commit_id: "0000000000000000000000000000000000000002".to_string(),
+        })
     }
 
     async fn jj_describe(
@@ -703,6 +712,149 @@ impl AgentCommitRepository for MemAgentCommitRepository {
             .filter(|ac| ac.task_id.as_deref() == Some(task_id))
             .cloned()
             .collect())
+    }
+
+    async fn find_by_session(&self, session_id: &Id) -> Result<Vec<AgentCommit>> {
+        // Chronological (oldest first): the session-to-commit mapping is
+        // ordered by when each commit landed. The mem adapter has no ORDER
+        // BY, so the sort is done in code (same contract as the SQLite and
+        // PostgreSQL adapters).
+        let mut commits: Vec<AgentCommit> = self
+            .store
+            .lock()
+            .await
+            .iter()
+            .filter(|ac| ac.session_id.as_deref() == Some(session_id.as_str()))
+            .cloned()
+            .collect();
+        commits.sort_by(|a, b| {
+            a.timestamp
+                .cmp(&b.timestamp)
+                .then_with(|| a.id.as_str().cmp(b.id.as_str()))
+        });
+        Ok(commits)
+    }
+
+    async fn find_by_file(&self, repo_id: &Id, path: &str) -> Result<Vec<AgentCommit>> {
+        // Exact path match against the recorded files_changed lists (same
+        // contract as the SQLite and PostgreSQL adapters).
+        let mut commits: Vec<AgentCommit> = self
+            .store
+            .lock()
+            .await
+            .iter()
+            .filter(|ac| {
+                ac.repository_id.as_str() == repo_id.as_str()
+                    && ac.files_changed.iter().any(|f| f == path)
+            })
+            .cloned()
+            .collect();
+        commits.sort_by(|a, b| {
+            a.timestamp
+                .cmp(&b.timestamp)
+                .then_with(|| a.id.as_str().cmp(b.id.as_str()))
+        });
+        Ok(commits)
+    }
+}
+
+#[derive(Default)]
+pub struct MemAgentSessionRepository {
+    store: Arc<Mutex<Vec<Session>>>,
+}
+
+#[async_trait]
+impl AgentSessionRepository for MemAgentSessionRepository {
+    async fn create(&self, session: &Session) -> Result<()> {
+        let mut store = self.store.lock().await;
+        // Port contract: fails if a session with the same id already
+        // exists. Guarded in code because the mem adapter has no schema to
+        // enforce the SQLite/PostgreSQL primary key.
+        if store.iter().any(|s| s.id == session.id) {
+            anyhow::bail!("session {} already exists", session.id);
+        }
+        store.push(session.clone());
+        Ok(())
+    }
+
+    async fn find_by_agent(&self, agent_id: &Id) -> Result<Vec<Session>> {
+        // Chronological (oldest first), same contract as the DB adapters,
+        // including the same-second tie-break: an ended session predates a
+        // still-open session started in the same second (one agent's
+        // sessions are sequential context windows), then ended_at, then the
+        // id as the final deterministic fallback — never the random-UUID id
+        // alone, which orders same-second sessions arbitrarily.
+        let mut sessions: Vec<Session> = self
+            .store
+            .lock()
+            .await
+            .iter()
+            .filter(|s| s.agent_id.as_str() == agent_id.as_str())
+            .cloned()
+            .collect();
+        sessions.sort_by(|a, b| {
+            a.started_at
+                .cmp(&b.started_at)
+                .then_with(|| a.ended_at.is_none().cmp(&b.ended_at.is_none()))
+                .then_with(|| a.ended_at.cmp(&b.ended_at))
+                .then_with(|| a.id.as_str().cmp(b.id.as_str()))
+        });
+        Ok(sessions)
+    }
+
+    async fn find_by_repo(&self, repository_id: &Id) -> Result<Vec<Session>> {
+        // Same ordering contract as find_by_agent (see there).
+        let mut sessions: Vec<Session> = self
+            .store
+            .lock()
+            .await
+            .iter()
+            .filter(|s| s.repository_id.as_str() == repository_id.as_str())
+            .cloned()
+            .collect();
+        sessions.sort_by(|a, b| {
+            a.started_at
+                .cmp(&b.started_at)
+                .then_with(|| a.ended_at.is_none().cmp(&b.ended_at.is_none()))
+                .then_with(|| a.ended_at.cmp(&b.ended_at))
+                .then_with(|| a.id.as_str().cmp(b.id.as_str()))
+        });
+        Ok(sessions)
+    }
+
+    async fn find_by_id(&self, id: &Id) -> Result<Option<Session>> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .iter()
+            .find(|s| s.id == *id)
+            .cloned())
+    }
+
+    async fn find_open_by_agent(&self, agent_id: &Id) -> Result<Option<Session>> {
+        // The latest session without ended_at (there is at most one per
+        // agent, but the query must return the newest if several exist).
+        Ok(self
+            .store
+            .lock()
+            .await
+            .iter()
+            .filter(|s| s.agent_id.as_str() == agent_id.as_str() && s.ended_at.is_none())
+            .max_by_key(|s| (s.started_at, s.id.to_string()))
+            .cloned())
+    }
+
+    async fn update(&self, session: &Session) -> Result<()> {
+        let mut store = self.store.lock().await;
+        // Port contract: fails if the session does not exist (same guard
+        // as the SQLite and PostgreSQL adapters' zero-rows check).
+        let existing = store
+            .iter_mut()
+            .find(|s| s.id == session.id)
+            .ok_or_else(|| anyhow::anyhow!("session {} does not exist", session.id))?;
+        *existing = session.clone();
+        Ok(())
     }
 }
 
@@ -5066,6 +5218,24 @@ pub fn test_state_with_jj_ops(jj_ops: Arc<dyn gyre_ports::JjOpsPort>) -> Arc<cra
     state
 }
 
+/// Build an AppState with a custom RekorClient for tests that need to
+/// control/observe transparency-log submission of merge attestation
+/// bundles (task-264).
+#[cfg(test)]
+pub fn test_state_with_rekor(rekor: Arc<dyn gyre_ports::RekorClient>) -> Arc<crate::AppState> {
+    let (workspaces, policies, ws_store) = shared_workspace_policy_pair(false);
+    let mut state = test_state_inner(
+        Arc::new(NoopGitOps),
+        workspaces,
+        policies,
+        ws_store,
+        TestStateOverrides::default(),
+    );
+    let s = Arc::get_mut(&mut state).expect("test state is uniquely owned");
+    s.rekor = rekor;
+    state
+}
+
 /// Ensure a workspace record exists so server-originated emissions resolve a
 /// real tenant.
 ///
@@ -5453,13 +5623,19 @@ fn test_state_inner(
     );
     // Mirror production wiring (lib.rs): attestation bundles are stored
     // through the AttestationStorage port over the same audit repository,
-    // and Rekor is the no-op client.
+    // and Rekor is the real HTTP client (task-264) — left UNCONFIGURED in
+    // tests (no GYRE_REKOR_URL) so no test ever contacts a transparency
+    // log; submissions fail explicitly, exactly like an unconfigured
+    // production deployment.
     let attestation_storage: Arc<dyn gyre_ports::AttestationStorage> = Arc::new(
         gyre_adapters::MergeAttestationStorage::new(Arc::clone(&audit)),
     );
-    let rekor: Arc<dyn gyre_ports::RekorClient> = Arc::new(gyre_adapters::NoopRekorClient);
 
     let forge_key = Arc::new(crate::auth::AgentSigningKey::generate());
+    let rekor: Arc<dyn gyre_ports::RekorClient> = Arc::new(gyre_adapters::HttpRekorClient::new(
+        None,
+        forge_key.public_key_pem(),
+    ));
 
     Arc::new(crate::AppState {
         auth_token: "test-token".to_string(),
@@ -5473,6 +5649,12 @@ fn test_state_inner(
             )
             .expect("test SPIFFE service construction must succeed"),
         ),
+        // No federation peers configured by default; tests that exercise
+        // SPIFFE federation install a registry with a local test endpoint.
+        spiffe_federation: Arc::new(crate::spiffe_federation::FederationBundles::new(
+            vec![],
+            std::time::Duration::from_secs(300),
+        )),
         repos: Arc::new(MemRepoRepository::default()),
         agents,
         tasks,
@@ -5482,6 +5664,7 @@ fn test_state_inner(
         git_ops,
         jj_ops: Arc::new(NoopJjOps),
         agent_commits: Arc::new(MemAgentCommitRepository::default()),
+        agent_sessions: Arc::new(MemAgentSessionRepository::default()),
         worktrees: Arc::new(MemWorktreeRepository::default()),
         telemetry_buffer: Arc::new(gyre_common::message::TelemetryBuffer::new(1_000, 10)),
         message_broadcast_tx: broadcast::channel(16).0,
@@ -5545,7 +5728,16 @@ fn test_state_inner(
         key_bindings: Arc::new(MemKeyBindingRepository::default()),
         trusted_issuers: vec![],
         commit_signatures: Arc::new(MemCommitSignatureRepository::default()),
-        signing_config: crate::commit_signatures::SigningConfig::default(),
+        // task-264: production's default signing mode is keyless Fulcio;
+        // the shared test fixture EXPLICITLY configures local forge-key
+        // signing (the documented operator opt-in) so tests exercise the
+        // signing surfaces without a reachable Fulcio. Fulcio-mode
+        // behavior has its own tests that override this config.
+        signing_config: crate::commit_signatures::SigningConfig {
+            mode: crate::commit_signatures::SigningMode::Local,
+            fulcio_url: "https://fulcio.invalid".to_string(),
+            rekor_url: "https://rekor.invalid".to_string(),
+        },
         remote_jwks_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         trusted_proxies: crate::trusted_proxy::TrustedProxies::default(),
         tunnel_store: Arc::new(Mutex::new(HashMap::new())),

@@ -348,7 +348,7 @@ pub async fn admin_audit(
 /// `revoke_reason`: short cause tag recorded on the `AgentTokenRevoked`
 /// audit event ("admin_kill").
 pub(crate) async fn kill_agent(
-    state: &AppState,
+    state: &Arc<AppState>,
     agent: &gyre_domain::Agent,
     reason: &str,
     preserve_worktree: bool,
@@ -368,6 +368,14 @@ pub(crate) async fn kill_agent(
     let mut agent = agent.clone();
     let _ = agent.transition_status(AgentStatus::Dead);
     state.agents.update(&agent).await?;
+
+    // source-control.md §Agent-to-Commit Tracking: the Dead transition
+    // terminates the agent's open session — records the worktree's real
+    // current branch and dirty state, and stamps ended_at. Must run
+    // BEFORE the worktree cleanup below, while the worktree still exists
+    // for the real `git status --porcelain` query. Best-effort: never
+    // fails the kill path.
+    crate::agent_sessions::end_session(state, &agent).await;
 
     // Kill the actual process/container/Pod if it is running. The backend
     // recorded at spawn time decides how: a container ID goes to
@@ -1372,6 +1380,114 @@ mod tests {
             events[0].properties["duration_secs"].as_u64().is_some(),
             "duration_secs must be present"
         );
+    }
+
+    #[tokio::test]
+    async fn kill_agent_terminates_open_session_before_worktree_cleanup() {
+        // Regression (task-258 review): the admin kill path transitions the
+        // agent to Dead — that termination must end the agent's open
+        // session, capturing the worktree's real dirty state BEFORE the
+        // worktree cleanup removes it, so "did the agent leave uncommitted
+        // work when it terminated?" stays answerable for killed agents.
+        use crate::api::now_secs;
+        use gyre_common::Id;
+        use gyre_domain::{Agent, AgentWorktree, Repository};
+
+        let state = test_state();
+        let now = now_secs();
+
+        // Real git repo + linked worktree with an uncommitted edit.
+        let dir = tempfile::tempdir().unwrap();
+        let main = dir.path().join("main");
+        std::fs::create_dir_all(&main).unwrap();
+        let git = |args: &[&str]| {
+            let ok = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&main)
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@t")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@t")
+                .status()
+                .unwrap()
+                .success();
+            assert!(ok, "git {args:?} failed");
+        };
+        git(&["init", "-b", "main"]);
+        std::fs::write(main.join("src"), "fn main() {}\n").unwrap();
+        git(&["add", "src"]);
+        git(&["commit", "-m", "init"]);
+        let wt_path = dir.path().join("wt");
+        git(&[
+            "worktree",
+            "add",
+            "-b",
+            "feat/spawn",
+            wt_path.to_str().unwrap(),
+        ]);
+
+        let mut agent = Agent::new(Id::new("agent-kill-sess"), "kill-sess", now);
+        agent
+            .transition_status(gyre_domain::AgentStatus::Active)
+            .ok();
+        state.agents.create(&agent).await.unwrap();
+        let repo = Repository::new(
+            Id::new("repo-kill-sess"),
+            Id::new("ws-1"),
+            "r-kill-sess".to_string(),
+            main.to_str().unwrap().to_string(),
+            now,
+        );
+        state.repos.create(&repo).await.unwrap();
+        let wt = AgentWorktree::new(
+            Id::new("wt-kill-sess"),
+            agent.id.clone(),
+            repo.id.clone(),
+            None,
+            "feat/spawn",
+            wt_path.to_str().unwrap().to_string(),
+            now,
+        );
+        state.worktrees.create(&wt).await.unwrap();
+        crate::agent_sessions::start_session(&state, &agent.id, &repo.id, "feat/spawn").await;
+
+        // Uncommitted modification present in the worktree at kill time.
+        std::fs::write(wt_path.join("src"), "fn main() { changed }\n").unwrap();
+
+        super::kill_agent(
+            &state,
+            &agent,
+            "force-killed by admin",
+            false,
+            "admin-t",
+            "admin_kill",
+        )
+        .await
+        .unwrap();
+
+        let sessions = state.agent_sessions.find_by_agent(&agent.id).await.unwrap();
+        assert_eq!(sessions.len(), 1);
+        let s = &sessions[0];
+        assert!(s.ended_at.is_some(), "kill must stamp ended_at");
+        assert_eq!(
+            s.dirty,
+            Some(true),
+            "uncommitted edit must be captured before worktree cleanup, got dirty={:?}",
+            s.dirty
+        );
+        assert!(
+            s.uncommitted_paths.contains(&"src".to_string()),
+            "modified file must be listed, got {:?}",
+            s.uncommitted_paths
+        );
+        // No session remains open after the Dead transition.
+        assert!(state
+            .agent_sessions
+            .find_open_by_agent(&agent.id)
+            .await
+            .unwrap()
+            .is_none());
     }
 
     #[tokio::test]

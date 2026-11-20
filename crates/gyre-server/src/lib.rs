@@ -4,6 +4,7 @@ pub(crate) mod abac;
 pub mod abac_middleware;
 pub mod abandoned_branch;
 pub mod agent_audit;
+pub mod agent_sessions;
 pub mod aibom_spec_registry;
 pub mod api;
 pub mod attestation;
@@ -68,6 +69,7 @@ pub mod policy_cache;
 pub mod policy_engine;
 pub mod signal_chain;
 pub mod spiffe;
+pub mod spiffe_federation;
 pub mod stale_agents;
 pub mod stale_peers;
 pub mod telemetry;
@@ -85,20 +87,20 @@ use gyre_common::message::{Destination, Message, MessageKind, MessageOrigin, Tel
 use gyre_common::Id;
 use gyre_common::WsMessage;
 use gyre_ports::{
-    AgentCommitRepository, AgentRepository, AnalyticsRepository, ApiKeyRepository,
-    AttestationRepository, AttestationStorage, AuditRepository, BreakingChangeRepository,
-    BudgetCallRepository, BudgetRepository, BudgetUsageRepository, ComputeTargetRepository,
-    ContainerAuditRepository, ConversationRepository, CostRepository, DependencyPolicyRepository,
-    DependencyRepository, GateResultRepository, GitOpsPort, GraphPort, JjOpsPort, KvJsonStore,
-    LlmConfigRepository, MergeQueueRepository, MergeRequestRepository, MetaSpecBindingRepository,
-    MetaSpecRepository, MetaSpecSetRepository, NetworkPeerRepository, NotificationRepository,
-    PersonaRepository, PolicyRepository, PreAcceptGate, ProcessHandle, PushGateRepository,
-    QualityGateRepository, RekorClient, RepoAccessOverrideRepository, RepoRepository,
-    ReviewRepository, RolloutPolicyRepository, SpawnLogRepository, SpecApprovalEventRepository,
-    SpecApprovalRepository, SpecLedgerRepository, SpecLifecycleRepository, SpecPolicyRepository,
-    TaskRepository, TeamRepository, TenantMetaSpecSetRepository, TraceRepository, UserRepository,
-    UserWorkspaceStateRepository, WorkspaceMembershipRepository, WorkspaceRepository,
-    WorktreeRepository,
+    AgentCommitRepository, AgentRepository, AgentSessionRepository, AnalyticsRepository,
+    ApiKeyRepository, AttestationRepository, AttestationStorage, AuditRepository,
+    BreakingChangeRepository, BudgetCallRepository, BudgetRepository, BudgetUsageRepository,
+    ComputeTargetRepository, ContainerAuditRepository, ConversationRepository, CostRepository,
+    DependencyPolicyRepository, DependencyRepository, GateResultRepository, GitOpsPort, GraphPort,
+    JjOpsPort, KvJsonStore, LlmConfigRepository, MergeQueueRepository, MergeRequestRepository,
+    MetaSpecBindingRepository, MetaSpecRepository, MetaSpecSetRepository, NetworkPeerRepository,
+    NotificationRepository, PersonaRepository, PolicyRepository, PreAcceptGate, ProcessHandle,
+    PushGateRepository, QualityGateRepository, RekorClient, RepoAccessOverrideRepository,
+    RepoRepository, ReviewRepository, RolloutPolicyRepository, SpawnLogRepository,
+    SpecApprovalEventRepository, SpecApprovalRepository, SpecLedgerRepository,
+    SpecLifecycleRepository, SpecPolicyRepository, TaskRepository, TeamRepository,
+    TenantMetaSpecSetRepository, TraceRepository, UserRepository, UserWorkspaceStateRepository,
+    WorkspaceMembershipRepository, WorkspaceRepository, WorktreeRepository,
 };
 use jobs::JobRegistry;
 use retention::RetentionStore;
@@ -226,6 +228,11 @@ pub struct AppState {
     /// trust-domain CA / external SPIRE Workload API, trust-bundle
     /// publication, and SVID issuance for agent sessions.
     pub spiffe: Arc<spiffe::SpiffeService>,
+    /// SPIFFE federation (identity-security.md §Federation): trust-bundle
+    /// exchange with peer Gyre instances — bundle endpoints keyed by trust
+    /// domain (`GYRE_SPIFFE_FEDERATION_PEERS`), refreshed on interval.
+    /// Independent of the OIDC-issuer federation (`trusted_issuers`).
+    pub spiffe_federation: Arc<spiffe_federation::FederationBundles>,
     pub repos: Arc<dyn RepoRepository>,
     pub agents: Arc<dyn AgentRepository>,
     pub tasks: Arc<dyn TaskRepository>,
@@ -235,6 +242,10 @@ pub struct AppState {
     pub git_ops: Arc<dyn GitOpsPort>,
     pub jj_ops: Arc<dyn JjOpsPort>,
     pub agent_commits: Arc<dyn AgentCommitRepository>,
+    /// Agent sessions (one per context window) — source-control.md
+    /// §Agent-to-Commit Tracking. Port-backed so sessions survive a
+    /// server restart.
+    pub agent_sessions: Arc<dyn AgentSessionRepository>,
     pub worktrees: Arc<dyn WorktreeRepository>,
     /// In-memory ring buffer for Telemetry-tier messages (replaces ActivityStore).
     pub telemetry_buffer: Arc<TelemetryBuffer>,
@@ -1840,12 +1851,9 @@ pub fn build_state(
     // audit events (queryable by MR id and commit SHA). Wraps the same
     // audit repository so bundles flow through the identical store
     // (SQLite/PG/mem) and search-sync path as every other audit event.
-    // Rekor transparency-log publication is stubbed until a backend is
-    // configured (no-op adapter warns on every submission).
     let attestation_storage: Arc<dyn AttestationStorage> = Arc::new(
         gyre_adapters::MergeAttestationStorage::new(Arc::clone(&audit)),
     );
-    let rekor: Arc<dyn RekorClient> = Arc::new(gyre_adapters::NoopRekorClient);
 
     // Spec-link graph persistence (spec-links.md §Forge-Maintained Spec Graph).
     // The SQL table is authoritative; the in-memory store is a hot cache,
@@ -1865,14 +1873,34 @@ pub fn build_state(
     let (agent_signing_key, signing_key_history) =
         load_or_persist_agent_signing_key(&sqlite_db, &pg_db);
 
+    // Rekor transparency-log publication for merge attestation bundles
+    // (task-264): the REAL HTTP client replaces the old no-op stub. It is
+    // configured only when GYRE_REKOR_URL is set — an unconfigured log
+    // makes every submission fail explicitly (surfaced as a warning by
+    // the storage path), never a silent Ok(None).
+    let rekor: Arc<dyn RekorClient> = Arc::new(gyre_adapters::HttpRekorClient::new(
+        std::env::var("GYRE_REKOR_URL")
+            .ok()
+            .map(|u| u.trim().to_string())
+            .filter(|u| !u.is_empty()),
+        agent_signing_key.public_key_pem(),
+    ));
+
     // SPIFFE workload attestation (identity-security.md Layer 1): resolve
     // the trust domain and anchor before wiring AppState.
     let spiffe_service = load_spiffe_service(&sqlite_db, &pg_db);
+
+    // SPIFFE federation (identity-security.md §Federation): exchanged
+    // trust bundles for peer trust domains, keyed by trust domain.
+    let spiffe_federation = Arc::new(spiffe_federation::FederationBundles::from_env(
+        spiffe_service.trust_domain(),
+    ));
 
     Arc::new(AppState {
         auth_token: auth_token.to_string(),
         base_url: base_url.to_string(),
         spiffe: spiffe_service,
+        spiffe_federation,
         repos: store!(dyn RepoRepository, mem::MemRepoRepository::default()),
         agents,
         tasks,
@@ -1887,6 +1915,10 @@ pub fn build_state(
         agent_commits: store!(
             dyn AgentCommitRepository,
             mem::MemAgentCommitRepository::default()
+        ),
+        agent_sessions: store!(
+            dyn AgentSessionRepository,
+            mem::MemAgentSessionRepository::default()
         ),
         worktrees: store!(
             dyn WorktreeRepository,
