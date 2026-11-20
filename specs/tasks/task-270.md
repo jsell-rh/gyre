@@ -2,8 +2,8 @@
 title: "PR collaboration invariants: reject agent-principal pushes to the default branch (human push path preserved per spec-lifecycle.md) and continuously act on stale MRs (nudge, rebase, escalate, close)"
 spec_ref: "Spec gap spec-4c39ca6ea3e71ce8a53398f3 / pr-protection-and-hygiene / d30f233daf86"
 depends_on: []
-progress: ready-for-review
-commits: ["f48a62f6be9ea6b85b94f5dd1293e137e7b51504", "34f7878e3734df124067c20b225ad7e2a150ec70", "041bddcdd54e58930beb34cfc06ca12a0d16e9fa", "c9faf6a80ba0a216889c2d7efb5c82f71f58deee", "d5888ad56a3369911836d9ccaeb06995dd73de9d", "c269022921fb4faddc818da21fd2d834d00ab63e"]
+progress: not-started
+commits: []
 ---
 
 ## Required behavior
@@ -61,98 +61,3 @@ Canonical spec: `specs/development/agent-workflow.md`. Source: `fb1424fbac55cd23
     ]
   }
 ]
-
-## Shipped
-
-Both normative bullets of specs/development/agent-workflow.md §PRs as the
-Collaboration Primitive are enforced in production code on this branch.
-Task commits: `c2690229` (push protection), `d5888ad5` (PR hygiene job),
-`c9faf6a8` (formatting), `041bddcd` (review repair: deletion bypass +
-agent nudge dedup), `34f7878e` (rustfmt/clippy repair), `f48a62f6`
-(review repair: packfile-carrying test receive-pack bodies).
-
-### Agent-principal default-branch push protection
-
-`git_receive_pack` (crates/gyre-server/src/git_http.rs) rejects, with 403
-and an explicit reason directing the agent to the MR flow, any push whose
-target ref is `refs/heads/{default_branch}` — resolved from the
-Repository record's `default_branch` field, never a hardcoded "main" —
-when the caller is an agent principal (`auth.user_id.is_none() &&
-!auth.is_system_principal()`, git_http.rs ~754). The check is a direct,
-unconditional check in the push handler (not an opt-in named pre-accept
-gate) and runs BEFORE `git receive-pack` executes, so the ref is never
-updated server-side on rejection; it matches the RAW pkt-line ref-update
-commands (`parse_ref_update_commands`), so agent-principal deletion of
-the default branch is rejected too. The rejection emits a `PushRejected`
-message-bus event and a `GitPushRejected` audit event (gate_name
-`default-branch-protection`, outcome Blocked). Human principals (user
-JWTs / API keys with push permission) and the system principal are
-exempt, preserving specs/system/spec-lifecycle.md §Automatic Task
-Creation (post-receive task creation, persona changes, ledger sync run
-unchanged); server-side landing (merge queue, post-merge reverts) goes
-through the git_ops/jj_ops ports, not this handler.
-
-### Continuous PR hygiene job
-
-`pr_hygiene_check` (crates/gyre-server/src/pr_hygiene.rs) is registered
-in jobs.rs on a minutes-scale interval (default 5 minutes, configurable
-via GYRE_PR_HYGIENE_INTERVAL_SECS; NOT the daily abandoned_branch_check
-cadence) and evaluates every open MR per workspace against the stale
-classes using real persisted state (MergeRequest.updated_at, reviewer
-assignments, review records, a real merge-base conflict check): unreviewed
-beyond the nudge threshold nudges assigned reviewers (or escalates to
-workspace Developers/Admins when there are none); conflicted MRs get a
-real rebase attempt via the jj machinery for agent-authored branches with
-live worktrees (rate-limited by a KV backoff window) and otherwise a
-rebase-required escalation; long-open MRs beyond the escalation threshold
-notify workspace Admins/Owners at higher priority; abandoned MRs beyond
-the hard close threshold are closed with a persisted status transition,
-an explanatory MR comment, and delivery to the author — never a silent
-close. Every action is recorded (notification rows, message-bus events,
-`pr_hygiene` audit events). Thresholds configurable via
-GYRE_PR_HYGIENE_{NUDGE,ESCALATE,CLOSE}_SECS (defaults 2d/7d/30d). The
-daily abandoned_branch_check job is untouched.
-
-### Test evidence and the round-bc9fa879 repair
-
-Review finding bc9fa879 (both details, same root cause): the task's
-receive-pack test bodies carried a ref-update command + flush but NO
-packfile, and `git receive-pack` applies nothing for such a non-delete
-request while still exiting 0 — so `agent_push_to_feature_branch_succeeds`
-and `human_push_to_default_branch_accepted_and_spec_lifecycle_runs`
-could never pass (refs never landed; no spec_changed event). Fixed in
-`f48a62f6`: new test helpers `pack_objects_for` /
-`receive_pack_body_with_pack` (the `git pack-objects --stdout` pattern
-already used elsewhere in this file) and `push_ref_as` now carries the
-packfile, so accepted pushes actually land server-side; rejection-path
-bodies are unaffected (the guard fires before receive-pack reads the
-body).
-
-In-sandbox evidence (no server build, per the 4 GiB budget policy):
-- `cargo check -p gyre-server` and `cargo check -p gyre-server --tests`:
-  clean (exit 0) at head `f48a62f6`.
-- Plain-git probe replicating the exact test construction (objects
-  created in a bare repo via mktree/commit-tree, body = pkt-line create
-  command + flush [+ pack] piped to `git receive-pack --stateless-rpc`):
-  packfile-less body → exit 0, ref NOT created (reproduces the finding);
-  packfile-carrying body → ref created. Script and output retained at
-  /tmp/stage/review-evidence/receive_pack_packfile_probe{.py,.out}.
-
-Deferred to the independent verifier (gyre-server test compilation must
-run there): `cargo test -p gyre-server` with the filter
-`agent_push_to_default_branch_rejected_directing_to_mr_flow
-agent_push_to_feature_branch_succeeds
-agent_deletion_of_default_branch_rejected
-protection_resolves_real_default_branch_not_literal_main
-human_push_to_default_branch_accepted_and_spec_lifecycle_runs` plus the
-pr_hygiene suite (`abandoned_mr_is_closed_with_explanation_delivered_to_author`,
-`unreviewed_mr_nudges_assigned_reviewers`,
-`unreviewed_mr_without_reviewers_escalates_to_developers_and_admins`,
-`fresh_mr_under_nudge_threshold_gets_no_action`,
-`reviewed_mr_is_not_unreviewed`,
-`conflicted_mr_with_active_agent_worktree_is_rebased`,
-`conflicted_mr_without_agent_raises_rebase_required_escalation`,
-`long_open_mr_escalates_to_admins_at_higher_priority`,
-`consecutive_evaluations_do_not_duplicate_notifications`,
-`consecutive_evaluations_do_not_duplicate_agent_reviewer_nudges`) and the
-jobs.rs registration test `pr_hygiene_check_registered_on_interval_not_daily`.
