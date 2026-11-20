@@ -99,18 +99,24 @@ impl OAuthStateRepository for SqliteStorage {
         .await?
     }
 
-    async fn mark_consumed(&self, state: &str) -> Result<()> {
+    async fn mark_consumed(&self, state: &str) -> Result<bool> {
         let pool = Arc::clone(&self.pool);
         let state = state.to_string();
-        tokio::task::spawn_blocking(move || -> Result<()> {
+        tokio::task::spawn_blocking(move || -> Result<bool> {
             let mut conn = pool.get().context("get db connection")?;
-            let n =
-                diesel::update(oauth_states::table.filter(oauth_states::state.eq(state.clone())))
-                    .set(oauth_states::consumed.eq(1))
-                    .execute(&mut conn)
-                    .context("mark oauth state consumed")?;
-            anyhow::ensure!(n > 0, "oauth state '{state}' not found");
-            Ok(())
+            // Atomic single-use consumption: the conditional
+            // `consumed = 0` predicate makes the flip itself the arbiter —
+            // exactly one of any number of concurrent callers gets
+            // `n > 0`; the rest see `false` (replay).
+            let n = diesel::update(
+                oauth_states::table
+                    .filter(oauth_states::state.eq(state.clone()))
+                    .filter(oauth_states::consumed.eq(0)),
+            )
+            .set(oauth_states::consumed.eq(1))
+            .execute(&mut conn)
+            .context("mark oauth state consumed")?;
+            Ok(n > 0)
         })
         .await?
     }
@@ -180,16 +186,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mark_consumed_flips_row_and_fails_for_unknown_state() {
+    async fn mark_consumed_is_atomic_single_use() {
         let (_tmp, s) = setup();
         s.create(&row("st-1", 10_000, false)).await.unwrap();
 
-        // Single-use consumption.
-        s.mark_consumed("st-1").await.unwrap();
+        // Single-use consumption: the first caller wins...
+        assert!(s.mark_consumed("st-1").await.unwrap());
         assert!(s.find_by_state("st-1").await.unwrap().unwrap().consumed);
 
-        // Port contract: consuming an unknown state fails.
-        assert!(s.mark_consumed("st-missing").await.is_err());
+        // ...and every later caller loses — the flip is a conditional
+        // UPDATE (consumed = 0 predicate), so concurrent replays cannot
+        // both win even without a prior read.
+        assert!(
+            !s.mark_consumed("st-1").await.unwrap(),
+            "a consumed state must not be consumable again"
+        );
+
+        // Unknown state: no row flipped, not an error.
+        assert!(!s.mark_consumed("st-missing").await.unwrap());
     }
 
     #[tokio::test]

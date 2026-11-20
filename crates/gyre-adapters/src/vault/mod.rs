@@ -297,6 +297,31 @@ impl VaultSecretRepository {
         )
     }
 
+    /// Validate a secret name before it becomes a Vault KV path segment:
+    /// no separators (`/`, `\\`), no traversal segments (`..`, `.`), no
+    /// control characters. The Admin API validates the same charset, but
+    /// the port can be reached from other write paths — the adapter
+    /// enforces its own path-safety boundary: reqwest/url collapses `../`
+    /// segments, so a `../`-bearing name would write outside the caller's
+    /// tenant subtree whenever the server token's policy is broader than
+    /// one tenant subtree, and a plain `/` in a name breaks KV listing
+    /// (only the first path component is returned). (Review task-273.)
+    fn validate_name(name: &str) -> Result<()> {
+        anyhow::ensure!(
+            !name.is_empty() && name.len() <= 255,
+            "secret name must be 1-255 characters"
+        );
+        anyhow::ensure!(
+            !name.contains('/') && !name.contains('\\') && !name.contains("..") && name != ".",
+            "secret name must not contain '/', '\\', or '.'/'..' traversal segments"
+        );
+        anyhow::ensure!(
+            !name.chars().any(|c| c.is_control()),
+            "secret name must not contain control characters"
+        );
+        Ok(())
+    }
+
     fn metadata_path(&self, tenant_id: &str, scope: &str, scope_id: &str) -> String {
         format!(
             "{}/metadata/gyre-secrets/{tenant_id}/{scope}/{scope_id}",
@@ -345,11 +370,18 @@ impl VaultSecretRepository {
     /// Read the id index entry with the server token.
     async fn read_index(&self, tenant_id: &str, id: &str) -> Result<Option<VaultIndexEntry>> {
         let path = self.index_path(tenant_id, id);
+        // The namespace header must ride index reads too: with
+        // GYRE_VAULT_NAMESPACE set, a namespace-less read 404s, which
+        // silently fails OPEN (get_value/find_by_id return Ok(None) for a
+        // secret that exists in the real namespace) — review task-273.
+        let namespace = self.config.namespace.clone();
         self.server_token_retry(move |token| {
-            let url = format!("{}/v1/{}", self.config.addr, path);
+            let path = path.clone();
+            let namespace = namespace.clone();
             async move {
+                let url = format!("{}/v1/{}", self.config.addr, path);
                 let mut req = self.http.get(&url);
-                req = Self::with_auth(req, &token, None);
+                req = Self::with_auth(req, &token, namespace.as_deref());
                 let resp = req.send().await.context("Vault index read failed")?;
                 if resp.status() == reqwest::StatusCode::NOT_FOUND {
                     return Ok(None);
@@ -412,14 +444,40 @@ impl VaultSecretRepository {
         req
     }
 
+    /// KV data read with the server token, re-logging-in an expired
+    /// AppRole token when Vault rejects it. Every server-token read goes
+    /// through the retry wrapper — a cached AppRole token whose TTL
+    /// expired must not permanently fail the operations that previously
+    /// fetched it directly (review task-273: get_value / list_by_scope /
+    /// rotate / resolve_for_agent 403'd forever until an unrelated
+    /// create/delete refreshed the cache).
+    async fn kv_read_server(&self, path: &str) -> Result<Option<VaultSecretPayload>> {
+        let path = path.to_string();
+        self.server_token_retry(|token| {
+            let path = path.clone();
+            async move { self.kv_read(&path, &token).await }
+        })
+        .await
+    }
+
+    /// KV metadata LIST with the server token (same retry contract as
+    /// [`Self::kv_read_server`]).
+    async fn kv_list_server(&self, path: &str) -> Result<Vec<String>> {
+        let path = path.to_string();
+        self.server_token_retry(|token| {
+            let path = path.clone();
+            async move { self.kv_list(&path, &token).await }
+        })
+        .await
+    }
+
     /// Read the secret's payload by id (server token).
     async fn read_by_id(&self, id: &Id, tenant_id: &str) -> Result<Option<Secret>> {
         let Some(idx) = self.read_index(tenant_id, id.as_str()).await? else {
             return Ok(None);
         };
         let path = self.data_path(tenant_id, &idx.scope, &idx.scope_id, &idx.name);
-        let token = self.server_token().await?;
-        let payload = self.kv_read(&path, &token).await?;
+        let payload = self.kv_read_server(&path).await?;
         match payload {
             None => Ok(None),
             Some(mut p) => {
@@ -454,6 +512,10 @@ impl SecretRepository for VaultSecretRepository {
         let scope_id = secret.scope_id.clone();
         let name = secret.name.clone();
 
+        // Path-safety boundary (review task-273): the name becomes a KV
+        // path segment — reject separators/traversal before anything else.
+        Self::validate_name(&name)?;
+
         // Port contract: fail if the same id, or the same
         // (scope, scope_id, name) within the tenant, already exists.
         if self
@@ -464,8 +526,7 @@ impl SecretRepository for VaultSecretRepository {
             anyhow::bail!("secret id {} already exists in Vault", secret.id);
         }
         let data_path = self.data_path(&tenant_id, &scope, &scope_id, &name);
-        let token = self.server_token().await?;
-        if self.kv_read(&data_path, &token).await?.is_some() {
+        if self.kv_read_server(&data_path).await?.is_some() {
             anyhow::bail!(
                 "secret '{}' already exists at scope {scope}:{scope_id}",
                 secret.name
@@ -529,8 +590,7 @@ impl SecretRepository for VaultSecretRepository {
             return Ok(None);
         };
         let path = self.data_path(tenant_id, &idx.scope, &idx.scope_id, &idx.name);
-        let token = self.server_token().await?;
-        match self.kv_read(&path, &token).await? {
+        match self.kv_read_server(&path).await? {
             None => Ok(None),
             Some(p) => Ok(Some(p.decode_value()?)),
         }
@@ -547,12 +607,11 @@ impl SecretRepository for VaultSecretRepository {
         tenant_id: &str,
     ) -> Result<Vec<Secret>> {
         let list_path = self.metadata_path(tenant_id, scope.as_str(), scope_id);
-        let token = self.server_token().await?;
-        let names = self.kv_list(&list_path, &token).await?;
+        let names = self.kv_list_server(&list_path).await?;
         let mut secrets = Vec::with_capacity(names.len());
         for name in names {
             let path = self.data_path(tenant_id, scope.as_str(), scope_id, &name);
-            if let Some(p) = self.kv_read(&path, &token).await? {
+            if let Some(p) = self.kv_read_server(&path).await? {
                 let mut secret = p.into_secret()?;
                 secret.tenant_id = tenant_id.to_string();
                 secrets.push(secret);
@@ -571,12 +630,19 @@ impl SecretRepository for VaultSecretRepository {
             self.config.kv_mount, idx.scope, idx.scope_id, idx.name
         );
         let index_meta = self.index_metadata_path(tenant_id, id.as_str());
+        // The namespace header must ride the deletes too: with
+        // GYRE_VAULT_NAMESPACE set, a namespace-less delete 404s (treated
+        // as success) while the secret remains in the real namespace — a
+        // silent non-enforcement of a destructive admin operation
+        // (review task-273).
+        let namespace = self.config.namespace.clone();
         self.server_token_retry(|token| {
             let data_meta = data_meta.clone();
+            let namespace = namespace.clone();
             async move {
                 let url = format!("{}/v1/{}", self.config.addr, data_meta);
                 let mut req = self.http.delete(&url);
-                req = Self::with_auth(req, &token, None);
+                req = Self::with_auth(req, &token, namespace.as_deref());
                 let resp = req.send().await.context("Vault delete request failed")?;
                 anyhow::ensure!(
                     resp.status().is_success() || resp.status() == reqwest::StatusCode::NOT_FOUND,
@@ -589,10 +655,11 @@ impl SecretRepository for VaultSecretRepository {
         .await?;
         self.server_token_retry(|token| {
             let index_meta = index_meta.clone();
+            let namespace = namespace.clone();
             async move {
                 let url = format!("{}/v1/{}", self.config.addr, index_meta);
                 let mut req = self.http.delete(&url);
-                req = Self::with_auth(req, &token, None);
+                req = Self::with_auth(req, &token, namespace.as_deref());
                 let resp = req.send().await.context("Vault index delete failed")?;
                 anyhow::ensure!(
                     resp.status().is_success() || resp.status() == reqwest::StatusCode::NOT_FOUND,
@@ -611,27 +678,42 @@ impl SecretRepository for VaultSecretRepository {
             anyhow::bail!("secret {id} not found in tenant {tenant_id}");
         };
         let path = self.data_path(tenant_id, &idx.scope, &idx.scope_id, &idx.name);
-        let token = self.server_token().await?;
-        let Some(mut payload) = self.kv_read(&path, &token).await? else {
-            anyhow::bail!("secret {id} not found in tenant {tenant_id}");
-        };
-        payload.value_b64 = B64.encode(new_value);
-        payload.last_rotated_at = Some(now_secs());
+        let value_b64 = B64.encode(new_value);
+        let rotated_at = now_secs();
+        let not_found = format!("secret {id} not found in tenant {tenant_id}");
+        let namespace = self.config.namespace.clone();
+        // Read + write under the retry wrapper: an AppRole token whose TTL
+        // expired between operations re-logins instead of 403ing forever
+        // (review task-273).
+        self.server_token_retry(move |token| {
+            let path = path.clone();
+            let value_b64 = value_b64.clone();
+            let not_found = not_found.clone();
+            let namespace = namespace.clone();
+            async move {
+                let Some(mut payload) = self.kv_read(&path, &token).await? else {
+                    anyhow::bail!("{not_found}");
+                };
+                payload.value_b64 = value_b64;
+                payload.last_rotated_at = Some(rotated_at);
 
-        let url = format!("{}/v1/{path}", self.config.addr);
-        let mut req = self.http.post(&url);
-        req = Self::with_auth(req, &token, self.config.namespace.as_deref());
-        let resp = req
-            .json(&serde_json::json!({ "data": payload }))
-            .send()
-            .await
-            .context("Vault rotate write failed")?;
-        anyhow::ensure!(
-            resp.status().is_success(),
-            "Vault rotate write failed: HTTP {}",
-            resp.status()
-        );
-        Ok(())
+                let url = format!("{}/v1/{}", self.config.addr, path);
+                let mut req = self.http.post(&url);
+                req = Self::with_auth(req, &token, namespace.as_deref());
+                let resp = req
+                    .json(&serde_json::json!({ "data": payload }))
+                    .send()
+                    .await
+                    .context("Vault rotate write failed")?;
+                anyhow::ensure!(
+                    resp.status().is_success(),
+                    "Vault rotate write failed: HTTP {}",
+                    resp.status()
+                );
+                Ok(())
+            }
+        })
+        .await
     }
 
     async fn resolve_for_agent(
@@ -643,10 +725,24 @@ impl SecretRepository for VaultSecretRepository {
     ) -> Result<Vec<(String, Vec<u8>)>> {
         // Server-token resolution: the same scope cascade the database
         // backends implement (used by internal callers without an agent
-        // identity).
-        let token = self.server_token().await?;
-        self.resolve_cascade(&token, tenant_id, workspace_id, repo_id, task_id)
-            .await
+        // identity). Under the retry wrapper — an expired AppRole token
+        // must re-login, not 403 the resolution forever (review
+        // task-273).
+        let tenant = tenant_id.to_string();
+        let ws = workspace_id.to_string();
+        let repo = repo_id.to_string();
+        let task = task_id.map(str::to_string);
+        self.server_token_retry(move |token| {
+            let tenant = tenant.clone();
+            let ws = ws.clone();
+            let repo = repo.clone();
+            let task = task.clone();
+            async move {
+                self.resolve_cascade(&token, &tenant, &ws, &repo, task.as_deref())
+                    .await
+            }
+        })
+        .await
     }
 
     async fn resolve_for_agent_as(

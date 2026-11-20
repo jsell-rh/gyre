@@ -54,9 +54,17 @@ pub trait OAuthStateRepository: Send + Sync {
     /// Look up a state row by its `state` value.
     async fn find_by_state(&self, state: &str) -> Result<Option<OAuthStateRecord>>;
 
-    /// Mark a state row consumed (single use). Fails if the row does not
-    /// exist.
-    async fn mark_consumed(&self, state: &str) -> Result<()>;
+    /// Atomically mark a state row consumed (single use).
+    ///
+    /// Returns `Ok(true)` when THIS call flipped the row from unconsumed
+    /// to consumed; `Ok(false)` when the row does not exist or was
+    /// already consumed. The flip MUST be a single conditional update
+    /// (`UPDATE … SET consumed = 1 WHERE state = ? AND consumed = 0`, or
+    /// the equivalent guarded in-code mutation) so that exactly one of
+    /// any number of concurrent callers wins — a read-then-write sequence
+    /// lets two concurrent callbacks both pass a pre-checked
+    /// `record.consumed` flag.
+    async fn mark_consumed(&self, state: &str) -> Result<bool>;
 
     /// Delete rows whose `expires_at` is before `cutoff_secs`. Returns the
     /// number of rows deleted. Used by the `oauth_state_cleanup` job.

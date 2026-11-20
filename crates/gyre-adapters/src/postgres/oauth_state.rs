@@ -99,18 +99,24 @@ impl OAuthStateRepository for PgStorage {
         .await?
     }
 
-    async fn mark_consumed(&self, state: &str) -> Result<()> {
+    async fn mark_consumed(&self, state: &str) -> Result<bool> {
         let pool = Arc::clone(&self.pool);
         let state = state.to_string();
-        tokio::task::spawn_blocking(move || -> Result<()> {
+        tokio::task::spawn_blocking(move || -> Result<bool> {
             let mut conn = pool.get().context("get db connection")?;
-            let n =
-                diesel::update(oauth_states::table.filter(oauth_states::state.eq(state.clone())))
-                    .set(oauth_states::consumed.eq(1))
-                    .execute(&mut conn)
-                    .context("mark oauth state consumed")?;
-            anyhow::ensure!(n > 0, "oauth state '{state}' not found");
-            Ok(())
+            // Atomic single-use consumption: the conditional
+            // `consumed = 0` predicate makes the flip itself the arbiter —
+            // exactly one of any number of concurrent callers gets
+            // `n > 0`; the rest see `false` (replay).
+            let n = diesel::update(
+                oauth_states::table
+                    .filter(oauth_states::state.eq(state.clone()))
+                    .filter(oauth_states::consumed.eq(0)),
+            )
+            .set(oauth_states::consumed.eq(1))
+            .execute(&mut conn)
+            .context("mark oauth state consumed")?;
+            Ok(n > 0)
         })
         .await?
     }
@@ -140,10 +146,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn mark_consumed_updates_only_matching_state_row() {
+    fn mark_consumed_updates_only_unconsumed_matching_state_row() {
+        // Atomic single-use consumption: the UPDATE must carry the
+        // `consumed = 0` predicate so the flip itself arbitrates between
+        // concurrent callbacks (a bare UPDATE keyed on state alone is
+        // idempotent and lets replays through).
         let sql = diesel::debug_query::<diesel::pg::Pg, _>(
-            &diesel::update(oauth_states::table.filter(oauth_states::state.eq("st-1")))
-                .set(oauth_states::consumed.eq(1)),
+            &diesel::update(
+                oauth_states::table
+                    .filter(oauth_states::state.eq("st-1"))
+                    .filter(oauth_states::consumed.eq(0)),
+            )
+            .set(oauth_states::consumed.eq(1)),
         )
         .to_string();
         assert!(

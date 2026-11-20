@@ -113,6 +113,30 @@ impl From<Secret> for SecretResponse {
 
 // ── Handlers ────────────────────────────────────────────────────────────────
 
+/// A secret name becomes a path segment in the Vault KV backend and a key
+/// in every backend's scope index: reject separators, traversal segments
+/// and control characters (review task-273 — a `../`-bearing name would
+/// write outside the caller's tenant subtree in Vault, and a `/` in a name
+/// breaks KV listing so the secret silently vanishes from list/get).
+fn validate_secret_name(name: &str) -> Result<(), ApiError> {
+    if name.is_empty() || name.len() > 255 {
+        return Err(ApiError::InvalidInput(
+            "secret name must be 1-255 characters".to_string(),
+        ));
+    }
+    if name.contains('/') || name.contains('\\') || name.contains("..") || name == "." {
+        return Err(ApiError::InvalidInput(
+            "secret name must not contain '/', '\\', or '.'/'..' traversal segments".to_string(),
+        ));
+    }
+    if name.chars().any(|c| c.is_control()) {
+        return Err(ApiError::InvalidInput(
+            "secret name must not contain control characters".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// POST /api/v1/secrets — create a secret, or update the value of an
 /// existing secret with the same (scope, scope_id, name) in the tenant
 /// (the spec's "Create/update secret (admin only)").
@@ -127,11 +151,7 @@ pub async fn create_secret(
     let scope = parse_scope(&req.scope)?;
     let secret_type = parse_secret_type(&req.secret_type)?;
     let name = req.name.trim().to_string();
-    if name.is_empty() || name.len() > 255 {
-        return Err(ApiError::InvalidInput(
-            "secret name must be 1-255 characters".to_string(),
-        ));
-    }
+    validate_secret_name(&name)?;
     if req.value.is_empty() {
         return Err(ApiError::InvalidInput(
             "secret value must not be empty".to_string(),
@@ -896,5 +916,48 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// Review task-273: a secret name becomes a path segment in the Vault
+    /// KV backend — separators, traversal segments and control characters
+    /// must be rejected at the API boundary (a `../`-bearing name writes
+    /// outside the caller's tenant subtree; `/` breaks KV listing).
+    #[tokio::test]
+    async fn path_unsafe_secret_names_are_rejected() {
+        let (app, state) = app();
+        for bad in [
+            "../escape",
+            "a/b",
+            "a\\b",
+            "..",
+            ".",
+            "bad\u{0}name",
+            "",
+            "   ",
+        ] {
+            let body = serde_json::json!({
+                "name": bad,
+                "scope": "tenant",
+                "secret_type": "static",
+                "value": "v"
+            });
+            let resp = app
+                .clone()
+                .oneshot(post_json("/api/v1/secrets", "test-token", body))
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::BAD_REQUEST,
+                "name {bad:?} must be rejected as path-unsafe"
+            );
+        }
+        // Nothing was created.
+        let listed = state
+            .secrets
+            .list_by_scope(gyre_common::SecretScope::Tenant, "default", "default")
+            .await
+            .unwrap();
+        assert!(listed.is_empty(), "no path-unsafe secret may be created");
     }
 }

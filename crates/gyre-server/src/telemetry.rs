@@ -39,13 +39,21 @@ pub struct ServerLogBuffer {
 
 impl ServerLogBuffer {
     fn new(capacity: usize) -> Self {
+        // Clamp to at least 1: a capacity of 0 (e.g.
+        // GYRE_SERVER_LOG_BUFFER_SIZE=0) would otherwise never trigger the
+        // `len == capacity` eviction and grow without bound — precisely
+        // the unbounded growth the bounded-ring contract prevents (review
+        // task-273).
+        let capacity = capacity.max(1);
         Self {
             entries: std::sync::RwLock::new(VecDeque::with_capacity(capacity.min(1024))),
             capacity,
         }
     }
 
-    fn push(&self, entry: ServerLogEntry) {
+    /// Push one entry (crate-visible: the admin server-logs endpoint tests
+    /// inject recognizable lines through it).
+    pub(crate) fn push(&self, entry: ServerLogEntry) {
         let mut entries = self.entries.write().unwrap();
         if entries.len() == self.capacity {
             entries.pop_front();
@@ -92,7 +100,11 @@ impl ServerLogBuffer {
 }
 
 fn level_rank(level: &str) -> u8 {
-    match level {
+    // Case-insensitive: `?level=warn` is as valid as `?level=WARN`
+    // (a lowercase level silently ranked 0 would no-op the filter —
+    // review task-273). Unrecognized values rank 0; the HTTP handler
+    // rejects them with 400 instead of letting them widen the filter.
+    match level.to_ascii_uppercase().as_str() {
         "ERROR" => 5,
         "WARN" => 4,
         "INFO" => 3,
@@ -348,5 +360,45 @@ mod tests {
         let limited = buffer.query(None, None, 1);
         assert_eq!(limited.len(), 1);
         assert_eq!(limited[0].message, "m4");
+    }
+
+    /// Review task-273: capacity 0 must not disable the bound (the
+    /// `len == capacity` eviction would never fire and the deque would
+    /// grow without bound).
+    #[test]
+    fn server_log_buffer_capacity_zero_is_clamped_bounded() {
+        let buffer = ServerLogBuffer::new(0);
+        for i in 0..10 {
+            buffer.push(ServerLogEntry {
+                timestamp_ms: i,
+                level: "INFO".to_string(),
+                target: "t".to_string(),
+                message: format!("m{i}"),
+            });
+        }
+        assert_eq!(buffer.len(), 1, "capacity 0 clamps to 1, never unbounded");
+    }
+
+    /// Review task-273: the level filter is case-insensitive —
+    /// `?level=warn` must narrow exactly like `?level=WARN`.
+    #[test]
+    fn server_log_level_filter_is_case_insensitive() {
+        let buffer = ServerLogBuffer::new(10);
+        for (i, level) in ["INFO", "WARN", "ERROR"].iter().enumerate() {
+            buffer.push(ServerLogEntry {
+                timestamp_ms: i as u64,
+                level: level.to_string(),
+                target: "t".to_string(),
+                message: format!("m{i}"),
+            });
+        }
+        let warn_upper = buffer.query(Some("WARN"), None, 10);
+        let warn_lower = buffer.query(Some("warn"), None, 10);
+        assert_eq!(warn_upper.len(), 2);
+        assert_eq!(
+            warn_lower.len(),
+            2,
+            "lowercase level must narrow identically to uppercase"
+        );
     }
 }

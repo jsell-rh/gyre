@@ -1947,6 +1947,19 @@ pub fn build_state(
         spiffe_service.trust_domain(),
     ));
 
+    let users_repo: Arc<dyn UserRepository> =
+        store!(dyn UserRepository, mem::MemUserRepository::default());
+    // TASK-273 review (mem parity): in pure-mem mode the audit repo
+    // derives an event's tenant server-side at record time from the SAME
+    // workspace/user repos the state serves — exactly the derivation the
+    // SQLite/PostgreSQL adapters perform — so mem mode does not silently
+    // drop workspace-scoped server events from the tenant-scoped admin
+    // audit view. (In DB-backed mode `mem_audit` is not wired into
+    // `state.audit`, so the sources are unused.)
+    if sqlite_db.is_none() && pg_db.is_none() {
+        mem_audit.set_tenant_sources(Arc::clone(&workspaces), Arc::clone(&users_repo));
+    }
+
     Arc::new(AppState {
         auth_token: auth_token.to_string(),
         base_url: base_url.to_string(),
@@ -1990,7 +2003,7 @@ pub fn build_state(
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(300),
-        users: store!(dyn UserRepository, mem::MemUserRepository::default()),
+        users: users_repo,
         api_keys: store!(dyn ApiKeyRepository, mem::MemApiKeyRepository::default()),
         jwt_config,
         http_client: reqwest::Client::builder()

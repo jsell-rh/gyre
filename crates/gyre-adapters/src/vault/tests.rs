@@ -10,13 +10,21 @@ use tokio::sync::Mutex;
 /// In-memory Vault state: path → payload (`data` object).
 type VaultStore = Arc<Mutex<HashMap<String, serde_json::Value>>>;
 
-/// What the stub server observed (tokens per path, JWT logins).
+/// What the stub server observed (tokens per path, JWT logins,
+/// namespaces, AppRole token generations).
 #[derive(Default, Clone)]
 struct Observed {
     /// (path, token) for every data read.
     reads: Arc<Mutex<Vec<(String, String)>>>,
     /// JWTs presented at the JWT login endpoint.
     jwt_logins: Arc<Mutex<Vec<String>>>,
+    /// (op, namespace header) for every namespaced request (data reads,
+    /// index reads, lists, deletes, writes).
+    namespaces: Arc<Mutex<Vec<(&'static str, Option<String>)>>>,
+    /// AppRole tokens "approle-token-N" with N <= this value are rejected
+    /// (403) by the data/metadata handlers — the test flips this to
+    /// simulate a cached server token whose TTL expired.
+    reject_approle_upto: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 /// Spawn the stub Vault server; returns (base_url, store, observed).
@@ -28,18 +36,50 @@ async fn spawn_vault() -> (String, VaultStore, Observed) {
 
     let reads = Arc::clone(&observed.reads);
     let jwt_logins = Arc::clone(&observed.jwt_logins);
+    let namespaces = Arc::clone(&observed.namespaces);
+    let reject_approle_upto = Arc::clone(&observed.reject_approle_upto);
     let store_reads = Arc::clone(&store);
     let store_writes = Arc::clone(&store);
     let store_list = Arc::clone(&store);
     let store_delete = Arc::clone(&store);
+    // Per-handler clones: each `move` route closure needs its own Arc.
+    let ns_data_read = Arc::clone(&namespaces);
+    let ns_delete = Arc::clone(&namespaces);
+    let reject_reads = Arc::clone(&reject_approle_upto);
+    let reject_writes = Arc::clone(&reject_approle_upto);
+    let reject_list = Arc::clone(&reject_approle_upto);
+    let reject_delete = Arc::clone(&reject_approle_upto);
+    let approle_generation = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let approle_gen_login = Arc::clone(&approle_generation);
+
+    // Shared token/namespace acceptance logic: the static server token,
+    // agent-scoped tokens, and AppRole-issued tokens newer than
+    // `reject_approle_upto` are accepted; anything else is 403 (the
+    // fail-closed probe relies on the error surfacing).
+    fn token_accepted(token: &str, reject_upto: &std::sync::atomic::AtomicUsize) -> bool {
+        if token == "test-agent-token" || token == "static-token" {
+            return true;
+        }
+        if let Some(n) = token.strip_prefix("approle-token-") {
+            return n
+                .parse::<usize>()
+                .map(|n| n > reject_upto.load(std::sync::atomic::Ordering::SeqCst))
+                .unwrap_or(false);
+        }
+        false
+    }
 
     let app = axum::Router::new()
         .route(
             "/v1/auth/approle/login",
-            post(|| async {
-                axum::Json(serde_json::json!({
-                    "auth": { "client_token": "test-server-token" }
-                }))
+            post(move || {
+                let generation = approle_gen_login.clone();
+                async move {
+                    let n = generation.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    axum::Json(serde_json::json!({
+                        "auth": { "client_token": format!("approle-token-{n}") }
+                    }))
+                }
             }),
         )
         .route(
@@ -56,15 +96,15 @@ async fn spawn_vault() -> (String, VaultStore, Observed) {
                 }
             }),
         )
-        // KV v2 data read/write. The token is validated: the server token
-        // and agent-scoped tokens are accepted, anything else is 403 (the
-        // fail-closed probe relies on the error surfacing).
+        // KV v2 data read/write.
         .route(
             "/v1/secret/data/*path",
             axum::routing::get(
                 move |axum::extract::Path(path): axum::extract::Path<String>,
                       headers: axum::http::HeaderMap| {
                     let reads = Arc::clone(&reads);
+                    let namespaces = ns_data_read;
+                    let reject_upto = reject_reads;
                     let store = Arc::clone(&store_reads);
                     async move {
                         let token = headers
@@ -72,15 +112,19 @@ async fn spawn_vault() -> (String, VaultStore, Observed) {
                             .and_then(|t| t.to_str().ok())
                             .unwrap_or_default()
                             .to_string();
-                        if token != "test-server-token"
-                            && token != "test-agent-token"
-                            && token != "static-token"
-                        {
+                        if !token_accepted(&token, &reject_upto) {
                             return (
                                 axum::http::StatusCode::FORBIDDEN,
                                 axum::Json(serde_json::json!({"errors": ["permission denied"]})),
                             );
                         }
+                        namespaces.lock().await.push((
+                            "data_read",
+                            headers
+                                .get("X-Vault-Namespace")
+                                .and_then(|n| n.to_str().ok())
+                                .map(str::to_string),
+                        ));
                         reads
                             .lock()
                             .await
@@ -104,13 +148,14 @@ async fn spawn_vault() -> (String, VaultStore, Observed) {
                       headers: axum::http::HeaderMap,
                       body: String| {
                     let store = Arc::clone(&store_writes);
+                    let reject_upto = reject_writes;
                     async move {
                         let token = headers
                             .get("X-Vault-Token")
                             .and_then(|t| t.to_str().ok())
                             .unwrap_or_default()
                             .to_string();
-                        if token != "test-server-token" && token != "static-token" {
+                        if !token_accepted(&token, &reject_upto) {
                             return (
                                 axum::http::StatusCode::FORBIDDEN,
                                 axum::Json(serde_json::json!({"errors": ["permission denied"]})),
@@ -137,16 +182,14 @@ async fn spawn_vault() -> (String, VaultStore, Observed) {
                 move |axum::extract::Path(path): axum::extract::Path<String>,
                       headers: axum::http::HeaderMap| {
                     let store = Arc::clone(&store_list);
+                    let reject_upto = reject_list;
                     async move {
                         let token = headers
                             .get("X-Vault-Token")
                             .and_then(|t| t.to_str().ok())
                             .unwrap_or_default()
                             .to_string();
-                        if token != "test-server-token"
-                            && token != "test-agent-token"
-                            && token != "static-token"
-                        {
+                        if !token_accepted(&token, &reject_upto) {
                             return (
                                 axum::http::StatusCode::FORBIDDEN,
                                 axum::Json(serde_json::json!({"errors": ["permission denied"]})),
@@ -173,18 +216,27 @@ async fn spawn_vault() -> (String, VaultStore, Observed) {
                 move |axum::extract::Path(path): axum::extract::Path<String>,
                       headers: axum::http::HeaderMap| {
                     let store = Arc::clone(&store_delete);
+                    let namespaces = ns_delete;
+                    let reject_upto = reject_delete;
                     async move {
                         let token = headers
                             .get("X-Vault-Token")
                             .and_then(|t| t.to_str().ok())
                             .unwrap_or_default()
                             .to_string();
-                        if token != "test-server-token" && token != "static-token" {
+                        if !token_accepted(&token, &reject_upto) {
                             return (
                                 axum::http::StatusCode::FORBIDDEN,
                                 axum::Json(serde_json::json!({"errors": ["permission denied"]})),
                             );
                         }
+                        namespaces.lock().await.push((
+                            "delete",
+                            headers
+                                .get("X-Vault-Namespace")
+                                .and_then(|n| n.to_str().ok())
+                                .map(str::to_string),
+                        ));
                         let prefix = format!("secret/data/{path}");
                         let mut store = store.lock().await;
                         store.retain(|k, _| !k.starts_with(&prefix));
@@ -451,4 +503,125 @@ fn config_from_env_requires_auth_material() {
     std::env::remove_var("GYRE_VAULT_ROLE_ID");
     std::env::remove_var("GYRE_VAULT_SECRET_ID");
     assert!(VaultConfig::from_env().is_err());
+}
+
+/// Review task-273: a caller-supplied secret name becomes a KV path
+/// segment — separators and traversal segments must be rejected by the
+/// adapter itself (defense in depth behind the API validation), or a
+/// `../`-bearing name writes outside the caller's tenant subtree and a
+/// `/`-bearing name silently vanishes from list/get_by_scope.
+#[tokio::test]
+async fn create_rejects_path_unsafe_names() {
+    let (addr, store, _observed) = spawn_vault().await;
+    let repo = VaultSecretRepository::new(config(&addr)).unwrap();
+
+    for bad in ["../escape", "a/b", "a\\b", "..", ".", "bad\u{0}name"] {
+        let secret = sample_secret(bad, SecretScope::Repo, "repo-1", "t1");
+        let err = repo.create(&secret, b"v").await.unwrap_err();
+        assert!(
+            err.to_string().contains("traversal") || err.to_string().contains("control"),
+            "name {bad:?} must be rejected as path-unsafe, got: {err}"
+        );
+    }
+
+    // Nothing was written — in particular nothing outside the tenant
+    // subtree.
+    assert!(
+        store.lock().await.is_empty(),
+        "no path-unsafe write may land"
+    );
+}
+
+/// Review task-273: with GYRE_VAULT_NAMESPACE set, the X-Vault-Namespace
+/// header must ride EVERY server-token request — index reads and deletes
+/// previously dropped it, so reads failed OPEN (Ok(None) for a secret
+/// that exists in the real namespace) and deletes 404'd (treated as
+/// success) while the secret survived.
+#[tokio::test]
+async fn namespace_header_rides_index_reads_and_deletes() {
+    let (addr, _store, observed) = spawn_vault().await;
+    let mut cfg = config(&addr);
+    cfg.namespace = Some("ns-1".to_string());
+    let repo = VaultSecretRepository::new(cfg).unwrap();
+
+    let secret = sample_secret("NS", SecretScope::Repo, "repo-1", "t1");
+    repo.create(&secret, b"v").await.unwrap();
+
+    // get_value performs an index read + a data read; list_by_scope a
+    // metadata LIST + data reads; delete two metadata DELETEs.
+    assert_eq!(
+        repo.get_value(&secret.id, "t1").await.unwrap(),
+        Some(b"v".to_vec())
+    );
+    repo.list_by_scope(SecretScope::Repo, "repo-1", "t1")
+        .await
+        .unwrap();
+    repo.delete(&secret.id, "t1").await.unwrap();
+
+    let namespaces = observed.namespaces.lock().await;
+    assert!(
+        namespaces
+            .iter()
+            .all(|(_, ns)| ns.as_deref() == Some("ns-1")),
+        "every recorded request must carry the configured namespace: {namespaces:?}"
+    );
+    assert!(
+        namespaces.iter().any(|(op, _)| *op == "data_read"),
+        "data reads must be observed: {namespaces:?}"
+    );
+    assert!(
+        namespaces.iter().any(|(op, _)| *op == "delete"),
+        "deletes must be observed: {namespaces:?}"
+    );
+}
+
+/// Review task-273: an AppRole token whose TTL expired (rejected by
+/// Vault) must trigger a re-login on EVERY operation — get_value,
+/// list_by_scope, rotate and resolve_for_agent previously fetched the
+/// cached token directly, so they 403'd forever after expiry.
+#[tokio::test]
+async fn expired_approle_token_relogs_in_for_every_operation() {
+    let (addr, _store, observed) = spawn_vault().await;
+    let mut cfg = config(&addr);
+    cfg.token = None;
+    cfg.role_id = Some("role".to_string());
+    cfg.secret_id = Some("secret".to_string());
+    let repo = VaultSecretRepository::new(cfg).unwrap();
+
+    // Seed one secret while the (fresh) AppRole token is accepted.
+    let secret = sample_secret("TTL", SecretScope::Repo, "repo-1", "t1");
+    repo.create(&secret, b"v1").await.unwrap();
+
+    // Expire the cached token: AppRole tokens with generation <= 1 are
+    // now rejected — exactly the shape of a TTL expiry mid-lifetime.
+    observed
+        .reject_approle_upto
+        .store(1, std::sync::atomic::Ordering::SeqCst);
+
+    // Every previously-unwrapped operation must transparently re-login
+    // (generation 2) instead of failing forever.
+    assert_eq!(
+        repo.get_value(&secret.id, "t1").await.unwrap(),
+        Some(b"v1".to_vec()),
+        "get_value must survive an expired AppRole token"
+    );
+    repo.list_by_scope(SecretScope::Repo, "repo-1", "t1")
+        .await
+        .expect("list_by_scope must survive an expired AppRole token");
+    repo.rotate(&secret.id, b"v2", "t1")
+        .await
+        .expect("rotate must survive an expired AppRole token");
+    let resolved = repo
+        .resolve_for_agent("t1", "ws-1", "repo-1", None)
+        .await
+        .expect("server-token resolution must survive an expired AppRole token");
+    assert!(
+        resolved.iter().any(|(name, _)| name == "TTL"),
+        "resolution must return the secret: {resolved:?}"
+    );
+    assert_eq!(
+        repo.get_value(&secret.id, "t1").await.unwrap(),
+        Some(b"v2".to_vec()),
+        "the rotate above must have taken effect"
+    );
 }
