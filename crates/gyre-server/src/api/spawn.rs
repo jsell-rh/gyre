@@ -4699,6 +4699,7 @@ mod tests {
         task.workspace_id = Id::new("ws-1");
         state.tasks.create(&task).await.unwrap();
         let auth = crate::auth::AuthenticatedAgent {
+            auth_mechanism: crate::auth::AuthMechanism::AgentToken,
             agent_id: "spawner".to_string(),
             user_id: None,
             roles: vec![],
