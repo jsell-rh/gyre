@@ -368,8 +368,22 @@ fn detail_matches(row: &AuditEventRow, term: &str) -> bool {
 /// without an unbounded scan: pages are fetched newest-first until
 /// `filter.limit` matches are collected or the candidate set is exhausted.
 fn query_rows(conn: &mut SqliteConnection, filter: &AuditQueryFilter) -> Result<Vec<AuditEvent>> {
+    // Tenant scoping (admin-panel.md §Audit Log Viewer) is applied here,
+    // lexically at the read entry point, so a tenant-scoped caller's query
+    // visibly filters by tenant_id (hierarchy-enforcement.md §3); the
+    // remaining structured filters ride in apply_filters. Unattributed
+    // legacy rows (NULL tenant, created before tenant attribution
+    // existed) are visible to unscoped internal reads only — never to a
+    // tenant-scoped admin query, which would attribute them to a tenant
+    // they did not come from.
+    let tenant_scoped = |mut query: BoxedAuditQuery| -> BoxedAuditQuery {
+        if let Some(t) = &filter.tenant_id {
+            query = query.filter(audit_events::tenant_id.eq(t.clone()));
+        }
+        query
+    };
     if filter.q.is_none() {
-        let rows = apply_filters(audit_events::table.into_boxed(), filter)
+        let rows = apply_filters(tenant_scoped(audit_events::table.into_boxed()), filter)
             .order(audit_events::timestamp.desc())
             .limit(filter.limit as i64)
             .load::<AuditEventRow>(conn)
@@ -382,7 +396,7 @@ fn query_rows(conn: &mut SqliteConnection, filter: &AuditQueryFilter) -> Result<
 
     let term = filter.q.as_deref().unwrap_or_default().trim().to_string();
     if term.is_empty() {
-        let rows = apply_filters(audit_events::table.into_boxed(), filter)
+        let rows = apply_filters(tenant_scoped(audit_events::table.into_boxed()), filter)
             .order(audit_events::timestamp.desc())
             .limit(filter.limit as i64)
             .load::<AuditEventRow>(conn)
@@ -397,7 +411,7 @@ fn query_rows(conn: &mut SqliteConnection, filter: &AuditQueryFilter) -> Result<
     let page = (filter.limit.max(100) as i64).min(1_000);
     let mut offset: i64 = 0;
     loop {
-        let rows = apply_filters(audit_events::table.into_boxed(), filter)
+        let rows = apply_filters(tenant_scoped(audit_events::table.into_boxed()), filter)
             .order(audit_events::timestamp.desc())
             .limit(page)
             .offset(offset)
@@ -425,8 +439,16 @@ fn query_rows(conn: &mut SqliteConnection, filter: &AuditQueryFilter) -> Result<
 /// matching semantics as [`query_rows`]; `limit` deliberately not applied —
 /// the count covers the full filtered set, per the port contract).
 fn count_rows(conn: &mut SqliteConnection, filter: &AuditQueryFilter) -> Result<u64> {
+    // Tenant scoping lives here, lexically at the read entry point (see
+    // query_rows); apply_filters handles the remaining structured filters.
+    let tenant_scoped = |mut query: BoxedAuditQuery| -> BoxedAuditQuery {
+        if let Some(t) = &filter.tenant_id {
+            query = query.filter(audit_events::tenant_id.eq(t.clone()));
+        }
+        query
+    };
     if filter.q.is_none() {
-        let n = apply_filters(audit_events::table.into_boxed(), filter)
+        let n = apply_filters(tenant_scoped(audit_events::table.into_boxed()), filter)
             .count()
             .get_result::<i64>(conn)
             .context("count audit_events (filtered)")?;
@@ -434,7 +456,7 @@ fn count_rows(conn: &mut SqliteConnection, filter: &AuditQueryFilter) -> Result<
     }
     let term = filter.q.as_deref().unwrap_or_default().trim().to_string();
     if term.is_empty() {
-        let n = apply_filters(audit_events::table.into_boxed(), filter)
+        let n = apply_filters(tenant_scoped(audit_events::table.into_boxed()), filter)
             .count()
             .get_result::<i64>(conn)
             .context("count audit_events (filtered)")?;
@@ -444,7 +466,7 @@ fn count_rows(conn: &mut SqliteConnection, filter: &AuditQueryFilter) -> Result<
     let page: i64 = 500;
     let mut offset: i64 = 0;
     loop {
-        let rows = apply_filters(audit_events::table.into_boxed(), filter)
+        let rows = apply_filters(tenant_scoped(audit_events::table.into_boxed()), filter)
             .order(audit_events::timestamp.desc())
             .limit(page)
             .offset(offset)
@@ -476,15 +498,9 @@ fn apply_filters(mut query: BoxedAuditQuery, filter: &AuditQueryFilter) -> Boxed
     if let Some(w) = &filter.workspace_id {
         query = query.filter(audit_events::workspace_id.eq(w.clone()));
     }
-    // Tenant scoping (admin-panel.md §Audit Log Viewer): rows scoped to
-    // the caller's tenant only. Unattributed legacy rows (NULL tenant,
-    // created before tenant attribution existed) are visible to unscoped
-    // internal reads only — never to a tenant-scoped admin query, which
-    // would attribute them to a tenant they did not come from — and
-    // another tenant's events are never returned.
-    if let Some(t) = &filter.tenant_id {
-        query = query.filter(audit_events::tenant_id.eq(t.clone()));
-    }
+    // NOTE: tenant scoping is deliberately NOT applied here — it lives
+    // lexically in the read entry points (query_rows / count_rows), which
+    // call this helper with an already tenant-scoped base query.
     if let Some(u) = &filter.user_id {
         query = query.filter(audit_events::user_id.eq(u.clone()));
     }

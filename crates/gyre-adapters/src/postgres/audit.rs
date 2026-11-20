@@ -377,13 +377,27 @@ fn query_rows(
     conn: &mut diesel::PgConnection,
     filter: &AuditQueryFilter,
 ) -> Result<Vec<AuditEvent>> {
+    // Tenant scoping (admin-panel.md §Audit Log Viewer) is applied here,
+    // lexically at the read entry point, so a tenant-scoped caller's query
+    // visibly filters by tenant_id (hierarchy-enforcement.md §3); the
+    // remaining structured filters ride in apply_filters. Unattributed
+    // legacy rows (NULL tenant, created before tenant attribution
+    // existed) are visible to unscoped internal reads only — never to a
+    // tenant-scoped admin query, which would attribute them to a tenant
+    // they did not come from.
+    let tenant_scoped = |mut query: BoxedAuditQuery| -> BoxedAuditQuery {
+        if let Some(t) = &filter.tenant_id {
+            query = query.filter(audit_events::tenant_id.eq(t.clone()));
+        }
+        query
+    };
     let needs_q = filter
         .q
         .as_deref()
         .map(|t| !t.trim().is_empty())
         .unwrap_or(false);
     if !needs_q {
-        let rows = apply_filters(audit_events::table.into_boxed(), filter)
+        let rows = apply_filters(tenant_scoped(audit_events::table.into_boxed()), filter)
             .order(audit_events::timestamp.desc())
             .limit(filter.limit as i64)
             .load::<AuditEventRow>(conn)
@@ -399,7 +413,7 @@ fn query_rows(
     let page = (filter.limit.max(100) as i64).min(1_000);
     let mut offset: i64 = 0;
     loop {
-        let rows = apply_filters(audit_events::table.into_boxed(), filter)
+        let rows = apply_filters(tenant_scoped(audit_events::table.into_boxed()), filter)
             .order(audit_events::timestamp.desc())
             .limit(page)
             .offset(offset)
@@ -427,13 +441,21 @@ fn query_rows(
 /// matching semantics as [`query_rows`]; `limit` deliberately not applied —
 /// the count covers the full filtered set, per the port contract).
 fn count_rows(conn: &mut diesel::PgConnection, filter: &AuditQueryFilter) -> Result<u64> {
+    // Tenant scoping lives here, lexically at the read entry point (see
+    // query_rows); apply_filters handles the remaining structured filters.
+    let tenant_scoped = |mut query: BoxedAuditQuery| -> BoxedAuditQuery {
+        if let Some(t) = &filter.tenant_id {
+            query = query.filter(audit_events::tenant_id.eq(t.clone()));
+        }
+        query
+    };
     let needs_q = filter
         .q
         .as_deref()
         .map(|t| !t.trim().is_empty())
         .unwrap_or(false);
     if !needs_q {
-        let n = apply_filters(audit_events::table.into_boxed(), filter)
+        let n = apply_filters(tenant_scoped(audit_events::table.into_boxed()), filter)
             .count()
             .get_result::<i64>(conn)
             .context("count audit_events (filtered)")?;
@@ -444,7 +466,7 @@ fn count_rows(conn: &mut diesel::PgConnection, filter: &AuditQueryFilter) -> Res
     let page: i64 = 500;
     let mut offset: i64 = 0;
     loop {
-        let rows = apply_filters(audit_events::table.into_boxed(), filter)
+        let rows = apply_filters(tenant_scoped(audit_events::table.into_boxed()), filter)
             .order(audit_events::timestamp.desc())
             .limit(page)
             .offset(offset)
@@ -476,15 +498,9 @@ fn apply_filters(mut query: BoxedAuditQuery, filter: &AuditQueryFilter) -> Boxed
     if let Some(w) = &filter.workspace_id {
         query = query.filter(audit_events::workspace_id.eq(w.clone()));
     }
-    // Tenant scoping (admin-panel.md §Audit Log Viewer): rows scoped to
-    // the caller's tenant only. Unattributed legacy rows (NULL tenant,
-    // created before tenant attribution existed) are visible to unscoped
-    // internal reads only — never to a tenant-scoped admin query, which
-    // would attribute them to a tenant they did not come from — and
-    // another tenant's events are never returned.
-    if let Some(t) = &filter.tenant_id {
-        query = query.filter(audit_events::tenant_id.eq(t.clone()));
-    }
+    // NOTE: tenant scoping is deliberately NOT applied here — it lives
+    // lexically in the read entry points (query_rows / count_rows), which
+    // call this helper with an already tenant-scoped base query.
     if let Some(u) = &filter.user_id {
         query = query.filter(audit_events::user_id.eq(u.clone()));
     }
@@ -533,12 +549,15 @@ mod tests {
 
     use super::*;
 
+    /// Mirrors the query_rows / count_rows entry-point scoping (tenant
+    /// filter first, then apply_filters) so the pinned SQL shape is exactly
+    /// what the served queries generate.
     fn sql(filter: &AuditQueryFilter) -> String {
-        diesel::debug_query::<diesel::pg::Pg, _>(&apply_filters(
-            audit_events::table.into_boxed(),
-            filter,
-        ))
-        .to_string()
+        let mut base = audit_events::table.into_boxed();
+        if let Some(t) = &filter.tenant_id {
+            base = base.filter(audit_events::tenant_id.eq(t.clone()));
+        }
+        diesel::debug_query::<diesel::pg::Pg, _>(&apply_filters(base, filter)).to_string()
     }
 
     fn all() -> AuditQueryFilter {

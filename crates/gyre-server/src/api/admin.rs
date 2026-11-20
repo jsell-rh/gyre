@@ -1492,7 +1492,10 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let json = body_json(resp).await;
-        assert_eq!(json["count"], 1, "other-tenant and NULL-tenant events must be invisible");
+        assert_eq!(
+            json["count"], 1,
+            "other-tenant and NULL-tenant events must be invisible"
+        );
         let ids: Vec<&str> = json["events"]
             .as_array()
             .unwrap()
@@ -1500,7 +1503,10 @@ mod tests {
             .map(|e| e["id"].as_str().unwrap())
             .collect();
         assert!(ids.contains(&"ev-own"));
-        assert!(!ids.contains(&"ev-legacy"), "unattributed rows are not this tenant's");
+        assert!(
+            !ids.contains(&"ev-legacy"),
+            "unattributed rows are not this tenant's"
+        );
     }
 
     #[tokio::test]
@@ -2912,10 +2918,7 @@ mod tests {
             )
             .await;
         // First run fails, latest run succeeds.
-        let _ = state
-            .job_registry
-            .trigger("flaky_job", state.clone())
-            .await;
+        let _ = state.job_registry.trigger("flaky_job", state.clone()).await;
         state
             .job_registry
             .trigger("flaky_job", state.clone())
