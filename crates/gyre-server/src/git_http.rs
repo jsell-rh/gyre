@@ -727,6 +727,82 @@ pub async fn git_receive_pack(
     // Parse updated refs BEFORE forwarding to git (pkt-line ref-update commands).
     let ref_updates = parse_ref_updates(&body_bytes);
 
+    // Agent-principal default-branch protection (specs/development/
+    // agent-workflow.md §PRs as the Collaboration Primitive: "All code
+    // submission and collaboration happens via pull requests. No direct
+    // pushes to main"). The bullet governs agent code submission, so the
+    // rejection is scoped to AGENT principals: an `AuthenticatedAgent`
+    // with no backing user (`user_id` None) that is not the system
+    // principal — i.e. a caller authenticated via an agent token / agent
+    // identity. Human principals (user JWTs / API keys with push
+    // permission) and the system principal keep their default-branch
+    // push path: specs/system/spec-lifecycle.md §Automatic Task Creation
+    // normatively requires post-receive processing (task creation,
+    // persona changes, ledger sync) of default-branch pushes from anyone
+    // with push access, and §What This Does NOT Do forbids blocking them.
+    // This is an unconditional invariant for the caller class, not an
+    // opt-in named pre-accept gate (`check_pre_accept_gates` returns Ok
+    // early for repos with no gate names configured, so an opt-in gate
+    // would leave default repos unprotected). It runs BEFORE receive-pack
+    // executes, so on rejection the ref is never updated server-side;
+    // server-side landing (merge queue, post-merge reverts) goes through
+    // the git_ops/jj_ops ports and never through this handler. The target
+    // ref is compared against the repo's actual `default_branch` record —
+    // never a hardcoded "main" — so a repo whose default branch is e.g.
+    // "trunk" is protected on refs/heads/trunk while an agent push to a
+    // branch literally named "main" there is unaffected.
+    if auth.user_id.is_none() && !auth.is_system_principal() {
+        let default_ref = format!("refs/heads/{default_branch}");
+        if ref_updates.iter().any(|u| u.refname == default_ref) {
+            let reason = format!(
+                "agent principals may not push directly to the default branch \
+                 '{default_branch}'; push a feature branch and signal completion \
+                 (gyre_agent_complete) to create a merge request instead"
+            );
+            warn!(
+                agent_id = %auth.agent_id,
+                %repo_id,
+                default_branch = %default_branch,
+                "git-receive-pack 403: agent-principal push to the default branch rejected"
+            );
+            state
+                .emit_event(
+                    repo_workspace_id.clone(),
+                    gyre_common::message::Destination::Workspace(repo_workspace_id.clone()),
+                    gyre_common::message::MessageKind::PushRejected,
+                    Some(serde_json::json!({
+                        "repo_id": repo_id,
+                        "branch": default_branch,
+                        "agent_id": auth.agent_id,
+                        "reason": reason,
+                    })),
+                )
+                .await;
+            // GitPushRejected audit event — the invariant rejected the push
+            // before git ever ran, so the ref was never updated.
+            emit_git_push_rejected_audit(
+                &state,
+                &repo_id,
+                &repo_workspace_id,
+                &auth.agent_id,
+                &default_branch,
+                "default-branch-protection",
+                &reason,
+            )
+            .await;
+            return (
+                StatusCode::FORBIDDEN,
+                format!(
+                    "push rejected: agents may not push directly to the default \
+                     branch '{default_branch}'. All code submission happens via merge \
+                     requests: push a feature branch and signal completion \
+                     (gyre_agent_complete) to create one."
+                ),
+            )
+                .into_response();
+        }
+    }
+
     let output = match run_git_stateless("receive-pack", &repo_path, &body_bytes).await {
         Ok(o) => o,
         Err(e) => return git_err(e),
@@ -8060,6 +8136,238 @@ specs:
 
     fn agent_auth(agent_id: &str) -> String {
         format!("Bearer tok-{agent_id}")
+    }
+
+    // ── Agent-principal default-branch push protection (task-270) ──
+    //
+    // specs/development/agent-workflow.md §PRs as the Collaboration
+    // Primitive: "All code submission and collaboration happens via pull
+    // requests. No direct pushes to main" — enforced for agent principals
+    // in the HTTP push path, while human/system default-branch pushes keep
+    // the spec-lifecycle.md §Automatic Task Creation path.
+
+    /// POST a stateless receive-pack body updating `refname` to `new_sha`
+    /// with the given Authorization header value.
+    async fn push_ref_as(
+        app: Router,
+        ws_slug: &str,
+        repo_name: &str,
+        auth: &str,
+        new_sha: &str,
+        refname: &str,
+    ) -> axum::response::Response {
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/git/{ws_slug}/{repo_name}/git-receive-pack"))
+                    .header("Authorization", auth)
+                    .header("content-type", "application/x-git-receive-pack-request")
+                    .body(Body::from(receive_pack_body(new_sha, refname)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    /// True when the repo's git store currently resolves `refname`.
+    fn ref_exists(repo_path: &str, refname: &str) -> bool {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo_path)
+            .args(["rev-parse", "--verify", "--quiet", refname])
+            .status()
+            .unwrap()
+            .success()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn agent_push_to_default_branch_rejected_directing_to_mr_flow() {
+        let (app, state, _tmp, ws_slug, repo_name, repo_path) = git_app_with_repo().await;
+        seed_agent_token(&state, "agent-dbp").await;
+
+        let sha = make_commit(&repo_path, &[("dbp.md", "# dbp\n".to_string())]).await;
+
+        let resp = push_ref_as(
+            app,
+            &ws_slug,
+            &repo_name,
+            &agent_auth("agent-dbp"),
+            &sha,
+            "refs/heads/main",
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = String::from_utf8_lossy(&body);
+        assert!(
+            body.contains("merge request"),
+            "rejection must direct the agent to the MR flow, got: {body}"
+        );
+
+        // The rejection runs before receive-pack — the ref must never have
+        // been created server-side.
+        assert!(
+            !ref_exists(&repo_path, "refs/heads/main"),
+            "default-branch ref must not be updated by a rejected agent push"
+        );
+
+        // Synchronous rejection: the GitPushRejected audit event names the
+        // invariant and the caller.
+        let events = wait_for_audit_event(&state, "git_push_rejected").await;
+        let e = events
+            .iter()
+            .find(|e| e.detail["gate_name"] == "default-branch-protection")
+            .expect("default-branch-protection rejection audit event");
+        assert_eq!(e.agent_id.as_ref().unwrap().as_str(), "agent-dbp");
+        assert_eq!(e.detail["branch"], "main");
+        assert_eq!(e.outcome, gyre_domain::AuditOutcome::Blocked);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn agent_push_to_feature_branch_succeeds() {
+        let (app, state, _tmp, ws_slug, repo_name, repo_path) = git_app_with_repo().await;
+        seed_agent_token(&state, "agent-dbp-feat").await;
+
+        let sha = make_commit(&repo_path, &[("feat.md", "# dbp feat\n".to_string())]).await;
+
+        let resp = push_ref_as(
+            app,
+            &ws_slug,
+            &repo_name,
+            &agent_auth("agent-dbp-feat"),
+            &sha,
+            "refs/heads/feat/dbp",
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(
+            ref_exists(&repo_path, "refs/heads/feat/dbp"),
+            "agent feature-branch push must be accepted"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn protection_resolves_real_default_branch_not_literal_main() {
+        // A repo whose default branch is "trunk": refs/heads/trunk is
+        // protected for agent principals, while a branch literally named
+        // "main" is an ordinary feature branch there and must NOT be
+        // rejected.
+        let (app, state, _tmp, ws_slug, repo_name, repo_path) = git_app_with_repo().await;
+
+        let mut repo = state
+            .repos
+            .find_by_id(&Id::new("repo-1"))
+            .await
+            .unwrap()
+            .expect("repo exists");
+        repo.default_branch = "trunk".to_string();
+        state.repos.update(&repo).await.unwrap();
+
+        seed_agent_token(&state, "agent-trunk").await;
+
+        let sha = make_commit(&repo_path, &[("t.md", "# trunk\n".to_string())]).await;
+
+        // Push to a branch literally named "main" on a trunk-default repo:
+        // ordinary feature branch, accepted.
+        let resp = push_ref_as(
+            app.clone(),
+            &ws_slug,
+            &repo_name,
+            &agent_auth("agent-trunk"),
+            &sha,
+            "refs/heads/main",
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "agent push to a branch literally named 'main' must not be rejected \
+             when the repo's default branch is 'trunk'"
+        );
+
+        // Push to the real default branch "trunk": rejected.
+        let resp = push_ref_as(
+            app,
+            &ws_slug,
+            &repo_name,
+            &agent_auth("agent-trunk"),
+            &sha,
+            "refs/heads/trunk",
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        assert!(!ref_exists(&repo_path, "refs/heads/trunk"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn human_push_to_default_branch_accepted_and_spec_lifecycle_runs() {
+        // spec-lifecycle.md §Automatic Task Creation: a push-capable HUMAN
+        // token pushing a spec change to the default branch must stay
+        // accepted and still trigger spec-change task creation — the
+        // agent-principal protection must not over-block the human path.
+        let (app, state, _tmp, ws_slug, repo_name, repo_path) = git_app_with_repo().await;
+
+        // Human principal: API key + Developer workspace membership (Write
+        // repo permission).
+        let user_id = Id::new("user-human-push");
+        let mut user =
+            gyre_domain::User::new(user_id.clone(), "ext-human-push", "human-push", 0);
+        user.tenant_id = Some(Id::new("default"));
+        user.global_role = gyre_domain::GlobalRole::Member;
+        user.roles = vec![gyre_domain::UserRole::Developer];
+        state.users.create(&user).await.unwrap();
+        let mut m = gyre_domain::WorkspaceMembership::new(
+            Id::new("m-human-push"),
+            user_id.clone(),
+            Id::new("ws-test"),
+            gyre_domain::WorkspaceRole::Developer,
+            Id::new("system"),
+            0,
+        );
+        m.accept(0);
+        state.workspace_memberships.create(&m).await.unwrap();
+        state
+            .api_keys
+            .create(&crate::auth::hash_api_key("gyre-test-human-push-key"), &user_id, "test")
+            .await
+            .unwrap();
+
+        // Commit adding specs/system/human-push-spec.md.
+        let sha = make_commit(
+            &repo_path,
+            &[("specs/system/human-push-spec.md", "# spec\n".to_string())],
+        )
+        .await;
+
+        let resp = push_ref_as(
+            app,
+            &ws_slug,
+            &repo_name,
+            "Bearer gyre-test-human-push-key",
+            &sha,
+            "refs/heads/main",
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "human push-capable token must keep default-branch push access"
+        );
+        assert!(ref_exists(&repo_path, "refs/heads/main"));
+
+        // process_spec_lifecycle ran: the spec change created a task.
+        let events = wait_for_audit_event(&state, "spec_changed").await;
+        let e = events
+            .iter()
+            .find(|e| e.detail["spec_path"] == "specs/system/human-push-spec.md")
+            .expect("spec_changed audit event for the human default-branch push");
+        assert!(
+            e.detail["task_id"].as_str().is_some(),
+            "spec-change task must be auto-created for a human default-branch push"
+        );
     }
 
     /// authorization-provenance.md §7.5 defines the payload schema for

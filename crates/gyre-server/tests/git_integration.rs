@@ -468,6 +468,11 @@ async fn push_records_agent_commit_provenance() {
     // Agent clones, commits, and pushes using its per-agent token.
     let base_url_c = base_url.clone();
     let agent_token_c = agent_token.clone();
+    // task-270: the server (system) token performs the initial default-branch
+    // push — agent principals may not push directly to the default branch
+    // (specs/development/agent-workflow.md §PRs as the Collaboration
+    // Primitive). The agent keeps pushing its feature branch.
+    let system_token_c = token.to_string();
     let _repo_id_c = repo_id.clone();
     let ws_id_c = ws_id.clone();
 
@@ -486,11 +491,12 @@ async fn push_records_agent_commit_provenance() {
         git_local(&["config", "user.email", "prov@gyre.local"], &dir);
         git_local(&["config", "user.name", "Prov Agent"], &dir);
 
-        // Initial commit on main.
+        // Initial commit on main — pushed with the system token: the default
+        // branch is protected from agent-principal pushes (task-270).
         std::fs::write(dir.join("readme.md"), "# prov\n").unwrap();
         git_local(&["add", "."], &dir);
         git_local(&["commit", "-m", "chore: initial commit"], &dir);
-        let push_main = git_with_token(&["push", "origin", "HEAD:main"], &dir, &agent_token_c);
+        let push_main = git_with_token(&["push", "origin", "HEAD:main"], &dir, &system_token_c);
         let push_stderr = String::from_utf8_lossy(&push_main.stderr).to_string();
         assert!(
             push_main.status.success(),
@@ -593,6 +599,11 @@ async fn merge_queue_auto_merges_mr_and_commit_on_main() {
     // Agent clones, commits, and pushes.
     let base_url_c = base_url.clone();
     let agent_token_c = agent_token.clone();
+    // task-270: the initial default-branch push uses the system token —
+    // agent principals may not push directly to the default branch. The
+    // merge queue's landing of the MR on main is server-side (git_ops
+    // port) and unaffected by the HTTP-path protection.
+    let system_token_c = token.to_string();
     let _repo_id_c = repo_id.clone();
     let ws_id_c = ws_id.clone();
     tokio::task::spawn_blocking(move || {
@@ -610,11 +621,12 @@ async fn merge_queue_auto_merges_mr_and_commit_on_main() {
         git_local(&["config", "user.email", "mq@gyre.local"], &dir);
         git_local(&["config", "user.name", "MQ Agent"], &dir);
 
-        // Establish main branch.
+        // Establish main branch (system token — the default branch is
+        // protected from agent-principal pushes, task-270).
         std::fs::write(dir.join("readme.md"), "# mq\n").unwrap();
         git_local(&["add", "."], &dir);
         git_local(&["commit", "-m", "chore: initial commit"], &dir);
-        let push_main = git_with_token(&["push", "origin", "HEAD:main"], &dir, &agent_token_c);
+        let push_main = git_with_token(&["push", "origin", "HEAD:main"], &dir, &system_token_c);
         assert!(push_main.status.success(), "push main failed");
 
         // Feature branch.
