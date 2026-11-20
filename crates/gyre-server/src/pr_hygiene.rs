@@ -303,24 +303,18 @@ async fn close_abandoned(
     // Deliver the explanation to the author: an agent author gets a
     // message in its inbox; a user author gets an MrAutoClosed
     // notification. Workspace Admins/Owners observe every auto-close.
-    deliver_author_message_or_notification(
-        state,
-        ws,
-        &mr,
+    let notice = MrNotice::new(
         NotificationType::MrAutoClosed,
         "Merge request auto-closed",
         &explanation,
-        now,
-    )
-    .await;
+    );
+    deliver_author_message_or_notification(state, ws, &mr, &notice, now).await;
     notify_members(
         state,
         ws,
         &mr,
-        NotificationType::MrAutoClosed,
+        &notice,
         &[WorkspaceRole::Admin, WorkspaceRole::Owner],
-        "Merge request auto-closed",
-        &explanation,
         now,
     )
     .await;
@@ -532,14 +526,17 @@ async fn act_on_conflict(
          branch is required before it can merge.",
         mr.title, mr.source_branch, mr.target_branch
     );
+    let notice = MrNotice::new(
+        NotificationType::MrNeedsRebase,
+        "Merge request needs a rebase",
+        &body,
+    );
     notify_members(
         state,
         ws,
         mr,
-        NotificationType::MrNeedsRebase,
+        &notice,
         &[WorkspaceRole::Developer, WorkspaceRole::Admin],
-        "Merge request needs a rebase",
-        &body,
         now,
     )
     .await;
@@ -614,14 +611,17 @@ async fn escalate_stale(
          Long-open PRs are a signal something is wrong — review, rebase, or close it.",
         mr.title, days
     );
+    let notice = MrNotice::new(
+        NotificationType::MrStaleEscalation,
+        "Merge request open too long",
+        &body,
+    );
     notify_members(
         state,
         ws,
         mr,
-        NotificationType::MrStaleEscalation,
+        &notice,
         &[WorkspaceRole::Admin, WorkspaceRole::Owner],
-        "Merge request open too long",
-        &body,
         now,
     )
     .await;
@@ -653,14 +653,17 @@ async fn nudge_unreviewed(
              reviewers assigned. Assign a reviewer so it can proceed.",
             mr.title
         );
+        let notice = MrNotice::new(
+            NotificationType::MrUnreviewed,
+            "Merge request needs reviewers",
+            &body,
+        );
         notify_members(
             state,
             ws,
             mr,
-            NotificationType::MrUnreviewed,
+            &notice,
             &[WorkspaceRole::Developer, WorkspaceRole::Admin],
-            "Merge request needs reviewers",
-            &body,
             now,
         )
         .await;
@@ -686,18 +689,8 @@ async fn nudge_unreviewed(
         // (message bus) — both are real deliveries, recorded below via
         // create_notification / emit_event.
         if let Ok(Some(_)) = state.users.find_by_id(reviewer).await {
-            if create_notification(
-                state,
-                ws,
-                reviewer,
-                mr,
-                NotificationType::ReviewerNudge,
-                "Review requested",
-                &body,
-                now,
-            )
-            .await
-            {
+            let notice = MrNotice::new(NotificationType::ReviewerNudge, "Review requested", &body);
+            if create_notification(state, ws, reviewer, mr, &notice, now).await {
                 nudged += 1;
             }
         } else if state
@@ -755,6 +748,25 @@ async fn nudge_unreviewed(
 
 // ── shared helpers ───────────────────────────────────────────────────────────
 
+/// One hygiene delivery payload: the (notification type, title, body)
+/// triple shared by every delivery path. Bundling it keeps the delivery
+/// helpers within clippy's argument budget without suppressing the lint.
+struct MrNotice {
+    notification_type: NotificationType,
+    title: String,
+    body: String,
+}
+
+impl MrNotice {
+    fn new(notification_type: NotificationType, title: &str, body: &str) -> Self {
+        Self {
+            notification_type,
+            title: title.to_string(),
+            body: body.to_string(),
+        }
+    }
+}
+
 /// Create a deduplicated notification for one user about one MR. Returns
 /// false when suppressed (an active notification of this type for this
 /// (user, MR) pair already exists, or the user dismissed one recently).
@@ -763,15 +775,19 @@ async fn create_notification(
     ws: &gyre_domain::Workspace,
     user_id: &Id,
     mr: &gyre_domain::MergeRequest,
-    notification_type: NotificationType,
-    title: &str,
-    body: &str,
+    notice: &MrNotice,
     now: u64,
 ) -> bool {
     let mr_id_str = mr.id.to_string();
     if state
         .notifications
-        .has_active_notification(&ws.id, user_id, notification_type.as_str(), &mr_id_str, 0)
+        .has_active_notification(
+            &ws.id,
+            user_id,
+            notice.notification_type.as_str(),
+            &mr_id_str,
+            0,
+        )
         .await
         .unwrap_or(false)
     {
@@ -783,13 +799,13 @@ async fn create_notification(
         Id::new(uuid::Uuid::new_v4().to_string()),
         ws.id.clone(),
         user_id.clone(),
-        notification_type.clone(),
-        title.to_string(),
+        notice.notification_type.clone(),
+        notice.title.clone(),
         ws.tenant_id.to_string(),
         now as i64,
     );
     let mut notif = notif;
-    notif.body = Some(body.to_string());
+    notif.body = Some(notice.body.clone());
     notif.source.entity_type = "mr".to_string();
     notif.source.entity_id = mr_id_str;
     notif.source.repo_id = Some(mr.repository_id.clone());
@@ -809,10 +825,8 @@ async fn notify_members(
     state: &Arc<AppState>,
     ws: &gyre_domain::Workspace,
     mr: &gyre_domain::MergeRequest,
-    notification_type: NotificationType,
+    notice: &MrNotice,
     roles: &[WorkspaceRole],
-    title: &str,
-    body: &str,
     now: u64,
 ) {
     let Ok(members) = state.workspace_memberships.list_by_workspace(&ws.id).await else {
@@ -824,17 +838,7 @@ async fn notify_members(
         debug!(workspace = %ws.slug, "pr_hygiene_check: no members with role {:?} to notify", roles);
     }
     for member in targets {
-        create_notification(
-            state,
-            ws,
-            &member.user_id,
-            mr,
-            notification_type.clone(),
-            title,
-            body,
-            now,
-        )
-        .await;
+        create_notification(state, ws, &member.user_id, mr, notice, now).await;
     }
 }
 
@@ -845,9 +849,7 @@ async fn deliver_author_message_or_notification(
     state: &Arc<AppState>,
     ws: &gyre_domain::Workspace,
     mr: &gyre_domain::MergeRequest,
-    notification_type: NotificationType,
-    title: &str,
-    body: &str,
+    notice: &MrNotice,
     now: u64,
 ) {
     let Some(author_id) = mr.author_agent_id.clone() else {
@@ -870,7 +872,7 @@ async fn deliver_author_message_or_notification(
                     "mr_id": mr.id.to_string(),
                     "repo_id": mr.repository_id.to_string(),
                     "title": mr.title,
-                    "explanation": body,
+                    "explanation": notice.body,
                 })),
             )
             .await;
@@ -882,17 +884,7 @@ async fn deliver_author_message_or_notification(
         .flatten()
         .is_some()
     {
-        create_notification(
-            state,
-            ws,
-            &author_id,
-            mr,
-            notification_type,
-            title,
-            body,
-            now,
-        )
-        .await;
+        create_notification(state, ws, &author_id, mr, notice, now).await;
     }
 }
 
