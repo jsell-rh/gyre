@@ -311,6 +311,9 @@ mod tests {
             signing_key_history: Vec::new(),
             attestation_verifier: base.attestation_verifier.clone(),
             agent_jwt_ttl_secs: base.agent_jwt_ttl_secs,
+            preview_ttl_secs: base.preview_ttl_secs,
+            preview_jwt_ttl_secs: base.preview_jwt_ttl_secs,
+            preview_budget_max_concurrent: base.preview_budget_max_concurrent,
             users: base.users.clone(),
             api_keys: base.api_keys.clone(),
             jwt_config: base.jwt_config.clone(),
@@ -661,6 +664,11 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/api/v1/agents")
+                    // Authenticated caller: the auth extractor runs before
+                    // the Json extractor reads the body, so the oversized
+                    // body must still be rejected by the body limit (413),
+                    // not short-circuited by a 401.
+                    .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(large_body))
                     .unwrap(),

@@ -609,6 +609,16 @@ impl ResourceResolver {
                     None,
                 ),
                 RouteResourceMapping::api(
+                    "/api/v1/workspaces/:id/meta-specs/preview",
+                    "meta_spec",
+                    None,
+                ),
+                RouteResourceMapping::api(
+                    "/api/v1/workspaces/:id/meta-specs/preview/:preview_id",
+                    "meta_spec",
+                    None,
+                ),
+                RouteResourceMapping::api(
                     "/api/v1/workspaces/:id/meta-specs/assist",
                     "meta_spec",
                     Some("generate"),
@@ -783,6 +793,12 @@ impl ResourceResolver {
                 ),
                 RouteResourceMapping::api(
                     "/api/v1/meta-specs/:path/blast-radius",
+                    "meta_spec",
+                    None,
+                ),
+                RouteResourceMapping::api("/api/v1/meta-specs/preview", "meta_spec", None),
+                RouteResourceMapping::api(
+                    "/api/v1/meta-specs/preview/:preview_id",
                     "meta_spec",
                     None,
                 ),

@@ -2763,6 +2763,14 @@ mod tests {
             Ok(())
         }
 
+        async fn force_remove_worktree(
+            &self,
+            _repo_path: &str,
+            _worktree_path: &str,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+
         async fn list_worktrees(&self, _repo_path: &str) -> anyhow::Result<Vec<String>> {
             Ok(vec![])
         }
@@ -2821,6 +2829,10 @@ mod tests {
             _branch_name: &str,
             _from_ref: &str,
         ) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn delete_branch(&self, _repo_path: &str, _branch_name: &str) -> anyhow::Result<()> {
             Ok(())
         }
 

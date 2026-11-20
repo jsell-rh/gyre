@@ -314,6 +314,9 @@ impl ComputeTarget for KubernetesTarget {
             id: name,
             target_type: "kubernetes".to_string(),
             pid: None,
+            // Kubernetes kills are reconstructed from the pod name (id) via
+            // kubectl on the server host — no per-target connection details.
+            options: std::collections::HashMap::new(),
         })
     }
 

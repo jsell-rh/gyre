@@ -675,7 +675,12 @@ implementation findings. When testing upstream's scripts against the candidate,
 the verifier records which upstream-only files it introduces. Restoration removes
 only those unchanged files, leaving candidate deletions intact; modified or
 pre-existing files are never blindly cleaned. This prevents the verifier itself
-from contaminating the exact checkout it later checks. Git retries reuse the
+from contaminating the exact checkout it later checks. Only verifier LOGIC is
+overlaid from upstream: the frozen repo-state data files (scripts/*-exemptions.txt)
+follow the merge, because base data describes the base tree and would flag
+routes and findings a candidate legitimately removed together with their
+exemption entries. Exemption additions relative to the base are forbidden
+separately, so merged data can only make the upstream phase stricter. Git retries reuse the
 allocation. Logs stream to the cockpit and remain locally; compute is immediately requested for deletion, with
 unconfirmed compute release charged until scoped runtime evidence proves absence. Slots zero drains
 verification too. SQLite, gateway authentication, Git publication, and GitHub

@@ -197,6 +197,19 @@ pub async fn create_task(
     Json(req): Json<CreateTaskRequest>,
 ) -> Result<(StatusCode, Json<TaskResponse>), ApiError> {
     let mut req = req;
+    // Preview agents (meta-spec reconciliation §5) run ceremony-free: no task
+    // ledger writes. The MCP dispatch already refuses `gyre_create_task` for
+    // preview agents, but allowedTools is advisory and builtin policy grants
+    // the Agent role 'write' on '*' — without this gate a preview agent's live
+    // JWT can create task-ledger rows through the REST surface, the same
+    // escape class closed for POST /agents/{id}/complete and POST /merge-requests.
+    if crate::api::meta_specs::caller_is_preview_agent(&state, &auth).await {
+        return Err(ApiError::Forbidden(
+            "preview agents may not create tasks — preview runs skip task ceremony; \
+             the preview branch is the deliverable"
+                .to_string(),
+        ));
+    }
     if auth.agent_task_claim().is_some() {
         if let Some(ws_id) = req.workspace_id.as_deref() {
             if Some(ws_id.to_string()) != auth.workspace_id {
@@ -237,11 +250,23 @@ pub async fn create_task(
         .collect();
     task.spec_path = req.spec_path;
     task.spec_ref = req.spec_ref;
-    if let Some(ws_id) = req.workspace_id {
-        task.workspace_id = Id::new(ws_id);
+    // Caller-supplied scope fields are validated against the caller's tenant
+    // before they are persisted (task-102 F2 anti-forgery: the auth extractor
+    // already knows the caller's scope; a body field must never re-attribute
+    // the task to another tenant's workspace/repo). The repo check also
+    // verifies repo∈workspace when BOTH fields are supplied.
+    let requested_ws: Option<Id> = req
+        .workspace_id
+        .as_ref()
+        .map(|ws_id| Id::new(ws_id.clone()));
+    if let Some(ws_id) = &requested_ws {
+        super::audit::validate_workspace_scope(&state, ws_id, &auth).await?;
+        task.workspace_id = ws_id.clone();
     }
-    if let Some(repo_id) = req.repo_id {
-        task.repo_id = Id::new(repo_id);
+    if let Some(repo_id) = &req.repo_id {
+        super::audit::validate_repo_scope(&state, &Id::new(repo_id), &auth, requested_ws.as_ref())
+            .await?;
+        task.repo_id = Id::new(repo_id.clone());
     }
     state.tasks.create(&task).await?;
     // Index for search (search.md §Searchable Entities: task facets
@@ -335,6 +360,15 @@ pub async fn update_task(
     auth: crate::auth::AuthenticatedAgent,
     Json(req): Json<UpdateTaskRequest>,
 ) -> Result<Json<TaskResponse>, ApiError> {
+    // Preview agents may not mutate the task ledger (meta-spec reconciliation
+    // §5 skip-ceremony; same rationale as the create_task guard above).
+    if crate::api::meta_specs::caller_is_preview_agent(&state, &auth).await {
+        return Err(ApiError::Forbidden(
+            "preview agents may not update tasks — preview runs skip task ceremony; \
+             the preview branch is the deliverable"
+                .to_string(),
+        ));
+    }
     let mut task = state
         .tasks
         .find_by_id(&Id::new(&id))
@@ -387,6 +421,19 @@ pub async fn transition_task_status(
     auth: crate::auth::AuthenticatedAgent,
     Json(req): Json<TransitionStatusRequest>,
 ) -> Result<Json<TaskResponse>, ApiError> {
+    // Preview agents may not transition task status (meta-spec reconciliation
+    // §5 skip-ceremony; same escape class as the create/update guards above).
+    // This route is the dangerous one: a Done/Cancelled transition of a
+    // reconciliation/drift-labeled task fires on_reconciliation_task_terminal
+    // below, advancing meta-spec rollouts — a durable production effect from
+    // throwaway preview scratch work that §5 requires to leave no footprint.
+    if crate::api::meta_specs::caller_is_preview_agent(&state, &auth).await {
+        return Err(ApiError::Forbidden(
+            "preview agents may not transition task status — preview runs skip task \
+             ceremony; the preview branch is the deliverable"
+                .to_string(),
+        ));
+    }
     let mut task = state
         .tasks
         .find_by_id(&Id::new(&id))
@@ -471,8 +518,8 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/api/v1/tasks")
-                    .header("content-type", "application/json")
                     .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -532,8 +579,8 @@ mod tests {
                 Request::builder()
                     .method("PUT")
                     .uri(format!("/api/v1/tasks/{id}"))
-                    .header("content-type", "application/json")
                     .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&update_body).unwrap()))
                     .unwrap(),
             )
@@ -688,6 +735,33 @@ mod tests {
     async fn agent_jwt_create_task_clamped_to_claims() {
         let state = test_state();
         let app = crate::api::api_router().with_state(state.clone());
+        // The clamped claims (ws-1/repo-1) must resolve to real scoped
+        // entities: create_task validates the caller-supplied/inherited
+        // scope against the stores (task-102 F2 anti-forgery), so seed the
+        // workspace (tenant "default", matching the minted JWT) and its
+        // repo before minting the token.
+        state
+            .workspaces
+            .create(&gyre_domain::Workspace::new(
+                gyre_common::Id::new("ws-1"),
+                gyre_common::Id::new("default"),
+                "Clamp WS",
+                "clamp-ws",
+                0,
+            ))
+            .await
+            .unwrap();
+        state
+            .repos
+            .create(&gyre_domain::Repository::new(
+                gyre_common::Id::new("repo-1"),
+                gyre_common::Id::new("ws-1"),
+                "clamp-repo",
+                "/tmp/gyre-test-clamp-repo",
+                0,
+            ))
+            .await
+            .unwrap();
         let token = agent_token_for_task(&state, "task-own").await;
 
         // Explicit foreign workspace → 403.
@@ -739,8 +813,8 @@ mod tests {
                 Request::builder()
                     .method("PUT")
                     .uri(format!("/api/v1/tasks/{id}/status"))
-                    .header("content-type", "application/json")
                     .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -763,8 +837,8 @@ mod tests {
                 Request::builder()
                     .method("PUT")
                     .uri(format!("/api/v1/tasks/{id}/status"))
-                    .header("content-type", "application/json")
                     .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -791,7 +865,32 @@ mod tests {
         );
         let app = crate::api::api_router().with_state(state.clone());
 
-        // Create a task scoped to a known workspace/repo.
+        // Create a task scoped to a known workspace/repo. The workspace and
+        // repo rows must exist in the caller's tenant: create_task derives
+        // the task's scope fields through the caller-scope validators
+        // (task-102 F2), so the rows are seeded before the request.
+        state
+            .workspaces
+            .create(&gyre_domain::Workspace::new(
+                gyre_common::Id::new("ws-scope-1"),
+                gyre_common::Id::new("default"),
+                "Scoped",
+                "scoped",
+                1000,
+            ))
+            .await
+            .unwrap();
+        state
+            .repos
+            .create(&gyre_domain::Repository::new(
+                gyre_common::Id::new("repo-scope-1"),
+                gyre_common::Id::new("ws-scope-1"),
+                "scoped-repo",
+                "/tmp/scoped-repo.git".to_string(),
+                1000,
+            ))
+            .await
+            .unwrap();
         let body = serde_json::json!({
             "title": "Scoped transition probe",
             "workspace_id": "ws-scope-1",
@@ -803,8 +902,8 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/api/v1/tasks")
-                    .header("content-type", "application/json")
                     .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -821,8 +920,8 @@ mod tests {
                 Request::builder()
                     .method("PUT")
                     .uri(format!("/api/v1/tasks/{id}/status"))
-                    .header("content-type", "application/json")
                     .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -841,7 +940,12 @@ mod tests {
                 entity_type: Some("activity_event".to_string()),
                 workspace_id: Some("ws-scope-1".to_string()),
                 limit: 10,
-                tenant_id: String::new(),
+                // The indexed document's tenant resolves from the seeded
+                // workspace row ("default") at index time — the direct
+                // port call must carry the same tenant the production
+                // scope-derivation path (search_scope::derive_search_scope)
+                // would hand the adapter for a caller in that tenant.
+                tenant_id: "default".to_string(),
                 accessible_workspace_ids: None,
                 accessible_repo_ids: None,
             })
@@ -872,8 +976,8 @@ mod tests {
                 Request::builder()
                     .method("PUT")
                     .uri(format!("/api/v1/tasks/{id}/status"))
-                    .header("content-type", "application/json")
                     .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -910,8 +1014,8 @@ mod tests {
                 Request::builder()
                     .method("PUT")
                     .uri(format!("/api/v1/tasks/{id}"))
-                    .header("content-type", "application/json")
                     .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&assign_body).unwrap()))
                     .unwrap(),
             )
@@ -925,8 +1029,8 @@ mod tests {
                 Request::builder()
                     .method("PUT")
                     .uri(format!("/api/v1/tasks/{id}/status"))
-                    .header("content-type", "application/json")
                     .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )

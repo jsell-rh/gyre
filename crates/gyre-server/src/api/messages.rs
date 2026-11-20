@@ -103,6 +103,20 @@ pub async fn send_message(
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
     let ws_id = Id::new(&workspace_id);
 
+    // Preview agents (meta-spec reconciliation §5) are scratch work with no
+    // durable footprint: a Directed-tier message they send lands in a real
+    // production agent's inbox and stays there until acked — an influence
+    // channel and a durable trace that outlives the throwaway run. Same
+    // containment as the task/MR/complete refusals; the MCP twin
+    // gyre_message_send is denied in the mcp dispatch.
+    if crate::api::meta_specs::caller_is_preview_agent(&state, &auth).await {
+        return Err(ApiError::Forbidden(
+            "preview agents may not send messages — preview runs leave no durable \
+             footprint in production inboxes"
+                .to_string(),
+        ));
+    }
+
     // Parse destination from request body.
     let to = parse_destination(&req.to)?;
 

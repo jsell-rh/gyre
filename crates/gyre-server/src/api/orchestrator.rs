@@ -168,6 +168,20 @@ pub(crate) struct LaunchOutcome {
     pub compute_target_label: String,
 }
 
+/// Connection parameters for an SSH-launched orchestrator process —
+/// everything the out-of-band liveness probe in `launch_orchestrator_process`
+/// needs to rebuild the `SshTarget` connection (user, host, identity_file,
+/// port, ssh_path). A named struct, not a tuple: the monitor consumes it
+/// field-by-field, and the 5-element nested-Option tuple tripped
+/// clippy::type_complexity.
+struct SshLaunchProbe {
+    user: String,
+    host: String,
+    identity_file: Option<String>,
+    port: Option<u16>,
+    ssh_path: Option<String>,
+}
+
 /// Launch the orchestrator process on the workspace's compute target (§3:
 /// both orchestrator tiers use the workspace's configured compute target).
 ///
@@ -381,9 +395,10 @@ pub(crate) async fn launch_orchestrator_process(
     // Probe info for the exit monitor: it must probe liveness with the same
     // target type the process launched on (a container handle has no pid, so
     // a LocalTarget probe would report dead instantly). SSH liveness probes
-    // re-open a connection, so the monitor keeps the connection parameters.
+    // re-open a connection, so the monitor keeps the connection parameters
+    // (user, host, identity_file, port, ssh_path) on this struct.
     let mut launch_image: Option<String> = None;
-    let mut launch_ssh: Option<(String, String, Option<String>, Option<u16>)> = None;
+    let mut launch_ssh: Option<SshLaunchProbe> = None;
 
     // Launch on the resolved target. Mirrors api/spawn.rs: container via
     // ContainerTarget (G8 security defaults), ssh via SshTarget (with
@@ -413,18 +428,22 @@ pub(crate) async fn launch_orchestrator_process(
                 .as_str()
                 .unwrap_or("localhost")
                 .to_string();
-            launch_ssh = Some((
-                user.clone(),
-                host.clone(),
-                cfg.config["identity_file"].as_str().map(str::to_string),
-                cfg.config["port"].as_u64().map(|p| p as u16),
-            ));
+            launch_ssh = Some(SshLaunchProbe {
+                user: user.clone(),
+                host: host.clone(),
+                identity_file: cfg.config["identity_file"].as_str().map(str::to_string),
+                port: cfg.config["port"].as_u64().map(|p| p as u16),
+                ssh_path: cfg.config["ssh_path"].as_str().map(str::to_string),
+            });
             let mut ssh_target = gyre_adapters::compute::SshTarget::new(user, host);
             if let Some(id_file) = cfg.config["identity_file"].as_str() {
                 ssh_target = ssh_target.with_identity(id_file);
             }
             if let Some(port) = cfg.config["port"].as_u64() {
                 ssh_target = ssh_target.with_port(port as u16);
+            }
+            if let Some(bin) = cfg.config["ssh_path"].as_str() {
+                ssh_target = ssh_target.with_ssh_path(bin);
             }
             let container_mode = cfg.config["container_mode"].as_bool().unwrap_or(false);
             let ssh_spawn_config = if container_mode {
@@ -516,16 +535,19 @@ pub(crate) async fn launch_orchestrator_process(
                             // dead — the stale detector still owns
                             // heartbeat-based recovery.
                             match &launch_ssh {
-                                Some((user, host, id_file, port)) => {
+                                Some(probe_info) => {
                                     let mut probe = gyre_adapters::compute::SshTarget::new(
-                                        user.clone(),
-                                        host.clone(),
+                                        probe_info.user.clone(),
+                                        probe_info.host.clone(),
                                     );
-                                    if let Some(f) = id_file {
+                                    if let Some(f) = &probe_info.identity_file {
                                         probe = probe.with_identity(f.clone());
                                     }
-                                    if let Some(p) = port {
-                                        probe = probe.with_port(*p);
+                                    if let Some(p) = probe_info.port {
+                                        probe = probe.with_port(p);
+                                    }
+                                    if let Some(bin) = &probe_info.ssh_path {
+                                        probe = probe.with_ssh_path(bin.clone());
                                     }
                                     gyre_ports::ComputeTarget::is_alive(&probe, &handle).await
                                 }
@@ -875,8 +897,12 @@ fn deny_task_bound_agent(auth: &AuthenticatedAgent) -> Result<(), ApiError> {
 /// Spawn the single workspace orchestrator for a workspace.
 /// Returns 409 Conflict when a live workspace orchestrator already exists.
 ///
-/// Per-handler authorization: the workspace's tenant must match the
-/// caller's tenant (the route runs without middleware ABAC, so this is the
+/// Authorization: Admin or Developer role required (operator surface —
+/// the builtin agent-scoped-access policy would otherwise grant the
+/// Agent-role `write` on this non-repo-addressed route), preview-agent
+/// callers are refused (meta-spec reconciliation §5), and the workspace's
+/// tenant must match the caller's tenant (the route runs without
+/// middleware ABAC, so this is the
 /// only cross-tenant containment) — for EVERY caller, including the
 /// global system token. Unlike the repo-tier spawn route below, no
 /// bootstrap flow spawns a workspace orchestrator (platform-model.md §8
@@ -915,6 +941,37 @@ pub async fn spawn_workspace_orchestrator(
 ) -> Result<(StatusCode, Json<SpawnOrchestratorResponse>), ApiError> {
     deny_task_bound_agent(&auth)?;
 
+    // Role gate (task-206 review F1): spawning the workspace orchestrator is
+    // an operator action — it decomposes specs into tasks and spawns worker
+    // agents, durable ledger footprint. The route is not repo-addressed, so
+    // the agent-repo-scope containment cannot fire, and the builtin
+    // agent-scoped-access policy grants `write` on `*` to the Agent role —
+    // without this gate any agent JWT (a preview agent's included) could
+    // mint a workspace orchestrator.
+    if !(auth.roles.contains(&gyre_domain::UserRole::Admin)
+        || auth.roles.contains(&gyre_domain::UserRole::Developer))
+    {
+        crate::rbac::record_rbac_denied(
+            state.as_ref(),
+            &auth,
+            "Admin or Developer",
+            "POST /api/v1/workspaces/:id/orchestrator/spawn",
+        )
+        .await;
+        return Err(ApiError::Forbidden(
+            "Admin or Developer role required to spawn a workspace orchestrator".to_string(),
+        ));
+    }
+    // meta-spec reconciliation §5 (task-206 review F1): preview agents may
+    // not spawn orchestrators — throwaway preview scratch must leave no
+    // task/agent ledger footprint.
+    if crate::api::meta_specs::caller_is_preview_agent(&state, &auth).await {
+        return Err(ApiError::Forbidden(
+            "preview agents may not spawn orchestrators — preview runs leave no \
+             production footprint"
+                .to_string(),
+        ));
+    }
     // Tenant containment: load the workspace, compare its tenant against
     // the caller's resolved tenant. No system-principal bypass: the global
     // token's tenant is the bootstrap principal ("default"), and no
@@ -1116,7 +1173,8 @@ pub(crate) fn parse_priority(s: &str) -> gyre_domain::TaskPriority {
 /// bootstrap principal, not a tenant scope, and the documented dev-mode
 /// bootstrap (`gyre bootstrap --dev`, docs/cli.md) authenticates this
 /// route's step-8 repo-orchestrator spawn with that static token against
-/// the freshly created "dev" tenant. (The workspace-tier spawn route above
+/// the freshly created "dev" tenant (the role gate below passes for the
+/// system principal, which resolves as Admin). (The workspace-tier spawn route above
 /// has NO bypass: no bootstrap flow spawns a workspace orchestrator, so
 /// its containment holds for every caller.) The shared core re-checks
 /// containment for every caller (it is also the MCP spawn path, which runs
@@ -1143,6 +1201,42 @@ pub async fn spawn_repo_orchestrator(
 ) -> Result<(StatusCode, Json<SpawnOrchestratorResponse>), ApiError> {
     deny_task_bound_agent(&auth)?;
 
+    // Role gate (task-206 review F1, repo tier): spawning the repo
+    // orchestrator is an operator action — it decomposes specs into tasks
+    // and spawns worker agents, durable ledger footprint. The route is
+    // repo-addressed, but the builtin agent-scoped-access policy grants
+    // `write` on `*` to the Agent role, so repo ABAC alone cannot refuse a
+    // same-tenant agent JWT — a preview agent's included, which is
+    // same-tenant by construction for its target repo. Without this gate
+    // any agent JWT could mint a repo orchestrator and receive the minted
+    // orchestrator token. The workspace-tier twin route above carries the
+    // same gate; the dev bootstrap flow is unaffected (the global system
+    // token resolves as Admin).
+    if !(auth.roles.contains(&gyre_domain::UserRole::Admin)
+        || auth.roles.contains(&gyre_domain::UserRole::Developer))
+    {
+        crate::rbac::record_rbac_denied(
+            state.as_ref(),
+            &auth,
+            "Admin or Developer",
+            "POST /api/v1/repos/:id/orchestrator/spawn",
+        )
+        .await;
+        return Err(ApiError::Forbidden(
+            "Admin or Developer role required to spawn a repo orchestrator".to_string(),
+        ));
+    }
+    // meta-spec reconciliation §5 (task-206 review F1, repo tier): preview
+    // agents may not spawn orchestrators — throwaway preview scratch must
+    // leave no task/agent ledger footprint. Belt-and-braces with the role
+    // gate above in case a future role band grants Agent the tier.
+    if crate::api::meta_specs::caller_is_preview_agent(&state, &auth).await {
+        return Err(ApiError::Forbidden(
+            "preview agents may not spawn orchestrators — preview runs leave no \
+             production footprint"
+                .to_string(),
+        ));
+    }
     // G6: ABAC enforcement - repo access required to spawn its orchestrator.
     if let Err(reason) = crate::abac::check_repo_abac(&state, &repo_id, &auth).await {
         // task-104: AbacDenied audit event — per-handler repo-level ABAC

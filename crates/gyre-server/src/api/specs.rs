@@ -444,6 +444,23 @@ pub async fn approve_spec(
     let spec_path = encoded_path;
     let now = now_secs();
 
+    // meta-spec reconciliation §5 skip-ceremony row 1 ("Spec approval check
+    // — Skipped", task-206 review F1): a preview agent must not emit
+    // production SpecApprovalEvents. Its live JWT carries the Agent role —
+    // the minimum approving role — and the builtin agent-scoped-access
+    // policy's action set includes `approve`, so ABAC passes for specs
+    // resolving to the preview's target repo; without this guard,
+    // throwaway preview scratch could approve the spec it was pointed at
+    // (and any other spec in scope), minting a durable approval event the
+    // signal chain and merge gates then honor.
+    if crate::api::meta_specs::caller_is_preview_agent(&state, &auth).await {
+        return Err(ApiError::Forbidden(
+            "preview agents may not approve specs — spec approval is skipped ceremony \
+             for preview runs"
+                .to_string(),
+        ));
+    }
+
     // ReadOnly users cannot approve specs (M21.1-C).
     if auth.roles.contains(&gyre_domain::UserRole::ReadOnly)
         && !auth.roles.contains(&gyre_domain::UserRole::Admin)

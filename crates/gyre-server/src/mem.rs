@@ -113,6 +113,10 @@ impl GitOpsPort for NoopGitOps {
         Ok(())
     }
 
+    async fn force_remove_worktree(&self, _repo_path: &str, _worktree_path: &str) -> Result<()> {
+        Ok(())
+    }
+
     async fn list_worktrees(&self, _repo_path: &str) -> Result<Vec<String>> {
         Ok(vec![])
     }
@@ -139,6 +143,10 @@ impl GitOpsPort for NoopGitOps {
         _branch_name: &str,
         _from_ref: &str,
     ) -> Result<()> {
+        Ok(())
+    }
+
+    async fn delete_branch(&self, _repo_path: &str, _branch_name: &str) -> Result<()> {
         Ok(())
     }
 
@@ -314,6 +322,10 @@ impl GitOpsPort for ConfigurableGitOps {
         Ok(())
     }
 
+    async fn force_remove_worktree(&self, _repo_path: &str, _worktree_path: &str) -> Result<()> {
+        Ok(())
+    }
+
     async fn list_worktrees(&self, _repo_path: &str) -> Result<Vec<String>> {
         Ok(vec![])
     }
@@ -340,6 +352,10 @@ impl GitOpsPort for ConfigurableGitOps {
         _branch_name: &str,
         _from_ref: &str,
     ) -> Result<()> {
+        Ok(())
+    }
+
+    async fn delete_branch(&self, _repo_path: &str, _branch_name: &str) -> Result<()> {
         Ok(())
     }
 
@@ -5717,6 +5733,29 @@ pub fn test_state_with_git_ops(git_ops: Arc<dyn gyre_ports::GitOpsPort>) -> Arc<
         TestStateOverrides::default(),
     )
 }
+
+/// Build a test AppState with the meta-spec preview knobs pinned, so TTL expiry
+/// and the preview concurrency cap are testable without mutating the process
+/// environment (which every other test in this binary reads).
+#[cfg(test)]
+pub fn test_state_with_preview_config(
+    git_ops: Arc<dyn gyre_ports::GitOpsPort>,
+    preview_ttl_secs: u64,
+    preview_budget_max_concurrent: Option<u64>,
+) -> Arc<crate::AppState> {
+    let (workspaces, policies, ws_store) = shared_workspace_policy_pair(false);
+    let mut state = test_state_inner(
+        git_ops,
+        workspaces,
+        policies,
+        ws_store,
+        TestStateOverrides::default(),
+    );
+    let s = Arc::get_mut(&mut state).expect("test state is uniquely owned");
+    s.preview_ttl_secs = preview_ttl_secs;
+    s.preview_budget_max_concurrent = preview_budget_max_concurrent;
+    state
+}
 /// Optional port overrides for `test_state_inner`: each field replaces the
 /// default in-memory implementation when `Some`. Bundling them in one struct
 /// keeps the shared builder under clippy's `too_many_arguments` threshold.
@@ -5895,6 +5934,9 @@ fn test_state_inner(
             forge_key.clone(),
         )),
         agent_jwt_ttl_secs: 3600,
+        preview_ttl_secs: 86_400,
+        preview_jwt_ttl_secs: 1_800,
+        preview_budget_max_concurrent: None,
         users: Arc::new(MemUserRepository::default()),
         api_keys: Arc::new(MemApiKeyRepository::default()),
         jwt_config: None,

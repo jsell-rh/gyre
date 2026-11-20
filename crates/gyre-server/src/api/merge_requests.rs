@@ -312,6 +312,19 @@ pub async fn create_mr(
     auth: crate::auth::AuthenticatedAgent,
     Json(req): Json<CreateMrRequest>,
 ) -> Result<(StatusCode, Json<MrResponse>), ApiError> {
+    // Preview agents (meta-spec reconciliation §5) run with all ceremony
+    // stripped: no MRs — the preview branch is the entire deliverable. The
+    // agent runner withholds MR tools client-side, but allowedTools is
+    // advisory and `repository_id` here is caller-supplied, so without this
+    // gate a preview agent could open MRs on any repo its Agent-role ABAC
+    // policy allows — a scope escape beyond §5's "no MR" skip.
+    if crate::api::meta_specs::caller_is_preview_agent(&state, &auth).await {
+        return Err(ApiError::Forbidden(
+            "preview agents may not create merge requests — preview runs skip MR ceremony; \
+             the preview branch is the deliverable"
+                .to_string(),
+        ));
+    }
     // Validate spec_ref SHA if provided ("path@sha" format, SHA must be 40-char hex).
     if let Some(ref spec_ref) = req.spec_ref {
         if let Some(sha) = spec_ref.rsplit_once('@').map(|(_, s)| s) {
@@ -956,6 +969,17 @@ pub async fn transition_mr_status(
     Path(id): Path<String>,
     Json(req): Json<TransitionStatusRequest>,
 ) -> Result<Json<MrResponse>, ApiError> {
+    // Preview agents may not transition MR status (meta-spec reconciliation
+    // §5 skip-ceremony; same escape class as the create_mr guard above) —
+    // notably not to Approved, which would self-satisfy the human-review
+    // escape below, and not to Merged, which bypasses the merge queue.
+    if crate::api::meta_specs::caller_is_preview_agent(&state, &auth).await {
+        return Err(ApiError::Forbidden(
+            "preview agents may not transition merge request status — preview runs \
+             skip MR ceremony; the preview branch is the deliverable"
+                .to_string(),
+        ));
+    }
     let mut mr = state
         .merge_requests
         .find_by_id(&Id::new(&id))
@@ -1146,6 +1170,19 @@ pub async fn submit_review(
     Path(id): Path<String>,
     Json(req): Json<SubmitReviewRequest>,
 ) -> Result<(StatusCode, Json<ReviewResponse>), ApiError> {
+    // Preview agents (meta-spec reconciliation §5) run ceremony-free scratch
+    // work against an unvetted draft persona. A review they record is a
+    // real Review row on a real MR — it counts toward merge decisions
+    // wherever gate constraints are permissive (attestation level 0), the
+    // same reason approve_spec refuses preview-agent callers. The runner
+    // withholds review tools client-side, but allowedTools is advisory.
+    if crate::api::meta_specs::caller_is_preview_agent(&state, &auth).await {
+        return Err(ApiError::Forbidden(
+            "preview agents may not submit merge request reviews — preview runs \
+             skip review ceremony; the preview branch is the deliverable"
+                .to_string(),
+        ));
+    }
     let mr_id = Id::new(&id);
     let mr = state
         .merge_requests

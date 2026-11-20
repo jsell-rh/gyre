@@ -460,6 +460,15 @@ pub(crate) async fn kill_agent(
     // M22.2: release the budget active-agent slot this agent held.
     if was_active {
         crate::api::budget::decrement_active_agents(state, &agent.workspace_id.to_string()).await;
+        // Preview-agent slot bookkeeping: this kill released the slot AND
+        // consumed the process registry handle, so the agent's process is
+        // dying — its exit routes through finish_preview_agent, and the
+        // human's preview DELETE (or the GC sweep) runs teardown later.
+        // Both preview-owned paths must see the flag this writes or each
+        // of them releases the same slot a second time (exactly-once;
+        // decrement_active is MAX(0, n-1) — a double release permanently
+        // biases the counter down). No-op for normal agents.
+        crate::api::meta_specs::mark_preview_slot_released(state, &agent.id.to_string()).await;
     }
 
     let ws_id = agent.workspace_id.clone();
