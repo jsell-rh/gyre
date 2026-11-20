@@ -2955,6 +2955,57 @@ pub(crate) async fn launch_taskless_agent_process(
     }
     container_env.insert("GYRE_REPO_ID".to_string(), repo_id.to_string());
 
+    // identity-security.md Layer 1 (task-206 review repair): issue the
+    // session's X.509-SVID before dispatch, mirroring
+    // [`launch_agent_workload`]. Without it the preview agent's runner
+    // heartbeats — sent every 15 s with `GYRE_SVID_PEM` /
+    // `GYRE_STACK_HASH`, exactly as the preview prompt instructs — fail
+    // closed at `attest_session` ("session was never attested"), so
+    // `Agent::is_alive` falls back to `spawned_at` and the stale-agent
+    // detector flips a still-running preview agent to Stopped ~60 s into
+    // every real run. Issuance here is gated on the same spawn-time
+    // authorization evidence this path already holds (post-ABAC,
+    // post-budget, resolved compute target); a failed issuance fails the
+    // launch closed — an unattested workload is never spawned silently.
+    let compute_target_label = resolved_target_config
+        .as_ref()
+        .map(|c| c.id.clone())
+        .unwrap_or_else(|| "local".to_string());
+    let spiffe_role = crate::spiffe::agent_role(None, &agent.orchestrator_type);
+    let stack_evidence = match container_env.get("GYRE_STACK_HASH") {
+        Some(existing) if !existing.is_empty() => existing.clone(),
+        _ => {
+            crate::spiffe::resolve_session_stack_evidence(
+                state,
+                &agent.id.to_string(),
+                &compute_target_label,
+                None,
+                None,
+                Some(&spiffe_role),
+            )
+            .await
+        }
+    };
+    let svid = crate::spiffe::issue_session_svid(
+        state,
+        &agent.id.to_string(),
+        &spiffe_role,
+        &compute_target_label,
+        &stack_evidence,
+    )
+    .await
+    .map_err(ApiError::Internal)?;
+    // The workload presents this fingerprint on every heartbeat; it must
+    // be the exact evidence bound at issuance or verification fails.
+    container_env.insert("GYRE_STACK_HASH".to_string(), stack_evidence);
+    let svid_record = &svid.record;
+    container_env.insert("GYRE_SPIFFE_ID".to_string(), svid_record.spiffe_id.clone());
+    container_env.insert("GYRE_SVID_PEM".to_string(), svid_record.chain_pem.clone());
+    // The SVID private key is handed to the workload (the SVID = leaf +
+    // key, per the SPIFFE X.509-SVID specification); the server retains
+    // only the record above.
+    container_env.insert("GYRE_SVID_KEY".to_string(), svid.private_key_pem.clone());
+
     // Platform Model §7 Secrets Delivery: resolve scoped secrets from the
     // repository (tenant → workspace → repo → task, nearest scope wins)
     // and inject as GYRE_CRED_* env vars. Failure is logged and skipped: a

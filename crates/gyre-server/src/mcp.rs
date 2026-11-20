@@ -5075,7 +5075,15 @@ pub async fn mcp_handler(
             // gyre_message_send / gyre_message_ack are in the same class: a
             // preview agent injecting Directed-tier messages into production
             // inboxes (or acking around the exit hook's bulk-ack) leaves a
-            // durable footprint that outlives the throwaway run.
+            // durable footprint that outlives the throwaway run. The four
+            // orchestrator tools (gyre_spawn_worker,
+            // gyre_spawn_repo_orchestrator, gyre_cross_repo_task,
+            // gyre_decompose_spec) are in the same class too: they create tasks and spawn agents — ceremony a preview
+            // run must skip. They are currently unreachable for a preview
+            // caller only because preview JWTs carry no orchestrator claims
+            // (validate_tool_scope's token-shape check); the preview registry
+            // is the containment boundary, so they are denied here as
+            // defense-in-depth, not left to token shape.
             if is_agent_jwt(&auth)
                 && matches!(
                     tool_name,
@@ -5086,6 +5094,10 @@ pub async fn mcp_handler(
                         | "conversation_upload"
                         | "gyre_message_send"
                         | "gyre_message_ack"
+                        | "gyre_spawn_worker"
+                        | "gyre_spawn_repo_orchestrator"
+                        | "gyre_cross_repo_task"
+                        | "gyre_decompose_spec"
                 )
                 && crate::api::meta_specs::is_preview_agent(&state, &auth.agent_id).await
             {
@@ -11198,6 +11210,21 @@ concepts:
                 json!({ "to": {"agent": "some-real-agent"}, "kind": "status_update", "payload": {} }),
             ),
             ("gyre_message_ack", json!({ "message_id": "m-1" })),
+            // Orchestrator tools (task-206 review repair eb6937c4 F2): they
+            // create tasks / spawn agents — ceremony the preview run must
+            // skip. Defense-in-depth: a preview JWT carries no orchestrator
+            // claims, so token shape would also refuse them; the preview
+            // registry must refuse them on its own.
+            (
+                "gyre_spawn_worker",
+                json!({ "task_id": "t-1", "persona": "worker" }),
+            ),
+            ("gyre_spawn_repo_orchestrator", json!({ "repo_id": "r-1" })),
+            (
+                "gyre_cross_repo_task",
+                json!({ "title": "t", "repo_ids": ["r-1"] }),
+            ),
+            ("gyre_decompose_spec", json!({ "spec_path": "specs/s.md" })),
         ];
         for (tool, args) in ceremony_tools {
             let (_status, json) =
@@ -11285,9 +11312,13 @@ concepts:
             "cross-target record_activity must be denied for a preview agent; got: {text}"
         );
 
-        // Self-target heartbeat passes the dispatch guard (it then fails
-        // SVID verification in the handler — a different, expected error,
-        // never the preview denial).
+        // Self-target heartbeat passes the dispatch guard. This manually
+        // seeded preview row carries no SVID record, so the handler's SVID
+        // verification is the expected failure here — a different, expected
+        // error, never the preview denial. (A preview agent launched through
+        // the production path DOES carry a session SVID — see
+        // `preview_agent_heartbeats_keep_long_runs_active` in meta_specs.rs —
+        // so its self-heartbeat verifies and keeps the run alive.)
         let (_status, json) = mcp_post_with_token(
             app.clone(),
             tool_call(

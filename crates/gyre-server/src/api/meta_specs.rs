@@ -6699,7 +6699,211 @@ mod tests {
         .await;
     }
 
-    /// F2 regression: the §5 skip-ceremony must hold on the REST task and
+    /// Task-206 review repair (eb6937c4 F1): a preview agent's launch path
+    /// issues the session SVID, so the runner's 15 s self-heartbeats —
+    /// which present exactly `GYRE_SVID_PEM` + `GYRE_STACK_HASH` — verify
+    /// cryptographically against the real trust bundle and keep a >60 s
+    /// run Active. Before the fix the launch never issued an SVID, every
+    /// heartbeat failed closed at `attest_session` ("session was never
+    /// attested"), and the stale detector's default Pause arm flipped a
+    /// still-running preview agent to Stopped ~60 s into every real run
+    /// (spurious agent.failed, status reporting "complete" while agents
+    /// were still working, the UI stopping its poll and never fetching the
+    /// diff). This test drives the full causal chain: real launch, real
+    /// env capture, real heartbeat through the production router, real
+    /// stale-detector pass.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn preview_agent_heartbeats_keep_long_runs_active() {
+        let dir = tempfile::tempdir().unwrap();
+        let (app, state, repo_id) = preview_app(dir.path(), 86_400, None).await;
+
+        // The runner presents GYRE_SVID_PEM / GYRE_STACK_HASH verbatim from
+        // its environment (agent-runner.mjs sendHeartbeat). A PEM contains
+        // newlines, so capture the exact values to files — not a line-parsed
+        // `env` dump — and verify the heartbeat with precisely what the
+        // process received.
+        let svid_out = dir.path().join("agent-svid.pem");
+        let stack_out = dir.path().join("agent-stack.txt");
+        let script = dir.path().join("agent-entrypoint.sh");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nprintf '%s' \"$GYRE_SVID_PEM\" > {svid}\nprintf '%s' \"$GYRE_STACK_HASH\" > {stack}\nexec sleep 300\n",
+                svid = svid_out.display(),
+                stack = stack_out.display(),
+            ),
+        )
+        .unwrap();
+        make_executable(&script);
+
+        with_agent_command(script.to_str().unwrap(), || async {
+            let resp =
+                post_preview(&app, preview_body(&repo_id, &["specs/system/search.md"])).await;
+            assert_eq!(resp.status(), StatusCode::ACCEPTED);
+            let json = body_json(resp).await;
+            let preview_id = json["preview_id"].as_str().unwrap().to_string();
+            let agent_id = json["agents"][0]["agent_id"].as_str().unwrap().to_string();
+
+            // The launched process received the session SVID and the stack
+            // fingerprint bound at issuance (this fails on the old behavior:
+            // no SVID was ever injected, so the file stays empty).
+            let svid_pem = soon(|| {
+                std::fs::read_to_string(&svid_out)
+                    .ok()
+                    .filter(|s| !s.is_empty())
+            })
+            .await;
+            assert!(
+                svid_pem.contains("BEGIN CERTIFICATE"),
+                "GYRE_SVID_PEM must carry the issued chain; got: {svid_pem}"
+            );
+            let stack = soon(|| {
+                std::fs::read_to_string(&stack_out)
+                    .ok()
+                    .filter(|s| !s.is_empty())
+            })
+            .await;
+            assert!(
+                stack.starts_with("sha256:"),
+                "GYRE_STACK_HASH must carry the issuance-bound fingerprint; got: {stack}"
+            );
+            // The SVID record the heartbeat verifies against exists and is
+            // keyed to this agent (the record `attest_session` loads).
+            let record = state
+                .kv_store
+                .kv_get("spiffe_svids", &agent_id)
+                .await
+                .unwrap()
+                .expect("launch must persist the session SVID record");
+            assert!(
+                record.contains(stack.as_str()),
+                "record must bind the stack fingerprint"
+            );
+
+            // The runner's heartbeat — exactly what agent-runner.mjs sends
+            // every 15 s — driven through the production router (auth +
+            // ABAC middleware) with the preview agent's live JWT. Real
+            // crypto: chain validation against the published trust bundle,
+            // serial match, stack binding. On the old behavior this was a
+            // 403 "session was never attested" for every preview run.
+            crate::abac_middleware::seed_builtin_policies(&state)
+                .await
+                .expect("seed built-in policies");
+            let prod = crate::build_router(state.clone());
+            let jwt = state
+                .kv_store
+                .kv_get("agent_tokens", &agent_id)
+                .await
+                .unwrap()
+                .expect("preview agent token must be live");
+            let resp = prod
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("PUT")
+                        .uri(format!("/api/v1/agents/{agent_id}/heartbeat"))
+                        .header("authorization", format!("Bearer {jwt}"))
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({
+                                "svid": svid_pem,
+                                "stack_fingerprint": stack,
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::NO_CONTENT,
+                "the runner's self-heartbeat must verify for a preview agent"
+            );
+
+            // The heartbeat advanced the agent's liveness.
+            let row = state
+                .agents
+                .find_by_id(&gyre_common::Id::new(&agent_id))
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(
+                row.last_heartbeat.is_some(),
+                "a verified heartbeat must record last_heartbeat"
+            );
+
+            // A >60 s run is exactly this state: spawn older than the
+            // detector's window, liveness kept fresh by heartbeats. Age the
+            // spawn past the window and run the real detector — the
+            // still-running preview agent must stay Active (on the old
+            // behavior the missed heartbeats flipped it to Stopped with a
+            // spurious agent.failed event).
+            let mut aged = state
+                .agents
+                .find_by_id(&gyre_common::Id::new(&agent_id))
+                .await
+                .unwrap()
+                .unwrap();
+            aged.spawned_at = aged.spawned_at.saturating_sub(10_000);
+            state.agents.update(&aged).await.unwrap();
+            crate::stale_agents::run_once(&state).await.unwrap();
+            let row = state
+                .agents
+                .find_by_id(&gyre_common::Id::new(&agent_id))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                row.status,
+                gyre_domain::AgentStatus::Active,
+                "a heartbeating preview agent past the 60 s spawn window must stay Active"
+            );
+
+            // And the status surface reports the run as still running —
+            // the signal the UI polls for diff updates (§5 step 4).
+            let resp = get_preview_status(&app, &preview_id).await;
+            assert_eq!(resp.status(), StatusCode::OK);
+            let status = body_json(resp).await;
+            assert_eq!(status["state"], "running", "status: {status}");
+            assert_eq!(
+                status["agents"][0]["status"], "running",
+                "per-agent status must reflect the Active row: {status}"
+            );
+
+            // Cross-check the negative: a heartbeat presenting a tampered
+            // SVID is refused — the 204 above was real verification, not a
+            // bypass.
+            let resp = prod
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("PUT")
+                        .uri(format!("/api/v1/agents/{agent_id}/heartbeat"))
+                        .header("authorization", format!("Bearer {jwt}"))
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({
+                                "svid": "not-a-valid-svid",
+                                "stack_fingerprint": stack,
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::FORBIDDEN,
+                "a tampered SVID presentation must be refused"
+            );
+
+            let del = delete_preview(&app, &preview_id).await;
+            assert_eq!(del.status(), StatusCode::NO_CONTENT);
+        })
+        .await;
+    }
     /// merge-queue routes too. A preview agent's live JWT authenticates as
     /// UserRole::Agent and the builtin agent-scoped-access policy grants
     /// 'write' on '*' — without per-handler guards it can create/update task
