@@ -325,6 +325,7 @@ mod tests {
     async fn no_policies_grants_access() {
         let state = test_state();
         let auth = AuthenticatedAgent {
+            auth_mechanism: crate::auth::AuthMechanism::AgentToken,
             agent_id: "agent-1".to_string(),
             user_id: None,
             roles: vec![],
@@ -362,6 +363,7 @@ mod tests {
             .unwrap();
         // Global token / API key: jwt_claims is None → bypass.
         let auth = AuthenticatedAgent {
+            auth_mechanism: crate::auth::AuthMechanism::GlobalToken,
             agent_id: "system".to_string(),
             user_id: None,
             roles: vec![gyre_domain::UserRole::Admin],
@@ -397,6 +399,7 @@ mod tests {
             .await
             .unwrap();
         let auth = AuthenticatedAgent {
+            auth_mechanism: crate::auth::AuthMechanism::AgentToken,
             agent_id: "agent-1".to_string(),
             user_id: None,
             roles: vec![],
@@ -433,6 +436,7 @@ mod tests {
             .unwrap();
         // Agent only has scope for repo:A, not repo:B
         let auth = AuthenticatedAgent {
+            auth_mechanism: crate::auth::AuthMechanism::AgentToken,
             agent_id: "agent-1".to_string(),
             user_id: None,
             roles: vec![],
@@ -487,6 +491,7 @@ mod tests {
                 .unwrap();
         }
         let auth = AuthenticatedAgent {
+            auth_mechanism: crate::auth::AuthMechanism::AgentToken,
             agent_id: "agent-1".to_string(),
             user_id: None,
             roles: vec![],
@@ -521,6 +526,7 @@ mod tests {
 
         // Admin token (jwt_claims = None) — must succeed despite corrupt data.
         let admin_auth = AuthenticatedAgent {
+            auth_mechanism: crate::auth::AuthMechanism::GlobalToken,
             agent_id: "system".to_string(),
             user_id: None,
             roles: vec![gyre_domain::UserRole::Admin],
@@ -542,6 +548,7 @@ mod tests {
 
         // Non-admin token (jwt_claims = Some(...)) — must fail-closed.
         let agent_auth = AuthenticatedAgent {
+            auth_mechanism: crate::auth::AuthMechanism::AgentToken,
             agent_id: "agent-1".to_string(),
             user_id: None,
             roles: vec![],
