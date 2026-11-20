@@ -4,6 +4,7 @@ pub(crate) mod abac;
 pub mod abac_middleware;
 pub mod abandoned_branch;
 pub mod agent_audit;
+pub mod agent_sessions;
 pub mod aibom_spec_registry;
 pub mod api;
 pub mod attestation;
@@ -86,20 +87,20 @@ use gyre_common::message::{Destination, Message, MessageKind, MessageOrigin, Tel
 use gyre_common::Id;
 use gyre_common::WsMessage;
 use gyre_ports::{
-    AgentCommitRepository, AgentRepository, AnalyticsRepository, ApiKeyRepository,
-    AttestationRepository, AttestationStorage, AuditRepository, BreakingChangeRepository,
-    BudgetCallRepository, BudgetRepository, BudgetUsageRepository, ComputeTargetRepository,
-    ContainerAuditRepository, ConversationRepository, CostRepository, DependencyPolicyRepository,
-    DependencyRepository, GateResultRepository, GitOpsPort, GraphPort, JjOpsPort, KvJsonStore,
-    LlmConfigRepository, MergeQueueRepository, MergeRequestRepository, MetaSpecBindingRepository,
-    MetaSpecRepository, MetaSpecSetRepository, NetworkPeerRepository, NotificationRepository,
-    PersonaRepository, PolicyRepository, PreAcceptGate, ProcessHandle, PushGateRepository,
-    QualityGateRepository, RekorClient, RepoAccessOverrideRepository, RepoRepository,
-    ReviewRepository, RolloutPolicyRepository, SpawnLogRepository, SpecApprovalEventRepository,
-    SpecApprovalRepository, SpecLedgerRepository, SpecLifecycleRepository, SpecPolicyRepository,
-    TaskRepository, TeamRepository, TenantMetaSpecSetRepository, TraceRepository, UserRepository,
-    UserWorkspaceStateRepository, WorkspaceMembershipRepository, WorkspaceRepository,
-    WorktreeRepository,
+    AgentCommitRepository, AgentRepository, AgentSessionRepository, AnalyticsRepository,
+    ApiKeyRepository, AttestationRepository, AttestationStorage, AuditRepository,
+    BreakingChangeRepository, BudgetCallRepository, BudgetRepository, BudgetUsageRepository,
+    ComputeTargetRepository, ContainerAuditRepository, ConversationRepository, CostRepository,
+    DependencyPolicyRepository, DependencyRepository, GateResultRepository, GitOpsPort, GraphPort,
+    JjOpsPort, KvJsonStore, LlmConfigRepository, MergeQueueRepository, MergeRequestRepository,
+    MetaSpecBindingRepository, MetaSpecRepository, MetaSpecSetRepository, NetworkPeerRepository,
+    NotificationRepository, PersonaRepository, PolicyRepository, PreAcceptGate, ProcessHandle,
+    PushGateRepository, QualityGateRepository, RekorClient, RepoAccessOverrideRepository,
+    RepoRepository, ReviewRepository, RolloutPolicyRepository, SpawnLogRepository,
+    SpecApprovalEventRepository, SpecApprovalRepository, SpecLedgerRepository,
+    SpecLifecycleRepository, SpecPolicyRepository, TaskRepository, TeamRepository,
+    TenantMetaSpecSetRepository, TraceRepository, UserRepository, UserWorkspaceStateRepository,
+    WorkspaceMembershipRepository, WorkspaceRepository, WorktreeRepository,
 };
 use jobs::JobRegistry;
 use retention::RetentionStore;
@@ -241,6 +242,10 @@ pub struct AppState {
     pub git_ops: Arc<dyn GitOpsPort>,
     pub jj_ops: Arc<dyn JjOpsPort>,
     pub agent_commits: Arc<dyn AgentCommitRepository>,
+    /// Agent sessions (one per context window) — source-control.md
+    /// §Agent-to-Commit Tracking. Port-backed so sessions survive a
+    /// server restart.
+    pub agent_sessions: Arc<dyn AgentSessionRepository>,
     pub worktrees: Arc<dyn WorktreeRepository>,
     /// In-memory ring buffer for Telemetry-tier messages (replaces ActivityStore).
     pub telemetry_buffer: Arc<TelemetryBuffer>,
@@ -1930,6 +1935,10 @@ pub fn build_state(
         agent_commits: store!(
             dyn AgentCommitRepository,
             mem::MemAgentCommitRepository::default()
+        ),
+        agent_sessions: store!(
+            dyn AgentSessionRepository,
+            mem::MemAgentSessionRepository::default()
         ),
         worktrees: store!(
             dyn WorktreeRepository,

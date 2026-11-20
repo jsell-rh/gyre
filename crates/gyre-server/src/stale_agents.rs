@@ -60,6 +60,13 @@ pub async fn run_once(state: &Arc<AppState>) -> anyhow::Result<()> {
                 // `active_agents` slot (review F3).
                 let was_active = agent.status == AgentStatus::Active;
                 let _ = agent.transition_status(AgentStatus::Dead);
+                // source-control.md §Agent-to-Commit Tracking: the Dead
+                // transition terminates the agent's open session — records
+                // the worktree's real current branch and dirty state, and
+                // stamps ended_at. Must run BEFORE the worktree cleanup
+                // below, or the dirty-state observation would have nothing
+                // left to observe. Best-effort: never fails the kill.
+                crate::agent_sessions::end_session(state, &agent).await;
                 // agent.failed analytics event (analytics.md §Auto-Emitted
                 // Events: "Agent fails or is killed"). Heartbeat timeout is
                 // a failure; the admin kill and fail_agent paths are others.

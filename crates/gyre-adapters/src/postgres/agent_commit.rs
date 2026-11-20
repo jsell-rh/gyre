@@ -24,6 +24,8 @@ struct AgentCommitRow {
     parent_agent_id: Option<String>,
     model_context: Option<String>,
     attestation_level: Option<String>,
+    session_id: Option<String>,
+    files_changed: String,
 }
 
 impl From<AgentCommitRow> for AgentCommit {
@@ -40,6 +42,8 @@ impl From<AgentCommitRow> for AgentCommit {
             parent_agent_id: r.parent_agent_id,
             model_context: r.model_context,
             attestation_level: r.attestation_level,
+            session_id: r.session_id,
+            files_changed: serde_json::from_str(&r.files_changed).unwrap_or_default(),
         }
     }
 }
@@ -58,6 +62,8 @@ struct AgentCommitRecord<'a> {
     parent_agent_id: Option<&'a str>,
     model_context: Option<&'a str>,
     attestation_level: Option<&'a str>,
+    session_id: Option<&'a str>,
+    files_changed: String,
 }
 
 impl<'a> From<&'a AgentCommit> for AgentCommitRecord<'a> {
@@ -74,6 +80,9 @@ impl<'a> From<&'a AgentCommit> for AgentCommitRecord<'a> {
             parent_agent_id: m.parent_agent_id.as_deref(),
             model_context: m.model_context.as_deref(),
             attestation_level: m.attestation_level.as_deref(),
+            session_id: m.session_id.as_deref(),
+            files_changed: serde_json::to_string(&m.files_changed)
+                .unwrap_or_else(|_| "[]".to_string()),
         }
     }
 }
@@ -151,6 +160,47 @@ impl AgentCommitRepository for PgStorage {
                 .load::<AgentCommitRow>(&mut *conn)
                 .context("find agent_commits by task")?;
             Ok(rows.into_iter().map(AgentCommit::from).collect())
+        })
+        .await?
+    }
+
+    async fn find_by_session(&self, session_id: &Id) -> Result<Vec<AgentCommit>> {
+        let pool = Arc::clone(&self.pool);
+        let session_id = session_id.to_string();
+        tokio::task::spawn_blocking(move || -> Result<Vec<AgentCommit>> {
+            let mut conn = pool.get().context("get db connection")?;
+            let rows = agent_commits::table
+                .filter(agent_commits::session_id.eq(session_id.as_str()))
+                // Chronological (oldest first): the session-to-commit
+                // mapping is ordered by when each commit landed.
+                .order(agent_commits::timestamp.asc())
+                .then_order_by(agent_commits::id.asc())
+                .load::<AgentCommitRow>(&mut *conn)
+                .context("find agent_commits by session")?;
+            Ok(rows.into_iter().map(AgentCommit::from).collect())
+        })
+        .await?
+    }
+
+    async fn find_by_file(&self, repo_id: &Id, path: &str) -> Result<Vec<AgentCommit>> {
+        let pool = Arc::clone(&self.pool);
+        let repo_id = repo_id.clone();
+        let path = path.to_string();
+        tokio::task::spawn_blocking(move || -> Result<Vec<AgentCommit>> {
+            let mut conn = pool.get().context("get db connection")?;
+            let rows = agent_commits::table
+                .filter(agent_commits::repository_id.eq(repo_id.as_str()))
+                .order(agent_commits::timestamp.asc())
+                .load::<AgentCommitRow>(&mut *conn)
+                .context("find agent_commits by repo for file filter")?;
+            // files_changed is a JSON array of paths — match exactly, in
+            // Rust, so a path that is a substring of another (or contains
+            // LIKE pattern characters) never produces a false match.
+            Ok(rows
+                .into_iter()
+                .map(AgentCommit::from)
+                .filter(|ac| ac.files_changed.iter().any(|f| f == &path))
+                .collect())
         })
         .await?
     }
