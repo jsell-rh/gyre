@@ -794,6 +794,21 @@ pub(crate) async fn relaunch_agent_session(
     .await;
     let wl_stack_hash = Some(respawn_stack_evidence.clone());
     let wl_compute_target = respawn_compute_target_label.clone();
+    // `wl_hostname` — same rule as the first-spawn mint
+    // (api/spawn.rs): the hostname of the COMPUTE TARGET, i.e. the
+    // configured remote host for an Ssh target — never the forge
+    // server's own hostname — the local host for local/Container
+    // spawns, and honestly absent for Kubernetes (no single host fact
+    // exists at mint time).
+    let wl_hostname = match resolved_ct_entity.as_ref() {
+        Some(e) if e.target_type == gyre_domain::ComputeTargetType::Ssh => e
+            .config
+            .get("host")
+            .and_then(|h| h.as_str())
+            .map(|h| h.to_string()),
+        Some(e) if e.target_type == gyre_domain::ComputeTargetType::Kubernetes => None,
+        _ => Some(crate::workload_attestation::read_hostname()),
+    };
     let token = state
         .agent_signing_key
         .mint_worker_scoped(
@@ -819,7 +834,7 @@ pub(crate) async fn relaunch_agent_session(
                         gyre_domain::ComputeTargetType::Kubernetes => 1,
                     }),
             ),
-            Some(crate::workload_attestation::read_hostname()),
+            wl_hostname,
             Some(wl_compute_target),
             wl_stack_hash,
             wl_image_hash,
@@ -965,6 +980,169 @@ mod tests {
     fn default_max_iterations_matches_spec() {
         // agent-runtime.md §1 Phase 7: "default: 10".
         assert_eq!(DEFAULT_MAX_ITERATIONS, 10);
+    }
+
+    /// AC (task-263, identity-security.md §Task-Scoped JWT Claims): the
+    /// re-spawn mint carries the agent's stack fingerprint
+    /// (`wl_stack_hash` AND its `stack_hash` alias), the persona slug
+    /// bound to the agent row, the `agent:<uuid>` `sub`, and the task
+    /// claim — every fact knowable at re-spawn mint time. Under the
+    /// Layer-1 SPIFFE design (task-261, merged with this task) the
+    /// session stack evidence is resolved once
+    /// (`spiffe::resolve_session_stack_evidence` reads the agent's
+    /// registered stack first) and the SAME value is bound to the mint
+    /// claims, the session SVID, and the fresh workload-attestation
+    /// record written at launch.
+    #[tokio::test]
+    async fn respawn_mint_carries_stored_stack_fingerprint() {
+        let state = test_state();
+        let ws = gyre_domain::Workspace::new(Id::new("ws-fp"), Id::new("t1"), "Ws", "ws-fp", 0);
+        state.workspaces.create(&ws).await.unwrap();
+        state
+            .repos
+            .create(&gyre_domain::Repository::new(
+                Id::new("r-fp"),
+                Id::new("ws-fp"),
+                "r-fp",
+                "/tmp/gyre-ralph-test-r-fp",
+                0,
+            ))
+            .await
+            .unwrap();
+        let mut task = Task::new(Id::new("task-fp"), "stack fingerprint task", 0);
+        task.workspace_id = Id::new("ws-fp");
+        task.repo_id = Id::new("r-fp");
+        task.assigned_to = Some(Id::new("agent-fp"));
+        task.transition_status(TaskStatus::InProgress).unwrap();
+        state.tasks.create(&task).await.unwrap();
+
+        // Persona bound to the agent row (relaunch fails closed without
+        // an Approved binding when persona_id is set).
+        let mut persona = gyre_domain::Persona::new(
+            Id::new("persona-fp"),
+            "Persona fp",
+            "fp-worker",
+            gyre_domain::PersonaScope::Tenant(Id::new("t1")),
+            "be swift",
+            0,
+        );
+        persona.approval_status = gyre_domain::PersonaApprovalStatus::Approved;
+        state.personas.create(&persona).await.unwrap();
+
+        let mut agent = Agent::new(Id::new("agent-fp"), "worker-fp", 0);
+        agent.transition_status(AgentStatus::Active).unwrap();
+        agent.assign_task(task.id.clone());
+        agent.workspace_id = Id::new("ws-fp");
+        agent.spawned_by = Some("system".to_string());
+        agent.persona_id = Some(Id::new("persona-fp"));
+        state.agents.create(&agent).await.unwrap();
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let worktree_path = tmp.path().join("wt");
+        std::fs::create_dir_all(&worktree_path).unwrap();
+        state
+            .worktrees
+            .create(&AgentWorktree::new(
+                Id::new("wt-fp"),
+                agent.id.clone(),
+                Id::new("r-fp"),
+                Some(task.id.clone()),
+                "task/fp",
+                worktree_path.to_str().unwrap(),
+                0,
+            ))
+            .await
+            .unwrap();
+
+        // The previous iteration's attested stack: the agent's registered
+        // stack (M14.1 `agent_stacks` KV) — the self-reported, fingerprinted
+        // runtime configuration. `resolve_session_stack_evidence` reads it
+        // first, so the re-spawn mint, the session SVID, and the fresh
+        // workload-attestation record all carry this fingerprint.
+        let registered = gyre_domain::stack::AgentStack {
+            agents_md_hash: "agents-md-hash-fp".to_string(),
+            hooks: vec![],
+            mcp_servers: vec![],
+            model: "test-model".to_string(),
+            cli_version: "1.2.3".to_string(),
+            settings_hash: "settings-hash-fp".to_string(),
+            persona_hash: None,
+        };
+        let registered_fingerprint = registered.fingerprint();
+        state
+            .kv_store
+            .kv_set(
+                "agent_stacks",
+                "agent-fp",
+                serde_json::to_string(&registered).unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // The launch needs a runnable command (no container runtime in
+        // the test sandbox).
+        let script = tmp.path().join("agent.sh");
+        std::fs::write(&script, "#!/bin/sh\nsleep 30\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        std::env::set_var("GYRE_AGENT_COMMAND", &script);
+
+        let result = relaunch_agent_session(&state, &agent, &task).await;
+        std::env::remove_var("GYRE_AGENT_COMMAND");
+        result.expect("re-spawn must launch");
+
+        let token = state
+            .kv_store
+            .kv_get("agent_tokens", "agent-fp")
+            .await
+            .unwrap()
+            .expect("re-spawn stores the fresh token");
+        let claims = state
+            .agent_signing_key
+            .validate(&token, &state.base_url)
+            .expect("re-spawn JWT must validate");
+        assert_eq!(claims.sub, "agent:agent-fp");
+        assert_eq!(claims.task_id, "task-fp");
+        assert_eq!(
+            claims.wl_stack_hash.as_deref(),
+            Some(registered_fingerprint.as_str()),
+            "wl_stack_hash carries the agent's registered stack fingerprint"
+        );
+        assert_eq!(
+            claims.stack_hash.as_deref(),
+            Some(registered_fingerprint.as_str()),
+            "stack_hash alias is populated from the same fingerprint"
+        );
+        // The fresh workload-attestation record (written at launch from
+        // the SVID-bound evidence) stores the same fingerprint — the
+        // minted claim equals the stored attestation fact.
+        let fresh_att_json = state
+            .kv_store
+            .kv_get("workload_attestations", "agent-fp")
+            .await
+            .unwrap()
+            .expect("re-spawn launch wrote a fresh attestation record");
+        let fresh_att: crate::workload_attestation::WorkloadAttestation =
+            serde_json::from_str(&fresh_att_json).unwrap();
+        assert_eq!(
+            fresh_att.stack_fingerprint, registered_fingerprint,
+            "the stored workload-attestation fingerprint equals the minted \
+             stack hash"
+        );
+        assert_eq!(
+            claims.persona.as_deref(),
+            Some("fp-worker"),
+            "persona comes from the agent row's bound persona"
+        );
+        // No compute target resolved for this workspace → raw local
+        // subprocess, attestation level 1.
+        assert_eq!(claims.attestation_level, Some(1));
+        // The previous process's pid is a stale fact for the new process:
+        // not minted (it is recorded fresh post-launch).
+        assert!(claims.wl_pid.is_none());
     }
 
     /// Fixture: workspace ws-1, repo r-1, an Idle agent (iteration 0) with a

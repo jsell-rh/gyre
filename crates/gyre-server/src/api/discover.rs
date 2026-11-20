@@ -134,6 +134,7 @@ mod tests {
                     .method("PUT")
                     .uri(format!("/api/v1/agents/{id}/status"))
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&status_body).unwrap()))
                     .unwrap(),
             )
