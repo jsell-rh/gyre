@@ -3,7 +3,7 @@ title: "Admin Panel completion: SOPS/Vault secret backends, durable job history 
 spec_ref: "Spec gap spec-5b647653a4554eea3e93ac19 / admin-panel-remaining-gap / e61ffd082155"
 depends_on: []
 progress: ready-for-review
-commits: ["d6f32bd0269314f9ee552ed72df33322b0fe2238", "cd2f616e3ebd96addab2dcaf78242d31c58efc04", "808e3c10c035c9fc6fe8c5ee96d474fc5468acf3", "b979fefeeb7a6bb8340ccd85c64b467e0f46c553", "210dfa61bc1ea637a29a79c26af80746b2fb002c", "3ebd143d29eb52bb2bc0bd748f60fe52fa960f66", "9b81c9816f13a3d637057a6c3149c9be92f38a3c", "0fda00bfe9860c8c8b66ea1235f0d2e3251df67a", "1bc00b6cb9212e6ac6dfc7c764afede98ae8fd64", "a2b31ac19c05310ebd05a072ddde1acf0c51f2ec", "f6e31cf57779a7e117f5a0b9bd75720aed90ca56", "b101d27aafb7bde0907a568e7bb8a3ffbdd3ae67", "ee253c8854f16664f91d16171e08414effc314b7", "db320101b1540a35cf9986408e70ac46008b1982"]
+commits: ["4c71fe4827a62f792912b4e5ab257a50c1882860", "d6f32bd0269314f9ee552ed72df33322b0fe2238", "cd2f616e3ebd96addab2dcaf78242d31c58efc04", "808e3c10c035c9fc6fe8c5ee96d474fc5468acf3", "b979fefeeb7a6bb8340ccd85c64b467e0f46c553", "210dfa61bc1ea637a29a79c26af80746b2fb002c", "3ebd143d29eb52bb2bc0bd748f60fe52fa960f66", "9b81c9816f13a3d637057a6c3149c9be92f38a3c", "0fda00bfe9860c8c8b66ea1235f0d2e3251df67a", "1bc00b6cb9212e6ac6dfc7c764afede98ae8fd64", "a2b31ac19c05310ebd05a072ddde1acf0c51f2ec", "f6e31cf57779a7e117f5a0b9bd75720aed90ca56", "b101d27aafb7bde0907a568e7bb8a3ffbdd3ae67", "ee253c8854f16664f91d16171e08414effc314b7", "db320101b1540a35cf9986408e70ac46008b1982"]
 ---
 
 ## Required behavior
@@ -126,10 +126,8 @@ The eight admin-panel deliverables (SOPS/Vault secret backends, durable
 job history with logs, maintenance jobs, complete token refresh, the
 OAuth enrollment flow, remote-agent cleanup, the server-log viewer, the
 durable searchable admin audit) shipped in the earlier rounds on this
-branch and carried through two base rebases (`7add1d8d`, `f54b1057`),
-behavior preserved. This round repairs the ten findings of the
-independent review (`41d97abf`, checkpoint `c19d16de`) in seven
-conventional commits, all recorded in the frontmatter:
+branch and are carried through three base merges (`7add1d8d`,
+`f54b1057`, `5c155180` onto base `cae04d59`), behavior preserved.
 
 ### Review-repair round (commits `9b81c981`…`d6f32bd0`)
 
@@ -177,22 +175,42 @@ conventional commits, all recorded in the frontmatter:
    outcome/since/until + q), with the `outcome` filter added to
    `GET /admin/audit` (validated like `/audit/events`).
 
+### Verification-repair round (commit `4c71fe48`)
+
+The independent verification run (`checks.sh`, candidate `3ce715c3`)
+failed on ten clippy findings, all inside this task's new files.
+`4c71fe48` clears every one with behavior-preserving rewrites:
+`AgeIdentity::from_str` renamed to `parse` (`should_implement_trait`,
+all 10 call sites updated), identity `.into()` removals in
+`api/oauth.rs` (`useless_conversion`), `&token` → `token` in
+`api/spawn.rs` (`needless_borrow`), `Ok(x.transpose()?)` →
+`x.transpose()` in `postgres/secret.rs`, char-array `find` patterns in
+`sops/mod.rs`, redundant test-module trait imports dropped in
+`sqlite/{job_run,agent_instance,oauth_state}.rs` (the traits are
+already in scope via `use super::*`), `== false` → `!` in
+`sqlite/secret.rs`, and a `NamespaceEvent` type alias plus a rewrapped
+module doc in `vault/tests.rs`. No route, migration, port, or behavior
+change; probe evidence in
+`/tmp/stage/review-evidence/verification-repair-round.md`.
+
 ### Test evidence
 
 Executed in this sandbox (passing): `cargo test -p gyre-adapters
-vault::` (12, including the new policy-denial scoping and atomic
-replace tests), `compute::local` (4, including dead-pid idempotence),
-`sqlite::audit` (22), `sqlite::secret` (23); web
-`vitest run src/__tests__/TenantSettings.test.js` (61, including the
-new since/outcome/scope filter tests). `cargo check -p gyre-server -p
-gyre-adapters --all-targets` clean; `cargo fmt --check` clean. All
-mechanical invariant scripts re-run and passing with no new exemption
-entries (arch, migration versions/portability, mem-port-contracts,
+--lib -- sops vault secret job_run agent_instance oauth_state` (68,
+re-run after the verification repair: SOPS document format and
+roundtrip, legacy AES-GCM upgrade, Vault KV v2 / JWT-auth /
+policy-denial / fail-closed, job-run / agent-instance / oauth-state
+SQLite adapters). After the repair: `cargo clippy -p gyre-adapters
+--all-targets` and `cargo clippy -p gyre-server --all-targets` both
+exit 0, with a scripted mapping of every remaining warning against the
+task-273 diff line ranges confirming ZERO warnings inside the task's
+changed lines (the remainder is pre-existing debt in untouched files,
+identical at base `cae04d59`). `rustfmt --check` clean on every touched
+file. All mechanical invariant scripts re-run and passing with no new
+exemption entries (arch, migration versions/portability, mem-port-contracts,
 in-memory-state-stores, abac-route-registry, unbounded-external-http,
-inert-enforcement, lossy-secret-conversion, byte-slice-truncation,
-relative-path-defaults, fail-open-ref-resolution,
-fabricated/scope-literal defaults, dead-message-kinds,
-forwarded-header-trust, mcp-write-tools, abac-exempt-handlers).
+byte-slice-truncation, lossy-secret-conversion,
+task-commit-attribution).
 
 gyre-server test *execution* is deferred to the independent verifier
 per the 4 GiB build budget; the required module filters (jobs,
