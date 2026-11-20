@@ -56,6 +56,8 @@ async fn spawn_vault() -> (String, VaultStore, Observed) {
     // Per-handler clones: each `move` route closure needs its own Arc.
     let ns_data_read = Arc::clone(&namespaces);
     let ns_delete = Arc::clone(&namespaces);
+    let ns_approle_login = Arc::clone(&namespaces);
+    let ns_jwt_login = Arc::clone(&namespaces);
     let reject_reads = Arc::clone(&reject_approle_upto);
     let reject_writes = Arc::clone(&reject_approle_upto);
     let reject_list = Arc::clone(&reject_approle_upto);
@@ -83,9 +85,17 @@ async fn spawn_vault() -> (String, VaultStore, Observed) {
     let app = axum::Router::new()
         .route(
             "/v1/auth/approle/login",
-            post(move || {
+            post(move |headers: axum::http::HeaderMap| {
                 let generation = approle_gen_login.clone();
+                let namespaces = Arc::clone(&ns_approle_login);
                 async move {
+                    namespaces.lock().await.push((
+                        "approle_login",
+                        headers
+                            .get("X-Vault-Namespace")
+                            .and_then(|n| n.to_str().ok())
+                            .map(str::to_string),
+                    ));
                     let n = generation.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     axum::Json(serde_json::json!({
                         "auth": { "client_token": format!("approle-token-{n}") }
@@ -95,9 +105,17 @@ async fn spawn_vault() -> (String, VaultStore, Observed) {
         )
         .route(
             "/v1/auth/jwt/login",
-            post(move |body: String| {
+            post(move |headers: axum::http::HeaderMap, body: String| {
                 let jwt_logins = Arc::clone(&jwt_logins);
+                let namespaces = Arc::clone(&ns_jwt_login);
                 async move {
+                    namespaces.lock().await.push((
+                        "jwt_login",
+                        headers
+                            .get("X-Vault-Namespace")
+                            .and_then(|n| n.to_str().ok())
+                            .map(str::to_string),
+                    ));
                     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
                     let jwt = v["jwt"].as_str().unwrap_or_default().to_string();
                     jwt_logins.lock().await.push(jwt);
@@ -684,19 +702,29 @@ async fn create_rejects_path_unsafe_names() {
 /// header must ride EVERY server-token request — index reads and deletes
 /// previously dropped it, so reads failed OPEN (Ok(None) for a secret
 /// that exists in the real namespace) and deletes 404'd (treated as
-/// success) while the secret survived.
+/// success) while the secret survived. The AppRole and JWT LOGIN
+/// requests must carry it too: a namespace-less login authenticates
+/// against the root namespace while every KV operation targets the
+/// configured one, so both the admin write path and agent-scoped
+/// resolution would fail with a namespace configured (Vault Enterprise).
 #[tokio::test]
 async fn namespace_header_rides_index_reads_and_deletes() {
     let (addr, _store, observed) = spawn_vault().await;
     let mut cfg = config(&addr);
     cfg.namespace = Some("ns-1".to_string());
+    // AppRole (not a static token) so the admin write path performs a
+    // real login, and the agent resolution below performs a JWT login.
+    cfg.token = None;
+    cfg.role_id = Some("role".to_string());
+    cfg.secret_id = Some("secret".to_string());
     let repo = VaultSecretRepository::new(cfg).unwrap();
 
     let secret = sample_secret("NS", SecretScope::Repo, "repo-1", "t1");
     repo.create(&secret, b"v").await.unwrap();
 
-    // get_value performs an index read + a data read; list_by_scope a
-    // metadata LIST + data reads; delete two metadata DELETEs.
+    // get_value performs an AppRole login + an index read + a data read;
+    // list_by_scope a metadata LIST + data reads; delete two metadata
+    // DELETEs; resolve_for_agent_as a JWT login + reads.
     assert_eq!(
         repo.get_value(&secret.id, "t1").await.unwrap(),
         Some(b"v".to_vec())
@@ -705,6 +733,16 @@ async fn namespace_header_rides_index_reads_and_deletes() {
         .await
         .unwrap();
     repo.delete(&secret.id, "t1").await.unwrap();
+    // Re-create for the agent-scoped resolution (JWT login path).
+    repo.create(&secret, b"v").await.unwrap();
+    let resolved = repo
+        .resolve_for_agent_as("t1", "ws-1", "repo-1", None, "agent-jwt-ns")
+        .await
+        .unwrap();
+    assert!(
+        resolved.iter().any(|(name, _)| name == "NS"),
+        "agent resolution must return the secret: {resolved:?}"
+    );
 
     let namespaces = observed.namespaces.lock().await;
     assert!(
@@ -720,6 +758,14 @@ async fn namespace_header_rides_index_reads_and_deletes() {
     assert!(
         namespaces.iter().any(|(op, _)| *op == "delete"),
         "deletes must be observed: {namespaces:?}"
+    );
+    assert!(
+        namespaces.iter().any(|(op, _)| *op == "approle_login"),
+        "the AppRole login must be observed (and namespaced): {namespaces:?}"
+    );
+    assert!(
+        namespaces.iter().any(|(op, _)| *op == "jwt_login"),
+        "the JWT login must be observed (and namespaced): {namespaces:?}"
     );
 }
 
