@@ -29,6 +29,7 @@ pub mod dependency;
 pub mod extractor;
 pub mod git_types;
 pub mod go_extractor;
+pub mod graph_diff;
 pub mod invitation;
 pub mod llm_config;
 pub mod merge_attestation;

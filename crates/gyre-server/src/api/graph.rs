@@ -294,7 +294,21 @@ pub struct GraphDiffResponse {
     pub from: String,
     pub to: String,
     pub message: String,
+    /// Node-level change set between the two boundary commits, computed from
+    /// real per-commit repository state via the shared two-commit graph-diff
+    /// core (qualified-name identity). `None` when a boundary ref could not
+    /// be resolved (see `message`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nodes: Option<GraphDiffNodeChangeSet>,
     pub deltas: Vec<DeltaResponse>,
+}
+
+/// Node-level change set (qualified names) between two boundary commits.
+#[derive(Serialize)]
+pub struct GraphDiffNodeChangeSet {
+    pub added: Vec<String>,
+    pub removed: Vec<String>,
+    pub modified: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -1159,9 +1173,16 @@ pub async fn get_graph_timeline(
 }
 
 /// GET /api/v1/repos/{id}/graph/diff
-/// Returns the graph diff between two git commit SHAs (?from=&to=).
+/// Returns the graph diff between two commits (?from=&to=).
 ///
-/// Returns deltas as an approximation; full diff requires the extraction pipeline.
+/// The node-level change set (`nodes`) is computed from real per-commit
+/// repository state via the shared two-commit graph-diff core
+/// (crates/gyre-server/src/graph_diff_core.rs — the same production path the
+/// view-query `Scope::Diff` consumes): each boundary ref is resolved against
+/// the repo's real git, each boundary commit's tree is snapshotted and
+/// extracted, and nodes are compared by qualified-name identity.
+/// `deltas` remains the recorded per-extraction delta history (realized-model
+/// §3 timeline records).
 pub async fn get_graph_diff(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -1172,6 +1193,50 @@ pub async fn get_graph_diff(
 
     let from = q.from.unwrap_or_else(|| "HEAD~1".to_string());
     let to = q.to.unwrap_or_else(|| "HEAD".to_string());
+
+    // Shared two-commit graph-diff core (identical production path to the
+    // view-query diff scope).
+    let repo = state
+        .repos
+        .find_by_id(&repo_id)
+        .await
+        .map_err(ApiError::Internal)?
+        .ok_or_else(|| ApiError::NotFound(format!("repo {id} not found")))?;
+    let outcome = if repo.path.is_empty() {
+        crate::graph_diff_core::CommitRangeDiffOutcome {
+            diff: None,
+            warnings: vec![format!(
+                "Diff could not be computed: repo '{id}' has no git storage path."
+            )],
+        }
+    } else {
+        crate::graph_diff_core::compute_commit_range_diff(&repo.path, &repo_id, &from, &to).await
+    };
+
+    let (message, nodes) = match &outcome.diff {
+        Some(d) => {
+            let cs = &d.change_set;
+            let short = |sha: &str| sha.chars().take(12).collect::<String>();
+            (
+                format!(
+                    "node-level change set computed from per-commit extraction between \
+                     {} (from) and {} (to): {} added, {} removed, {} modified; \
+                     deltas below are the recorded extraction history",
+                    short(&d.from_sha),
+                    short(&d.to_sha),
+                    cs.added.len(),
+                    cs.removed.len(),
+                    cs.modified.len()
+                ),
+                Some(GraphDiffNodeChangeSet {
+                    added: cs.added.clone(),
+                    removed: cs.removed.clone(),
+                    modified: cs.modified.clone(),
+                }),
+            )
+        }
+        None => (outcome.warnings.join(" "), None),
+    };
 
     let deltas = state
         .graph_store
@@ -1195,7 +1260,8 @@ pub async fn get_graph_diff(
     Ok(Json(GraphDiffResponse {
         from,
         to,
-        message: "full diff requires extraction pipeline; returning all deltas".to_string(),
+        message,
+        nodes,
         deltas: delta_responses,
     }))
 }
@@ -2784,7 +2850,21 @@ pub async fn view_query_dryrun(
         .map_err(ApiError::Internal)?;
 
     let selected = req.selected_node_id.as_deref();
-    let result = gyre_domain::view_query_resolver::dry_run(&req.query, &nodes, &edges, selected);
+    // SHA/ref-based Diff scopes resolve their change set from the repo's
+    // real git via the shared two-commit graph-diff core (the same path that
+    // serves GET /repos/{id}/graph/diff) and inject it into the pure domain
+    // resolver — no git knowledge enters gyre-domain.
+    let diff_changes =
+        crate::graph_diff_core::resolve_view_query_diff_changes_for_state(&state, &id, &req.query)
+            .await;
+    let result = gyre_domain::view_query_resolver::dry_run_with_diff_change_set(
+        &req.query,
+        &nodes,
+        &edges,
+        selected,
+        None,
+        diff_changes.as_ref(),
+    );
 
     Ok(Json(result))
 }
