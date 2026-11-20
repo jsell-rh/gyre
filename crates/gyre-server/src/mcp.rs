@@ -1863,6 +1863,14 @@ async fn handle_update_task(state: &std::sync::Arc<AppState>, args: &Value) -> V
                 crate::reconciliation::on_reconciliation_task_terminal(state, &task.workspace_id)
                     .await;
             }
+            // agent-workflow.md §Parallel Work via Worktrees: worktrees
+            // are ephemeral — Cancelled is terminal, so the cancelled
+            // task's agents have their worktrees torn down via the same
+            // shared helper the HTTP status endpoint uses (session end
+            // state captured first, inside the helper).
+            if task.status == TaskStatus::Cancelled {
+                crate::api::spawn::cleanup_worktrees_for_task(state, &task).await;
+            }
             tool_result(format!("Updated task {id_str}"))
         }
         Err(e) => tool_error(format!("Failed to update task: {e}")),

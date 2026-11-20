@@ -264,6 +264,22 @@ async fn complete_task_on_merge(state: &Arc<AppState>, mr: &MergeRequest, agent_
         mr_id = %mr.id,
         "ralph-loop: gates passed, MR merged, task Done (agent-runtime.md §1 Phase 7)"
     );
+
+    // agent-workflow.md §Parallel Work via Worktrees: worktrees are
+    // ephemeral — task Done after the MR merged is the terminal point
+    // where the working copy is no longer needed. Placement is load-
+    // bearing: the Phase 7 gate-failure respawn REUSES this worktree
+    // (`relaunch_agent_session`), so teardown must NOT fire at MR-creation
+    // completion — only here, when the work is terminally complete. The
+    // snapshot refs were written against the bare repo at completion and
+    // the session end state was captured there too; `end_session` is
+    // re-run (a best-effort no-op when none is open) so the capture-
+    // BEFORE-removal ordering holds even if the agent completed out-of-
+    // band of this watcher. Only the working copy and its agent_worktrees
+    // record go: the merged MR, the branch, and the pushed commits stay
+    // server-side.
+    crate::agent_sessions::end_session(state, &agent).await;
+    crate::api::spawn::cleanup_agent_worktrees(state, &agent.id).await;
 }
 
 /// Phase 7 fail path: gate failures → agent inbox, then re-spawn or block.
@@ -418,6 +434,16 @@ async fn on_gates_failed(state: &Arc<AppState>, mr_id: &Id, agent_id: &Id) {
             .kv_store
             .kv_remove("agent_tokens", agent.id.as_str())
             .await;
+        // agent-workflow.md §Parallel Work via Worktrees: the iteration
+        // ceiling is terminal (task Blocked, agent Failed — no respawn
+        // follows), so the ephemeral worktree is torn down here, not left
+        // to persist indefinitely. The session end state was captured at
+        // the completion that preceded this gate failure; `end_session`
+        // is re-run (a best-effort no-op when none is open) so the
+        // capture-BEFORE-removal ordering holds. The snapshot refs and
+        // the pushed branch/MR survive server-side.
+        crate::agent_sessions::end_session(state, &agent).await;
+        crate::api::spawn::cleanup_agent_worktrees(state, &agent.id).await;
         notify_task_blocked(
             state,
             &task,
@@ -513,6 +539,15 @@ async fn respawn_with_retry(
         .kv_store
         .kv_remove("agent_tokens", agent.id.as_str())
         .await;
+
+    // agent-workflow.md §Parallel Work via Worktrees: this terminal state
+    // (agent Failed, task Blocked — no further respawn follows) tears the
+    // ephemeral worktree down like every Phase 7 terminal path. The
+    // session end state was captured at the completion that preceded the
+    // gate failure; the re-run below is a best-effort no-op when none is
+    // open, preserving the capture-BEFORE-removal ordering.
+    crate::agent_sessions::end_session(state, &failed).await;
+    crate::api::spawn::cleanup_agent_worktrees(state, &failed.id).await;
 
     // Freshest task row: the watcher snapshot predates the backoff awaits,
     // and the whole-row persist must not overwrite a concurrent mutation
@@ -975,6 +1010,7 @@ mod tests {
     use gyre_domain::{
         AgentWorktree, GateResult, GateStatus, GateType, MergeRequest, MrStatus, QualityGate,
     };
+    use gyre_ports::GitOpsPort;
 
     #[test]
     fn default_max_iterations_matches_spec() {
@@ -1325,6 +1361,24 @@ mod tests {
         assert_eq!(agent.status, AgentStatus::Active, "agent re-spawned");
         assert_eq!(agent.iteration, 1, "iteration incremented");
         assert_eq!(agent.current_task_id, Some(Id::new("task-1")));
+
+        // agent-workflow.md §Parallel Work via Worktrees: the respawn
+        // REUSES the agent's worktree — teardown must NOT fire on the
+        // gate-failure path (only on terminal states). A naive cleanup at
+        // MR-creation completion breaks this respawn with "agent has no
+        // worktree to re-spawn"; both assertions below are the placement
+        // probe for that regression.
+        let wts = state
+            .worktrees
+            .find_by_agent(&Id::new("agent-1"))
+            .await
+            .unwrap();
+        assert_eq!(wts.len(), 1, "worktree record survives the respawn");
+        assert!(
+            std::path::Path::new(&wts[0].path).exists(),
+            "worktree directory survives the respawn (the re-spawned session
+             works in it)"
+        );
 
         // Same task, back to InProgress (Phase 7 step 1).
         let task = state
@@ -1915,5 +1969,254 @@ mod tests {
                 && e.properties["assigned_to"] == "agent-1"),
             "merge completion must record a task.status_changed event: {events:?}"
         );
+    }
+
+    /// agent-workflow.md §Parallel Work via Worktrees (task-269): the
+    /// happy path — agent completes, MR merges, task Done — is the
+    /// terminal point where the ephemeral worktree goes. Afterwards the
+    /// working-copy directory must not exist on disk,
+    /// worktrees.find_by_agent must be empty, and the MR must survive
+    /// server-side. Killing direction: on the pre-task-269 tree the
+    /// directory and the agent_worktrees row persist indefinitely after
+    /// completion (both teardown assertions fail; the doc even claimed
+    /// complete "removes the git worktree" while the code did not).
+    #[tokio::test]
+    async fn merge_completion_tears_down_worktree() {
+        let state = loop_state(None).await;
+        let wt_path = state
+            .worktrees
+            .find_by_agent(&Id::new("agent-1"))
+            .await
+            .unwrap()
+            .first()
+            .unwrap()
+            .path
+            .clone();
+        assert!(
+            std::path::Path::new(&wt_path).exists(),
+            "fixture worktree exists before the merge"
+        );
+
+        let mr = state
+            .merge_requests
+            .find_by_id(&Id::new("mr-1"))
+            .await
+            .unwrap()
+            .unwrap();
+        let mut merged = mr.clone();
+        merged.transition_status(MrStatus::Approved).unwrap();
+        merged.transition_status(MrStatus::Merged).unwrap();
+        state.merge_requests.update(&merged).await.unwrap();
+
+        complete_task_on_merge(&state, &merged, &Id::new("agent-1")).await;
+
+        // The terminal trigger fired.
+        let task = state
+            .tasks
+            .find_by_id(&Id::new("task-1"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(task.status, TaskStatus::Done);
+
+        // The working copy is gone from disk...
+        assert!(
+            !std::path::Path::new(&wt_path).exists(),
+            "worktree directory must not exist after task Done"
+        );
+        // ...and its agent_worktrees record is deleted.
+        let wts = state
+            .worktrees
+            .find_by_agent(&Id::new("agent-1"))
+            .await
+            .unwrap();
+        assert!(
+            wts.is_empty(),
+            "worktrees.find_by_agent must return empty after Done, got {wts:?}"
+        );
+
+        // The merged MR survives server-side (only the working copy goes).
+        let mr_after = state
+            .merge_requests
+            .find_by_id(&Id::new("mr-1"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(mr_after.status, MrStatus::Merged);
+    }
+
+    /// agent-workflow.md §Parallel Work via Worktrees (task-269): the
+    /// Phase 7 iteration ceiling — task Blocked, agent Failed — is
+    /// terminal, so the worktree is removed from disk and DB (pre-task-269
+    /// the ceiling revoked the token but left the worktree persisting
+    /// indefinitely).
+    #[tokio::test]
+    async fn iteration_ceiling_tears_down_worktree() {
+        let state = loop_state(Some(1)).await; // ceiling reached on iteration 1
+        let wt_path = state
+            .worktrees
+            .find_by_agent(&Id::new("agent-1"))
+            .await
+            .unwrap()
+            .first()
+            .unwrap()
+            .path
+            .clone();
+        assert!(std::path::Path::new(&wt_path).exists());
+
+        on_gates_failed(&state, &Id::new("mr-1"), &Id::new("agent-1")).await;
+
+        let task = state
+            .tasks
+            .find_by_id(&Id::new("task-1"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(task.status, TaskStatus::Blocked);
+        let agent = state
+            .agents
+            .find_by_id(&Id::new("agent-1"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(agent.status, AgentStatus::Failed);
+
+        assert!(
+            !std::path::Path::new(&wt_path).exists(),
+            "worktree directory must not exist after the iteration ceiling"
+        );
+        let wts = state
+            .worktrees
+            .find_by_agent(&Id::new("agent-1"))
+            .await
+            .unwrap();
+        assert!(
+            wts.is_empty(),
+            "worktrees.find_by_agent must return empty after the ceiling, got {wts:?}"
+        );
+    }
+
+    /// agent-workflow.md §Parallel Work via Worktrees (task-269) — AC:
+    /// "Teardown is the real VCS operation (jj workspace removed / git
+    /// worktree pruned), not just a DB row delete." Drives the merge
+    /// watcher's terminal cleanup with the REAL git adapter against a
+    /// real bare repo with a real registered git worktree, and proves the
+    /// VCS-level state change: `git worktree list` no longer registers
+    /// the working copy (a DB-row-delete-only implementation leaves it
+    /// listed), the directory is gone, the jj workspace forget ran with
+    /// the spawn-time workspace name, and the agent_worktrees record is
+    /// deleted.
+    #[tokio::test]
+    async fn terminal_cleanup_is_the_real_vcs_operation() {
+        let jj = std::sync::Arc::new(crate::mem::ConfigurableJjOps::default());
+        let git = std::sync::Arc::new(gyre_adapters::git2_ops::Git2OpsAdapter::new());
+        let state = crate::mem::test_state_with_jj_and_git_ops(jj.clone(), git.clone());
+
+        // A real bare repo with one commit on main, and a real registered
+        // git worktree on the agent's branch — the on-disk layout the
+        // spawn path's plain-git fallback provisions.
+        let dir = tempfile::tempdir().unwrap();
+        let bare = dir.path().join("repo.git");
+        let bare_str = bare.to_str().unwrap().to_string();
+        git.init_bare(&bare_str).await.unwrap();
+        git.create_initial_commit(&bare_str, "main").await.unwrap();
+        let wt_path = dir.path().join("worktrees").join("task-abc");
+        let wt_str = wt_path.to_str().unwrap().to_string();
+        git.create_worktree(&bare_str, &wt_str, "task/abc")
+            .await
+            .expect("real git worktree add");
+        let listed = git.list_worktrees(&bare_str).await.unwrap();
+        assert!(
+            listed.contains(&wt_str),
+            "worktree must be registered before the terminal cleanup: {listed:?}"
+        );
+
+        // Domain fixtures pointing at the real repo/worktree.
+        let ws = gyre_domain::Workspace::new(Id::new("ws-1"), Id::new("t1"), "Ws", "ws", 0);
+        state.workspaces.create(&ws).await.unwrap();
+        let repo = gyre_domain::Repository::new(
+            Id::new("r-1"),
+            Id::new("ws-1"),
+            "r-1",
+            bare_str.clone(),
+            0,
+        );
+        state.repos.create(&repo).await.unwrap();
+        let mut task = Task::new(Id::new("task-1"), "Real teardown", 0);
+        task.task_type = Some(gyre_domain::TaskType::Implementation);
+        task.workspace_id = Id::new("ws-1");
+        task.repo_id = Id::new("r-1");
+        task.assigned_to = Some(Id::new("agent-1"));
+        task.transition_status(TaskStatus::InProgress).unwrap();
+        task.transition_status(TaskStatus::Review).unwrap();
+        state.tasks.create(&task).await.unwrap();
+        let mut agent = Agent::new(Id::new("agent-1"), "worker-1", 0);
+        agent.transition_status(AgentStatus::Active).unwrap();
+        agent.transition_status(AgentStatus::Idle).unwrap();
+        agent.assign_task(task.id.clone());
+        agent.workspace_id = Id::new("ws-1");
+        state.agents.create(&agent).await.unwrap();
+        state
+            .worktrees
+            .create(&AgentWorktree::new(
+                Id::new("wt-1"),
+                agent.id.clone(),
+                Id::new("r-1"),
+                Some(task.id.clone()),
+                "task/abc",
+                &wt_str,
+                0,
+            ))
+            .await
+            .unwrap();
+        let mut mr = MergeRequest::new(
+            Id::new("mr-1"),
+            Id::new("r-1"),
+            Id::new("ws-1"),
+            "Agent 'worker-1': Real teardown",
+            "task/abc",
+            "main",
+            0,
+        );
+        mr.author_agent_id = Some(agent.id.clone());
+        mr.transition_status(MrStatus::Approved).unwrap();
+        mr.transition_status(MrStatus::Merged).unwrap();
+        state.merge_requests.create(&mr).await.unwrap();
+
+        complete_task_on_merge(&state, &mr, &Id::new("agent-1")).await;
+
+        let task = state
+            .tasks
+            .find_by_id(&Id::new("task-1"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(task.status, TaskStatus::Done);
+
+        // The REAL VCS state change: the worktree is no longer registered
+        // with git (pruned via `git worktree remove`, not just untracked
+        // in the DB) and its directory is gone.
+        let listed = git.list_worktrees(&bare_str).await.unwrap();
+        assert!(
+            !listed.contains(&wt_str),
+            "git worktree list must no longer register the working copy: {listed:?}"
+        );
+        assert!(!wt_path.exists(), "working-copy directory removed");
+
+        // The jj teardown ran with the spawn-time workspace name
+        // ("agent-{agent_id}" — the name jj_workspace_add registers).
+        assert_eq!(
+            jj.workspace_forget_calls.lock().clone(),
+            vec!["agent-agent-1".to_string()],
+            "jj workspace forget must run with the spawn-time workspace name"
+        );
+
+        // DB record gone.
+        let wts = state
+            .worktrees
+            .find_by_agent(&Id::new("agent-1"))
+            .await
+            .unwrap();
+        assert!(wts.is_empty(), "agent_worktrees record deleted");
     }
 }
