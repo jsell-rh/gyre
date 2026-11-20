@@ -61,19 +61,19 @@ fn at_rest_format() -> AtRestFormat {
 fn load_sops_identity(conn: &mut SqliteConnection) -> Result<AgeIdentity> {
     if let Ok(key) = std::env::var("GYRE_SOPS_AGE_KEY") {
         if !key.trim().is_empty() {
-            return sops::AgeIdentity::from_str(&key);
+            return sops::AgeIdentity::parse(&key);
         }
     }
     if let Ok(path) = std::env::var("GYRE_SOPS_AGE_KEY_FILE") {
         if !path.trim().is_empty() {
             let contents = std::fs::read_to_string(&path)
                 .with_context(|| format!("reading GYRE_SOPS_AGE_KEY_FILE {path}"))?;
-            return sops::AgeIdentity::from_str(&contents);
+            return sops::AgeIdentity::parse(&contents);
         }
     }
 
     match kv_get(conn, KEY_NAMESPACE, SOPS_AGE_KV_KEY)? {
-        Some(stored) => sops::AgeIdentity::from_str(&stored)
+        Some(stored) => sops::AgeIdentity::parse(&stored)
             .with_context(|| "persisted SOPS age identity is unreadable"),
         None => {
             let identity = AgeIdentity::generate();
@@ -727,7 +727,7 @@ mod tests {
         storage.create(&secret, b"legacy-plaintext").await.unwrap();
         let (legacy_value, legacy_nonce) = decrypt_row(&storage, secret.id.as_str());
         assert_eq!(legacy_nonce.len(), ring::aead::NONCE_LEN);
-        assert!(sops::looks_like_sops(&legacy_value) == false);
+        assert!(!sops::looks_like_sops(&legacy_value));
 
         // Upgrade: default (SOPS) backend. The legacy row must remain
         // resolvable and be re-encrypted on first access.

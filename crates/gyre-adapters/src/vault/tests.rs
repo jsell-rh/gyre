@@ -1,6 +1,6 @@
-//! Vault backend tests against a local HTTP server speaking the Vault KV v2
-//! + JWT-auth API subset (the AC's sanctioned stand-in for a real Vault dev
-//! server).
+//! Vault backend tests against a local HTTP server speaking the Vault KV
+//! v2 and JWT-auth API subset (the AC's sanctioned stand-in for a real
+//! Vault dev server).
 
 use super::*;
 use std::collections::HashMap;
@@ -9,6 +9,10 @@ use tokio::sync::Mutex;
 
 /// In-memory Vault state: path → payload (`data` object).
 type VaultStore = Arc<Mutex<HashMap<String, serde_json::Value>>>;
+
+/// A namespaced request observed by the stub server: (operation,
+/// namespace header).
+type NamespaceEvent = (&'static str, Option<String>);
 
 /// What the stub server observed (tokens per path, JWT logins,
 /// namespaces, AppRole token generations).
@@ -20,7 +24,7 @@ struct Observed {
     jwt_logins: Arc<Mutex<Vec<String>>>,
     /// (op, namespace header) for every namespaced request (data reads,
     /// index reads, lists, deletes, writes).
-    namespaces: Arc<Mutex<Vec<(&'static str, Option<String>)>>>,
+    namespaces: Arc<Mutex<Vec<NamespaceEvent>>>,
     /// AppRole tokens "approle-token-N" with N <= this value are rejected
     /// (403) by the data/metadata handlers — the test flips this to
     /// simulate a cached server token whose TTL expired.

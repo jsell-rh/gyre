@@ -85,7 +85,7 @@ impl AgeIdentity {
     }
 
     /// Parse an `AGE-SECRET-KEY-1…` bech32 string.
-    pub fn from_str(s: &str) -> Result<Self> {
+    pub fn parse(s: &str) -> Result<Self> {
         let inner = s
             .trim()
             .parse::<age::x25519::Identity>()
@@ -214,9 +214,7 @@ fn canonical_lastmodified(raw: &str) -> Result<String> {
         "lastmodified date is not YYYY-MM-DD: {raw:?}"
     );
     // The time part runs to the first fraction ('.') or zone marker.
-    let time_end = rest
-        .find(|c| c == '.' || c == 'Z' || c == '+' || c == '-')
-        .unwrap_or(rest.len());
+    let time_end = rest.find(['.', 'Z', '+', '-']).unwrap_or(rest.len());
     let (time, tail) = rest.split_at(time_end);
     anyhow::ensure!(
         time.len() == 8 && time.as_bytes()[2] == b':' && time.as_bytes()[5] == b':',
@@ -226,7 +224,7 @@ fn canonical_lastmodified(raw: &str) -> Result<String> {
         // Fractional digits: skip to the zone marker that follows.
         Some(frac) => {
             let z = frac
-                .find(|c| c == 'Z' || c == '+' || c == '-')
+                .find(['Z', '+', '-'])
                 .context("lastmodified has fractional digits but no zone")?;
             &frac[z..]
         }

@@ -124,7 +124,7 @@ fn random_hex(bytes: usize) -> Result<String, ApiError> {
     let mut buf = vec![0u8; bytes];
     ring::rand::SystemRandom::new()
         .fill(&mut buf)
-        .map_err(|_| ApiError::Internal(anyhow::anyhow!("system RNG failure").into()))?;
+        .map_err(|_| ApiError::Internal(anyhow::anyhow!("system RNG failure")))?;
     Ok(hex::encode(buf))
 }
 
@@ -210,9 +210,8 @@ pub async fn enroll_claude_max(
         created_at: now,
         expires_at: now + STATE_TTL_SECS,
         consumed: false,
-        provider_config: serde_json::to_string(&provider).map_err(|e| {
-            ApiError::Internal(anyhow::anyhow!("serializing provider config: {e}").into())
-        })?,
+        provider_config: serde_json::to_string(&provider)
+            .map_err(|e| ApiError::Internal(anyhow::anyhow!("serializing provider config: {e}")))?,
     };
     state
         .oauth_states
@@ -234,7 +233,7 @@ pub async fn enroll_claude_max(
             ("code_challenge_method", "S256"),
         ],
     )
-    .map_err(|e| ApiError::Internal(anyhow::anyhow!("building authorization URL: {e}").into()))?;
+    .map_err(|e| ApiError::Internal(anyhow::anyhow!("building authorization URL: {e}")))?;
 
     tracing::info!(
         event = "oauth.enrollment_started",
@@ -321,7 +320,7 @@ pub async fn claude_max_callback(
     }
 
     let provider: ProviderConfig = serde_json::from_str(&record.provider_config).map_err(|e| {
-        ApiError::Internal(anyhow::anyhow!("stored provider config is unreadable: {e}").into())
+        ApiError::Internal(anyhow::anyhow!("stored provider config is unreadable: {e}"))
     })?;
 
     // Authorization-code + PKCE exchange at the provider token endpoint.
@@ -386,7 +385,7 @@ pub async fn claude_max_callback(
         "access_token": access_token,
     });
     let value = serde_json::to_vec(&doc)
-        .map_err(|e| ApiError::Internal(anyhow::anyhow!("serializing credential: {e}").into()))?;
+        .map_err(|e| ApiError::Internal(anyhow::anyhow!("serializing credential: {e}")))?;
 
     let secret = Secret {
         id: Id::new(uuid::Uuid::new_v4().to_string()),

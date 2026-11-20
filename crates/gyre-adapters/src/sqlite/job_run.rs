@@ -140,7 +140,6 @@ impl JobRunRepository for SqliteStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gyre_ports::JobRunRepository as _;
     use tempfile::NamedTempFile;
 
     fn setup() -> (NamedTempFile, SqliteStorage) {
