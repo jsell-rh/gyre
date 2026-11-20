@@ -1955,3 +1955,196 @@ describe('MetaSpecs -- Agent Rules → Architecture navigation', () => {
     expect(text).toBeTruthy();
   });
 });
+
+// ─── Task-206 review repairs: mid-run diffs and shared-path targets ───────────
+describe('MetaSpecs -- preview diff viewer updates mid-run (§5 step 4)', () => {
+  beforeEach(() => {
+    localStorage.clear();
+    vi.clearAllMocks();
+    api.getSpecs.mockResolvedValue([...mockSpecs]);
+    api.getMetaSpecs.mockResolvedValue([...mockPersonas]);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('renders a finished agent\'s diff while the run is still running', async () => {
+    vi.useFakeTimers();
+    api.previewMetaSpec.mockResolvedValue({
+      preview_id: 'pv-mid',
+      agents: [
+        { agent_id: 'ag-1', repo_id: 'repo-1', spec_path: 'specs/payment/retry.md', branch: 'preview/pv-mid/retry' },
+        { agent_id: 'ag-2', repo_id: 'repo-2', spec_path: 'specs/system/design.md', branch: 'preview/pv-mid/design' },
+      ],
+    });
+    // state stays 'running': the SECOND agent is still going. The first
+    // agent finished and its diff is already present — the viewer must show
+    // it NOW, not after the whole run completes.
+    api.previewMetaSpecStatus.mockResolvedValue({
+      preview_id: 'pv-mid',
+      state: 'running',
+      agents: [
+        {
+          agent_id: 'ag-1',
+          repo_id: 'repo-1',
+          spec_path: 'specs/payment/retry.md',
+          branch: 'preview/pv-mid/retry',
+          status: 'complete',
+          diff: {
+            files_changed: 1,
+            insertions: 1,
+            deletions: 0,
+            patches: [{ path: 'src/lib.rs', status: 'modified', patch: '+fn mid_run() {}' }],
+          },
+        },
+        { agent_id: 'ag-2', repo_id: 'repo-2', spec_path: 'specs/system/design.md', branch: 'preview/pv-mid/design', status: 'running', diff: null },
+      ],
+    });
+
+    const { findByText, findByTestId, container } = render(MetaSpecs, { props: { scope: 'workspace', workspaceId: 'ws-1' } });
+    await fireEvent.click(await findByText('Select All'));
+    await fireEvent.click(await findByTestId('preview-btn'));
+    await vi.advanceTimersByTimeAsync(2100);
+
+    // Still in the running state...
+    expect(await findByTestId('preview-running')).toBeTruthy();
+    // ...and the finished agent's diff lines are already rendered, with the
+    // running agent still listed in the progress strip.
+    await waitFor(() => {
+      const lines = container.querySelectorAll('.code-diff-line');
+      expect(lines.length).toBeGreaterThan(0);
+      expect(lines[0].textContent).toContain('+fn mid_run() {}');
+    });
+    const progressItems = container.querySelectorAll('.progress-item');
+    expect(progressItems.length).toBe(2);
+    vi.useRealTimers();
+  });
+
+  it('keeps the mid-run viewer hidden while no agent has produced a diff', async () => {
+    vi.useFakeTimers();
+    api.previewMetaSpec.mockResolvedValue({
+      preview_id: 'pv-mid-none',
+      agents: [
+        { agent_id: 'ag-1', repo_id: 'repo-1', spec_path: 'specs/payment/retry.md', branch: 'preview/pv-mid-none/retry' },
+      ],
+    });
+    api.previewMetaSpecStatus.mockResolvedValue({
+      preview_id: 'pv-mid-none',
+      state: 'running',
+      agents: [
+        { agent_id: 'ag-1', repo_id: 'repo-1', spec_path: 'specs/payment/retry.md', branch: 'preview/pv-mid-none/retry', status: 'running', diff: null },
+      ],
+    });
+
+    const { findByText, findByTestId, container } = render(MetaSpecs, { props: { scope: 'workspace', workspaceId: 'ws-1' } });
+    await fireEvent.click(await findByText('Select All'));
+    await fireEvent.click(await findByTestId('preview-btn'));
+    await vi.advanceTimersByTimeAsync(2100);
+
+    expect(await findByTestId('preview-running')).toBeTruthy();
+    expect(container.querySelectorAll('.code-diff-line').length).toBe(0);
+    vi.useRealTimers();
+  });
+});
+
+describe('MetaSpecs -- shared spec paths across repos are distinct targets', () => {
+  beforeEach(() => {
+    localStorage.clear();
+    vi.clearAllMocks();
+    // Two workspace repos exposing the SAME spec path: keyed-each blocks
+    // that key on the path alone would collide (Svelte keyed-each error)
+    // and the two targets would be indistinguishable.
+    api.getSpecs.mockResolvedValue([
+      { path: 'specs/system/design.md', title: 'Design (repo A)', kind: null, approval_status: 'approved', current_sha: 'a1', repo_id: 'repo-a' },
+      { path: 'specs/system/design.md', title: 'Design (repo B)', kind: null, approval_status: 'pending', current_sha: 'b2', repo_id: 'repo-b' },
+    ]);
+    api.getMetaSpecs.mockResolvedValue([...mockPersonas]);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('renders two distinguishable checklist rows for the shared path', async () => {
+    const { container } = render(MetaSpecs, { props: { scope: 'workspace', workspaceId: 'ws-1' } });
+    await waitFor(() => {
+      const rows = container.querySelectorAll('.spec-check-item');
+      expect(rows.length).toBe(2);
+    });
+    // Both rows carry the shared path plus a repo discriminator, so the
+    // labels are not identical.
+    const labels = Array.from(container.querySelectorAll('.spec-check-path')).map((el) => el.textContent);
+    expect(labels[0]).not.toBe(labels[1]);
+    expect(labels.every((l) => l.includes('specs/system/design.md'))).toBe(true);
+    expect(labels.some((l) => l.includes('repo-a'))).toBe(true);
+    expect(labels.some((l) => l.includes('repo-b'))).toBe(true);
+  });
+
+  it('selects targets independently and spawns only the checked repo', async () => {
+    vi.useFakeTimers();
+    api.previewMetaSpec.mockResolvedValue({ preview_id: 'pv-dup', agents: [] });
+    api.previewMetaSpecStatus.mockResolvedValue({
+      preview_id: 'pv-dup',
+      state: 'complete',
+      agents: [],
+    });
+
+    const { container, findByText, findByTestId } = render(MetaSpecs, { props: { scope: 'workspace', workspaceId: 'ws-1' } });
+    await waitFor(() => {
+      expect(container.querySelectorAll('.spec-check-item').length).toBe(2);
+    });
+    // Check ONLY repo-b's row: the shared path must not select both repos.
+    const checkboxes = container.querySelectorAll('.spec-check-item input[type="checkbox"]');
+    await fireEvent.click(checkboxes[1]);
+    expect(checkboxes[0].checked).toBe(false);
+    expect(checkboxes[1].checked).toBe(true);
+
+    await fireEvent.click(await findByTestId('preview-btn'));
+    await waitFor(() => {
+      expect(api.previewMetaSpec).toHaveBeenCalledTimes(1);
+      expect(api.previewMetaSpec).toHaveBeenCalledWith({
+        draft: expect.anything(),
+        targets: [{ repo_id: 'repo-b', spec_path: 'specs/system/design.md' }],
+      });
+    });
+    vi.useRealTimers();
+  });
+
+  it('disambiguates tabs for agents that share a spec stem', async () => {
+    vi.useFakeTimers();
+    api.previewMetaSpec.mockResolvedValue({
+      preview_id: 'pv-tabs',
+      agents: [
+        { agent_id: 'ag-1', repo_id: 'repo-a', spec_path: 'specs/system/design.md', branch: 'preview/pv-tabs/system-design' },
+        { agent_id: 'ag-2', repo_id: 'repo-b', spec_path: 'docs/design.md', branch: 'preview/pv-tabs/design' },
+      ],
+    });
+    api.previewMetaSpecStatus.mockResolvedValue({
+      preview_id: 'pv-tabs',
+      state: 'complete',
+      agents: [
+        { agent_id: 'ag-1', repo_id: 'repo-a', spec_path: 'specs/system/design.md', branch: 'preview/pv-tabs/system-design', status: 'complete', diff: null },
+        { agent_id: 'ag-2', repo_id: 'repo-b', spec_path: 'docs/design.md', branch: 'preview/pv-tabs/design', status: 'complete', diff: null },
+      ],
+    });
+
+    const { findByText, findByTestId, container } = render(MetaSpecs, { props: { scope: 'workspace', workspaceId: 'ws-1' } });
+    await fireEvent.click(await findByText('Select All'));
+    await fireEvent.click(await findByTestId('preview-btn'));
+    await vi.advanceTimersByTimeAsync(2100);
+    await findByTestId('preview-complete');
+
+    await waitFor(() => {
+      const tabs = Array.from(container.querySelectorAll('.impact-tab')).map((t) => t.textContent);
+      expect(tabs.length).toBe(2);
+      // Same stem 'design' disambiguated with the parent directory,
+      // mirroring the server's preview_branch_name — never two identical
+      // labels for two different targets.
+      expect(tabs[0]).not.toBe(tabs[1]);
+      expect(new Set(tabs).size).toBe(2);
+      expect(tabs.some((t) => t.includes('design'))).toBe(true);
+    });
+    vi.useRealTimers();
+  });
+});

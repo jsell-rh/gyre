@@ -368,7 +368,15 @@
   );
 
   let targetSpecs       = $state([]);
-  let selectedSpecPaths = $state([]);
+  // Targets are {repo_id, spec_path} PAIRS: two workspace repos can expose
+  // the same spec path, so a path alone is not a unique target key —
+  // keyed each blocks would collide and checklist rows/tabs become
+  // indistinguishable. Selection, keys and tabs all use the composite.
+  let selectedSpecKeys  = $state([]);
+
+  function specKey(repoId, path) { return `${repoId ?? ''}:${path ?? ''}`; }
+  function targetKey(s)          { return specKey(s.repo_id, s.path); }
+  function agentKey(a)          { return specKey(a.repo_id, a.spec_path); }
 
   // Preview state is server-owned: this mirrors the agents POST /meta-specs/preview
   // spawned and the diffs their preview/<id>/<slug> branches produced.
@@ -435,18 +443,19 @@
     resetPreviewState();
   }
 
-  function toggleSpec(path) {
-    if (selectedSpecPaths.includes(path)) {
-      selectedSpecPaths = selectedSpecPaths.filter(p => p !== path);
+  function toggleSpec(repoId, path) {
+    const key = specKey(repoId, path);
+    if (selectedSpecKeys.includes(key)) {
+      selectedSpecKeys = selectedSpecKeys.filter(k => k !== key);
     } else {
-      selectedSpecPaths = [...selectedSpecPaths, path];
+      selectedSpecKeys = [...selectedSpecKeys, key];
     }
   }
 
-  function selectAll() { selectedSpecPaths = targetSpecs.map(s => s.path); }
-  function clearAll()  { selectedSpecPaths = []; }
+  function selectAll() { selectedSpecKeys = targetSpecs.map(targetKey); }
+  function clearAll()  { selectedSpecKeys = []; }
 
-  const canPreview = $derived.by(() => selectedSpecPaths.length > 0 && previewState === 'editing');
+  const canPreview = $derived.by(() => selectedSpecKeys.length > 0 && previewState === 'editing');
 
   // Preview run generation: every reset invalidates in-flight POST/poll promises so
   // a stale response can never write state belonging to a previous run.
@@ -470,7 +479,7 @@
       content: selectedMsContent,
     };
     const targets = targetSpecs
-      .filter(s => selectedSpecPaths.includes(s.path))
+      .filter(s => selectedSpecKeys.includes(targetKey(s)))
       .map(s => ({ repo_id: s.repo_id, spec_path: s.path }));
 
     const run = previewRun;
@@ -547,6 +556,17 @@
             diff: a.diff ?? null,
           }))
         : previewAgents;
+      // Mid-run diff viewer: land the tab on the first agent that has
+      // produced a diff while the run is still going (§5 step 4 — the
+      // viewer updates as EACH agent completes). Never moves away from a
+      // tab that already shows a diff, so a user-picked tab is preserved.
+      if (status?.state !== 'complete') {
+        const cur = previewAgents[previewAgentTab];
+        if (!cur || !agentPatchLines(cur).length) {
+          const idx = previewAgents.findIndex(a => agentPatchLines(a).length);
+          if (idx >= 0) previewAgentTab = idx;
+        }
+      }
       if (status?.state === 'complete') {
         stopPreview();
         previewState = 'complete';
@@ -588,6 +608,34 @@
   function specSlug(path) {
     const base = (path || '').split('/').pop() || 'spec';
     return base.replace(/\.[^.]+$/, '') || 'spec';
+  }
+
+  // Checklist/tab label disambiguation for shared paths: the server's
+  // preview_branch_name suffixes the parent directory when two targets
+  // share a stem — the UI mirrors that, then falls back to the repo id
+  // prefix, so two different targets never render identical labels.
+  function disambiguatedLabel(repoId, path, all) {
+    const slug = specSlug(path);
+    const labelOf = (p) => {
+      const parts = String(p ?? '').split('/').filter(Boolean);
+      const s = specSlug(p);
+      return parts.length >= 2 ? `${parts[parts.length - 2]}/${s}` : s;
+    };
+    if (all.filter((x) => specSlug(x.path) === slug).length <= 1) return slug;
+    const label = labelOf(path);
+    if (all.filter((x) => labelOf(x.path) === label).length <= 1) return label;
+    return `${label}·${String(repoId ?? '').slice(0, 8)}`;
+  }
+
+  function agentTabLabel(a) {
+    return disambiguatedLabel(a.repo_id, a.spec_path, previewAgents.map((x) => ({ repo_id: x.repo_id, path: x.spec_path })));
+  }
+
+  function specListLabel(s) {
+    // The checklist shows the full path (it is the target the agent will
+    // implement); a shared path across repos gets a repo discriminator.
+    const dup = targetSpecs.filter((x) => x.path === s.path).length > 1;
+    return dup ? `${s.path} (${String(s.repo_id ?? '').slice(0, 8)})` : s.path;
   }
 
   function agentPatchLines(a) {
@@ -826,6 +874,58 @@
 
         <!-- RIGHT: Spec selector / progress / impact -->
         <div class="split-right">
+          <!-- §5 iteration step 4: "The diff viewer updates as each preview
+               agent completes; multiple targets show as tabs." The same
+               tabbed diff viewer serves BOTH the running panel (rendered as
+               soon as any agent has produced a diff — a slow second agent
+               must not hide a finished first agent's diff for the rest of
+               the run) and the completed panel. -->
+          {#snippet agentDiffViewer()}
+            {#if previewAgents.length > 1}
+              <div class="impact-tabs" role="tablist" aria-label={$t('meta_specs.workspace.impact_view_aria')} tabindex="0" onkeydown={onAgentTabKeydown}>
+                {#each previewAgents as a, i (agentKey(a))}
+                  <button
+                    class="impact-tab"
+                    role="tab"
+                    id="preview-agent-tab-{i}"
+                    aria-controls="preview-agent-panel-{i}"
+                    aria-selected={previewAgentTab === i}
+                    class:active={previewAgentTab === i}
+                    tabindex={previewAgentTab === i ? 0 : -1}
+                    onclick={() => previewAgentTab = i}
+                  >{agentTabLabel(a)}</button>
+                {/each}
+              </div>
+            {/if}
+            {#if selectedAgent()}
+              {@const a = selectedAgent()}
+              <div class="impact-content" role="tabpanel" id="preview-agent-panel-{previewAgentTab}" aria-labelledby="preview-agent-tab-{previewAgentTab}">
+                <div class="agent-summary">
+                  <span class="mono">{a.spec_path}</span>
+                  <span class="progress-status">{statusLabel(a)}</span>
+                  {#if a.branch}
+                    <span class="mono text-muted">{a.branch}</span>
+                  {/if}
+                  {#if agentDiffStats(a)}
+                    <span class="text-muted">+{agentDiffStats(a).insertions ?? 0} / -{agentDiffStats(a).deletions ?? 0} · {agentDiffStats(a).files_changed ?? 0} {$t('meta_specs.workspace.diff_files')}</span>
+                  {/if}
+                </div>
+                {#if agentPatchLines(a).length}
+                  <div class="code-diff">
+                    {#each agentPatchLines(a) as line}
+                      <div class="code-diff-line {line.startsWith('+') && !line.startsWith('+++') ? 'add' : line.startsWith('-') && !line.startsWith('---') ? 'remove' : 'ctx'}">{line}</div>
+                    {/each}
+                  </div>
+                {:else if agentStatusIs(a, 'complete', 'stopped')}
+                  <span class="impact-empty">{$t('meta_specs.workspace.no_diff_available')}</span>
+                {:else if agentStatusIs(a, 'failed', 'dead', 'unknown')}
+                  <span class="impact-empty">{$t('meta_specs.workspace.agent_failed')}</span>
+                {:else}
+                  <span class="impact-empty">{$t('meta_specs.workspace.agent_still_running')}</span>
+                {/if}
+              </div>
+            {/if}
+          {/snippet}
           {#if previewState === 'editing'}
             <div class="spec-selector">
               <div class="spec-selector-header">
@@ -836,10 +936,10 @@
                 </div>
               </div>
               <div class="spec-checklist">
-                {#each targetSpecs as spec (spec.path)}
+                {#each targetSpecs as spec (targetKey(spec))}
                   <label class="spec-check-item">
-                    <input type="checkbox" checked={selectedSpecPaths.includes(spec.path)} onchange={() => toggleSpec(spec.path)} />
-                    <span class="spec-check-path">{spec.path}</span>
+                    <input type="checkbox" checked={selectedSpecKeys.includes(targetKey(spec))} onchange={() => toggleSpec(spec.repo_id, spec.path)} />
+                    <span class="spec-check-path">{specListLabel(spec)}</span>
                   </label>
                 {:else}
                   <p class="empty-specs">{$t('meta_specs.workspace.no_specs_available')}</p>
@@ -854,7 +954,7 @@
                 <div class="preview-error" role="alert">{previewError}</div>
               {/if}
               <div class="progress-list">
-                {#each previewAgents as a (a.spec_path)}
+                {#each previewAgents as a (agentKey(a))}
                   <div class="progress-item">
                     <span class="progress-icon {statusClass(a)}" aria-hidden="true">{statusIcon(a)}</span>
                     <span class="progress-path">{a.spec_path}</span>
@@ -863,6 +963,13 @@
                 {/each}
               </div>
               <div class="progress-summary">{$t('meta_specs.workspace.progress_label', { values: { done: previewDone, total: previewAgents.length } })}</div>
+              {#if previewAgents.some((a) => agentPatchLines(a).length)}
+                <!-- Mid-run diff viewer: rendered as soon as ANY agent has a
+                     diff, while the rest keep running. -->
+                <div class="impact-panel mid-run-diff">
+                  {@render agentDiffViewer()}
+                </div>
+              {/if}
               {#if previewStalled}
                 <div class="progress-stalled" role="status">{$t('meta_specs.workspace.preview_stalled')}</div>
               {/if}
@@ -877,50 +984,7 @@
               {#if previewStalled}
                 <div class="progress-stalled" role="status">{$t('meta_specs.workspace.preview_stalled')}</div>
               {/if}
-              {#if previewAgents.length > 1}
-                <div class="impact-tabs" role="tablist" aria-label={$t('meta_specs.workspace.impact_view_aria')} tabindex="0" onkeydown={onAgentTabKeydown}>
-                  {#each previewAgents as a, i (a.spec_path)}
-                    <button
-                      class="impact-tab"
-                      role="tab"
-                      id="preview-agent-tab-{i}"
-                      aria-controls="preview-agent-panel-{i}"
-                      aria-selected={previewAgentTab === i}
-                      class:active={previewAgentTab === i}
-                      tabindex={previewAgentTab === i ? 0 : -1}
-                      onclick={() => previewAgentTab = i}
-                    >{specSlug(a.spec_path)}</button>
-                  {/each}
-                </div>
-              {/if}
-              {#if selectedAgent()}
-                {@const a = selectedAgent()}
-                <div class="impact-content" role="tabpanel" id="preview-agent-panel-{previewAgentTab}" aria-labelledby="preview-agent-tab-{previewAgentTab}">
-                  <div class="agent-summary">
-                    <span class="mono">{a.spec_path}</span>
-                    <span class="progress-status">{statusLabel(a)}</span>
-                    {#if a.branch}
-                      <span class="mono text-muted">{a.branch}</span>
-                    {/if}
-                    {#if agentDiffStats(a)}
-                      <span class="text-muted">+{agentDiffStats(a).insertions ?? 0} / -{agentDiffStats(a).deletions ?? 0} · {agentDiffStats(a).files_changed ?? 0} {$t('meta_specs.workspace.diff_files')}</span>
-                    {/if}
-                  </div>
-                  {#if agentPatchLines(a).length}
-                    <div class="code-diff">
-                      {#each agentPatchLines(a) as line}
-                        <div class="code-diff-line {line.startsWith('+') && !line.startsWith('+++') ? 'add' : line.startsWith('-') && !line.startsWith('---') ? 'remove' : 'ctx'}">{line}</div>
-                      {/each}
-                    </div>
-                  {:else if agentStatusIs(a, 'complete', 'stopped')}
-                    <span class="impact-empty">{$t('meta_specs.workspace.no_diff_available')}</span>
-                  {:else if agentStatusIs(a, 'failed', 'dead', 'unknown')}
-                    <span class="impact-empty">{$t('meta_specs.workspace.agent_failed')}</span>
-                  {:else}
-                    <span class="impact-empty">{$t('meta_specs.workspace.agent_still_running')}</span>
-                  {/if}
-                </div>
-              {/if}
+              {@render agentDiffViewer()}
               <div class="impact-actions">
                 <Button variant="secondary" onclick={clearPreviewRun} disabled={clearing || !previewId}>{$t('meta_specs.workspace.clear_preview')}</Button>
               </div>
@@ -1780,6 +1844,10 @@
   .progress-summary { font-size: var(--text-sm); color: var(--color-text-muted); }
 
   .impact-panel { background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius); overflow: hidden; }
+  /* Mid-run diff viewer: nested under the progress panel, so it needs its
+     own padding/radius (the outer panel already pads) and a margin to
+     separate it from the progress summary above. */
+  .impact-panel.mid-run-diff { margin-top: var(--space-2); border-radius: calc(var(--radius) - 2px); }
   .impact-tabs { display: flex; border-bottom: 1px solid var(--color-border); }
   .impact-tab { padding: 0.5rem 1rem; background: none; border: none; border-bottom: 2px solid transparent; color: var(--color-text-muted); cursor: pointer; font-size: var(--text-sm); transition: color var(--transition-fast); font-family: var(--font-body); }
   .impact-tab.active { color: var(--color-text); border-bottom-color: var(--color-link, var(--color-focus)); }

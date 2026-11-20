@@ -1376,3 +1376,68 @@ describe('EditorSplit — system-explorer.md §3 progressive preview', () => {
     20000,
   );
 });
+
+// ─── Task-206 review repair: the diff viewer updates mid-run (§5 step 4) ──────
+describe('EditorSplit -- meta-spec preview diffs update mid-run', () => {
+  it('shows a finished agent\'s diff in the Code Diff tab while the run is still going', async () => {
+    vi.useFakeTimers();
+    try {
+      const { api } = await import('../lib/api.js');
+      api.previewMetaSpec.mockResolvedValueOnce({
+        preview_id: 'pv-mid',
+        agents: [
+          { agent_id: 'ag-1', repo_id: 'repo-1', spec_path: 'specs/payment/retry.md', branch: 'preview/pv-mid/retry' },
+          { agent_id: 'ag-2', repo_id: 'repo-1', spec_path: 'specs/system/design.md', branch: 'preview/pv-mid/design' },
+        ],
+      });
+      // state stays 'running' (second agent still going), but the FIRST
+      // agent already finished and carries its diff — the Code Diff tab
+      // must render it now, not only after the whole run completes.
+      api.previewMetaSpecStatus.mockResolvedValue({
+        preview_id: 'pv-mid',
+        state: 'running',
+        agents: [
+          {
+            agent_id: 'ag-1',
+            repo_id: 'repo-1',
+            spec_path: 'specs/payment/retry.md',
+            branch: 'preview/pv-mid/retry',
+            status: 'complete',
+            diff: {
+              files_changed: 1,
+              insertions: 1,
+              deletions: 1,
+              patches: [{ patch: '@@ specs/payment/retry.md@@\n-old line\n+mid-run line' }],
+            },
+          },
+          { agent_id: 'ag-2', repo_id: 'repo-1', spec_path: 'specs/system/design.md', branch: 'preview/pv-mid/design', status: 'running', diff: null },
+        ],
+      });
+      render(EditorSplit, {
+        props: {
+          content: 'You are a backend dev...',
+          context: 'meta-spec',
+          workspaceId: 'ws-1',
+          targetSpecs: [
+            { path: 'specs/payment/retry.md', repo_id: 'repo-1' },
+            { path: 'specs/system/design.md', repo_id: 'repo-1' },
+          ],
+        },
+      });
+      await fireEvent.click(await screen.findByText('Select All'));
+      await fireEvent.click(screen.getByTestId('preview-btn'));
+      await vi.advanceTimersByTimeAsync(2100);
+
+      // Still running — no iterate button yet...
+      expect(screen.getByTestId('preview-running')).toBeTruthy();
+      expect(screen.queryByTestId('iterate-btn')).toBeNull();
+      // ...but the finished agent's diff is already on the Code Diff tab.
+      await fireEvent.click(screen.getByTestId('tab-code-diff'));
+      const panel = await screen.findByTestId('code-diff-panel');
+      expect(panel.textContent).toContain('+mid-run line');
+      expect(panel.textContent).toContain('-old line');
+    } finally {
+      vi.useRealTimers();
+    }
+  }, 20000);
+});

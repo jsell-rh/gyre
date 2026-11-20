@@ -110,7 +110,12 @@
   // Architecture tab keeps the fast graphPredict overlays) with an error banner.
   let previewState = $state('editing');
   let previewError = $state(null);
-  let selectedSpecPaths = $state([]);
+  let selectedSpecKeys = $state([]);
+
+  // Targets are {repo_id, spec_path} pairs: two workspace repos can expose
+  // the same spec path, so paths alone are not unique keys (keyed each
+  // blocks would collide). Keys and selection use the composite.
+  function specKey(repoId, path) { return `${repoId ?? ''}:${path ?? ''}`; }
   let previewPollTimer = null;
   let previewProgress = $state([]);
   let codeDiffFiles = $state([]); // [{ path, diff: [{op,text}] }]
@@ -298,20 +303,21 @@
 
   // ── Preview workflow (§2/§9) ────────────────────────────────────────────────
 
-  function toggleSpec(path) {
-    if (selectedSpecPaths.includes(path)) {
-      selectedSpecPaths = selectedSpecPaths.filter((p) => p !== path);
+  function toggleSpec(repoId, path) {
+    const key = specKey(repoId, path);
+    if (selectedSpecKeys.includes(key)) {
+      selectedSpecKeys = selectedSpecKeys.filter((k) => k !== key);
     } else {
-      selectedSpecPaths = [...selectedSpecPaths, path];
+      selectedSpecKeys = [...selectedSpecKeys, key];
     }
   }
 
   function selectAllSpecs() {
-    selectedSpecPaths = selectableSpecs.map((s) => s.path);
+    selectedSpecKeys = selectableSpecs.map((s) => specKey(s.repo_id, s.path));
   }
 
   function clearAllSpecs() {
-    selectedSpecPaths = [];
+    selectedSpecKeys = [];
   }
 
   const canRunPreview = $derived.by(() => {
@@ -320,7 +326,7 @@
     // (§9 State 1) — the §5 preview endpoint spawns one agent per { repo_id,
     // spec_path } target, so a target without repo_id can never run.
     if (context === 'meta-spec')
-      return selectableSpecs.some((s) => selectedSpecPaths.includes(s.path) && s.repo_id);
+      return selectableSpecs.some((s) => selectedSpecKeys.includes(specKey(s.repo_id, s.path)) && s.repo_id);
     // Spec context: needs a repo + spec path.
     return Boolean(repoId && specPath);
   });
@@ -363,7 +369,7 @@
         // target, no gates/MR/provenance. Response 202: { preview_id, agents:
         // [{ agent_id, repo_id, spec_path, branch }] }.
         const targets = selectableSpecs
-          .filter((s) => selectedSpecPaths.includes(s.path) && s.repo_id)
+          .filter((s) => selectedSpecKeys.includes(specKey(s.repo_id, s.path)) && s.repo_id)
           .map((s) => ({ repo_id: s.repo_id, spec_path: s.path }));
         let res;
         try {
@@ -412,9 +418,11 @@
 
   function pollPreviewTask(taskId) {
     previewState = 'preview_running';
-    previewProgress = selectedSpecPaths.length
-      ? selectedSpecPaths.map((path) => ({ path, status: 'running' }))
-      : [{ path: specPath ?? '', status: 'running' }];
+    previewProgress = selectedSpecKeys.length
+      ? selectableSpecs
+          .filter((s) => selectedSpecKeys.includes(specKey(s.repo_id, s.path)))
+          .map((s) => ({ path: s.path, repo_id: s.repo_id, status: 'running' }))
+      : [{ path: specPath ?? '', repo_id: repoId ?? null, status: 'running' }];
     let elapsed = 0;
     previewPollTimer = setInterval(async () => {
       elapsed += 10000;
@@ -516,6 +524,7 @@
     previewState = 'preview_running';
     previewProgress = (Array.isArray(initial?.agents) ? initial.agents : []).map((a) => ({
       path: a?.spec_path ?? '',
+      repo_id: a?.repo_id ?? null,
       status: 'running',
     }));
     metaPreviewResult = initial ?? null;
@@ -527,9 +536,17 @@
         if (Array.isArray(status?.agents)) {
           previewProgress = status.agents.map((a) => ({
             path: a?.spec_path ?? '',
+            repo_id: a?.repo_id ?? null,
             status: a?.status ?? 'unknown',
           }));
           metaPreviewResult = status;
+          // §5 iteration step 4: "The diff viewer updates as each preview
+          // agent completes" — surface each finished agent's diff on the
+          // Code Diff tab DURING the run, not only after every agent is
+          // terminal (a slow second agent must not hide a finished first
+          // agent's diff for the rest of the run).
+          const midRunFiles = metaAgentDiffFiles(status);
+          if (midRunFiles.length) codeDiffFiles = midRunFiles;
         }
         if (status?.state === 'complete') {
           applyPreviewResult(status);
@@ -549,6 +566,34 @@
   }
 
   /**
+   * Map the §5 preview status's per-agent diffs onto the Code Diff tab's
+   * [{ path, diff: [{op,text}] }] shape. Shared by the mid-run poll updates
+   * and the final applyPreviewResult so both render the same files.
+   */
+  function metaAgentDiffFiles(result) {
+    return Array.isArray(result?.agents)
+      ? result.agents
+          .filter((a) => Array.isArray(a?.diff?.patches))
+          .map((a) => ({
+            path: a.spec_path ?? '',
+            repo_id: a.repo_id ?? null,
+            diff: a.diff.patches
+              .flatMap((p) => String(p?.patch ?? '').split('\n'))
+              .filter((line) => line.length > 0)
+              .map((line) => ({
+                op:
+                  line.startsWith('+') && !line.startsWith('+++')
+                    ? 'add'
+                    : line.startsWith('-') && !line.startsWith('---')
+                      ? 'remove'
+                      : 'context',
+                text: line,
+              })),
+          }))
+      : [];
+  }
+
+  /**
    * Map a completed preview result onto the Architecture (ghost overlays /
    * node delta) and Code Diff tabs. Accepts the shapes returned by
    * thoroughPreview/taskStatus ({predictions, code_diff}) and the real §5
@@ -563,25 +608,7 @@
     // unified-diff text its preview branch produced (§5 iteration step 4).
     if (result.preview_id) {
       metaPreviewResult = result;
-      const agentFiles = Array.isArray(result.agents)
-        ? result.agents
-            .filter((a) => Array.isArray(a?.diff?.patches))
-            .map((a) => ({
-              path: a.spec_path ?? '',
-              diff: a.diff.patches
-                .flatMap((p) => String(p?.patch ?? '').split('\n'))
-                .filter((line) => line.length > 0)
-                .map((line) => ({
-                  op:
-                    line.startsWith('+') && !line.startsWith('+++')
-                      ? 'add'
-                      : line.startsWith('-') && !line.startsWith('---')
-                        ? 'remove'
-                        : 'context',
-                  text: line,
-                })),
-            }))
-        : [];
+      const agentFiles = metaAgentDiffFiles(result);
       if (agentFiles.length) codeDiffFiles = agentFiles;
     }
     // Structural delta → ghost overlays on the Architecture tab.
@@ -606,6 +633,7 @@
     if (Array.isArray(result.agents)) {
       previewProgress = result.agents.map((a) => ({
         path: a?.spec_path ?? '',
+        repo_id: a?.repo_id ?? null,
         status: a?.status ?? 'unknown',
       }));
     }
@@ -1075,7 +1103,7 @@
         <div class="preview-progress" data-testid="preview-running" aria-live="polite">
           <div class="progress-header" role="status">{$t('editor_split.preview_running')}</div>
           <div class="progress-list">
-            {#each previewProgress as item (item.path)}
+            {#each previewProgress as item (specKey(item.repo_id, item.path))}
               <div class="progress-item">
                 <span class="progress-icon" aria-hidden="true">{agentStatusIcon(item.status)}</span>
                 <span class="progress-path">{item.path}</span>
@@ -1102,12 +1130,12 @@
             </div>
           </div>
           <div class="spec-checklist">
-            {#each selectableSpecs as spec (spec.path)}
+            {#each selectableSpecs as spec (specKey(spec.repo_id, spec.path))}
               <label class="spec-check-item">
                 <input
                   type="checkbox"
-                  checked={selectedSpecPaths.includes(spec.path)}
-                  onchange={() => toggleSpec(spec.path)}
+                  checked={selectedSpecKeys.includes(specKey(spec.repo_id, spec.path))}
+                  onchange={() => toggleSpec(spec.repo_id, spec.path)}
                 />
                 <span class="spec-check-path">{spec.path}</span>
               </label>
@@ -1170,7 +1198,7 @@
                 <div class="meta-impact-section">
                   <h4 class="meta-impact-title">{$t('editor_split.preview_agents_title')}</h4>
                   <ul class="meta-repo-list">
-                    {#each metaPreviewResult.agents ?? [] as a (a.agent_id ?? a.spec_path)}
+                    {#each metaPreviewResult.agents ?? [] as a (a.agent_id ?? specKey(a.repo_id, a.spec_path))}
                       <li class="meta-repo-item">
                         <span class="meta-repo-id">{a.spec_path}</span>
                         <span class="meta-repo-reason">
@@ -1204,7 +1232,7 @@
             data-testid="code-diff-panel"
           >
             {#if codeDiffFiles.length}
-              {#each codeDiffFiles as file (file.path)}
+              {#each codeDiffFiles as file (specKey(file.repo_id, file.path))}
                 <div class="code-diff-file">
                   <div class="code-diff-path">{file.path}</div>
                   <SpecDiffView diff={file.diff} />
@@ -1215,7 +1243,7 @@
                    per-agent statuses so the outcome is still visible. -->
               {#if metaPreviewResult?.agents?.length}
                 <div class="meta-spec-statuses" data-testid="meta-spec-statuses">
-                  {#each metaPreviewResult.agents as s (s.agent_id ?? s.spec_path)}
+                  {#each metaPreviewResult.agents as s (s.agent_id ?? specKey(s.repo_id, s.spec_path))}
                     <div class="meta-spec-status">
                       <span class="meta-spec-path">{s.spec_path}</span>
                       <span class="meta-spec-state">{agentStatusLabel(s.status)}</span>
