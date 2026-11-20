@@ -287,6 +287,25 @@ impl MessageKind {
         )
     }
 
+    /// Maps this kind to its AG-UI event type (message-bus.md §API Telemetry:
+    /// `ActivityEventData.event_type` = "`message.kind` mapped to `AgEventType`
+    /// string"). The seven telemetry kinds map to their AG-UI variants
+    /// (AgentError → ERROR per the §MCP Integration table); every other
+    /// kind maps to `AgEventType::Custom(kind.as_str())`, which serializes
+    /// as the kind's snake_case wire name.
+    pub fn ag_event_type(&self) -> crate::protocol::AgEventType {
+        match self {
+            MessageKind::ToolCallStart => crate::protocol::AgEventType::ToolCallStart,
+            MessageKind::ToolCallEnd => crate::protocol::AgEventType::ToolCallEnd,
+            MessageKind::TextMessageContent => crate::protocol::AgEventType::TextMessageContent,
+            MessageKind::RunStarted => crate::protocol::AgEventType::RunStarted,
+            MessageKind::RunFinished => crate::protocol::AgEventType::RunFinished,
+            MessageKind::StateChanged => crate::protocol::AgEventType::StateChanged,
+            MessageKind::AgentError => crate::protocol::AgEventType::Error,
+            other => crate::protocol::AgEventType::Custom(other.as_str().to_string()),
+        }
+    }
+
     /// Broadcast-only kinds (message-bus.md §Broadcast-only kinds):
     /// `DataSeeded` and `QueueUpdated` are server-only AND storage-exempt —
     /// they flow through the in-memory broadcast channel only and never hit
@@ -1641,5 +1660,29 @@ mod tests {
         let msg = make_telemetry(Some(ws.clone()));
         buf.push(msg);
         assert_eq!(buf.list_since(&ws, 0, 100).len(), 1);
+    }
+
+    #[test]
+    fn kind_ag_event_type_mapping_matches_spec() {
+        // message-bus.md §API > Telemetry: event_type is the kind mapped to
+        // its AgEventType string. The seven telemetry kinds map to their
+        // AG-UI variants (AgentError → ERROR per the §MCP Integration
+        // table); other kinds fall back to the Custom(kind wire name)
+        // string.
+        let cases = [
+            (MessageKind::ToolCallStart, "TOOL_CALL_START"),
+            (MessageKind::ToolCallEnd, "TOOL_CALL_END"),
+            (MessageKind::TextMessageContent, "TEXT_MESSAGE_CONTENT"),
+            (MessageKind::RunStarted, "RUN_STARTED"),
+            (MessageKind::RunFinished, "RUN_FINISHED"),
+            (MessageKind::StateChanged, "STATE_CHANGED"),
+            (MessageKind::AgentError, "ERROR"),
+            (MessageKind::TaskCreated, "task_created"),
+            (MessageKind::MrMerged, "mr_merged"),
+            (MessageKind::Custom("my_event".to_string()), "my_event"),
+        ];
+        for (kind, expected) in cases {
+            assert_eq!(kind.ag_event_type().as_str(), expected, "kind {kind:?}");
+        }
     }
 }
