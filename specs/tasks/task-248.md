@@ -2,8 +2,8 @@
 title: "Message send-path guards: scope validation, mem store contract, WS acknowledged exclusion, auth-mechanism origin table, Agent-destination tenant isolation"
 spec_ref: "Spec gap spec-c62aac6701125cb09e0c736c / message-send-path-guards / 60b177f85a11"
 depends_on: []
-progress: complete
-commits: ["001f585ac686c90f601fd210ca4a40cc5cad7c9d", "951fa88b25aa0c530aab4dc4c4e2c59cbe6994f2", "a2781ff06b71bc443eda82aa1c0022edf011c972", "3bb9c9bd4099810d8583ab647018a5a41297f8c2", "873d0821ca7a33501c178303bdc618a1802ccbb6", "9dd4a1f0f07930760dddf8036a9fede6bbafb44c", "955c134a8c669070c3b936eac55f0e5e3f448418"]
+progress: ready-for-review
+commits: ["001f585ac686c90f601fd210ca4a40cc5cad7c9d", "951fa88b25aa0c530aab4dc4c4e2c59cbe6994f2", "a2781ff06b71bc443eda82aa1c0022edf011c972", "3bb9c9bd4099810d8583ab647018a5a41297f8c2", "873d0821ca7a33501c178303bdc618a1802ccbb6", "9dd4a1f0f07930760dddf8036a9fede6bbafb44c", "955c134a8c669070c3b936eac55f0e5e3f448418", "8a299761"]
 ---
 
 ## Required behavior
@@ -124,8 +124,9 @@ Canonical spec: `specs/system/message-bus.md`. Source: `4127964001113dda08e48524
 ## Shipped
 
 All five send-path guards are implemented on this branch (955c134a,
-9dd4a1f0, 873d0821, 3bb9c9bd, a2781ff0, 951fa88b), carried through the
-merge with base 9f0c709f, plus this round's CI repair (001f585a).
+9dd4a1f0, 873d0821, 3bb9c9bd, a2781ff0, 951fa88b, 001f585a), carried
+through the merge with base 00669baa, plus this round's compile repair
+(8a299761).
 
 ### Behavior
 
@@ -159,40 +160,30 @@ merge with base 9f0c709f, plus this round's CI repair (001f585a).
    (nothing stored or broadcast), including Server-origin global-token
    callers. An unresolvable workspace record rejects fail-closed.
 
-### This round — verification repair: commit attribution
+### This round — merged-base compile repair
 
-Verification at candidate f33d1224 (CI run on PR head) passed every
-gate except `check-task-commit-attribution.sh`: commit 001f585a
-(`fix(task-248): add auth_mechanism to merged task-258 spawn test
-fixture`) names both task-248 and task-258 in its subject and touches
-product surface (crates/gyre-server/src/api/spawn.rs), so the check
-requires its SHA in BOTH tasks' `commits:` frontmatter — it was
-recorded in task-248.md only. This round records
-`001f585ac686c90f601fd210ca4a40cc5cad7c9d` in
-specs/tasks/task-258.md's `commits:` frontmatter (the drift fix the
-check's message prescribes — frontmatter recording, never an
-exemption entry). No production code changed this round.
-
-Context for that commit, carried from the prior round: CI run
-44662219386 (PR head 324daddf) failed to compile the gyre-server lib
-test because the merge with base 9f0c709f brought task-258's new
-`complete_agent_ends_session_with_real_dirty_state` fixture in
-spawn.rs constructing `AuthenticatedAgent` without the
-`auth_mechanism` field task-248 added to the extractor; 001f585a sets
-it to `AuthMechanism::AgentToken`, matching the sibling spawner
-fixtures in the same test module — a one-line test-fixture repair, no
-task-248 guard code changed.
+CI run 44680564932 (PR head 1bcfb6dd) failed to compile the
+gyre-server lib test: E0063, missing field `auth_mechanism` in an
+`AuthenticatedAgent` initializer at crates/gyre-server/src/api/spawn.rs.
+The initializer is `plain_auth`, a hand-rolled test fixture that came
+in with merged base 00669baa and predated the field task-248 added to
+the extractor. Commit 8a299761 sets it to
+`AuthMechanism::AgentToken`, matching the sibling spawner fixtures in
+the same test module (the same repair class as 001f585a in the prior
+round). No task-248 guard code changed this round; the field is
+consulted only by `origin_from_auth`, which this fixture's sole
+consumer (`complete_agent` direct drive) does not exercise.
 
 ### Test evidence
 
 - In-sandbox probes this round (build-budget limit — large gyre-server
-  test compilation deferred to the verifier): `cargo fmt --check` —
-  clean, exit 0; `bash scripts/check-task-commit-attribution.sh` —
-  now passes (exit 0) with 001f585a recorded in both task-248.md and
-  task-258.md frontmatter (it failed on task-258 before the fix).
-- Prior-round probes, unchanged by this round's docs-only repair:
-  `SKIP_WEB_BUILD=1 cargo check -p gyre-server --tests` — clean;
-  origin-table probes (Admin API-key/OIDC server_only 403,
+  test compilation deferred to the verifier): `SKIP_WEB_BUILD=1 cargo
+  check -p gyre-server --tests` — clean, exit 0 (was the E0063
+  failure); `cargo fmt --check` — clean, exit 0;
+  `bash scripts/check-task-commit-attribution.sh` — full-history scan,
+  result recorded in review evidence.
+- Prior-round probes, unchanged by this round's one-line fixture
+  repair: origin-table probes (Admin API-key/OIDC server_only 403,
   directed-send membership 403, global-token Server origin +
   Broadcast authority, rule-6 Admin-Broadcast allowance), rule-1
   cross-tenant 403 with empty store (REST + MCP), WS live/replay
@@ -201,6 +192,5 @@ task-248 guard code changed.
   with empty store/broadcast.
 - Deferred to the independent verifier: `cargo test -p gyre-server`
   (the task-248 guard tests in api/messages.rs, mcp.rs, ws.rs, mem.rs,
-  lib.rs test modules, and the repaired
-  `complete_agent_ends_session_with_real_dirty_state` in spawn.rs), and
-  full `cargo test --all` / nextest.
+  and lib.rs, plus the spawn.rs fixture suite that includes
+  `plain_auth`).
