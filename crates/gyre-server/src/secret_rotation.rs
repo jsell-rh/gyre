@@ -20,12 +20,66 @@ use std::sync::Arc;
 
 use anyhow::Context as _;
 use gyre_common::{Id, Notification, NotificationType, Secret};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 use crate::AppState;
 
 /// Window before expiry that triggers a notification (seconds).
 const EXPIRY_WINDOW_SECS: u64 = 3600;
+
+/// Minimum remaining lifetime that still justifies an automatic refresh
+/// (seconds). Larger than the 5-minute job interval: a credential whose
+/// natural lifetime is at or below the window (a Google access token is
+/// exactly 3600 s) must not be re-refreshed on EVERY job cycle — the
+/// refresh fires when the credential is genuinely near expiry, then the
+/// new grant takes it out of the refresh threshold until it nears expiry
+/// again (review task-273: perpetual refresh loop).
+const REFRESH_THRESHOLD_MIN_SECS: u64 = 600;
+
+/// Whether an expiring secret should be refreshed NOW.
+///
+/// The credential must be within [`EXPIRY_WINDOW_SECS`] of expiry (the
+/// job's scan window — see [`expiring`]) AND meaningfully near expiry:
+/// already expired, or with a remaining lifetime at or below a threshold
+/// derived from the granted lifetime (`expires_at - last_rotated_at`, set
+/// by the previous refresh). Without the threshold, a credential whose
+/// natural lifetime is shorter than or equal to the window — Google
+/// access tokens: `expires_in` 3600 against a 3600 s window — would be
+/// refreshed on every 5-minute cycle forever: each refresh sets
+/// `expires_at = now + 3600`, which never leaves the window.
+///
+/// The threshold is one fifth of the granted lifetime, clamped to
+/// [REFRESH_THRESHOLD_MIN_SECS, EXPIRY_WINDOW_SECS]:
+///
+/// - Google SA (granted 3600 s): threshold 720 s — refreshed with ~12
+///   minutes left, i.e. roughly every 48 minutes, not every cycle.
+/// - Long-lived grants (days): threshold clamps to the window — the
+///   pre-existing behavior (refresh within the last hour).
+/// - Never-refreshed secrets (`last_rotated_at` unknown): threshold is
+///   the full window, so the first refresh happens promptly and starts
+///   the cadence.
+fn should_refresh(secret: &Secret, now: u64) -> bool {
+    let Some(expires_at) = secret.expires_at else {
+        return false;
+    };
+    if expires_at <= now {
+        // Already expired: refresh immediately (an admin must also know
+        // either way, but a handler refresh revives it first).
+        return true;
+    }
+    let remaining = expires_at - now;
+    if remaining > EXPIRY_WINDOW_SECS {
+        return false;
+    }
+    let threshold = match secret.last_rotated_at {
+        Some(rotated_at) if rotated_at < expires_at => {
+            let granted = expires_at - rotated_at;
+            (granted / 5).clamp(REFRESH_THRESHOLD_MIN_SECS, EXPIRY_WINDOW_SECS)
+        }
+        _ => EXPIRY_WINDOW_SECS,
+    };
+    remaining <= threshold
+}
 
 fn now_secs() -> u64 {
     std::time::SystemTime::now()
@@ -165,10 +219,16 @@ impl SecretRotationHandler for OAuthRefreshHandler {
             .and_then(|v| v.as_str())
             .unwrap_or(&doc.refresh_token)
             .to_string();
+        // expires_in is RECOMMENDED, not guaranteed — but fabricating a
+        // lifetime the provider did not state would set a wrong expires_at
+        // (and, for a value below the real lifetime, a perpetual
+        // refresh/notification loop). A response without it fails the
+        // rotation honestly: the admin is notified and the stored
+        // credential is left untouched (review task-273).
         let expires_in = tokens
             .get("expires_in")
             .and_then(|v| v.as_u64())
-            .unwrap_or(3600);
+            .context("token response missing expires_in (cannot determine new expiry)")?;
 
         let updated = OAuthCredentialDoc {
             token_endpoint: doc.token_endpoint,
@@ -323,10 +383,13 @@ impl SecretRotationHandler for GcpServiceAccountHandler {
             .and_then(|v| v.as_str())
             .context("token response missing access_token")?
             .to_string();
+        // No fabricated lifetime: Google always states expires_in, and a
+        // response without it cannot set an honest expires_at (review
+        // task-273).
         let expires_in = tokens
             .get("expires_in")
             .and_then(|v| v.as_u64())
-            .unwrap_or(3600);
+            .context("token response missing expires_in (cannot determine new expiry)")?;
 
         // Overwrite ONLY the access token on the original document — every
         // other field the admin supplied (Google-issued SA key fields
@@ -373,31 +436,19 @@ async fn attempt_rotation(
         .rotate(&state.http_client, secret, current_value)
         .await?;
 
-    // Replace the value + metadata via delete + create (the port's
+    // Replace the value + metadata with ONE port operation. The port's
     // `rotate()` only touches value + `last_rotated_at`, so the extended
-    // `expires_at` needs a row rewrite; same pattern the Admin API uses
-    // for a force-rotate with expiry change). The new value is re-supplied
-    // from the handler, never read back out of storage.
-    //
-    // If the re-create fails after the delete succeeded, the ORIGINAL row
-    // (metadata + value, both still in hand) is restored BEFORE the error
-    // propagates — a failed metadata rewrite must never lose the
-    // credential document, or the admin would get a SecretExpiring
-    // notification for a secret that no longer exists (review task-273).
+    // `expires_at` needs a row rewrite — but a delete + create pair would
+    // lose the credential if the process died between the two steps (the
+    // SA key or refresh token is unrecoverable), and a concurrent
+    // resolve_for_agent in the window would see it missing. `replace` is
+    // a single atomic rewrite with no such window (review task-273). The
+    // new value is re-supplied from the handler, never read back out of
+    // storage.
     let mut updated = secret.clone();
     updated.expires_at = rotated.expires_at;
     updated.last_rotated_at = Some(now_secs());
-    state.secrets.delete(&secret.id, &secret.tenant_id).await?;
-    if let Err(create_err) = state.secrets.create(&updated, &rotated.value).await {
-        if let Err(restore_err) = state.secrets.create(secret, current_value).await {
-            error!(
-                secret_name = %secret.name,
-                "restoring the secret after a failed rotation rewrite failed: {restore_err:#} \
-                 (original create error: {create_err:#})"
-            );
-        }
-        return Err(create_err.context("rotation rewrite failed; the original secret was restored"));
-    }
+    state.secrets.replace(&updated, &rotated.value).await?;
 
     // §7 audit event: secret name (never value), scope, rotating actor.
     info!(
@@ -413,14 +464,32 @@ async fn attempt_rotation(
     Ok(())
 }
 
-/// Attempt handler rotation for one expiring secret. Returns `true` when a
-/// handler rotated it (suppressing the admin notification); `false` when
-/// there is no handler or rotation failed — a failed rotation is exactly
-/// what an admin must be warned about, so the caller notifies. The
-/// per-secret outcome (refreshed / no-refresh-mechanism / failed: reason)
-/// is recorded in the run-scoped log sink (TASK-273: no expiring
-/// credential is silently skipped).
-async fn try_rotate(state: &Arc<AppState>, secret: &Secret, log: &crate::jobs::JobRunLog) -> bool {
+/// Per-secret outcome of the rotation dispatch (TASK-273: no expiring
+/// credential is silently skipped — every outcome is distinguishable in
+/// the run's durable logs).
+enum RotateOutcome {
+    /// A handler refreshed the credential (admin notification suppressed).
+    Rotated,
+    /// A handler exists but the credential is not yet near enough to
+    /// expiry to justify a refresh (see [`should_refresh`]): the refresh
+    /// will fire before expiry; no notification.
+    Deferred,
+    /// No handler (no-refresh-mechanism) or the refresh failed — the
+    /// caller notifies the responsible admins.
+    Notify,
+}
+
+/// Attempt handler rotation for one expiring secret. Returns the
+/// [`RotateOutcome`] for the caller's notification decision; the
+/// per-secret outcome (refreshed / deferred / no-refresh-mechanism /
+/// failed: reason) is recorded in the run-scoped log sink (TASK-273: no
+/// expiring credential is silently skipped).
+async fn try_rotate(
+    state: &Arc<AppState>,
+    secret: &Secret,
+    log: &crate::jobs::JobRunLog,
+    now: u64,
+) -> RotateOutcome {
     let value = match state.secrets.get_value(&secret.id, &secret.tenant_id).await {
         Ok(Some(v)) => v,
         Ok(None) => {
@@ -431,7 +500,7 @@ async fn try_rotate(state: &Arc<AppState>, secret: &Secret, log: &crate::jobs::J
                 secret.scope_id
             ))
             .await;
-            return false;
+            return RotateOutcome::Notify;
         }
         Err(e) => {
             log.log(format!(
@@ -441,7 +510,7 @@ async fn try_rotate(state: &Arc<AppState>, secret: &Secret, log: &crate::jobs::J
                 secret.scope_id
             ))
             .await;
-            return false;
+            return RotateOutcome::Notify;
         }
     };
 
@@ -453,8 +522,26 @@ async fn try_rotate(state: &Arc<AppState>, secret: &Secret, log: &crate::jobs::J
             secret.scope_id
         ))
         .await;
-        return false;
+        return RotateOutcome::Notify;
     };
+    if !should_refresh(secret, now) {
+        // Within the scan window but not yet meaningfully near expiry: a
+        // short-lived token (e.g. a 3600 s Google access token) is fresh
+        // for most of its granted lifetime. Refreshing now would re-fire
+        // on every job cycle; the deferred refresh lands before expiry,
+        // so no admin notification is due either (review task-273:
+        // perpetual refresh loop).
+        log.log(format!(
+            "secret '{}' ({}:{}): refresh deferred — credential still fresh \
+             (expires_at {}, refresh fires near expiry)",
+            secret.name,
+            secret.scope.as_str(),
+            secret.scope_id,
+            secret.expires_at.unwrap_or(0)
+        ))
+        .await;
+        return RotateOutcome::Deferred;
+    }
     match attempt_rotation(state, handler, secret, &value).await {
         Ok(()) => {
             log.log(format!(
@@ -465,7 +552,7 @@ async fn try_rotate(state: &Arc<AppState>, secret: &Secret, log: &crate::jobs::J
                 handler.name()
             ))
             .await;
-            true
+            RotateOutcome::Rotated
         }
         Err(e) => {
             warn!(
@@ -482,7 +569,7 @@ async fn try_rotate(state: &Arc<AppState>, secret: &Secret, log: &crate::jobs::J
                 handler.name()
             ))
             .await;
-            false
+            RotateOutcome::Notify
         }
     }
 }
@@ -602,8 +689,12 @@ pub async fn run_once(state: &Arc<AppState>, log: &crate::jobs::JobRunLog) -> an
             .context("tenant-scope secret list failed")?;
         for secret in expiring(&tenant_secrets, now) {
             // Rotated secrets with a handler are refreshed automatically;
-            // only no-handler / failed-rotation secrets notify admins.
-            if try_rotate(state, secret, log).await {
+            // deferred refreshes will fire before expiry; only
+            // no-handler / failed-rotation secrets notify admins.
+            if !matches!(
+                try_rotate(state, secret, log, now).await,
+                RotateOutcome::Notify
+            ) {
                 continue;
             }
             for ws in &workspaces {
@@ -625,9 +716,14 @@ pub async fn run_once(state: &Arc<AppState>, log: &crate::jobs::JobRunLog) -> an
                 .await
                 .with_context(|| format!("workspace-scope secret list failed for {ws_id}"))?;
             for secret in expiring(&ws_secrets, now) {
-                // Rotated secrets with a handler are refreshed automatically;
-                // only no-handler / failed-rotation secrets notify admins.
-                if try_rotate(state, secret, log).await {
+                // Rotated secrets with a handler are refreshed
+                // automatically; deferred refreshes will fire before
+                // expiry; only no-handler / failed-rotation secrets
+                // notify admins.
+                if !matches!(
+                    try_rotate(state, secret, log, now).await,
+                    RotateOutcome::Notify
+                ) {
                     continue;
                 }
                 notify_workspace_admins(state, ws.id.clone(), secret, now).await;
@@ -644,9 +740,13 @@ pub async fn run_once(state: &Arc<AppState>, log: &crate::jobs::JobRunLog) -> an
                     .with_context(|| format!("repo-scope secret list failed for {repo_id}"))?;
                 for secret in expiring(&repo_secrets, now) {
                     // Rotated secrets with a handler are refreshed
-                    // automatically; only no-handler / failed-rotation
-                    // secrets notify admins.
-                    if try_rotate(state, secret, log).await {
+                    // automatically; deferred refreshes will fire before
+                    // expiry; only no-handler / failed-rotation secrets
+                    // notify admins.
+                    if !matches!(
+                        try_rotate(state, secret, log, now).await,
+                        RotateOutcome::Notify
+                    ) {
                         continue;
                     }
                     notify_workspace_admins(state, ws.id.clone(), secret, now).await;
@@ -2070,5 +2170,133 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(notifs.len(), 1, "failed SA refresh must notify admins");
+    }
+
+    // ── Refresh cadence (review task-273: perpetual refresh loop) ──────────
+
+    fn cadence_secret(expires_at: u64, last_rotated_at: Option<u64>) -> gyre_common::Secret {
+        gyre_common::Secret {
+            id: Id::new("sec-cadence"),
+            name: "gcp_sa_json".to_string(),
+            scope: gyre_common::SecretScope::Workspace,
+            scope_id: "ws-rot".to_string(),
+            secret_type: gyre_common::SecretType::Rotated,
+            created_by: "system".to_string(),
+            created_at: 1,
+            expires_at: Some(expires_at),
+            last_rotated_at,
+            tenant_id: "default".to_string(),
+        }
+    }
+
+    /// A credential whose granted lifetime equals the scan window (a
+    /// Google access token: expires_in 3600 against a 3600 s window) must
+    /// NOT be re-refreshed on every job cycle: right after a refresh the
+    /// remaining lifetime (3600 s) is above the refresh threshold, so the
+    /// next refresh defers until the credential nears expiry again.
+    #[test]
+    fn should_refresh_does_not_loop_on_window_sized_grants() {
+        let now = 1_000_000u64;
+        // Just refreshed: granted 3600 s at `now`.
+        let fresh = cadence_secret(now + 3600, Some(now));
+        assert!(
+            !should_refresh(&fresh, now + 300),
+            "a freshly granted 3600 s token (3300 s left) must not re-refresh \
+             every 5-minute cycle"
+        );
+        // Still not refreshable at half life (1800 s left; threshold is
+        // 3600/5 = 720 s).
+        assert!(!should_refresh(&fresh, now + 1800));
+        // Refreshable inside the threshold (600 s left ≤ 720 s).
+        assert!(
+            should_refresh(&fresh, now + 3000),
+            "refresh must fire once the remaining lifetime is at/below the \
+             granted-lifetime threshold"
+        );
+    }
+
+    #[test]
+    fn should_refresh_first_refresh_and_expiry_edges() {
+        let now = 1_000_000u64;
+        // Never rotated: the first refresh uses the full window.
+        let never_rotated = cadence_secret(now + 1800, None);
+        assert!(should_refresh(&never_rotated, now));
+        // Already expired: always refreshable.
+        let expired = cadence_secret(now - 10, Some(now - 3610));
+        assert!(should_refresh(&expired, now));
+        // Outside the scan window entirely: not refreshable.
+        let far = cadence_secret(now + 7200, Some(now));
+        assert!(!should_refresh(&far, now));
+        // Long-lived grant (30 days): threshold clamps to the window —
+        // refreshed within the last hour of life only (pre-existing
+        // behavior preserved).
+        let long_lived = cadence_secret(now + 30 * 86_400, Some(now));
+        assert!(!should_refresh(&long_lived, now + 29 * 86_400));
+        assert!(should_refresh(&long_lived, now + 30 * 86_400 - 1800));
+    }
+
+    /// A token response without expires_in cannot set an honest expiry —
+    /// the rotation must FAIL (notification + untouched stored value)
+    /// rather than fabricate a 3600 s lifetime (review task-273).
+    #[tokio::test]
+    async fn missing_expires_in_fails_rotation_instead_of_fabricating_a_lifetime() {
+        let now = now_secs();
+        let (endpoint, _seen) = spawn_token_endpoint(
+            axum::http::StatusCode::OK,
+            serde_json::json!({
+                "access_token": "new-access-token",
+                "refresh_token": "new-refresh-token"
+            }),
+        )
+        .await;
+        let cred = serde_json::json!({
+            "token_endpoint": endpoint,
+            "client_id": "gyre-test",
+            "refresh_token": "old-refresh-token"
+        });
+        let original = cred.to_string();
+        let state = seed_oauth(now, original.as_bytes()).await;
+
+        let log = crate::jobs::JobRunLog::new();
+        run_once(&state, &log).await.unwrap();
+
+        // The stored credential is untouched — no fabricated expiry, no
+        // half-applied rotation.
+        let value = state
+            .secrets
+            .get_value(&Id::new("sec-oauth"), "default")
+            .await
+            .unwrap()
+            .expect("secret must survive the failed rotation");
+        assert_eq!(value, original.as_bytes());
+
+        // The failure is recorded in the run log and escalated to admins.
+        let lines = log.take().await;
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("FAILED") && l.contains("missing expires_in")),
+            "run log must record the missing-expires_in failure, got: {lines:?}"
+        );
+        let notifs = state
+            .notifications
+            .list_for_user(
+                &Id::new("user-admin"),
+                None,
+                None,
+                None,
+                Some(&["SecretExpiring"]),
+                None,
+                &[],
+                50,
+                0,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            notifs.len(),
+            1,
+            "a rotation that cannot determine the new expiry must notify admins"
+        );
     }
 }
