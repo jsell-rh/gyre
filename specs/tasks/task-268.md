@@ -3,7 +3,7 @@ title: "Pre-PR local verification: repo quality gates mechanically executed in t
 spec_ref: "Spec gap spec-4c39ca6ea3e71ce8a53398f3 / pre-pr-local-verification / d30f233daf86"
 depends_on: []
 progress: ready-for-review
-commits: ["950a65a098116c5d3bad82ee7cbbb425d491da5e", "36dab5b483855ac9131ea4f69f06b3d94a134834"]
+commits: ["36dab5b483855ac9131ea4f69f06b3d94a134834", "950a65a098116c5d3bad82ee7cbbb425d491da5e"]
 ---
 
 ## Required behavior
