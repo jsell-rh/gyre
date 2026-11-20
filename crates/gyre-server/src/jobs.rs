@@ -226,15 +226,23 @@ impl JobRegistry {
     /// DURABLE history for a specific job (newest-first, at most `limit`
     /// rows), read through the attached `JobRunRepository`. Falls back to
     /// the in-memory cache when no durable store is attached (pure-mem
-    /// mode before `start_job_registry` ran).
+    /// mode before `start_job_registry` ran). A durable-store read failure
+    /// is LOUD (logged) — never a silent degradation to empty results
+    /// (review task-273).
     pub async fn durable_history(&self, job_name: &str, limit: usize) -> Vec<JobRun> {
         let store = self.durable.lock().await.clone();
         match store {
-            Some(store) => store
-                .list_by_job(job_name, limit)
-                .await
-                .map(|runs| runs.into_iter().map(JobRun::from_record).collect())
-                .unwrap_or_default(),
+            Some(store) => match store.list_by_job(job_name, limit).await {
+                Ok(runs) => runs.into_iter().map(JobRun::from_record).collect(),
+                Err(e) => {
+                    error!(
+                        job = %job_name,
+                        "reading durable job history failed (serving the in-memory \
+                         cache): {e}"
+                    );
+                    self.history(job_name).await
+                }
+            },
             None => self.history(job_name).await,
         }
     }
@@ -1160,5 +1168,62 @@ mod tests {
         let history = state.job_registry.history("pr_hygiene_check").await;
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].status, "success");
+    }
+
+    /// Review task-273: the durable wiring must be proven — a triggered
+    /// run (with logs) lands in the attached JobRunRepository, not just
+    /// the in-memory ring, and durable_history reads through the store.
+    /// Without this test, deleting the store.record(...) call in
+    /// record_run or the durable_history read would leave every test
+    /// green.
+    #[tokio::test]
+    async fn trigger_persists_runs_through_the_durable_store() {
+        let state = test_state();
+        let registry = JobRegistry::new();
+        registry
+            .set_durable_store(Arc::clone(&state.job_runs))
+            .await;
+        registry
+            .register(
+                JobDefinition {
+                    name: "durable_job".to_string(),
+                    description: "Durable persistence test".to_string(),
+                    interval_secs: 60,
+                    enabled: true,
+                    run_at_utc_hour: None,
+                },
+                |_state, log| async move {
+                    log.log("per-item outcome line").await;
+                    Ok(())
+                },
+            )
+            .await;
+
+        registry
+            .trigger("durable_job", Arc::clone(&state))
+            .await
+            .unwrap();
+
+        // The run landed in the DURABLE store — a fresh registry backed by
+        // the same store (the shape of a server restart) sees it.
+        let runs = state.job_runs.list_by_job("durable_job", 10).await.unwrap();
+        assert_eq!(runs.len(), 1, "the triggered run must be persisted");
+        assert_eq!(runs[0].status, "success");
+        assert_eq!(
+            runs[0].logs,
+            vec!["per-item outcome line".to_string()],
+            "run-scoped log lines must land in the durable record"
+        );
+        assert!(runs[0].finished_at.is_some());
+
+        // durable_history reads through the attached store.
+        let history = registry.durable_history("durable_job", 10).await;
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].logs, vec!["per-item outcome line".to_string()]);
+
+        // record_cycle (the external scheduler loops' path) persists too.
+        registry.record_cycle("durable_job", 1000, &Ok(())).await;
+        let runs = state.job_runs.list_by_job("durable_job", 10).await.unwrap();
+        assert_eq!(runs.len(), 2, "record_cycle must persist through the store");
     }
 }

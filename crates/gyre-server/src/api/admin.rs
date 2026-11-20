@@ -432,14 +432,33 @@ pub struct ServerLogQuery {
     pub limit: Option<usize>,
 }
 
-pub async fn admin_server_logs(Query(q): Query<ServerLogQuery>) -> Json<serde_json::Value> {
+pub async fn admin_server_logs(
+    Query(q): Query<ServerLogQuery>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    // Validate the level parameter (case-insensitive): an unrecognized
+    // value must be a 400, not a silently-ignored filter that widens the
+    // result set (review task-273).
+    let min_level = match q.level.as_deref() {
+        None => None,
+        Some(raw) => {
+            let upper = raw.trim().to_ascii_uppercase();
+            match upper.as_str() {
+                "TRACE" | "DEBUG" | "INFO" | "WARN" | "ERROR" => Some(upper),
+                other => {
+                    return Err(ApiError::InvalidInput(format!(
+                        "unknown log level {other:?} (expected TRACE, DEBUG, INFO, WARN or ERROR)"
+                    )))
+                }
+            }
+        }
+    };
     let limit = q.limit.unwrap_or(200).min(5000);
-    let entries = crate::telemetry::server_log_buffer().query(q.level.as_deref(), q.since, limit);
+    let entries = crate::telemetry::server_log_buffer().query(min_level.as_deref(), q.since, limit);
     let count = entries.len();
-    Json(serde_json::json!({
+    Ok(Json(serde_json::json!({
         "entries": entries,
         "count": count
-    }))
+    })))
 }
 
 // ── Agent Kill ────────────────────────────────────────────────────────────────
@@ -504,8 +523,16 @@ pub(crate) async fn kill_agent(
     // captured for the AgentKilled audit event before the registry entry
     // is consumed.
     let mut killed_pid: Option<u32> = None;
+    // Whether a kill was actually ATTEMPTED for the durable instance
+    // record: marking a still-recorded-running instance terminated
+    // without attempting its kill would hide a live orphan from the
+    // remote_agent_cleanup sweep permanently (the sweep only considers
+    // records with terminated_at IS NULL) — worse than not having the
+    // durable store (review task-273).
+    let mut kill_attempted = false;
     if let Some(handle) = state.process_registry.lock().await.remove(&id) {
         killed_pid = handle.pid;
+        kill_attempted = true;
         let backend = state.spawned_backends.lock().await.remove(&id);
         let kill_result = match backend.as_deref() {
             Some(b) => gyre_ports::ComputeTarget::kill_process(b, &handle).await,
@@ -520,17 +547,82 @@ pub(crate) async fn kill_agent(
         if let Err(e) = kill_result {
             tracing::warn!(agent_id = %id, "kill_process failed: {e}");
         }
+    } else {
+        // Restart orphan (review task-273): the in-memory registry is
+        // empty, but the durable instance record may still show the
+        // instance running. Reconstruct the backend from the record —
+        // the same reconstruction remote_agent_cleanup performs — and
+        // kill it for real.
+        let durable_instance = state
+            .agent_instances
+            .find_by_agent(&id)
+            .await
+            .ok()
+            .flatten();
+        if let Some(instance) = durable_instance {
+            if instance.terminated_at.is_none() {
+                killed_pid = instance.pid;
+                let handle = gyre_ports::ProcessHandle {
+                    id: instance.handle_id.clone(),
+                    target_type: instance.target_type.clone(),
+                    pid: instance.pid,
+                };
+                // Container/Kubernetes kills address global resources
+                // (docker rm / kubectl delete pod) reachable from a
+                // default-constructed target; local kills by pid. A
+                // backend whose connection details are not persisted in
+                // the record cannot be reconstructed — the record stays
+                // running so the sweep keeps reporting it instead of
+                // silently marking it dead.
+                let kill_result: Option<anyhow::Result<()>> = match instance.backend.as_str() {
+                    "container" => {
+                        let target = gyre_adapters::compute::ContainerTarget::new("unused");
+                        Some(gyre_ports::ComputeTarget::kill_process(&target, &handle).await)
+                    }
+                    "kubernetes" => {
+                        let target = gyre_adapters::compute::KubernetesTarget::new("unused");
+                        Some(gyre_ports::ComputeTarget::kill_process(&target, &handle).await)
+                    }
+                    "local" => Some(
+                        gyre_ports::ComputeTarget::kill_process(
+                            &gyre_adapters::compute::LocalTarget,
+                            &handle,
+                        )
+                        .await,
+                    ),
+                    other => {
+                        tracing::warn!(
+                            agent_id = %id,
+                            backend = %other,
+                            "admin kill: backend cannot be reconstructed from the durable \
+                             record; leaving the instance recorded as running so \
+                             remote_agent_cleanup keeps reporting it"
+                        );
+                        None
+                    }
+                };
+                if let Some(result) = kill_result {
+                    kill_attempted = true;
+                    if let Err(e) = result {
+                        tracing::warn!(agent_id = %id, "kill_process failed: {e}");
+                    }
+                }
+            }
+        }
     }
-    // TASK-273: the durable instance record reflects the admin kill.
-    if let Err(e) = state
-        .agent_instances
-        .mark_terminated(&id, "admin_kill")
-        .await
-    {
-        tracing::warn!(
-            agent_id = %id,
-            "marking the killed agent instance terminated failed: {e:#}"
-        );
+    // TASK-273: the durable instance record reflects the admin kill — but
+    // ONLY when a kill was actually attempted.
+    if kill_attempted {
+        if let Err(e) = state
+            .agent_instances
+            .mark_terminated(&id, "admin_kill")
+            .await
+        {
+            tracing::warn!(
+                agent_id = %id,
+                "marking the killed agent instance terminated failed: {e:#}"
+            );
+        }
     }
     // Fall back to the attested PID when no live process handle exists.
     if killed_pid.is_none() {
@@ -3333,5 +3425,254 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::CONFLICT);
+    }
+
+    // ── Server logs (admin-panel.md §Server Logs; TASK-273) ──────────────────
+
+    /// Review task-273: the server-logs endpoint's authorization must be
+    /// exercised through the FULL middleware stack (ABAC resolver entry
+    /// for the "admin" resource) — a non-Admin JWT gets 403, not a
+    /// handler-level pass-through.
+    #[tokio::test]
+    async fn admin_server_logs_non_admin_gets_403_through_full_stack() {
+        use crate::auth::test_helpers::sign_test_jwt;
+        let app = crate::build_router(make_test_state_with_jwt());
+        let developer_jwt = sign_test_jwt(
+            &serde_json::json!({
+                "sub": "dev-sub",
+                "preferred_username": "dev-user",
+                "realm_access": { "roles": ["developer"] }
+            }),
+            3600,
+        );
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/admin/server/logs")
+                    .header("Authorization", format!("Bearer {developer_jwt}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "non-Admin callers must get 403 through the ABAC middleware"
+        );
+    }
+
+    /// Review task-273: happy path through the full stack — a captured
+    /// server-side log line is retrievable by an Admin caller, with the
+    /// level/since/limit filters honored and an unknown level rejected.
+    #[tokio::test]
+    async fn admin_server_logs_serves_captured_events_with_filters() {
+        let app = crate::build_router(test_state());
+
+        // Inject recognizable lines into the process-wide capture buffer
+        // (the same buffer the ServerLogLayer writes to).
+        let buffer = crate::telemetry::server_log_buffer();
+        let marker = format!("server-logs-endpoint-test-{}", std::process::id());
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        buffer.push(crate::telemetry::ServerLogEntry {
+            timestamp_ms: now_ms,
+            level: "INFO".to_string(),
+            target: "gyre_test".to_string(),
+            message: format!("{marker} info line"),
+        });
+        buffer.push(crate::telemetry::ServerLogEntry {
+            timestamp_ms: now_ms,
+            level: "ERROR".to_string(),
+            target: "gyre_test".to_string(),
+            message: format!("{marker} error line"),
+        });
+
+        let get = |query: &str| {
+            let app = app.clone();
+            let query = query.to_string();
+            async move {
+                app.oneshot(
+                    Request::builder()
+                        .uri(format!("/api/v1/admin/server/logs{query}"))
+                        .header("Authorization", "Bearer test-token")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+            }
+        };
+
+        // Unfiltered: both marker lines retrievable.
+        let resp = get("").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let entries = json["entries"].as_array().unwrap();
+        let matched: Vec<&str> = entries
+            .iter()
+            .filter(|e| e["message"].as_str().unwrap_or("").contains(&marker))
+            .map(|e| e["message"].as_str().unwrap())
+            .collect();
+        assert_eq!(matched.len(), 2, "both captured lines must be retrievable");
+        assert!(
+            entries.iter().all(|e| e["timestamp_ms"].is_number()
+                && e["level"].is_string()
+                && e["target"].is_string()
+                && e["message"].is_string()),
+            "entries carry timestamp/level/target/message: {entries:?}"
+        );
+
+        // Level filter (lowercase — case-insensitive narrowing).
+        let resp = get("?level=error").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let entries = json["entries"].as_array().unwrap();
+        let matched: Vec<&str> = entries
+            .iter()
+            .filter(|e| e["message"].as_str().unwrap_or("").contains(&marker))
+            .map(|e| e["message"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            matched,
+            vec![format!("{marker} error line").as_str()],
+            "level=error must keep only the ERROR line"
+        );
+
+        // Since filter: a future cutoff excludes everything.
+        let resp = get(&format!("?since={}", now_ms + 60_000)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(
+            json["entries"].as_array().unwrap().len(),
+            0,
+            "since=<future> must exclude the captured lines"
+        );
+
+        // Limit: only the single most recent entry (the buffer is
+        // process-global, so other tests' events may be present — the
+        // bound itself is what matters here; ordering is pinned by the
+        // telemetry.rs buffer tests).
+        let resp = get("?limit=1").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let entries = json["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 1, "limit=1 keeps one entry");
+        assert!(
+            entries[0]["timestamp_ms"].as_u64().unwrap() >= now_ms,
+            "limit keeps the MOST RECENT entries"
+        );
+
+        // Unknown level: 400, not a silently-widened filter.
+        let resp = get("?level=bogus").await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// Review task-273: an admin kill of a restart orphan (in-memory
+    // registries empty, durable instance record still running) must KILL
+    /// the real process and mark the record terminated — and an
+    /// unreconstructable record must NOT be silently marked terminated.
+    #[tokio::test]
+    async fn admin_kill_kills_restart_orphan_via_durable_record() {
+        let state = test_state();
+        // A dead agent with a recorded-running LOCAL instance (the shape
+        // a server restart leaves behind) — and a real process behind it.
+        let mut agent =
+            gyre_domain::Agent::new(gyre_common::Id::new("agent-orphan-kill"), "orphan", 1000);
+        agent.status = gyre_domain::AgentStatus::Active;
+        state.agents.create(&agent).await.unwrap();
+
+        let mut child = std::process::Command::new("sleep")
+            .arg("300")
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        state
+            .agent_instances
+            .record_spawned(&gyre_ports::AgentInstanceRecord {
+                agent_id: "agent-orphan-kill".to_string(),
+                backend: "local".to_string(),
+                target_type: "local".to_string(),
+                handle_id: pid.to_string(),
+                pid: Some(pid),
+                spawned_at: 1000,
+                terminated_at: None,
+                terminated_reason: None,
+            })
+            .await
+            .unwrap();
+
+        // NOTE: no process_registry / spawned_backends entries — the
+        // in-memory fast path is empty, exactly like after a restart.
+        super::kill_agent(&state, &agent, "test", false, "user-admin", "admin_kill")
+            .await
+            .unwrap();
+
+        // The real process is gone.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if child.try_wait().unwrap().is_some() {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the restart-orphan process was not killed within 10 s"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+
+        // The durable record is marked terminated.
+        let record = state
+            .agent_instances
+            .find_by_agent("agent-orphan-kill")
+            .await
+            .unwrap()
+            .expect("record must survive");
+        assert!(record.terminated_at.is_some());
+        assert_eq!(record.terminated_reason.as_deref(), Some("admin_kill"));
+
+        // Contrast: an unreconstructable backend (ssh) is NOT marked
+        // terminated — the sweep must keep seeing it.
+        let mut ssh_agent =
+            gyre_domain::Agent::new(gyre_common::Id::new("agent-ssh-orphan"), "ssh-orphan", 1000);
+        ssh_agent.status = gyre_domain::AgentStatus::Active;
+        state.agents.create(&ssh_agent).await.unwrap();
+        state
+            .agent_instances
+            .record_spawned(&gyre_ports::AgentInstanceRecord {
+                agent_id: "agent-ssh-orphan".to_string(),
+                backend: "ssh".to_string(),
+                target_type: "ssh".to_string(),
+                handle_id: "remote-1".to_string(),
+                pid: None,
+                spawned_at: 1000,
+                terminated_at: None,
+                terminated_reason: None,
+            })
+            .await
+            .unwrap();
+        super::kill_agent(
+            &state,
+            &ssh_agent,
+            "test",
+            false,
+            "user-admin",
+            "admin_kill",
+        )
+        .await
+        .unwrap();
+        let record = state
+            .agent_instances
+            .find_by_agent("agent-ssh-orphan")
+            .await
+            .unwrap()
+            .expect("record must survive");
+        assert!(
+            record.terminated_at.is_none(),
+            "an unreconstructable instance must stay recorded-running \
+             (visible to remote_agent_cleanup), not be silently marked terminated"
+        );
     }
 }

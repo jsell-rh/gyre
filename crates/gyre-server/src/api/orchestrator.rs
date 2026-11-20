@@ -506,6 +506,36 @@ pub(crate) async fn launch_orchestrator_process(
                 .lock()
                 .await
                 .insert(agent_id_str.clone(), handle.clone());
+            // TASK-273 (admin-panel.md §Remote agent cleanup): persist the
+            // spawned ORCHESTRATOR instance durably — the same contract as
+            // dispatch_agent_launch (spawn.rs): the in-memory registry is
+            // the fast path, the durable agent-instance store is the source
+            // of truth for orphan sweeps across server restarts. Without
+            // this, an orchestrator container orphaned by a restart is
+            // invisible to remote_agent_cleanup and leaks forever (review
+            // task-273: orchestrators are a production spawn path). Best
+            // effort: a persistence failure is logged, never blocks the
+            // launch.
+            let instance_record = gyre_ports::AgentInstanceRecord {
+                agent_id: agent_id_str.clone(),
+                backend: handle.target_type.clone(),
+                target_type: handle.target_type.clone(),
+                handle_id: handle.id.clone(),
+                pid: handle.pid,
+                spawned_at: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs(),
+                terminated_at: None,
+                terminated_reason: None,
+            };
+            if let Err(e) = state.agent_instances.record_spawned(&instance_record).await {
+                tracing::warn!(
+                    agent_id = %agent.id,
+                    "persisting the orchestrator instance record failed \
+                     (orphan sweep will not see it): {e:#}"
+                );
+            }
             // Monitor: on exit, free the registry slot and mark the agent
             // Dead so the stale detector / restart loop takes over. The
             // is_alive probe MUST use the same target type the process was
@@ -566,6 +596,21 @@ pub(crate) async fn launch_orchestrator_process(
                             .lock()
                             .await
                             .remove(&agent_id_str);
+                        // TASK-273: the durable instance record is marked
+                        // terminated on clean exit (best-effort) so the
+                        // orphan sweep does not consider a reaped
+                        // orchestrator still running.
+                        if let Err(e) = state_mon
+                            .agent_instances
+                            .mark_terminated(&agent_id_str, "clean_exit")
+                            .await
+                        {
+                            tracing::warn!(
+                                agent_id = %agent_id_str,
+                                "marking the orchestrator instance terminated \
+                                 failed: {e:#}"
+                            );
+                        }
                         if let Ok(Some(mut a)) =
                             state_mon.agents.find_by_id(&Id::new(&agent_id_str)).await
                         {

@@ -11,6 +11,69 @@ fn rfc3339_formatting() {
     assert_eq!(rfc3339_utc(1_735_689_600), "2025-01-01T00:00:00Z");
 }
 
+/// Review task-273 (sops CLI MAC compatibility): Go marshals `time.Time`
+/// to RFC 3339 with nanosecond precision while the MAC AAD is
+/// `Format(time.RFC3339)` (second precision) — canonicalization must
+/// truncate fractional digits and preserve the zone verbatim.
+#[test]
+fn canonical_lastmodified_truncates_fractions_and_keeps_zone() {
+    // Already canonical: unchanged.
+    assert_eq!(
+        canonical_lastmodified("2026-11-19T00:25:55Z").unwrap(),
+        "2026-11-19T00:25:55Z"
+    );
+    // Go JSON marshal shape (RFC3339Nano): fraction truncated.
+    assert_eq!(
+        canonical_lastmodified("2026-11-19T00:25:55.123456789Z").unwrap(),
+        "2026-11-19T00:25:55Z"
+    );
+    assert_eq!(
+        canonical_lastmodified("2026-11-19T00:25:55.5Z").unwrap(),
+        "2026-11-19T00:25:55Z"
+    );
+    // Non-UTC zone preserved verbatim (Go formats in the time's own
+    // location — no UTC conversion).
+    assert_eq!(
+        canonical_lastmodified("2026-11-19T00:25:55.999+02:00").unwrap(),
+        "2026-11-19T00:25:55+02:00"
+    );
+    assert_eq!(
+        canonical_lastmodified("2026-11-19T00:25:55-07:00").unwrap(),
+        "2026-11-19T00:25:55-07:00"
+    );
+    // Malformed values fail closed.
+    assert!(canonical_lastmodified("not-a-time").is_err());
+    assert!(canonical_lastmodified("2026-11-19T00:25:55").is_err()); // no zone
+    assert!(canonical_lastmodified("2026-11-19T00:25:55.999").is_err()); // fraction, no zone
+    assert!(canonical_lastmodified("2026-11-19T00:25Z").is_err()); // no seconds
+    assert!(canonical_lastmodified("20261119T00:25:55Z").is_err()); // bad date
+}
+
+/// Review task-273 (sops CLI MAC compatibility): a document whose STORED
+/// lastmodified carries fractional digits (the sops CLI's JSON marshal
+/// shape) must still verify — the MAC AAD is the canonicalized
+/// second-precision string, exactly what sops sealed under.
+#[test]
+fn sops_decrypt_verifies_cli_style_fractional_lastmodified() {
+    let identity = AgeIdentity::generate();
+    let doc = sops_encrypt(b"fractional-compat", &identity, 1_795_047_955).unwrap();
+    let mut v: serde_json::Value = serde_json::from_slice(&doc).unwrap();
+    v["sops"]["lastmodified"] = serde_json::json!("2026-11-19T00:25:55.999999999Z");
+    let rewritten = serde_json::to_vec(&v).unwrap();
+    let decrypted = sops_decrypt(&rewritten, &identity).unwrap();
+    assert_eq!(decrypted, b"fractional-compat");
+
+    // A DIFFERENT second still fails (canonicalization is truncation,
+    // not normalization-to-anything).
+    let mut v: serde_json::Value = serde_json::from_slice(&doc).unwrap();
+    v["sops"]["lastmodified"] = serde_json::json!("2026-11-19T00:25:56.000000001Z");
+    let tampered = serde_json::to_vec(&v).unwrap();
+    assert!(
+        sops_decrypt(&tampered, &identity).is_err(),
+        "a lastmodified in a different SECOND must fail MAC verification"
+    );
+}
+
 /// Cross-implementation vector from sops v3.9.4's own test suite
 /// (aes/cipher_test.go TestDecrypt): decrypting this ENC value with key
 /// `b"ffffffff…"` (32 bytes) and additional data `bar:` must yield `foo`.

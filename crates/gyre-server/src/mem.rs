@@ -14,7 +14,6 @@ use gyre_domain::{
 #[cfg(test)]
 use gyre_domain::{BranchInfo, CommitInfo, DiffResult, MergeResult};
 use gyre_ports::{
-<<<<<<< HEAD
     AgentCommitRepository, AgentInstanceRepository, AgentRepository, AgentSessionRepository,
     AnalyticsQueryFilter, AnalyticsRepository, ApiKeyRepository, AuditQueryFilter, AuditRepository,
     BudgetRepository, BudgetUsageRepository, CostRepository, DependencyRepository, JobRunRepository,
@@ -23,16 +22,6 @@ use gyre_ports::{
     RepoRepository, ReviewRepository, RolloutPolicyRepository, SpawnLogEntry, SpawnLogRepository,
     TaskRepository, TenantMetaSpecSetRepository, TenantRepository, UserRepository,
     UserWorkspaceStateRepository, WorkspaceRepository, WorktreeRepository,
-=======
-    AgentCommitRepository, AgentInstanceRepository, AgentRepository, AnalyticsQueryFilter,
-    AnalyticsRepository, ApiKeyRepository, AuditQueryFilter, AuditRepository, BudgetRepository,
-    BudgetUsageRepository, CostRepository, DependencyRepository, JobRunRepository, KvJsonStore,
-    LlmConfigRepository, MergeQueueRepository, MergeRequestRepository, MetaSpecSetRepository,
-    NetworkPeerRepository, OAuthStateRepository, PersonaRepository, RepoRepository,
-    ReviewRepository, RolloutPolicyRepository, SpawnLogEntry, SpawnLogRepository, TaskRepository,
-    TenantMetaSpecSetRepository, TenantRepository, UserRepository, UserWorkspaceStateRepository,
-    WorkspaceRepository, WorktreeRepository,
->>>>>>> b101d27a (style(task-273): rustfmt the task-273 surface (formatting only))
 };
 #[cfg(test)]
 use gyre_ports::{GitOpsPort, JjChange, JjNewChange, JjOpsPort};
@@ -2137,6 +2126,18 @@ impl MemAuditEntry {
 #[derive(Default)]
 pub struct MemAuditRepository {
     store: Arc<Mutex<Vec<MemAuditEntry>>>,
+    /// Server-side tenant-attribution sources (port parity with the SQL
+    /// adapters; TASK-273 review): injected after construction via
+    /// [`Self::set_tenant_sources`] because the workspace/user repos are
+    /// built after the audit repo in `build_state`/test wiring. Without
+    /// them, `record` stores the event verbatim (pre-existing behavior).
+    tenant_sources: std::sync::RwLock<MemAuditTenantSources>,
+}
+
+#[derive(Default)]
+struct MemAuditTenantSources {
+    workspaces: Option<Arc<dyn gyre_ports::WorkspaceRepository>>,
+    users: Option<Arc<dyn gyre_ports::UserRepository>>,
 }
 
 impl MemAuditRepository {
@@ -2145,6 +2146,22 @@ impl MemAuditRepository {
     /// MemAuditEntry (compression-aware); consumers materialize them.
     pub fn shared(&self) -> Arc<Mutex<Vec<MemAuditEntry>>> {
         Arc::clone(&self.store)
+    }
+
+    /// Inject the workspace/user repositories used to derive an event's
+    /// tenant server-side at record time — the same contract as the SQL
+    /// adapters' `tenant_of_workspace` / `tenant_of_user` (workspace's
+    /// owning tenant first, then the acting user's tenant binding). Pure
+    /// dev-mem mode must not attribute events differently than SQLite
+    /// does (TASK-273 review: mem parity).
+    pub fn set_tenant_sources(
+        &self,
+        workspaces: Arc<dyn gyre_ports::WorkspaceRepository>,
+        users: Arc<dyn gyre_ports::UserRepository>,
+    ) {
+        let mut sources = self.tenant_sources.write().unwrap();
+        sources.workspaces = Some(workspaces);
+        sources.users = Some(users);
     }
 }
 
@@ -2204,8 +2221,36 @@ fn audit_entry_matches(e: &AuditEvent, filter: &AuditQueryFilter) -> bool {
 #[async_trait]
 impl AuditRepository for MemAuditRepository {
     async fn record(&self, event: &AuditEvent) -> Result<()> {
+        let mut e = event.clone();
+        // Tenant attribution parity (TASK-273 review): the SQLite and
+        // PostgreSQL adapters derive the tenant server-side at record
+        // time — the workspace's owning tenant, then the acting user's
+        // tenant binding; a record that cannot be scoped stays NULL
+        // (visible to unscoped internal reads only, never attributed to
+        // a tenant it did not come from). The mem adapter performs the
+        // SAME derivation so pure-mem mode does not silently drop
+        // workspace-scoped server events from the tenant-scoped admin
+        // audit view.
+        if e.tenant_id.is_none() {
+            let (ws_repo, user_repo) = {
+                let sources = self.tenant_sources.read().unwrap();
+                (sources.workspaces.clone(), sources.users.clone())
+            };
+            if let (Some(ws_id), Some(workspaces)) = (e.workspace_id.as_ref(), ws_repo.as_ref()) {
+                if let Ok(Some(ws)) = workspaces.find_by_id(ws_id).await {
+                    e.tenant_id = Some(ws.tenant_id.to_string());
+                }
+            }
+            if e.tenant_id.is_none() {
+                if let (Some(user_id), Some(users)) = (e.user_id.as_ref(), user_repo.as_ref()) {
+                    if let Ok(Some(user)) = users.find_by_id(user_id).await {
+                        e.tenant_id = user.tenant_id.map(|t| t.to_string());
+                    }
+                }
+            }
+        }
         self.store.lock().await.push(MemAuditEntry {
-            event: event.clone(),
+            event: e,
             detail_zstd: None,
         });
         Ok(())
@@ -2289,6 +2334,118 @@ impl AuditRepository for MemAuditRepository {
             e.event.detail = serde_json::Value::Null;
         }
         Ok(stats)
+    }
+}
+
+#[cfg(test)]
+mod mem_audit_tenant_tests {
+    //! TASK-273 review (mem parity): the mem audit adapter must derive an
+    //! event's tenant server-side at record time exactly like the SQLite
+    //! and PostgreSQL adapters (workspace's owning tenant, then the acting
+    //! user's tenant binding) — otherwise pure-mem mode silently drops
+    //! workspace-scoped server events from the tenant-scoped admin audit
+    //! view while SQLite attributes them.
+
+    use super::*;
+
+    fn event(workspace_id: Option<Id>, user_id: Option<Id>) -> AuditEvent {
+        let mut e = AuditEvent::new(
+            Id::new("evt-1"),
+            gyre_domain::AuditEventType::ProcessExec,
+            None,
+            user_id,
+            None,
+            workspace_id,
+            None,
+            "server".to_string(),
+            None,
+            gyre_domain::AuditOutcome::Success,
+            serde_json::json!({"note": "mem tenant parity"}),
+            None,
+            None,
+            1_000,
+        );
+        e.tenant_id = None;
+        e
+    }
+
+    #[tokio::test]
+    async fn record_derives_tenant_from_workspace_then_user() {
+        let audit = MemAuditRepository::default();
+        let workspaces = MemWorkspaceRepository::default();
+        let users = MemUserRepository::default();
+        audit.set_tenant_sources(
+            Arc::new(workspaces) as Arc<dyn gyre_ports::WorkspaceRepository>,
+            Arc::new(users) as Arc<dyn gyre_ports::UserRepository>,
+        );
+
+        // A workspace-scoped server event: attributed to the workspace's
+        // owning tenant.
+        let ws =
+            gyre_domain::Workspace::new(Id::new("ws-1"), Id::new("tenant-a"), "One", "one", 1_000);
+        audit
+            .record(&event(Some(ws.id.clone()), None))
+            .await
+            .unwrap();
+        // (The sources repos only see the workspace if it exists there —
+        // derivation is a lookup, not a fabrication.)
+
+        // Without the workspace row the event stays unattributed (NULL
+        // tenant, never fabricated) — parity with the SQL adapters.
+        let unattributed = audit
+            .store
+            .lock()
+            .await
+            .last()
+            .unwrap()
+            .event
+            .tenant_id
+            .clone();
+        assert_eq!(unattributed, None);
+
+        // With the workspace row present, the SAME event shape derives
+        // tenant-a.
+        let ws_repo = MemWorkspaceRepository::default();
+        ws_repo.create(&ws).await.unwrap();
+        let users_repo = MemUserRepository::default();
+        let audit2 = MemAuditRepository::default();
+        audit2.set_tenant_sources(
+            Arc::new(ws_repo) as Arc<dyn gyre_ports::WorkspaceRepository>,
+            Arc::new(users_repo) as Arc<dyn gyre_ports::UserRepository>,
+        );
+        audit2
+            .record(&event(Some(Id::new("ws-1")), None))
+            .await
+            .unwrap();
+        let stored = audit2.store.lock().await.last().unwrap().event.clone();
+        assert_eq!(stored.tenant_id.as_deref(), Some("tenant-a"));
+
+        // User fallback: no workspace, but the acting user has a tenant
+        // binding.
+        let mut user = gyre_domain::User::new(Id::new("user-1"), "ext-1", "User One", 1_000);
+        user.tenant_id = Some(Id::new("tenant-b"));
+        let ws_repo = MemWorkspaceRepository::default();
+        let users_repo = MemUserRepository::default();
+        users_repo.create(&user).await.unwrap();
+        let audit3 = MemAuditRepository::default();
+        audit3.set_tenant_sources(
+            Arc::new(ws_repo) as Arc<dyn gyre_ports::WorkspaceRepository>,
+            Arc::new(users_repo) as Arc<dyn gyre_ports::UserRepository>,
+        );
+        audit3
+            .record(&event(None, Some(Id::new("user-1"))))
+            .await
+            .unwrap();
+        let stored = audit3.store.lock().await.last().unwrap().event.clone();
+        assert_eq!(stored.tenant_id.as_deref(), Some("tenant-b"));
+
+        // A client-supplied tenant_id is kept verbatim (never overwritten)
+        // — the derivation only fills missing attribution.
+        let mut supplied = event(Some(Id::new("ws-1")), None);
+        supplied.tenant_id = Some("tenant-explicit".to_string());
+        audit3.record(&supplied).await.unwrap();
+        let stored = audit3.store.lock().await.last().unwrap().event.clone();
+        assert_eq!(stored.tenant_id.as_deref(), Some("tenant-explicit"));
     }
 }
 
@@ -5843,6 +6000,15 @@ fn test_state_inner(
     // In-memory judgment ledger aggregates the SAME audit / spec-approval /
     // spec-ledger stores these repos write through (HSI §12).
     let mem_audit = Arc::new(MemAuditRepository::default());
+    // TASK-273 review (mem parity): the audit repo derives an event's
+    // tenant server-side at record time from the SAME workspace/user
+    // repos the state serves, exactly like the SQLite/PostgreSQL
+    // adapters — pure-mem mode must not attribute events differently.
+    let mem_users = Arc::new(MemUserRepository::default());
+    mem_audit.set_tenant_sources(
+        Arc::clone(&workspaces),
+        Arc::clone(&mem_users) as Arc<dyn gyre_ports::UserRepository>,
+    );
     let mem_spec_approvals = Arc::new(MemSpecApprovalRepository::default());
     let mem_spec_ledger = Arc::new(MemSpecLedgerRepository::default());
 
@@ -5968,7 +6134,7 @@ fn test_state_inner(
         preview_ttl_secs: 86_400,
         preview_jwt_ttl_secs: 1_800,
         preview_budget_max_concurrent: None,
-        users: Arc::new(MemUserRepository::default()),
+        users: mem_users,
         api_keys: Arc::new(MemApiKeyRepository::default()),
         jwt_config: None,
         http_client: reqwest::Client::new(),
@@ -8023,7 +8189,8 @@ impl JobRunRepository for MemJobRunRepository {
 
 /// In-memory `OAuthStateRepository` for pure-mem mode and tests. Enforces
 /// the port's failure constraints in code: duplicate states are rejected,
-/// `mark_consumed` fails for unknown rows.
+/// `mark_consumed` is an atomic single-use flip (unknown or
+/// already-consumed states return `false`).
 #[derive(Default)]
 pub struct MemOAuthStateRepository {
     states: Arc<Mutex<Vec<gyre_ports::OAuthStateRecord>>>,
@@ -8050,13 +8217,20 @@ impl OAuthStateRepository for MemOAuthStateRepository {
             .cloned())
     }
 
-    async fn mark_consumed(&self, state: &str) -> Result<()> {
+    async fn mark_consumed(&self, state: &str) -> Result<bool> {
+        // Atomic single-use consumption: the check and the flip happen
+        // under one lock guard (the mem adapter's equivalent of the SQL
+        // adapters' conditional `UPDATE … WHERE consumed = 0`), so
+        // exactly one of any number of concurrent callers wins.
         let mut states = self.states.lock().await;
         let Some(row) = states.iter_mut().find(|s| s.state == state) else {
-            anyhow::bail!("oauth state {state} not found");
+            return Ok(false);
         };
+        if row.consumed {
+            return Ok(false);
+        }
         row.consumed = true;
-        Ok(())
+        Ok(true)
     }
 
     async fn delete_expired_before(&self, cutoff_secs: u64) -> Result<u64> {

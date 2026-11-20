@@ -20,7 +20,7 @@ use std::sync::Arc;
 
 use anyhow::Context as _;
 use gyre_common::{Id, Notification, NotificationType, Secret};
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::AppState;
 
@@ -373,23 +373,31 @@ async fn attempt_rotation(
         .rotate(&state.http_client, secret, current_value)
         .await?;
 
-    // Replace the value + `last_rotated_at` via the port, then rewrite the
-    // row's metadata (extended `expires_at`) with the same delete + create
-    // pattern the Admin API uses for a force-rotate with expiry change. The
-    // new value is re-supplied from the handler, never read back out of
-    // storage.
-    state
-        .secrets
-        .rotate(&secret.id, &rotated.value, &secret.tenant_id)
-        .await?;
-    let mut updated = state
-        .secrets
-        .find_by_id(&secret.id, &secret.tenant_id)
-        .await?
-        .context("secret vanished after rotate")?;
+    // Replace the value + metadata via delete + create (the port's
+    // `rotate()` only touches value + `last_rotated_at`, so the extended
+    // `expires_at` needs a row rewrite; same pattern the Admin API uses
+    // for a force-rotate with expiry change). The new value is re-supplied
+    // from the handler, never read back out of storage.
+    //
+    // If the re-create fails after the delete succeeded, the ORIGINAL row
+    // (metadata + value, both still in hand) is restored BEFORE the error
+    // propagates — a failed metadata rewrite must never lose the
+    // credential document, or the admin would get a SecretExpiring
+    // notification for a secret that no longer exists (review task-273).
+    let mut updated = secret.clone();
     updated.expires_at = rotated.expires_at;
+    updated.last_rotated_at = Some(now_secs());
     state.secrets.delete(&secret.id, &secret.tenant_id).await?;
-    state.secrets.create(&updated, &rotated.value).await?;
+    if let Err(create_err) = state.secrets.create(&updated, &rotated.value).await {
+        if let Err(restore_err) = state.secrets.create(secret, current_value).await {
+            error!(
+                secret_name = %secret.name,
+                "restoring the secret after a failed rotation rewrite failed: {restore_err:#} \
+                 (original create error: {create_err:#})"
+            );
+        }
+        return Err(create_err.context("rotation rewrite failed; the original secret was restored"));
+    }
 
     // §7 audit event: secret name (never value), scope, rotating actor.
     info!(
@@ -573,6 +581,9 @@ pub async fn revoke_agent_task_secrets(state: &AppState, agent: &gyre_domain::Ag
 /// Run one pass of the secret expiry check across all tenants. Per-secret
 /// outcomes (refreshed / no-refresh-mechanism / failed: reason) are written
 /// to the run-scoped log sink, so the durable job-run record carries them.
+/// A scope-list failure fails the whole run (fail-closed) instead of
+/// degrading to an empty list — no expiring credential may be silently
+/// skipped.
 pub async fn run_once(state: &Arc<AppState>, log: &crate::jobs::JobRunLog) -> anyhow::Result<()> {
     let now = now_secs();
     let tenants = state.tenants.list().await?;
@@ -588,10 +599,7 @@ pub async fn run_once(state: &Arc<AppState>, log: &crate::jobs::JobRunLog) -> an
             .secrets
             .list_by_scope(gyre_common::SecretScope::Tenant, &tenant_id, &tenant_id)
             .await
-            .unwrap_or_else(|e| {
-                warn!("secret_rotation: tenant-scope list failed for {tenant_id}: {e:#}");
-                Vec::new()
-            });
+            .context("tenant-scope secret list failed")?;
         for secret in expiring(&tenant_secrets, now) {
             // Rotated secrets with a handler are refreshed automatically;
             // only no-handler / failed-rotation secrets notify admins.
@@ -605,15 +613,17 @@ pub async fn run_once(state: &Arc<AppState>, log: &crate::jobs::JobRunLog) -> an
 
         for ws in &workspaces {
             let ws_id = ws.id.to_string();
-            // Workspace-scoped secrets.
+            // Workspace-scoped secrets. A scope-list failure fails the run
+            // (recorded as a failed run with the reason): degrading to an
+            // empty list would complete the run "green" while silently
+            // skipping every expiring credential in the scope — the exact
+            // silent skip the run record exists to prevent (review
+            // task-273).
             let ws_secrets = state
                 .secrets
                 .list_by_scope(gyre_common::SecretScope::Workspace, &ws_id, &tenant_id)
                 .await
-                .unwrap_or_else(|e| {
-                    warn!("secret_rotation: workspace-scope list failed for {ws_id}: {e:#}");
-                    Vec::new()
-                });
+                .with_context(|| format!("workspace-scope secret list failed for {ws_id}"))?;
             for secret in expiring(&ws_secrets, now) {
                 // Rotated secrets with a handler are refreshed automatically;
                 // only no-handler / failed-rotation secrets notify admins.
@@ -631,10 +641,7 @@ pub async fn run_once(state: &Arc<AppState>, log: &crate::jobs::JobRunLog) -> an
                     .secrets
                     .list_by_scope(gyre_common::SecretScope::Repo, &repo_id, &tenant_id)
                     .await
-                    .unwrap_or_else(|e| {
-                        warn!("secret_rotation: repo-scope list failed for {repo_id}: {e:#}");
-                        Vec::new()
-                    });
+                    .with_context(|| format!("repo-scope secret list failed for {repo_id}"))?;
                 for secret in expiring(&repo_secrets, now) {
                     // Rotated secrets with a handler are refreshed
                     // automatically; only no-handler / failed-rotation

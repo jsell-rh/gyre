@@ -192,6 +192,56 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
+/// Canonicalize a stored `lastmodified` value to second-precision RFC
+/// 3339 — the exact additional data sops seals the MAC under
+/// (`LastModified.Format(time.RFC3339)` in cmd/sops/common/common.go).
+/// Go's JSON marshal of `time.Time` emits RFC 3339 with (up to)
+/// nanosecond precision, so a document produced by the sops CLI carries
+/// fractional digits in the STORED field while its MAC AAD is the
+/// truncated second-precision string: canonicalizing before MAC AAD use
+/// makes CLI-generated documents verify (review task-273 — using the raw
+/// stored string as AAD would fail MAC verification on every
+/// CLI-encrypted document). Fractional digits are truncated; the zone
+/// (`Z` or `±HH:MM`) is preserved verbatim (Go formats in the time's own
+/// location); anything malformed fails closed.
+fn canonical_lastmodified(raw: &str) -> Result<String> {
+    let t = raw
+        .find('T')
+        .context("lastmodified is not RFC 3339 (no date/time separator)")?;
+    let (date, rest) = raw.split_at(t + 1);
+    anyhow::ensure!(
+        date.len() == 11 && date.ends_with('T'),
+        "lastmodified date is not YYYY-MM-DD: {raw:?}"
+    );
+    // The time part runs to the first fraction ('.') or zone marker.
+    let time_end = rest
+        .find(|c| c == '.' || c == 'Z' || c == '+' || c == '-')
+        .unwrap_or(rest.len());
+    let (time, tail) = rest.split_at(time_end);
+    anyhow::ensure!(
+        time.len() == 8 && time.as_bytes()[2] == b':' && time.as_bytes()[5] == b':',
+        "lastmodified time is not HH:MM:SS: {raw:?}"
+    );
+    let zone = match tail.strip_prefix('.') {
+        // Fractional digits: skip to the zone marker that follows.
+        Some(frac) => {
+            let z = frac
+                .find(|c| c == 'Z' || c == '+' || c == '-')
+                .context("lastmodified has fractional digits but no zone")?;
+            &frac[z..]
+        }
+        None => tail,
+    };
+    anyhow::ensure!(
+        zone == "Z"
+            || (zone.len() == 6
+                && (zone.starts_with('+') || zone.starts_with('-'))
+                && zone.as_bytes()[3] == b':'),
+        "lastmodified zone is malformed: {raw:?}"
+    );
+    Ok(format!("{date}{time}{zone}"))
+}
+
 // ── ENC[AES256_GCM,...] values ────────────────────────────────────────────────
 
 /// Serialize one `ENC[AES256_GCM,data:…,iv:…,tag:…,type:str]` string from
@@ -322,11 +372,12 @@ pub fn sops_encrypt(plaintext: &[u8], recipient: &AgeIdentity, now_secs: u64) ->
     let value_enc = enc_string(&value_data, &value_iv, &value_tag);
 
     // 3. MAC: SHA-512 over the value bytes, uppercase hex (sops `%X`),
-    //    sealed with lastmodified as additional data.
+    //    sealed with the CANONICAL second-precision lastmodified as
+    //    additional data (sops: `LastModified.Format(time.RFC3339)`).
     let lastmodified = rfc3339_utc(now_secs);
+    let mac_aad = canonical_lastmodified(&lastmodified)?;
     let mac_hex = format!("{:X}", Sha512::digest(plaintext));
-    let (mac_data, mac_iv, mac_tag) =
-        gcm_seal(&data_key, mac_hex.as_bytes(), lastmodified.as_bytes())?;
+    let (mac_data, mac_iv, mac_tag) = gcm_seal(&data_key, mac_hex.as_bytes(), mac_aad.as_bytes())?;
     let mac_enc = enc_string(&mac_data, &mac_iv, &mac_tag);
 
     let document = serde_json::json!({
@@ -417,15 +468,14 @@ pub fn sops_decrypt(document: &[u8], identity: &AgeIdentity) -> Result<Vec<u8>> 
     let plaintext = gcm_open(&data_key, &value.data, &value.iv, &value.tag, VALUE_AAD)?;
 
     // MAC verification (fail closed): recompute SHA-512 over the decrypted
-    // value bytes and compare with the stored (decrypted) MAC.
+    // value bytes and compare with the stored (decrypted) MAC. The MAC's
+    // additional data is the CANONICAL second-precision lastmodified —
+    // the sops CLI marshals the stored field with nanosecond precision
+    // while sealing the MAC under `Format(time.RFC3339)`, so the raw
+    // stored string must be truncated before use (review task-273).
+    let mac_aad = canonical_lastmodified(lastmodified)?;
     let mac = parse_enc(&mac_enc)?;
-    let stored_mac = gcm_open(
-        &data_key,
-        &mac.data,
-        &mac.iv,
-        &mac.tag,
-        lastmodified.as_bytes(),
-    )?;
+    let stored_mac = gcm_open(&data_key, &mac.data, &mac.iv, &mac.tag, mac_aad.as_bytes())?;
     let computed_mac = format!("{:X}", Sha512::digest(&plaintext));
     let stored_mac_str =
         String::from_utf8(stored_mac).context("stored SOPS MAC is not UTF-8 (corrupt document)")?;

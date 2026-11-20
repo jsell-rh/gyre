@@ -60,19 +60,49 @@ pub struct ProviderConfig {
 }
 
 /// Load the provider config from the environment. Fails (fail-closed) when
-/// the client id is not configured — enrollment without it cannot complete.
+/// the client id is not configured, or when the redirect URI is missing or
+/// not an absolute HTTP(S) URI — RFC 6749 §3.1.2 requires an absolute URI,
+/// and providers reject a relative one at the authorization endpoint, so a
+/// relative default would produce an enrollment flow that can never
+/// complete, silently (review task-273: there is no valid relative
+/// default; the operator must supply the externally reachable callback
+/// URL).
 fn provider_config_from_env() -> Result<ProviderConfig, ApiError> {
     let client_id = std::env::var("GYRE_CLAUDE_MAX_CLIENT_ID")
         .ok()
         .filter(|v| !v.trim().is_empty())
         .ok_or_else(|| {
             ApiError::InvalidInput(
-                "Claude Max enrollment is not configured: set GYRE_CLAUDE_MAX_CLIENT_ID \
-                 (plus GYRE_CLAUDE_MAX_AUTH_ENDPOINT / GYRE_CLAUDE_MAX_TOKEN_ENDPOINT / \
-                 GYRE_CLAUDE_MAX_REDIRECT_URI as needed)"
+                "Claude Max enrollment is not configured: set GYRE_CLAUDE_MAX_CLIENT_ID, \
+                 GYRE_CLAUDE_MAX_REDIRECT_URI (absolute URI, e.g. \
+                 https://gyre.example.com/api/v1/oauth/claude-max/callback), and as needed \
+                 GYRE_CLAUDE_MAX_AUTH_ENDPOINT / GYRE_CLAUDE_MAX_TOKEN_ENDPOINT"
                     .to_string(),
             )
         })?;
+    let redirect_uri = std::env::var("GYRE_CLAUDE_MAX_REDIRECT_URI")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .ok_or_else(|| {
+            ApiError::InvalidInput(
+                "Claude Max enrollment requires GYRE_CLAUDE_MAX_REDIRECT_URI to be set to an \
+                 absolute URI (RFC 6749 §3.1.2), e.g. \
+                 https://gyre.example.com/api/v1/oauth/claude-max/callback — a relative \
+                 default is rejected by the provider's authorization endpoint"
+                    .to_string(),
+            )
+        })?;
+    let parsed_redirect = reqwest::Url::parse(&redirect_uri).map_err(|e| {
+        ApiError::InvalidInput(format!(
+            "GYRE_CLAUDE_MAX_REDIRECT_URI is not a valid absolute URI ({e})"
+        ))
+    })?;
+    if parsed_redirect.scheme() != "http" && parsed_redirect.scheme() != "https" {
+        return Err(ApiError::InvalidInput(
+            "GYRE_CLAUDE_MAX_REDIRECT_URI must be an absolute http(s) URI (RFC 6749 §3.1.2)"
+                .to_string(),
+        ));
+    }
     Ok(ProviderConfig {
         authorization_endpoint: std::env::var("GYRE_CLAUDE_MAX_AUTH_ENDPOINT")
             .unwrap_or_else(|_| "https://claude.ai/oauth/authorize".to_string()),
@@ -81,8 +111,7 @@ fn provider_config_from_env() -> Result<ProviderConfig, ApiError> {
         client_secret: std::env::var("GYRE_CLAUDE_MAX_CLIENT_SECRET")
             .ok()
             .filter(|v| !v.trim().is_empty()),
-        redirect_uri: std::env::var("GYRE_CLAUDE_MAX_REDIRECT_URI")
-            .unwrap_or_else(|_| "/api/v1/oauth/claude-max/callback".to_string()),
+        redirect_uri,
         scope: std::env::var("GYRE_CLAUDE_MAX_SCOPE")
             .unwrap_or_else(|_| "user:profile user:inference".to_string()),
         client_id,
@@ -259,7 +288,13 @@ pub async fn claude_max_callback(
         ApiError::InvalidInput("callback is missing the authorization code".to_string())
     })?;
 
-    // State validation: exists, unexpired, single-use.
+    // State validation: exists, unexpired, single-use. The single-use
+    // flip is the port's ATOMIC conditional update
+    // (`UPDATE … WHERE consumed = 0`): two concurrent callbacks carrying
+    // the same state cannot both win — exactly one gets `true` from
+    // mark_consumed; the loser is rejected here as a replay (review
+    // task-273: a Rust-side pre-check of `record.consumed` followed by an
+    // unconditional mark would race).
     let record = state
         .oauth_states
         .find_by_state(&params.state)
@@ -269,21 +304,21 @@ pub async fn claude_max_callback(
             ApiError::InvalidInput("unknown OAuth state (expired or forged)".to_string())
         })?;
     let now = now_secs();
-    if record.consumed {
-        return Err(ApiError::InvalidInput(
-            "OAuth state was already used (replay rejected)".to_string(),
-        ));
-    }
     if record.expires_at <= now {
         return Err(ApiError::InvalidInput("OAuth state expired".to_string()));
     }
     // Consume BEFORE the network exchange: a replayed callback must fail
     // even if the first exchange errored.
-    state
+    let consumed = state
         .oauth_states
         .mark_consumed(&params.state)
         .await
         .map_err(ApiError::Internal)?;
+    if !consumed {
+        return Err(ApiError::InvalidInput(
+            "OAuth state was already used (replay rejected)".to_string(),
+        ));
+    }
 
     let provider: ProviderConfig = serde_json::from_str(&record.provider_config).map_err(|e| {
         ApiError::Internal(anyhow::anyhow!("stored provider config is unreadable: {e}").into())
@@ -367,8 +402,16 @@ pub async fn claude_max_callback(
     };
 
     // Idempotent re-enrollment: an existing secret at the same scope is
-    // rotated (value replaced) instead of failing on the port's
-    // duplicate-(scope, name) constraint.
+    // rewritten (value + metadata) instead of failing on the port's
+    // duplicate-(scope, name) constraint. The rewrite is a delete +
+    // create — the port's rotate() only touches value + last_rotated_at,
+    // so a rotate-only path would leave the OLD expires_at on the row and
+    // an already-expired re-enrolled credential would stay invisible to
+    // resolve_for_agent (which excludes expired secrets) for up to an
+    // hour until the refresh job extends it (review task-273). If the
+    // re-create fails after the delete, the original row is restored
+    // first — the existing credential must never be lost to a failed
+    // rewrite.
     let existing = state
         .secrets
         .list_by_scope(scope, &scope_id, &record.tenant_id)
@@ -378,11 +421,38 @@ pub async fn claude_max_callback(
         .find(|s| s.name == CLAUDE_MAX_SECRET_NAME);
     match existing {
         Some(existing) => {
+            let old_value = state
+                .secrets
+                .get_value(&existing.id, &record.tenant_id)
+                .await
+                .map_err(ApiError::Internal)?
+                .ok_or_else(|| {
+                    ApiError::Internal(
+                        anyhow::anyhow!(
+                            "existing enrollment secret {} vanished before rewrite",
+                            existing.id
+                        )
+                        .into(),
+                    )
+                })?;
+            let mut updated = existing.clone();
+            updated.expires_at = Some(now + expires_in);
+            updated.last_rotated_at = Some(now);
             state
                 .secrets
-                .rotate(&existing.id, &value, &record.tenant_id)
+                .delete(&existing.id, &record.tenant_id)
                 .await
                 .map_err(ApiError::Internal)?;
+            if let Err(e) = state.secrets.create(&updated, &value).await {
+                if let Err(restore_err) = state.secrets.create(&existing, &old_value).await {
+                    tracing::error!(
+                        secret_name = CLAUDE_MAX_SECRET_NAME,
+                        "restoring the enrollment secret after a failed rewrite failed: \
+                         {restore_err:#} (original create error: {e:#})"
+                    );
+                }
+                return Err(ApiError::Internal(e.into()));
+            }
         }
         None => {
             state
@@ -558,6 +628,7 @@ mod tests {
         std::env::set_var("GYRE_CLAUDE_MAX_CLIENT_ID", "test-client");
         std::env::set_var("GYRE_CLAUDE_MAX_AUTH_ENDPOINT", &auth_url);
         std::env::set_var("GYRE_CLAUDE_MAX_TOKEN_ENDPOINT", &token_url);
+        std::env::set_var("GYRE_CLAUDE_MAX_REDIRECT_URI", "http://localhost:3000/cb");
 
         let state = crate::mem::test_state();
         // Workspace belonging to another tenant.
@@ -581,6 +652,187 @@ mod tests {
         std::env::remove_var("GYRE_CLAUDE_MAX_CLIENT_ID");
         std::env::remove_var("GYRE_CLAUDE_MAX_AUTH_ENDPOINT");
         std::env::remove_var("GYRE_CLAUDE_MAX_TOKEN_ENDPOINT");
+        std::env::remove_var("GYRE_CLAUDE_MAX_REDIRECT_URI");
+    }
+
+    /// Review task-273: RFC 6749 §3.1.2 requires an absolute redirect
+    /// URI; the documented minimal config must fail loudly at initiation
+    /// instead of producing an enrollment flow that can never complete.
+    #[tokio::test]
+    async fn enroll_rejects_relative_or_missing_redirect_uri() {
+        let _guard = ENV_LOCK.lock().await;
+        let state = crate::mem::test_state();
+
+        // Missing entirely → 400 naming the variable.
+        std::env::remove_var("GYRE_CLAUDE_MAX_REDIRECT_URI");
+        std::env::set_var("GYRE_CLAUDE_MAX_CLIENT_ID", "test-client");
+        let response = app(state.clone())
+            .oneshot(enroll_request("{}"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let text = String::from_utf8_lossy(&body);
+        assert!(
+            text.contains("GYRE_CLAUDE_MAX_REDIRECT_URI"),
+            "error must name the missing variable: {text}"
+        );
+
+        // Relative URI → 400 (no silent relative default).
+        std::env::set_var(
+            "GYRE_CLAUDE_MAX_REDIRECT_URI",
+            "/api/v1/oauth/claude-max/callback",
+        );
+        let response = app(state).oneshot(enroll_request("{}")).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        std::env::remove_var("GYRE_CLAUDE_MAX_CLIENT_ID");
+        std::env::remove_var("GYRE_CLAUDE_MAX_REDIRECT_URI");
+    }
+
+    /// Review task-273: the single-use consumption must be atomic — two
+    /// concurrent consumers of the same state row cannot both win (the
+    /// port's conditional flip, not a read-then-write in the handler).
+    #[tokio::test]
+    async fn concurrent_state_consumption_is_single_use() {
+        let state = crate::mem::test_state();
+        let now = now_secs();
+        state
+            .oauth_states
+            .create(&gyre_ports::OAuthStateRecord {
+                state: "st-race".to_string(),
+                tenant_id: "default".to_string(),
+                workspace_id: None,
+                initiated_by: "user-admin".to_string(),
+                pkce_verifier: "v".to_string(),
+                created_at: now,
+                expires_at: now + 600,
+                consumed: false,
+                provider_config: "{}".to_string(),
+            })
+            .await
+            .unwrap();
+
+        let (a, b) = tokio::join!(
+            state.oauth_states.mark_consumed("st-race"),
+            state.oauth_states.mark_consumed("st-race"),
+        );
+        let (a, b) = (a.unwrap(), b.unwrap());
+        assert!(
+            a ^ b,
+            "exactly one concurrent consumer must win (got {a}/{b})"
+        );
+        assert!(
+            state
+                .oauth_states
+                .find_by_state("st-race")
+                .await
+                .unwrap()
+                .unwrap()
+                .consumed
+        );
+    }
+
+    /// Review task-273: re-enrollment rewrites the row (value AND
+    /// expires_at) — an already-expired credential becomes visible to
+    /// resolve_for_agent immediately, not an hour later when the refresh
+    /// job runs.
+    #[tokio::test]
+    async fn callback_reenrollment_extends_expiry_immediately() {
+        let _guard = ENV_LOCK.lock().await;
+        let (auth_url, token_url, _seen) = spawn_provider(
+            serde_json::json!({
+                "access_token": "at-2",
+                "refresh_token": "rt-2",
+                "expires_in": 7200
+            }),
+            StatusCode::OK,
+        )
+        .await;
+        std::env::set_var("GYRE_CLAUDE_MAX_CLIENT_ID", "test-client");
+        std::env::set_var("GYRE_CLAUDE_MAX_AUTH_ENDPOINT", &auth_url);
+        std::env::set_var("GYRE_CLAUDE_MAX_TOKEN_ENDPOINT", &token_url);
+        std::env::set_var("GYRE_CLAUDE_MAX_REDIRECT_URI", "http://localhost:3000/cb");
+
+        let state = crate::mem::test_state();
+        let now = now_secs();
+        let provider = provider_config_from_env().unwrap();
+
+        // An EXISTING enrollment secret whose expiry is already past —
+        // the typical reason to re-enroll.
+        let existing = Secret {
+            id: Id::new("existing-enroll-secret"),
+            name: CLAUDE_MAX_SECRET_NAME.to_string(),
+            scope: SecretScope::Workspace,
+            scope_id: "ws-re".to_string(),
+            secret_type: SecretType::Rotated,
+            created_by: "oauth:claude-max:user-admin".to_string(),
+            created_at: now - 10_000,
+            expires_at: Some(now - 100),
+            last_rotated_at: None,
+            tenant_id: "default".to_string(),
+        };
+        state
+            .secrets
+            .create(&existing, br#"{"refresh_token":"rt-old"}"#)
+            .await
+            .unwrap();
+
+        state
+            .oauth_states
+            .create(&gyre_ports::OAuthStateRecord {
+                state: "st-re".to_string(),
+                tenant_id: "default".to_string(),
+                workspace_id: Some("ws-re".to_string()),
+                initiated_by: "user-admin".to_string(),
+                pkce_verifier: "v".to_string(),
+                created_at: now,
+                expires_at: now + 600,
+                consumed: false,
+                provider_config: serde_json::to_string(&provider).unwrap(),
+            })
+            .await
+            .unwrap();
+
+        let callback_app = app(state.clone());
+        let response = callback_app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/oauth/claude-max/callback?code=re-code&state=st-re")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // The re-enrolled credential is IMMEDIATELY visible with the new
+        // value and a future expiry (resolve_for_agent excludes expired
+        // secrets, so the old row would have stayed hidden for up to an
+        // hour under a rotate-only rewrite).
+        let secrets = state
+            .secrets
+            .list_by_scope(SecretScope::Workspace, "ws-re", "default")
+            .await
+            .unwrap();
+        let secret = secrets
+            .iter()
+            .find(|s| s.name == CLAUDE_MAX_SECRET_NAME)
+            .expect("re-enrolled secret present");
+        assert!(secret.expires_at.unwrap() > now, "expiry must be future");
+        let value = state
+            .secrets
+            .get_value(&secret.id, "default")
+            .await
+            .unwrap()
+            .unwrap();
+        let doc: serde_json::Value = serde_json::from_slice(&value).unwrap();
+        assert_eq!(doc["refresh_token"], "rt-2");
+
+        std::env::remove_var("GYRE_CLAUDE_MAX_CLIENT_ID");
+        std::env::remove_var("GYRE_CLAUDE_MAX_AUTH_ENDPOINT");
+        std::env::remove_var("GYRE_CLAUDE_MAX_TOKEN_ENDPOINT");
+        std::env::remove_var("GYRE_CLAUDE_MAX_REDIRECT_URI");
     }
 
     #[tokio::test]
