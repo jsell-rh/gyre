@@ -2408,7 +2408,7 @@ pub(crate) async fn launch_agent_process(
                         &repo.workspace_id.to_string(),
                         repo.id.as_str(),
                         Some(task.id.as_str()),
-                        &token,
+                        token,
                     )
                     .await
                 {

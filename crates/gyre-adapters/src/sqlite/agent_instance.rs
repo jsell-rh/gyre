@@ -140,7 +140,6 @@ impl AgentInstanceRepository for SqliteStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gyre_ports::AgentInstanceRepository as _;
     use tempfile::NamedTempFile;
 
     fn setup() -> (NamedTempFile, SqliteStorage) {
