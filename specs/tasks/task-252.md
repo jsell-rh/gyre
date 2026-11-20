@@ -2,8 +2,8 @@
 title: "Workspace-scoped telemetry access: Subscribe membership authorization and the REST activity endpoint"
 spec_ref: "Spec gap spec-c62aac6701125cb09e0c736c / telemetry-workspace-access / 60b177f85a11"
 depends_on: []
-progress: not-started
-commits: []
+progress: complete
+commits: ["9fa691150452e3df58ea95f3731cf150c96d84b4", "d2fe75e4c1098a26adb8717c02feed86e2afbc4a", "81910e025d8602ee0f20612620f1fdcb14a4349d"]
 ---
 
 ## Required behavior
@@ -81,3 +81,68 @@ Canonical spec: `specs/system/message-bus.md`. Source: `4127964001113dda08e48524
     ]
   }
 ]
+
+## Shipped
+
+This round is a rebase repair (merge commit `4c2e839e`): the retained,
+previously approved task-252 implementation was merged with current main
+head `b1ac5989` (task-248, message send-path guards). The only conflict,
+`specs/coverage/system/message-bus.md`, was resolved as a union — the
+header and rows 9/10/11 now carry both task-248's notes (WS `acknowledged`
+exclusion, auth-mechanism origin table, Agent-destination tenant isolation —
+rows 5, 9, 10) and task-252's (Subscribe membership authorization,
+workspace-scoped REST activity endpoint — rows 9, 11, 13). Row 9 is
+re-tracked as `implemented | task-248, task-252` (both tasks modified it;
+the accumulated-`implemented` convention used by row 16) rather than
+either side's pre-merge status, so no verification is claimed for the
+unaudited combination.
+
+### Source verification (this round)
+
+The resolution touched no task-252 source file: `git diff` of the merge
+against the previously approved head `5147d038` shows the only ws.rs changes
+are task-248's additive `ws_message_payload` acknowledged-stripping (live +
+replay delivery arms), which does not intersect the Subscribe membership
+authorization; `api/activity.rs`, `api/mod.rs`, `abac_middleware.rs`, and
+`gyre-common/src/message.rs` are byte-identical to the approved head.
+Probes: `cargo check -p gyre-server` clean (8m22s, exit 0);
+`scripts/check-abac-route-registry.sh` exit 0 with no new exemptions.
+
+### Retained behavior (unchanged this round)
+
+Subscribe membership authorization (gap 2b439cf656cf14c344afdb07): the
+ws.rs Subscribe handler authorizes each requested workspace in order —
+preserved Admin bypass, preserved tenant containment, then real
+workspace-membership verification (users via
+`WorkspaceMembershipRepository.find_by_user_and_workspace`, agents against
+their agent record's workspace). A rejected scope produces the
+SubscribeError frame, creates no subscription, and delivers neither
+workspace-scoped bus messages, telemetry, nor replay.
+
+REST telemetry endpoint (gap 64d1be477f27ebf27ec73076):
+`GET /api/v1/workspaces/:workspace_id/activity` (`workspace_activity_handler`,
+crates/gyre-server/src/api/activity.rs) is backed by
+`state.telemetry_buffer`: `since` in epoch milliseconds (entries with
+`created_at <= since` excluded) and `limit` (default 100), the spec field
+mapping to `ActivityEventData` (event_id ← id, agent_id ← payload or Agent
+origin, event_type ← `MessageKind::ag_event_type`, description ← tool_name
+or kind name, timestamp ← created_at), and per-handler membership
+verification (403 for same-tenant non-members; agent tokens scoped to their
+agent record's workspace). The route is registered in the ABAC
+RouteResourceMapping (abac_middleware.rs) — the registry check passes with
+no new exemptions. The unscoped `/api/v1/activity` and WS ActivityQuery
+paths are unchanged.
+
+### Deferred to the independent verifier
+
+Server test compilation exceeds the sandbox build budget; the verifier
+should run `cargo test -p gyre-server` for:
+`ws_subscribe_rejects_same_tenant_non_member` (ws.rs),
+`workspace_activity_maps_fields_per_spec`,
+`workspace_activity_since_boundary_and_limit`,
+`workspace_activity_rejects_same_tenant_non_member`,
+`workspace_activity_agent_token_scoped_to_own_workspace` (api/activity.rs),
+plus the task-248-overlap tests that now share ws.rs:
+`ws_live_delivery_strips_acknowledged`,
+`ws_subscribe_replay_strips_acknowledged` (ws.rs) and
+`get_inbox_still_includes_acknowledged` (api/messages.rs).
