@@ -766,6 +766,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri(format!("/api/v1/repos/{repo_id}/commits/record"))
+                    .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
@@ -804,6 +805,7 @@ mod tests {
                     Request::builder()
                         .method("POST")
                         .uri(format!("/api/v1/repos/{repo_id}/commits/record"))
+                        .header("authorization", "Bearer test-token")
                         .header("content-type", "application/json")
                         .body(Body::from(serde_json::to_vec(&body).unwrap()))
                         .unwrap(),
@@ -842,6 +844,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/api/v1/repos/no-such/commits/record")
+                    .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
@@ -1036,6 +1039,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri(format!("/api/v1/repos/{repo_id}/commits/record"))
+                    .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),

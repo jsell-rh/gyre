@@ -155,6 +155,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/api/v1/agents")
+                    .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::to_vec(&serde_json::json!({ "name": name })).unwrap(),

@@ -3861,6 +3861,11 @@ mod tests {
                 "dir=$(CDPATH= cd -- \"$(dirname -- \"$0\")\" && pwd)\n",
                 "cmd=\n",
                 "for arg in \"$@\"; do cmd=$arg; done\n",
+                // The dispatch shell-quotes every remote docker argument
+                // (SshDockerTarget::remote_docker), so the remote command
+                // arrives as `docker 'run' '--detach' ...`. Strip the
+                // quoting before matching the subcommand shape.
+                "cmd=$(printf '%s' \"$cmd\" | tr -d \"'\")\n",
                 "case $cmd in\n",
                 "  'docker run '*) echo fakecontainer0123456789; echo run > \"$dir/ssh-saw-run\" ;;\n",
                 "  'docker image inspect'*) echo sha256:fakedigest0000000000000000000000000000000000000000000000000000 ;;\n",
@@ -6272,6 +6277,7 @@ mod tests {
 
             let mk_auth = |agent_id: String, jwt_claims: Option<serde_json::Value>| {
                 crate::auth::AuthenticatedAgent {
+                    auth_mechanism: crate::auth::AuthMechanism::AgentToken,
                     agent_id,
                     user_id: None,
                     roles: vec![gyre_domain::UserRole::Agent],
@@ -6370,6 +6376,7 @@ mod tests {
 
         let mk_auth = |agent_id: &str, jwt_claims: Option<serde_json::Value>| {
             crate::auth::AuthenticatedAgent {
+                auth_mechanism: crate::auth::AuthMechanism::AgentToken,
                 agent_id: agent_id.to_string(),
                 user_id: None,
                 roles: vec![gyre_domain::UserRole::Agent],
@@ -7910,6 +7917,24 @@ mod tests {
             //    agent-repo-scope containment cannot fire and the builtin
             //    Agent-role Allow grants; the handler role gate is what refuses)
             let orch_uri = format!("/api/v1/workspaces/{}/orchestrator/spawn", ws_id);
+            // The admin spec-approval positive control above legitimately
+            // triggered the signal chain's server-side
+            // ensure_workspace_orchestrator (task-115: SpecApproved →
+            // exactly one live workspace orchestrator, spawned with no HTTP
+            // caller). Snapshot the orchestrator ids present before the
+            // refusal probes so the assert below attributes any NEW
+            // orchestrator to the refused requests exactly.
+            let orchestrators_before: std::collections::HashSet<String> = state
+                .agents
+                .list_by_workspace(&ws_id)
+                .await
+                .unwrap()
+                .into_iter()
+                .filter(|a| {
+                    a.orchestrator_type == gyre_domain::OrchestratorType::WorkspaceOrchestrator
+                })
+                .map(|a| a.id.to_string())
+                .collect();
             // The preview agent through the production router (realistic
             // surface), and the plain Agent-role caller through a bare
             // api_router built from the JWT twin (no ABAC middleware) so
@@ -7940,17 +7965,46 @@ mod tests {
                     "an {label} must not spawn a workspace orchestrator"
                 );
             }
+            let orchestrators_after: std::collections::HashSet<String> = state
+                .agents
+                .list_by_workspace(&ws_id)
+                .await
+                .unwrap()
+                .into_iter()
+                .filter(|a| {
+                    a.orchestrator_type == gyre_domain::OrchestratorType::WorkspaceOrchestrator
+                })
+                .map(|a| a.id.to_string())
+                .collect();
             assert!(
-                state
-                    .agents
-                    .list_by_workspace(&ws_id)
-                    .await
-                    .unwrap()
-                    .iter()
-                    .all(|a| a.orchestrator_type
-                        != gyre_domain::OrchestratorType::WorkspaceOrchestrator),
-                "neither refusal may have minted a workspace orchestrator"
+                orchestrators_after.is_subset(&orchestrators_before),
+                "neither refusal may have minted a workspace orchestrator \
+                 (before: {orchestrators_before:?}, after: {orchestrators_after:?})"
             );
+            // The spawn core enforces one LIVE workspace orchestrator per
+            // workspace (§3.2), so the signal chain's orchestrator from the
+            // approval positive control must be retired before the admin
+            // positive control can mint its own (a 409 there would be the
+            // one-live rule working, not a refusal bug).
+            for orch_id in &orchestrators_after {
+                let resp = prod
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .method("POST")
+                            .uri(format!("/api/v1/admin/agents/{orch_id}/kill"))
+                            .header("authorization", "Bearer test-token")
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    resp.status(),
+                    StatusCode::NO_CONTENT,
+                    "admin kill of the signal-chain orchestrator must work"
+                );
+            }
             // Positive control: the operator spawns one, then kills it
             // (terminating the launched process) so the test leaves nothing
             // behind.
@@ -9259,7 +9313,11 @@ pub async fn delete_meta_spec_registry(
     auth: AuthenticatedAgent,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
-    require_registry_admin(&state, &auth, "DELETE /api/v1/meta-specs-registry/:id").await?;
+    // No blanket Admin gate here (unlike POST/PUT): delete authorization is
+    // scope-derived — `authorize_meta_spec_delete` decides per entry
+    // (tenant Admin for Global/Tenant entries, workspace Owner/Admin
+    // membership for Workspace entries), so a workspace Owner may delete
+    // their workspace's entries without holding the tenant Admin role.
     // Load the entity, derive scope from the record (never the request), and
     // check tenant containment before deleting.
     require_meta_spec_access(&state, &auth, &id).await?;
@@ -9548,6 +9606,7 @@ pub async fn get_spec_meta_spec_bindings(
 mod registry_tests {
     use crate::mem::test_state;
     use axum::{body::Body, Router};
+    use gyre_domain::Workspace;
     use http::{Request, StatusCode};
     use tower::ServiceExt;
 
@@ -11263,6 +11322,21 @@ mod registry_tests {
 
         let state = make_test_state_with_jwt();
         let app = crate::api::api_router().with_state(state.clone());
+
+        // The Workspace-scoped create validates scope containment against
+        // the caller's tenant (scope_id must resolve to a real workspace
+        // row), so the target workspace is seeded before the request.
+        state
+            .workspaces
+            .create(&Workspace::new(
+                gyre_common::Id::new("ws-pub-1"),
+                gyre_common::Id::new("default"),
+                "Publish WS",
+                "publish-ws",
+                0,
+            ))
+            .await
+            .unwrap();
 
         // A human (OIDC JWT) publishes a Workspace-scoped meta-spec.
         let jwt = sign_test_jwt(

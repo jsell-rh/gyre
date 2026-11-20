@@ -520,7 +520,6 @@ mod tests {
                     .uri("/api/v1/tasks")
                     .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
-                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -582,7 +581,6 @@ mod tests {
                     .uri(format!("/api/v1/tasks/{id}"))
                     .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
-                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&update_body).unwrap()))
                     .unwrap(),
             )
@@ -737,6 +735,33 @@ mod tests {
     async fn agent_jwt_create_task_clamped_to_claims() {
         let state = test_state();
         let app = crate::api::api_router().with_state(state.clone());
+        // The clamped claims (ws-1/repo-1) must resolve to real scoped
+        // entities: create_task validates the caller-supplied/inherited
+        // scope against the stores (task-102 F2 anti-forgery), so seed the
+        // workspace (tenant "default", matching the minted JWT) and its
+        // repo before minting the token.
+        state
+            .workspaces
+            .create(&gyre_domain::Workspace::new(
+                gyre_common::Id::new("ws-1"),
+                gyre_common::Id::new("default"),
+                "Clamp WS",
+                "clamp-ws",
+                0,
+            ))
+            .await
+            .unwrap();
+        state
+            .repos
+            .create(&gyre_domain::Repository::new(
+                gyre_common::Id::new("repo-1"),
+                gyre_common::Id::new("ws-1"),
+                "clamp-repo",
+                "/tmp/gyre-test-clamp-repo",
+                0,
+            ))
+            .await
+            .unwrap();
         let token = agent_token_for_task(&state, "task-own").await;
 
         // Explicit foreign workspace → 403.
@@ -790,7 +815,6 @@ mod tests {
                     .uri(format!("/api/v1/tasks/{id}/status"))
                     .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
-                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -815,7 +839,6 @@ mod tests {
                     .uri(format!("/api/v1/tasks/{id}/status"))
                     .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
-                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -881,7 +904,6 @@ mod tests {
                     .uri("/api/v1/tasks")
                     .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
-                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -900,7 +922,6 @@ mod tests {
                     .uri(format!("/api/v1/tasks/{id}/status"))
                     .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
-                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -919,7 +940,12 @@ mod tests {
                 entity_type: Some("activity_event".to_string()),
                 workspace_id: Some("ws-scope-1".to_string()),
                 limit: 10,
-                tenant_id: String::new(),
+                // The indexed document's tenant resolves from the seeded
+                // workspace row ("default") at index time — the direct
+                // port call must carry the same tenant the production
+                // scope-derivation path (search_scope::derive_search_scope)
+                // would hand the adapter for a caller in that tenant.
+                tenant_id: "default".to_string(),
                 accessible_workspace_ids: None,
                 accessible_repo_ids: None,
             })
@@ -952,7 +978,6 @@ mod tests {
                     .uri(format!("/api/v1/tasks/{id}/status"))
                     .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
-                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -991,7 +1016,6 @@ mod tests {
                     .uri(format!("/api/v1/tasks/{id}"))
                     .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
-                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&assign_body).unwrap()))
                     .unwrap(),
             )
@@ -1007,7 +1031,6 @@ mod tests {
                     .uri(format!("/api/v1/tasks/{id}/status"))
                     .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
-                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )

@@ -389,7 +389,6 @@ mod tests {
                     .uri("/api/v1/compose/apply")
                     .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
-                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&compose).unwrap()))
                     .unwrap(),
             )
@@ -441,7 +440,6 @@ mod tests {
                     .uri("/api/v1/compose/apply")
                     .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
-                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&compose).unwrap()))
                     .unwrap(),
             )
@@ -508,7 +506,6 @@ mod tests {
                     .uri("/api/v1/compose/apply")
                     .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
-                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&compose).unwrap()))
                     .unwrap(),
             )
@@ -527,7 +524,6 @@ mod tests {
                     .uri("/api/v1/compose/teardown")
                     .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
-                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&teardown_body).unwrap()))
                     .unwrap(),
             )
@@ -645,7 +641,6 @@ agents:
                     .uri("/api/v1/compose/apply")
                     .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
-                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&compose).unwrap()))
                     .unwrap(),
             )
@@ -691,7 +686,6 @@ agents:
                     .uri("/api/v1/compose/apply")
                     .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
-                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&compose).unwrap()))
                     .unwrap(),
             )
@@ -724,7 +718,6 @@ agents:
                     .uri("/api/v1/compose/teardown")
                     .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
-                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&teardown_body).unwrap()))
                     .unwrap(),
             )

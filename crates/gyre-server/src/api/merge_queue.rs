@@ -337,7 +337,6 @@ mod tests {
                     .uri("/api/v1/merge-queue/enqueue")
                     .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
-                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -368,7 +367,6 @@ mod tests {
                     .uri("/api/v1/merge-queue/enqueue")
                     .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
-                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -391,7 +389,6 @@ mod tests {
                     .uri("/api/v1/merge-queue/enqueue")
                     .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
-                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -419,7 +416,6 @@ mod tests {
                     .uri("/api/v1/merge-queue/enqueue")
                     .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
-                    .header("authorization", "Bearer test-token")
                     .body(Body::from(body.clone()))
                     .unwrap(),
             )
@@ -435,7 +431,6 @@ mod tests {
                     .uri("/api/v1/merge-queue/enqueue")
                     .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
-                    .header("authorization", "Bearer test-token")
                     .body(Body::from(body))
                     .unwrap(),
             )
@@ -479,7 +474,6 @@ mod tests {
                     .uri("/api/v1/merge-queue/enqueue")
                     .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
-                    .header("authorization", "Bearer test-token")
                     .body(Body::from(
                         serde_json::to_vec(&serde_json::json!({ "merge_request_id": "mr-1" }))
                             .unwrap(),
@@ -744,7 +738,6 @@ mod tests {
                     .uri("/api/v1/merge-queue/enqueue")
                     .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
-                    .header("authorization", "Bearer test-token")
                     .body(Body::from(
                         serde_json::to_vec(&serde_json::json!({
                             "merge_request_id": "mr-rev"
