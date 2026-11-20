@@ -2,7 +2,7 @@
 title: "Ephemeral worktrees: teardown when work is terminally complete (task terminal states), preserving the Ralph-loop respawn working copy"
 spec_ref: "Spec gap spec-4c39ca6ea3e71ce8a53398f3 / terminal-worktree-cleanup / d30f233daf86"
 depends_on: [task-258]
-progress: ready-for-review
+progress: complete
 commits: ["5dfcf6425bc8dce8d07290e6e783c58b04069101", "e5b21daaca840e5e6ea60597d6247ffb62b45065"]
 ---
 
