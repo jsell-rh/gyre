@@ -260,6 +260,44 @@ fn parse_review_decision(s: &str) -> Result<ReviewDecision, ApiError> {
 
 // ── Handlers ─────────────────────────────────────────────────────────────────
 
+/// identity-security.md §Task-Scoped JWT Claims — MR-surface task-scope
+/// boundary, shared by MR creation, MR status transition, and the
+/// merge-queue surfaces (enqueue/cancel): an agent principal may only act
+/// on merge requests inside its task scope. The allowed repo is resolved
+/// from the caller's `task_id` claim (the task row's repo), falling back
+/// to the signed `repo_id` claim when the task row no longer resolves —
+/// fail closed on neither matching. Non-agent principals pass untouched
+/// (`agent_task_claim()` is `None` for them).
+pub(crate) async fn require_repo_in_agent_task_scope(
+    state: &AppState,
+    auth: &AuthenticatedAgent,
+    target_repo: &str,
+    surface: &str,
+) -> Result<(), ApiError> {
+    let Some(claim) = auth.agent_task_claim() else {
+        return Ok(());
+    };
+    let allowed_repo = state
+        .tasks
+        .find_by_id(&Id::new(claim))
+        .await
+        .ok()
+        .flatten()
+        .map(|t| t.repo_id.to_string())
+        .or_else(|| auth.repo_id.clone())
+        .ok_or_else(|| {
+            ApiError::Forbidden(format!(
+                "agent token carries no repo scope; cannot {surface}"
+            ))
+        })?;
+    if target_repo != allowed_repo {
+        return Err(ApiError::Forbidden(format!(
+            "agent token is scoped to task {claim}; cannot {surface} in repository {target_repo}"
+        )));
+    }
+    Ok(())
+}
+
 #[instrument(skip(state, auth, req), fields(source = %req.source_branch, target = %req.target_branch))]
 /// POST /api/v1/merge-requests
 ///
@@ -304,25 +342,7 @@ pub async fn create_mr(
     // Agent task-scope boundary (see handler doc): resolve the caller's
     // task claim to its real repo; fall back to the signed repo_id claim
     // when the task row is gone. Fail closed on neither matching.
-    if let Some(claim) = auth.agent_task_claim() {
-        let allowed_repo = state
-            .tasks
-            .find_by_id(&Id::new(claim))
-            .await
-            .ok()
-            .flatten()
-            .map(|t| t.repo_id.to_string())
-            .or_else(|| auth.repo_id.clone())
-            .ok_or_else(|| {
-                ApiError::Forbidden("agent token carries no repo scope for MR creation".to_string())
-            })?;
-        if repo.id.to_string() != allowed_repo {
-            return Err(ApiError::Forbidden(format!(
-                "agent token is scoped to task {claim}; cannot open an MR in repository {}",
-                repo.id
-            )));
-        }
-    }
+    require_repo_in_agent_task_scope(&state, &auth, &repo.id.to_string(), "open an MR").await?;
     let mut mr = MergeRequest::new(
         new_id(),
         repo_id.clone(),
@@ -920,6 +940,16 @@ pub async fn get_mr(
 }
 
 #[instrument(skip(state, req, auth), fields(mr_id = %id, new_status = %req.status))]
+/// PUT /api/v1/merge-requests/:id/status
+///
+/// identity-security.md §Task-Scoped JWT Claims — MR-surface boundary
+/// (task-263 review repair): an agent principal may only transition MRs
+/// inside its task scope — the MR's repository must be the repo of the
+/// caller's `task_id` claim, not merely a repo its tier can reach. The
+/// in-handler effect is MR-row mutation only (no task rows), but a
+/// foreign-MR transition (e.g. closing another task's completion MR)
+/// disrupts that task's delivery, so the boundary is enforced here too,
+/// consistently with MR creation. Non-agent principals are unaffected.
 pub async fn transition_mr_status(
     State(state): State<Arc<AppState>>,
     auth: AuthenticatedAgent,
@@ -958,6 +988,15 @@ pub async fn transition_mr_status(
                 .to_string(),
         ));
     }
+    // Agent task-scope boundary (see handler doc): the human-approval gate
+    // above stays first so its RbacDenied audit semantics are unchanged.
+    require_repo_in_agent_task_scope(
+        &state,
+        &auth,
+        &mr.repository_id.to_string(),
+        &format!("transition merge request {}", mr.id),
+    )
+    .await?;
     let is_merge = matches!(new_status, MrStatus::Merged);
     let is_close = matches!(new_status, MrStatus::Closed);
     mr.transition_status(new_status)
@@ -1715,6 +1754,119 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::CREATED);
+    }
+
+    /// task-263 review repair (identity-security.md §Task-Scoped JWT
+    /// Claims, MR-surface boundary): a valid, non-expired worker JWT
+    /// scoped to task-mr-1 (repo-1) gets 403 on transitioning an MR in
+    /// repo-2 — the MR stays Open — while the same token may transition
+    /// its own repo's MR (positive control: the boundary is the task
+    /// claim, not the route). `approved` is not used as the probe status
+    /// so the 403 proves the task-scope check, not the pre-existing
+    /// human-approval gate.
+    #[tokio::test]
+    async fn agent_jwt_cannot_transition_mr_outside_task_scope() {
+        let state = test_state();
+        seed_repo(&state).await;
+        let repo2 = gyre_domain::Repository::new(
+            gyre_common::Id::new("repo-2"),
+            gyre_common::Id::new("ws1"),
+            "repo-2",
+            "/repos/repo-2",
+            1000,
+        );
+        state.repos.create(&repo2).await.unwrap();
+        let mut task = gyre_domain::Task::new(Id::new("task-mr-1"), "MR scope task", 1000);
+        task.workspace_id = gyre_common::Id::new("ws1");
+        task.repo_id = gyre_common::Id::new("repo-1");
+        state.tasks.create(&task).await.unwrap();
+
+        let token = state
+            .agent_signing_key
+            .mint_worker_scoped(
+                "agent-mr-scope",
+                "task-mr-1",
+                "system",
+                &state.base_url,
+                3600,
+                "default",
+                "ws1",
+                "repo-1",
+                "repo-1",
+                None,
+                Some(1),
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        state
+            .kv_store
+            .kv_set("agent_tokens", "agent-mr-scope", token.clone())
+            .await
+            .unwrap();
+        let app = crate::api::api_router().with_state(state.clone());
+
+        let seed_mr_in = |repo_id: &str, mr_id: &str| {
+            let mut mr = MergeRequest::new(
+                Id::new(mr_id),
+                gyre_common::Id::new(repo_id),
+                gyre_common::Id::new("ws1"),
+                "Scope probe MR",
+                "feat/x",
+                "main",
+                1000,
+            );
+            mr.status = gyre_domain::MrStatus::Approved;
+            mr
+        };
+        let foreign = seed_mr_in("repo-2", "mr-foreign-scope");
+        state.merge_requests.create(&foreign).await.unwrap();
+        let own = seed_mr_in("repo-1", "mr-own-scope");
+        state.merge_requests.create(&own).await.unwrap();
+
+        async fn transition_closed(
+            app: &Router,
+            mr_id: &str,
+            token: &str,
+        ) -> axum::response::Response {
+            let body = serde_json::to_vec(&serde_json::json!({ "status": "closed" })).unwrap();
+            app.clone()
+                .oneshot(
+                    Request::builder()
+                        .method("PUT")
+                        .uri(format!("/api/v1/merge-requests/{mr_id}/status"))
+                        .header("authorization", format!("Bearer {token}"))
+                        .header("content-type", "application/json")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+        }
+
+        // Foreign repo → 403, MR untouched.
+        let resp = transition_closed(&app, "mr-foreign-scope", &token).await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let stored = state
+            .merge_requests
+            .find_by_id(&Id::new("mr-foreign-scope"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.status, gyre_domain::MrStatus::Approved);
+
+        // Own repo → 200 (positive control).
+        let resp = transition_closed(&app, "mr-own-scope", &token).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let stored = state
+            .merge_requests
+            .find_by_id(&Id::new("mr-own-scope"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.status, gyre_domain::MrStatus::Closed);
     }
 
     #[tokio::test]

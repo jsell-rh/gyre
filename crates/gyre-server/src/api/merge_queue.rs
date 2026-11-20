@@ -56,11 +56,39 @@ fn status_str(s: &MergeQueueEntryStatus) -> String {
     .to_string()
 }
 
-#[instrument(skip(state, req), fields(mr_id = %req.merge_request_id))]
+/// POST /api/v1/merge-queue/enqueue
+///
+/// identity-security.md §Task-Scoped JWT Claims — merge-queue boundary
+/// (task-263 review repair): an agent principal may only enqueue an MR
+/// inside its task scope — the MR's repository must be the repo of the
+/// caller's `task_id` claim, not merely a repo its tier can reach.
+/// Enqueuing a foreign task's MR would push that task's work through the
+/// merge pipeline (gate execution, then the system merge that
+/// transitions the task) on the caller's request. The Ralph loop's
+/// automatic post-completion enqueue goes through `enqueue_core` (system
+/// actor) and is unaffected. Non-agent principals are unaffected.
+#[instrument(skip(state, auth, req), fields(mr_id = %req.merge_request_id))]
 pub async fn enqueue(
     State(state): State<Arc<AppState>>,
+    auth: crate::auth::AuthenticatedAgent,
     Json(req): Json<EnqueueRequest>,
 ) -> Result<(StatusCode, Json<QueueEntryResponse>), ApiError> {
+    // Agent task-scope boundary (see handler doc): resolve the target MR
+    // and require its repo to be within the caller's task claim.
+    let mr = state
+        .merge_requests
+        .find_by_id(&Id::new(&req.merge_request_id))
+        .await?
+        .ok_or_else(|| {
+            ApiError::NotFound(format!("merge request {} not found", req.merge_request_id))
+        })?;
+    super::merge_requests::require_repo_in_agent_task_scope(
+        &state,
+        &auth,
+        &mr.repository_id.to_string(),
+        "enqueue this merge request",
+    )
+    .await?;
     let priority = req.priority.unwrap_or(50);
     let mr_id = Id::new(req.merge_request_id);
     let (entry, created) = enqueue_core(&state, &mr_id, priority).await?;
@@ -150,9 +178,19 @@ pub async fn list_queue(
     ))
 }
 
+/// DELETE /api/v1/merge-queue/:id — cancel a queue entry.
+///
+/// identity-security.md §Task-Scoped JWT Claims — merge-queue boundary
+/// (task-263 review repair): an agent principal may only cancel a queue
+/// entry whose MR is inside its task scope — the mirror of the enqueue
+/// boundary above (an agent must not be able to dequeue another task's
+/// MR either). The in-handler effect is queue-row mutation only (no task
+/// rows), but cancelling a foreign task's entry disrupts that task's
+/// delivery path. Non-agent principals are unaffected.
 pub async fn cancel_entry(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    auth: crate::auth::AuthenticatedAgent,
 ) -> Result<StatusCode, ApiError> {
     let entry = state
         .merge_queue
@@ -167,17 +205,39 @@ pub async fn cancel_entry(
         )));
     }
 
+    // Agent task-scope boundary (see handler doc): resolve the entry's MR
+    // and require its repo to be within the caller's task claim. The MR
+    // load doubles as the workspace source for the QueueUpdated broadcast
+    // below; for an agent principal an unresolvable MR fails the boundary
+    // closed, while non-agent principals keep the pre-existing cleanup
+    // path (cancel an orphaned entry, skip the broadcast).
+    let mr = state
+        .merge_requests
+        .find_by_id(&entry.merge_request_id)
+        .await?;
+    if auth.agent_task_claim().is_some() {
+        let mr = mr.as_ref().ok_or_else(|| {
+            ApiError::NotFound(format!(
+                "merge request {} not found",
+                entry.merge_request_id
+            ))
+        })?;
+        super::merge_requests::require_repo_in_agent_task_scope(
+            &state,
+            &auth,
+            &mr.repository_id.to_string(),
+            "cancel this merge-queue entry",
+        )
+        .await?;
+    }
+
     state.merge_queue.cancel(&Id::new(&id)).await?;
 
     // Broadcast-only QueueUpdated (message-bus.md §Broadcast-only kinds):
     // the cancel transition — the MR leaving the merge queue. The workspace
     // is resolved from the entry's MR; if the MR no longer resolves the
     // emission is skipped (the queue mutation itself already succeeded).
-    if let Ok(Some(mr)) = state
-        .merge_requests
-        .find_by_id(&entry.merge_request_id)
-        .await
-    {
+    if let Some(mr) = mr {
         crate::merge_processor::emit_queue_updated(&state, &mr.workspace_id).await;
     }
 
@@ -255,6 +315,7 @@ mod tests {
                     .method("POST")
                     .uri("/api/v1/merge-queue/enqueue")
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -284,6 +345,7 @@ mod tests {
                     .method("POST")
                     .uri("/api/v1/merge-queue/enqueue")
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -305,6 +367,7 @@ mod tests {
                     .method("POST")
                     .uri("/api/v1/merge-queue/enqueue")
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -331,6 +394,7 @@ mod tests {
                     .method("POST")
                     .uri("/api/v1/merge-queue/enqueue")
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(body.clone()))
                     .unwrap(),
             )
@@ -345,6 +409,7 @@ mod tests {
                     .method("POST")
                     .uri("/api/v1/merge-queue/enqueue")
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(body))
                     .unwrap(),
             )
@@ -387,6 +452,7 @@ mod tests {
                     .method("POST")
                     .uri("/api/v1/merge-queue/enqueue")
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(
                         serde_json::to_vec(&serde_json::json!({ "merge_request_id": "mr-1" }))
                             .unwrap(),
@@ -456,6 +522,7 @@ mod tests {
                 Request::builder()
                     .method("DELETE")
                     .uri(format!("/api/v1/merge-queue/{id}"))
+                    .header("authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -508,6 +575,7 @@ mod tests {
                     .method("POST")
                     .uri("/api/v1/merge-queue/enqueue")
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -540,6 +608,7 @@ mod tests {
                 Request::builder()
                     .method("DELETE")
                     .uri(format!("/api/v1/merge-queue/{entry_id}"))
+                    .header("authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -573,6 +642,7 @@ mod tests {
                 Request::builder()
                     .method("DELETE")
                     .uri(format!("/api/v1/merge-queue/{id}"))
+                    .header("authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -641,6 +711,7 @@ mod tests {
                     .method("POST")
                     .uri("/api/v1/merge-queue/enqueue")
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(
                         serde_json::to_vec(&serde_json::json!({
                             "merge_request_id": "mr-rev"
@@ -656,5 +727,122 @@ mod tests {
             state.merge_queue.list_queue().await.unwrap().is_empty(),
             "no queue entry may be created for a non-mergeable MR"
         );
+    }
+
+    /// task-263 review repair (identity-security.md §Task-Scoped JWT
+    /// Claims, merge-queue boundary): a valid, non-expired worker JWT
+    /// spawned for a task in repo-9 gets 403 on enqueueing another task's
+    /// MR (repo-1) and on cancelling that MR's queue entry — the entry
+    /// stays queued — while a worker scoped to repo-1 keeps both rights
+    /// on the same fixture (the boundary is the task claim, not the
+    /// route). The Ralph loop's automatic enqueue goes through
+    /// `enqueue_core` (system actor) and never crosses this boundary.
+    #[tokio::test]
+    async fn agent_jwt_task_scope_boundary_on_merge_queue_surfaces() {
+        let (app, state) = make_app().await;
+        // The target MR lives in repo-1 (seed_mr's fixture repo).
+        seed_mr(&state, "mr-mq-scope").await;
+        // Task rows the two tokens' claims resolve to: one in repo-1 (the
+        // MR's repo), one in repo-9 (foreign).
+        for (task_id, repo_id) in [("task-mq-own", "repo-1"), ("task-mq-foreign", "repo-9")] {
+            let mut task = gyre_domain::Task::new(Id::new(task_id), "merge-queue scope task", 1000);
+            task.workspace_id = Id::new("default");
+            task.repo_id = Id::new(repo_id);
+            state.tasks.create(&task).await.unwrap();
+        }
+        let mint = |agent_id: &str, task_id: &str, repo_id: &str| {
+            state
+                .agent_signing_key
+                .mint_worker_scoped(
+                    agent_id,
+                    task_id,
+                    "system",
+                    &state.base_url,
+                    3600,
+                    "default",
+                    "default",
+                    repo_id,
+                    repo_id,
+                    None,
+                    Some(1),
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap()
+        };
+        let token_own = mint("agent-mq-own", "task-mq-own", "repo-1");
+        let token_foreign = mint("agent-mq-foreign", "task-mq-foreign", "repo-9");
+        state
+            .kv_store
+            .kv_set("agent_tokens", "agent-mq-own", token_own.clone())
+            .await
+            .unwrap();
+        state
+            .kv_store
+            .kv_set("agent_tokens", "agent-mq-foreign", token_foreign.clone())
+            .await
+            .unwrap();
+
+        async fn enqueue_as(app: &Router, token: &str) -> axum::response::Response {
+            let body = serde_json::to_vec(&serde_json::json!({
+                "merge_request_id": "mr-mq-scope"
+            }))
+            .unwrap();
+            app.clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/merge-queue/enqueue")
+                        .header("content-type", "application/json")
+                        .header("authorization", format!("Bearer {token}"))
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+        }
+        async fn cancel_as(app: &Router, entry_id: &str, token: &str) -> axum::response::Response {
+            app.clone()
+                .oneshot(
+                    Request::builder()
+                        .method("DELETE")
+                        .uri(format!("/api/v1/merge-queue/{entry_id}"))
+                        .header("authorization", format!("Bearer {token}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+        }
+
+        // Foreign task's token: enqueue → 403, no queue entry created.
+        let resp = enqueue_as(&app, &token_foreign).await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        assert!(
+            state.merge_queue.list_queue().await.unwrap().is_empty(),
+            "no queue entry may be created for a foreign task's MR"
+        );
+
+        // Own-repo token: enqueue → 201 (positive control).
+        let resp = enqueue_as(&app, &token_own).await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let entry_id = body_json(resp).await["id"].as_str().unwrap().to_string();
+
+        // Foreign task's token: cancel → 403, the entry stays queued.
+        let resp = cancel_as(&app, &entry_id, &token_foreign).await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let entry = state
+            .merge_queue
+            .find_by_id(&Id::new(&entry_id))
+            .await
+            .unwrap()
+            .expect("queue entry must survive the denied cancel");
+        assert_eq!(entry.status, gyre_domain::MergeQueueEntryStatus::Queued);
+
+        // Own-repo token: cancel → 204 (positive control).
+        let resp = cancel_as(&app, &entry_id, &token_own).await;
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
     }
 }
