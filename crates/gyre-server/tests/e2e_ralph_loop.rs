@@ -50,6 +50,12 @@ async fn full_ralph_loop_via_gyre() {
     let base_url = format!("http://127.0.0.1:{port}");
     let auth_token = "e2e-ralph-token";
 
+    // task-264: production's default signing mode is keyless Fulcio; this
+    // e2e loop pushes and merges with non-JWT dev tokens, so it explicitly
+    // opts into local forge-key signing (the documented operator opt-in).
+    // Keyless/fail-loud signing has its own dedicated suites.
+    unsafe { std::env::set_var("GYRE_SIGNING_MODE", "local") };
+
     let state = build_state(auth_token, &base_url, None);
     abac_middleware::seed_builtin_policies(&state)
         .await

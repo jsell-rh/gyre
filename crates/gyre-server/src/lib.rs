@@ -1837,12 +1837,9 @@ pub fn build_state(
     // audit events (queryable by MR id and commit SHA). Wraps the same
     // audit repository so bundles flow through the identical store
     // (SQLite/PG/mem) and search-sync path as every other audit event.
-    // Rekor transparency-log publication is stubbed until a backend is
-    // configured (no-op adapter warns on every submission).
     let attestation_storage: Arc<dyn AttestationStorage> = Arc::new(
         gyre_adapters::MergeAttestationStorage::new(Arc::clone(&audit)),
     );
-    let rekor: Arc<dyn RekorClient> = Arc::new(gyre_adapters::NoopRekorClient);
 
     // Spec-link graph persistence (spec-links.md §Forge-Maintained Spec Graph).
     // The SQL table is authoritative; the in-memory store is a hot cache,
@@ -1861,6 +1858,19 @@ pub fn build_state(
     // JWKS (message-bus.md §Edge Cases "Signature key rotation").
     let (agent_signing_key, signing_key_history) =
         load_or_persist_agent_signing_key(&sqlite_db, &pg_db);
+
+    // Rekor transparency-log publication for merge attestation bundles
+    // (task-264): the REAL HTTP client replaces the old no-op stub. It is
+    // configured only when GYRE_REKOR_URL is set — an unconfigured log
+    // makes every submission fail explicitly (surfaced as a warning by
+    // the storage path), never a silent Ok(None).
+    let rekor: Arc<dyn RekorClient> = Arc::new(gyre_adapters::HttpRekorClient::new(
+        std::env::var("GYRE_REKOR_URL")
+            .ok()
+            .map(|u| u.trim().to_string())
+            .filter(|u| !u.is_empty()),
+        agent_signing_key.public_key_pem(),
+    ));
 
     // SPIFFE workload attestation (identity-security.md Layer 1): resolve
     // the trust domain and anchor before wiring AppState.

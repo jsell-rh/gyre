@@ -1064,6 +1064,168 @@ pub async fn git_receive_pack(
         }
     }
 
+    // task-264 (identity-security.md §Layer 3): git HTTP push is a
+    // commit-producing surface — every commit that actually landed must
+    // carry a persisted CommitSignature. Runs synchronously BEFORE the
+    // response so a signing failure can undo the refs and reject the push
+    // explicitly (naming the signing mode) — the same fail-loud contract as
+    // jj new/squash and MR merges. Attribution: the caller's validated JWT
+    // claims when present, else the pusher agent's stored task/spawner
+    // context (a real lookup, never a fabricated literal).
+    if !applied_updates.is_empty() {
+        // Review repair F2 (task-264): landed-commit enumeration failure
+        // REJECTS the push (refs undone, audited rejection) — never a
+        // success response that lands commits without their required
+        // signatures because the signing block silently skipped.
+        let new_shas = match list_new_commits(&repo_path, &applied_updates).await {
+            Ok(shas) => shas,
+            Err(reason) => {
+                warn!(
+                    agent_id = %auth.agent_id,
+                    %repo_id,
+                    %reason,
+                    "git-receive-pack: landed-commit enumeration failed — undoing refs and rejecting the push"
+                );
+                undo_ref_updates(&repo_path, &ref_updates).await;
+                state
+                    .emit_event(
+                        repo_workspace_id.clone(),
+                        gyre_common::message::Destination::Workspace(repo_workspace_id.clone()),
+                        gyre_common::message::MessageKind::PushRejected,
+                        Some(serde_json::json!({
+                            "repo_id": repo_id,
+                            "branch": branch_pushed(&ref_updates),
+                            "agent_id": auth.agent_id,
+                            "reason": reason,
+                        })),
+                    )
+                    .await;
+                emit_git_push_rejected_audit(
+                    &state,
+                    &repo_id,
+                    &repo_workspace_id,
+                    &auth.agent_id,
+                    branch_pushed(&ref_updates).as_str(),
+                    "commit-signing",
+                    &reason,
+                )
+                .await;
+                return (StatusCode::BAD_GATEWAY, format!("push rejected: {reason}"))
+                    .into_response();
+            }
+        };
+        if !new_shas.is_empty() {
+            let attribution = match auth.jwt_claims.as_ref() {
+                Some(_) => crate::commit_signatures::SigningAttribution::from_auth(&auth),
+                None => crate::commit_signatures::SigningAttribution {
+                    agent_id: auth.agent_id.clone(),
+                    task_id: task_id.clone().unwrap_or_default(),
+                    spawned_by: spawned_by_user_id.clone().unwrap_or_default(),
+                },
+            };
+            for sha in &new_shas {
+                // Review repair F1 (task-264): a commit that already carries
+                // a persisted CommitSignature KEEPS its original record —
+                // never re-signed. Branch-creation pushes enumerate the
+                // whole reachable history, and `save` upserts on
+                // (repo_id, commit_sha): without this guard a later agent
+                // pushing a branch over signed history would replace every
+                // ancestor's attribution-bound record with THEIR
+                // agent/task/spawned_by attribution (destroying the stored
+                // proof of who made those commits) and burn O(repo history)
+                // signing round trips. This also dedups a SHA reachable
+                // from several ref updates in the same push.
+                match state.commit_signatures.find(&repo_id, sha).await {
+                    Ok(Some(existing)) => {
+                        tracing::debug!(
+                            commit_sha = %sha,
+                            original_signer = %existing.signer_id,
+                            "push signing: commit already carries a persisted signature — preserving the original attribution record"
+                        );
+                        continue;
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        undo_ref_updates(&repo_path, &ref_updates).await;
+                        return git_err(format!(
+                            "push rejected: failed to check the existing commit \
+                             signature for {sha}: {e}"
+                        ));
+                    }
+                }
+                match crate::commit_signatures::sign_commit(
+                    &state,
+                    &repo_id,
+                    sha,
+                    &attribution,
+                    auth.bearer_token.as_deref(),
+                )
+                .await
+                {
+                    // `none` mode: explicit operator opt-in — unsigned.
+                    Ok(None) => {}
+                    Ok(Some(record)) => {
+                        if let Err(e) = state.commit_signatures.save(&record).await {
+                            undo_ref_updates(&repo_path, &ref_updates).await;
+                            return git_err(format!(
+                                "push rejected: failed to persist the commit signature: {e}"
+                            ));
+                        }
+                    }
+                    Err(e) => {
+                        let reason = e.describe();
+                        warn!(
+                            agent_id = %auth.agent_id,
+                            %repo_id,
+                            commit_sha = %sha,
+                            reason = %reason,
+                            "git-receive-pack: commit signing failed — undoing refs and rejecting the push"
+                        );
+                        undo_ref_updates(&repo_path, &ref_updates).await;
+                        state
+                            .emit_event(
+                                repo_workspace_id.clone(),
+                                gyre_common::message::Destination::Workspace(
+                                    repo_workspace_id.clone(),
+                                ),
+                                gyre_common::message::MessageKind::PushRejected,
+                                Some(serde_json::json!({
+                                    "repo_id": repo_id,
+                                    "branch": branch_pushed(&ref_updates),
+                                    "agent_id": auth.agent_id,
+                                    "reason": reason,
+                                })),
+                            )
+                            .await;
+                        // task-104: GitPushRejected audit event — the detail
+                        // names the signing failure AND the active signing
+                        // mode, so the audit trail identifies what actually
+                        // ran (task-264).
+                        emit_git_push_rejected_audit(
+                            &state,
+                            &repo_id,
+                            &repo_workspace_id,
+                            &auth.agent_id,
+                            branch_pushed(&ref_updates).as_str(),
+                            "commit-signing",
+                            &reason,
+                        )
+                        .await;
+                        let status = match e {
+                            crate::commit_signatures::CommitSigningError::NoOidcIdentity(_) => {
+                                StatusCode::FORBIDDEN
+                            }
+                            crate::commit_signatures::CommitSigningError::SigningStackFailed {
+                                ..
+                            } => StatusCode::BAD_GATEWAY,
+                        };
+                        return (status, format!("push rejected: {reason}")).into_response();
+                    }
+                }
+            }
+        }
+    }
+
     info!(%repo_path, updates = ref_updates.len(), "served git-receive-pack");
 
     // M13.3: Build X-Gyre-Push-Result JSON header value.
@@ -1491,10 +1653,77 @@ pub async fn git_receive_pack(
         .unwrap()
 }
 
-/// Resolve the task context for an agent to populate commit provenance (M13.2).
-/// Returns (task_id, parent_agent_id, spawned_by_user_id).
-async fn resolve_agent_context(
-    state: &Arc<AppState>,
+/// The first pushed branch name, for rejection events (empty when the
+/// push carries no ref updates).
+fn branch_pushed(ref_updates: &[RefUpdate]) -> String {
+    ref_updates
+        .first()
+        .map(|u| u.refname.trim_start_matches("refs/heads/").to_string())
+        .unwrap_or_default()
+}
+
+/// Enumerate the commits a push actually landed, per applied ref update
+/// (`git log {old}..{new} --format=%H`; a branch creation walks all of
+/// `new`). Used by the synchronous commit-signing path (task-264) — the
+/// same ranges `record_pushed_commits` walks post-response.
+///
+/// Review repair F2 (task-264): an enumeration failure is an `Err` the
+/// caller turns into a push rejection. The previous warn-and-continue
+/// made the signing block skip silently, landing commits without their
+/// required signatures behind a success response — a fail-open the
+/// fail-loud signing contract cannot tolerate. A legitimately empty
+/// result (no new commits in the applied ranges) is still `Ok(vec![])`.
+async fn list_new_commits(repo_path: &str, updates: &[RefUpdate]) -> Result<Vec<String>, String> {
+    let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
+    let mut shas = Vec::new();
+    for update in updates {
+        let range = if update.old_sha.starts_with("00000000") {
+            update.new_sha.clone()
+        } else {
+            format!("{}..{}", update.old_sha, update.new_sha)
+        };
+        let out = match Command::new(&git_bin)
+            .arg("-C")
+            .arg(repo_path)
+            .arg("log")
+            .arg("--format=%H")
+            .arg(&range)
+            .output()
+            .await
+        {
+            Ok(o) if o.status.success() => o,
+            Ok(o) => {
+                let err = String::from_utf8_lossy(&o.stderr);
+                return Err(format!(
+                    "failed to enumerate the commits landed by the push \
+                     (`git log {range}`) — refusing to accept unsigned commits: {err}"
+                ));
+            }
+            Err(e) => {
+                return Err(format!(
+                    "failed to enumerate the commits landed by the push \
+                     (`git log {range}`) — refusing to accept unsigned commits: \
+                     git spawn failed: {e}"
+                ));
+            }
+        };
+        shas.extend(
+            String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
+        );
+    }
+    Ok(shas)
+}
+
+/// Resolve an agent's task/spawner context from its stored record:
+/// `(current task id, parent agent id, spawning user id)`. Shared by the
+/// git push signing path and the merge-commit signer (task-264) — the
+/// attribution bound into commit signatures must come from a real lookup,
+/// never a fabricated literal.
+pub(crate) async fn resolve_agent_context(
+    state: &AppState,
     agent_id: &str,
 ) -> (Option<String>, Option<String>, Option<String>) {
     let agent = match state.agents.find_by_id(&Id::new(agent_id)).await {
@@ -5485,6 +5714,22 @@ mod tests {
         String,
         String,
     ) {
+        git_app_with_repo_configured(None).await
+    }
+
+    /// `git_app_with_repo` with an explicit signing configuration (task-264
+    /// push-signing tests): the state is reconfigured BEFORE the router
+    /// takes its clone, so the handler observes the test's signing mode.
+    async fn git_app_with_repo_configured(
+        signing_config: Option<crate::commit_signatures::SigningConfig>,
+    ) -> (
+        Router,
+        Arc<crate::AppState>,
+        TempDir,
+        String,
+        String,
+        String,
+    ) {
         let tmp = TempDir::new().unwrap();
         let repo_path = tmp.path().join("test-proj").join("my-repo.git");
         std::fs::create_dir_all(&repo_path).unwrap();
@@ -5498,7 +5743,11 @@ mod tests {
             .unwrap();
         assert!(status.success(), "git init --bare failed");
 
-        let state = test_state();
+        let mut state = test_state();
+        if let Some(config) = signing_config {
+            let state_mut = Arc::get_mut(&mut state).expect("sole owner");
+            state_mut.signing_config = config;
+        }
 
         // Create a workspace with a known slug under the default tenant.
         let ws = Workspace {
@@ -9620,6 +9869,504 @@ specs:
         assert_eq!(e.workspace_id.as_ref().unwrap().as_str(), "ws-test");
         assert_eq!(e.outcome, gyre_domain::AuditOutcome::Success);
         assert_eq!(e.resource_type, "repo");
+    }
+
+    /// task-264 (identity-security.md §Layer 3): git HTTP push is a
+    /// commit-producing surface — every commit that actually landed must
+    /// carry a persisted CommitSignature, and the existing verification
+    /// machinery must validate it (real Ed25519 check against the forge
+    /// key). Before task-264, pushes produced no signature records at all.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn push_signs_every_landed_commit() {
+        let (app, state, _tmp, ws_slug, repo_name, repo_path) = git_app_with_repo().await;
+
+        let git = |args: &[&str]| -> String {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo_path)
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@t")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@t")
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {:?} failed", args);
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+
+        let tree = git(&["mktree"]);
+        let base = git(&["commit-tree", &tree, "-m", "chore: base"]);
+        git(&["update-ref", "refs/heads/main", &base]);
+        let c1 = git(&["commit-tree", &tree, "-p", &base, "-m", "feat: one"]);
+        let c2 = git(&["commit-tree", &tree, "-p", &c1, "-m", "feat: two"]);
+        git(&["update-ref", "refs/heads/main", &c2]);
+
+        let line = format!("{base} {c2} refs/heads/main");
+        let mut body = super::pkt_line(&line);
+        body.extend_from_slice(b"0000");
+        let pack = {
+            use std::io::Write as _;
+            let mut child = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo_path)
+                .args(["pack-objects", "--stdout"])
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(format!("{c1}\n{c2}\n").as_bytes())
+                .unwrap();
+            let out = child.wait_with_output().unwrap();
+            assert!(out.status.success(), "pack-objects failed");
+            out.stdout
+        };
+        body.extend_from_slice(&pack);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/git/{ws_slug}/{repo_name}/git-receive-pack"))
+                    .header("Authorization", "Bearer test-token")
+                    .header("content-type", "application/x-git-receive-pack-request")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // EVERY landed commit has a persisted signature record (local
+        // mode is the test fixture's explicit configuration).
+        for sha in [&c1, &c2] {
+            let record = state
+                .commit_signatures
+                .find("repo-1", sha)
+                .await
+                .unwrap()
+                .unwrap_or_else(|| panic!("pushed commit {sha} must carry a CommitSignature"));
+            assert_eq!(record.sigstore_mode, gyre_ports::SigstoreMode::Local);
+            assert_eq!(record.signer_id, "system");
+            // The shared verification path validates the record — the real
+            // Ed25519 check over the attribution-bound payload.
+            let verification =
+                crate::sigstore::verify_state_commit_signature(&state, "repo-1", sha)
+                    .await
+                    .unwrap()
+                    .expect("record must exist");
+            assert!(
+                verification.valid,
+                "pushed commit {sha} signature must verify: {:?}",
+                verification.reason
+            );
+        }
+    }
+
+    /// task-264 (the task's verification intent, driven through the git push
+    /// surface): keyless (fulcio) mode with an unreachable Fulcio and a real
+    /// presentable agent JWT → the push must FAIL LOUDLY (502 naming the
+    /// signing mode), the refs must be undone, NO record signed with the
+    /// local forge key may be produced, and the rejection is audited with
+    /// the signing failure reason.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn push_rejected_loudly_when_fulcio_unreachable() {
+        let (app, state, _tmp, ws_slug, repo_name, repo_path) =
+            git_app_with_repo_configured(Some(crate::commit_signatures::SigningConfig {
+                mode: crate::commit_signatures::SigningMode::Fulcio,
+                fulcio_url: "https://fulcio.invalid".to_string(),
+                rekor_url: "https://rekor.invalid".to_string(),
+            }))
+            .await;
+
+        // Mint and register a real agent JWT (presentable to Fulcio) so the
+        // failure is the Fulcio round trip itself, not the identity gate.
+        let jwt = state
+            .agent_signing_key
+            .mint(
+                "agent-push",
+                "task-88",
+                "user-push",
+                &state.base_url,
+                3600,
+                "default",
+                "ws-test",
+                "repo-1",
+                TEST_REPO_NAME,
+            )
+            .expect("mint JWT");
+        state
+            .kv_store
+            .kv_set("agent_tokens", "agent-push", jwt.clone())
+            .await
+            .unwrap();
+
+        let git = |args: &[&str]| -> String {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo_path)
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@t")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@t")
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {:?} failed", args);
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+
+        let tree = git(&["mktree"]);
+        let base = git(&["commit-tree", &tree, "-m", "chore: base"]);
+        git(&["update-ref", "refs/heads/main", &base]);
+        let tip = git(&["commit-tree", &tree, "-p", &base, "-m", "feat: move main"]);
+        git(&["update-ref", "refs/heads/main", &tip]);
+
+        let line = format!("{base} {tip} refs/heads/main");
+        let mut body = super::pkt_line(&line);
+        body.extend_from_slice(b"0000");
+        let pack = {
+            use std::io::Write as _;
+            let mut child = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo_path)
+                .args(["pack-objects", "--stdout"])
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(format!("{tip}\n").as_bytes())
+                .unwrap();
+            let out = child.wait_with_output().unwrap();
+            assert!(out.status.success(), "pack-objects failed");
+            out.stdout
+        };
+        body.extend_from_slice(&pack);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/git/{ws_slug}/{repo_name}/git-receive-pack"))
+                    .header("Authorization", format!("Bearer {jwt}"))
+                    .header("content-type", "application/x-git-receive-pack-request")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_GATEWAY,
+            "unreachable Fulcio with keyless mode must reject the push explicitly"
+        );
+        let body_text = String::from_utf8_lossy(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .to_string();
+        assert!(
+            body_text.contains("fulcio"),
+            "the rejection must identify the actual signing mode used: {body_text}"
+        );
+
+        // The refs were undone — the push did not land.
+        assert_eq!(
+            git(&["rev-parse", "refs/heads/main"]),
+            base,
+            "a push rejected for signing failure must undo its ref updates"
+        );
+        // No local-key record was produced for the refused operation.
+        assert!(state
+            .commit_signatures
+            .find("repo-1", &tip)
+            .await
+            .unwrap()
+            .is_none());
+        // The rejection is audited with the signing failure reason.
+        let events = wait_for_audit_event(&state, "git_push_rejected").await;
+        assert!(
+            events
+                .iter()
+                .any(|e| e.detail["gate_name"] == "commit-signing"),
+            "a GitPushRejected audit event naming the commit-signing gate must \
+             be recorded: {:?}",
+            events
+        );
+    }
+
+    /// Review repair regression test (task-264 F1): a branch-creation push
+    /// enumerates the ENTIRE reachable history (old_sha is all zeros), and
+    /// `CommitSignatureRepository::save` UPSERTS on (repo_id, commit_sha).
+    /// Before the repair, the signing loop re-signed every already-signed
+    /// ancestor with the pushing agent's attribution and replaced the
+    /// original records — destroying the platform's stored proof of who
+    /// made those commits. The repair skips SHAs that already carry a
+    /// persisted CommitSignature, so a branch push over signed history
+    /// preserves the original attribution records and only signs commits
+    /// that are not signed yet.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn branch_push_over_signed_history_preserves_original_attribution() {
+        let (app, state, _tmp, ws_slug, repo_name, repo_path) = git_app_with_repo().await;
+
+        let git = |args: &[&str]| -> String {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo_path)
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@t")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@t")
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {:?} failed", args);
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+
+        // History: base <- c1 <- c2 on main.
+        let tree = git(&["mktree"]);
+        let base = git(&["commit-tree", &tree, "-m", "chore: base"]);
+        git(&["update-ref", "refs/heads/main", &base]);
+        let c1 = git(&["commit-tree", &tree, "-p", &base, "-m", "feat: one"]);
+        let c2 = git(&["commit-tree", &tree, "-p", &c1, "-m", "feat: two"]);
+        git(&["update-ref", "refs/heads/main", &c2]);
+
+        // First push (fast-forward, global test token): c1 and c2 get
+        // attribution-bound local signatures from the "system" signer.
+        let line = format!("{base} {c2} refs/heads/main");
+        let mut body = super::pkt_line(&line);
+        body.extend_from_slice(b"0000");
+        let pack = {
+            use std::io::Write as _;
+            let mut child = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo_path)
+                .args(["pack-objects", "--stdout"])
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(format!("{c1}\n{c2}\n").as_bytes())
+                .unwrap();
+            let out = child.wait_with_output().unwrap();
+            assert!(out.status.success(), "pack-objects failed");
+            out.stdout
+        };
+        body.extend_from_slice(&pack);
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/git/{ws_slug}/{repo_name}/git-receive-pack"))
+                    .header("Authorization", "Bearer test-token")
+                    .header("content-type", "application/x-git-receive-pack-request")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let orig_c1 = state
+            .commit_signatures
+            .find("repo-1", &c1)
+            .await
+            .unwrap()
+            .unwrap_or_else(|| panic!("commit {c1} must be signed by the first push"));
+        let orig_c2 = state
+            .commit_signatures
+            .find("repo-1", &c2)
+            .await
+            .unwrap()
+            .unwrap_or_else(|| panic!("commit {c2} must be signed by the first push"));
+        assert_eq!(orig_c1.signer_id, "system");
+        assert_eq!(orig_c2.signer_id, "system");
+
+        // Second push: a DIFFERENT agent (real JWT carrying its own
+        // task/spawned_by attribution) creates a branch at c3. The
+        // branch-creation range walks c3, c2, c1, base — the already-signed
+        // c1/c2 must NOT be re-signed with this agent's attribution.
+        let jwt = state
+            .agent_signing_key
+            .mint(
+                "agent-feature",
+                "task-feature-99",
+                "user-42",
+                &state.base_url,
+                3600,
+                "default",
+                "ws-test",
+                "repo-1",
+                TEST_REPO_NAME,
+            )
+            .expect("mint JWT");
+        state
+            .kv_store
+            .kv_set("agent_tokens", "agent-feature", jwt.clone())
+            .await
+            .unwrap();
+
+        let c3 = git(&["commit-tree", &tree, "-p", &c2, "-m", "feat: branch work"]);
+        let zeros = "0000000000000000000000000000000000000000";
+        let line = format!("{zeros} {c3} refs/heads/feature");
+        let mut body = super::pkt_line(&line);
+        body.extend_from_slice(b"0000");
+        let pack = {
+            use std::io::Write as _;
+            let mut child = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo_path)
+                .args(["pack-objects", "--stdout"])
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(format!("{c3}\n").as_bytes())
+                .unwrap();
+            let out = child.wait_with_output().unwrap();
+            assert!(out.status.success(), "pack-objects failed");
+            out.stdout
+        };
+        body.extend_from_slice(&pack);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/git/{ws_slug}/{repo_name}/git-receive-pack"))
+                    .header("Authorization", format!("Bearer {jwt}"))
+                    .header("content-type", "application/x-git-receive-pack-request")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            git(&["rev-parse", "refs/heads/feature"]),
+            c3,
+            "the branch-creation push must land refs/heads/feature"
+        );
+
+        // The NEW commit is signed with the pushing agent's attribution.
+        let c3_record = state
+            .commit_signatures
+            .find("repo-1", &c3)
+            .await
+            .unwrap()
+            .unwrap_or_else(|| panic!("branch commit {c3} must carry a CommitSignature"));
+        assert_eq!(c3_record.signer_id, "agent-feature");
+        assert_eq!(c3_record.task_id, "task-feature-99");
+        assert_eq!(c3_record.spawned_by, "user-42");
+        let verification = crate::sigstore::verify_state_commit_signature(&state, "repo-1", &c3)
+            .await
+            .unwrap()
+            .expect("record must exist");
+        assert!(
+            verification.valid,
+            "branch commit signature must verify: {:?}",
+            verification.reason
+        );
+
+        // The previously-unsigned ancestor reached by the branch-creation
+        // walk (base) now carries a signature too — every commit signed.
+        assert!(
+            state
+                .commit_signatures
+                .find("repo-1", &base)
+                .await
+                .unwrap()
+                .is_some(),
+            "a commit with no persisted signature reached by the walk must get one"
+        );
+
+        // The already-signed ancestors keep their ORIGINAL records — the
+        // later pusher's attribution must not replace them.
+        for (sha, original) in [(&c1, &orig_c1), (&c2, &orig_c2)] {
+            let record = state
+                .commit_signatures
+                .find("repo-1", sha)
+                .await
+                .unwrap()
+                .unwrap_or_else(|| panic!("commit {sha} must keep its signature record"));
+            assert_eq!(
+                record.signer_id, original.signer_id,
+                "commit {sha}: original signer attribution must survive a branch push"
+            );
+            assert_eq!(
+                record.task_id, original.task_id,
+                "commit {sha}: original task attribution must survive a branch push"
+            );
+            assert_eq!(
+                record.spawned_by, original.spawned_by,
+                "commit {sha}: original spawner attribution must survive a branch push"
+            );
+            assert_eq!(
+                record.signature, original.signature,
+                "commit {sha}: the original signature bytes must not be replaced"
+            );
+            assert_eq!(
+                record.signed_at, original.signed_at,
+                "commit {sha}: the record must not be re-signed"
+            );
+            assert_eq!(record.signing_key_id, original.signing_key_id);
+            let verification =
+                crate::sigstore::verify_state_commit_signature(&state, "repo-1", sha)
+                    .await
+                    .unwrap()
+                    .expect("record must exist");
+            assert!(
+                verification.valid,
+                "the preserved original record for {sha} must still verify: {:?}",
+                verification.reason
+            );
+        }
+    }
+
+    /// Review repair regression test (task-264 F2): landed-commit
+    /// enumeration must FAIL CLOSED. A `git log` failure (here: a repo
+    /// path that does not exist) is an `Err` the receive-pack path turns
+    /// into an audited push rejection — the previous warn-and-continue
+    /// returned a partial list, the signing block skipped silently, and
+    /// the push landed unsigned commits behind a success response.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn landed_commit_enumeration_failure_is_an_error() {
+        let update = super::RefUpdate {
+            old_sha: "0000000000000000000000000000000000000000".to_string(),
+            new_sha: "0123456789abcdef0123456789abcdef01234567".to_string(),
+            refname: "refs/heads/main".to_string(),
+        };
+        let err = super::list_new_commits("/nonexistent/repo/does/not/exist", &[update])
+            .await
+            .expect_err("git log over a nonexistent repo must be an enumeration error");
+        assert!(
+            err.contains("failed to enumerate"),
+            "the error must name the enumeration failure: {err}"
+        );
+        assert!(
+            err.contains("refusing to accept unsigned commits"),
+            "the error must state the fail-closed consequence: {err}"
+        );
     }
 
     /// Review repair regression test (task-104): `git receive-pack` declines
