@@ -678,6 +678,11 @@ mod tests {
                 Request::builder()
                     .method("DELETE")
                     .uri("/api/v1/merge-queue/no-such")
+                    // task-263: cancel_entry takes an auth extractor (agent
+                    // task-scope boundary) — the not-found path is probed by
+                    // an authenticated caller; an unauthenticated request is
+                    // (correctly) rejected 401 before the entry lookup.
+                    .header("authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )

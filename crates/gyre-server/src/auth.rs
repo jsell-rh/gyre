@@ -3238,8 +3238,11 @@ mod tests {
                 "gyre",
                 Some("security"),
                 Some(2),
-                Some("ct-docker-1".to_string()),
+                // Argument order matches the mint signature:
+                // wl_hostname (remote compute-target host) then
+                // wl_compute_target (the request's compute target id).
                 Some("ssh-host-1".to_string()),
+                Some("ct-docker-1".to_string()),
                 Some("sha256:abc123def456".to_string()),
                 Some("sha256:image".to_string()),
             )

@@ -4983,6 +4983,7 @@ mod tests {
             let (code, body) = complete_agent(
                 axum::extract::State(state.clone()),
                 axum::extract::Path(agent_id.to_string()),
+                auth,
                 axum::Json(CompleteAgentRequest {
                     branch: "feat/moved".to_string(),
                     title: "D feature".to_string(),
