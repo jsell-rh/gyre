@@ -453,6 +453,13 @@ pub struct AppState {
     pub tenant_invitations: Arc<dyn gyre_ports::TenantInvitationRepository>,
     /// Workspace invitation repository (task-110, user-management.md).
     pub workspace_invitations: Arc<dyn gyre_ports::WorkspaceInvitationRepository>,
+    /// SCIM Group resources and their membership sets (task-266,
+    /// identity-security.md §SCIM Provisioning). Durable: SQLite/PG
+    /// adapters over migration 000068.
+    pub scim_groups: Arc<dyn gyre_ports::ScimGroupRepository>,
+    /// Per-workspace IdP-group → workspace-role mappings (task-266,
+    /// identity-security.md §Group-to-Workspace Mapping). Durable.
+    pub scim_mappings: Arc<dyn gyre_ports::ScimMappingRepository>,
     /// WireGuard coordination plane configuration (M26.1).
     pub wg_config: WireGuardConfig,
     /// Knowledge graph store — nodes, edges, and architectural deltas (realized-model).
@@ -2101,6 +2108,17 @@ pub fn build_state(
         workspace_invitations: store!(
             dyn gyre_ports::WorkspaceInvitationRepository,
             mem::MemWorkspaceInvitationRepository::default()
+        ),
+        // SCIM groups and group-to-workspace mappings are durable
+        // (task-266): SQLite/PostgreSQL adapters implement the ports over
+        // migration 000068; mem mode keeps the in-code store.
+        scim_groups: store!(
+            dyn gyre_ports::ScimGroupRepository,
+            mem::MemScimGroupRepository::default()
+        ),
+        scim_mappings: store!(
+            dyn gyre_ports::ScimMappingRepository,
+            mem::MemScimMappingRepository::default()
         ),
         budget_usages: store!(
             dyn BudgetUsageRepository,

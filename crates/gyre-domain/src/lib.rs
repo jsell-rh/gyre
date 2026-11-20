@@ -47,6 +47,7 @@ pub mod repo_access;
 pub mod repository;
 pub mod review;
 pub mod rust_extractor;
+pub mod scim_group;
 pub mod search_query;
 pub mod spec_approval;
 pub mod spec_assertions;
@@ -133,6 +134,7 @@ pub use repo_access::{
 pub use repository::{RepoStatus, Repository};
 pub use review::{Review, ReviewComment, ReviewDecision};
 pub use rust_extractor::RustExtractor;
+pub use scim_group::{ScimGroup, ScimGroupMember, ScimWorkspaceMapping};
 pub use spec_approval::SpecApproval;
 pub use spec_assertions::{
     evaluate_assertions, parse_assertions, AssertionResult, Comparison, ParsedAssertion, Predicate,
