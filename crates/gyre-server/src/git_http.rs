@@ -1928,6 +1928,11 @@ async fn record_pushed_commits(
     let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
     let mut total_recorded = 0usize;
 
+    // source-control.md §Agent-to-Commit Tracking: commits are attributed
+    // to the pushing agent's currently-open session (context window).
+    // No open session → NULL session_id — never a fabricated id.
+    let open_session_id = crate::agent_sessions::open_session_id(state, &Id::new(agent_id)).await;
+
     for update in updates {
         // Walk new commits: git log {old}..{new} --format="%H"
         let range = if update.old_sha.starts_with("00000000") {
@@ -1959,6 +1964,12 @@ async fn record_pushed_commits(
 
         let shas = String::from_utf8_lossy(&out.stdout);
         for sha in shas.lines().filter(|s| !s.is_empty()) {
+            // source-control.md §Agent-to-Commit Tracking: record the files
+            // each pushed commit changed, at push time, so "find all agent
+            // sessions that touched this file" is answerable from real
+            // data (git diff-tree against the real object store).
+            let files_changed =
+                crate::agent_sessions::files_changed_for_commit(repo_path, sha).await;
             let mapping = gyre_domain::AgentCommit::new(
                 Id::new(uuid::Uuid::new_v4().to_string()),
                 Id::new(agent_id),
@@ -1973,7 +1984,9 @@ async fn record_pushed_commits(
                 parent_agent_id.map(str::to_string),
                 model_context.map(str::to_string),
             )
-            .with_attestation_level(attestation_level);
+            .with_attestation_level(attestation_level)
+            .with_session_id(open_session_id.clone())
+            .with_files_changed(files_changed);
             if let Err(e) = state.agent_commits.record(&mapping).await {
                 warn!(%sha, "post-receive: failed to record commit: {e}");
             } else {

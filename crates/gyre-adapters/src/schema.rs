@@ -164,6 +164,26 @@ diesel::table! {
         parent_agent_id -> Nullable<Text>,
         model_context -> Nullable<Text>,
         attestation_level -> Nullable<Text>,
+        session_id -> Nullable<Text>,
+        files_changed -> Text,
+    }
+}
+
+diesel::table! {
+    agent_sessions (id) {
+        id -> Text,
+        agent_id -> Text,
+        repository_id -> Text,
+        started_at -> BigInt,
+        ended_at -> Nullable<BigInt>,
+        initial_branch -> Text,
+        final_branch -> Nullable<Text>,
+        dirty -> Nullable<Bool>,
+        uncommitted_paths -> Text,
+        dirty_detail -> Nullable<Text>,
+        cost -> Nullable<Double>,
+        tokens_used -> Nullable<BigInt>,
+        messages_read -> Text,
     }
 }
 
@@ -837,6 +857,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     reviews,
     merge_queue,
     agent_commits,
+    agent_sessions,
     agent_worktrees,
     users,
     user_notification_preferences,
