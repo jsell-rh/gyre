@@ -2,8 +2,8 @@
 title: "Agent JWT claims completion and hard task-scope boundary (by-effect enforcement sweep)"
 spec_ref: "Spec gap spec-31d3ae72e12e22c52442e309 / agent-jwt-claims-task-scope / b60edce5bc49"
 depends_on: [task-130]
-progress: ready-for-review
-commits: ["6a17ba07dd35e403a53aeb7f8f04ae109cd4698a", "425a7cee99d06beb68d86517128ac53c0d6c0577", "a5e2bf75878ad280286fc0974a1d4e1d8c57de55", "00f1cfcb9226f1df0f15b9fb8d64df21fa2f468a", "0ef2e11d928370edb94f553eafd823fcb540ab9a", "2dd934d6b81e50b85170574a53ca614370af3541", "356184ee46d2363835f9b71df07a2facde5cd895", "5cdce3aadee6da0de408e8e4e83b2666fdf11f12", "88f9a006a2d6983173200f08c850ece61072f49c", "585d459ed97d7d585397d3587f386221b8c96f28", "544b2755ea961f0764abb0d8c3cb9d1ea214f358", "42dad97a5b9daf8ed4204c8a272884d741bee052", "37f458b9b33f62b3a85ea82193afdead4b28e4d1", "f338cfc164c3a775de95a520e6ca09d2eec00b39"]
+progress: not-started
+commits: []
 ---
 
 ## Required behavior
@@ -93,30 +93,3 @@ Canonical spec: `specs/system/identity-security.md`. Source: `fb1424fbac55cd23cb
     ]
   }
 ]
-
-## Shipped
-
-This round (`6a17ba07`, review repair for the checkpoint-`2c190b3a` round-2 finding F2) closes the by-effect sweep miss on the token-minting surfaces, on top of the previously reviewed task-263 branch (Layer-2 claims completion, the by-effect enforcement sweep, durable jti revocation, git-http agent repo identity, SPIFFE session binding, revert/merge-queue boundary — `f338cfc1` through `425a7cee`). The branch was first merged onto the current base `b2523a47` (task-264 Sigstore layer-3) — conflicts in `docs/server-config.md` and `specs/coverage/system/identity-security.md` resolved by keeping both sides' current state (task-264's expanded `GYRE_REKOR_URL` row + this branch's SPIFFE session-segment text; this branch's row 4 / task-264's row 5).
-
-### This round: orchestrator-mint boundary (token-minting surface)
-
-- **`POST /api/v1/workspaces/:id/orchestrator/spawn`** (`spawn_workspace_orchestrator`, orchestrator.rs) previously let a valid, non-expired task-bound worker JWT mint a workspace-orchestrator JWT under default configuration: the route is registry-exempt (no middleware ABAC), tenant containment passes for the worker's own workspace, and no bootstrap flow spawns a workspace orchestrator. The minted JWT carries `orchestrator_type`, so `agent_task_claim()` is `None` for it — it crosses every claims-based agent boundary this task enforces (task mutation, agent lifecycle, spawn-onto-task, MR, git push) and holds no `repo_id` claim, so the seeded `agent-repo-scope` containment never denies it either. With two HTTP calls a task-A worker JWT could transition/update ANY task, spawn workers onto any task, and open/enqueue MRs across the workspace.
-- **`POST /api/v1/repos/:id/orchestrator/spawn`** (`spawn_repo_orchestrator`) had the same escape within the worker's own repo: `agent-repo-scope` does not fire when the target is the worker's scoped repo, so the `agent-scoped-access` role Allow (priority 700) passes the worker through `check_repo_abac` under default configuration. The MCP twin (`gyre_spawn_repo_orchestrator`) already requires workspace-orchestrator tool scope — this closes the REST/MCP asymmetry.
-- Both handlers now deny task-bound agent principals outright via a shared `deny_task_bound_agent` helper (mirroring `archive_repo`/`compose apply`): no task claim can authorize minting a broader-scoped principal. Non-agent principals (users, orchestrators, system, gate, API keys) keep their rights — `agent_task_claim()` is `None` for them.
-
-### Test evidence
-
-New boundary test `orchestrator_spawn_denied_for_task_bound_agent_jwt` (tests/api_integration.rs, HTTP-level against a real server): a worker JWT minted for task A scoped to its OWN workspace and OWN repo — so tenant containment, repo scope, and (on the workspace route) the registry exemption all pass for it, proving the 403 comes from the handler gate — is denied 403 on both orchestrator-spawn routes with no agent created in the workspace; the operator positive control on the same fixture spawns both the workspace and the repo orchestrator (201).
-
-Local probes at head `6a17ba07`: `cargo check -p gyre-server --all-targets` exit 0 (all test targets type-check, including the new test), `rustfmt --edition 2021 --check` clean on the changed files, `scripts/check-arch.sh`, `check-abac-route-registry.sh`, `check-abac-exempt-handlers.sh`, `check-mcp-write-tools.sh`, and `check-api-auth.sh` all pass. Probe log: `/tmp/stage/review-evidence/round-6a17ba07-probes.log`. gyre-server test execution is deferred to the independent verifier per the 4 GiB budget rule; the verifier must run at head `6a17ba07`: `cargo test -p gyre-server --test api_integration orchestrator_spawn` (covers the new test plus the tenant-containment regression), plus the boundary suites deferred from prior rounds (`agent_jwt_task_scope_boundary_on_lifecycle_endpoints`, `agent_jwt_cannot_spawn_onto_foreign_task`, `agent_jwt_cannot_revert_merged_mr`, `agent_jwt_task_scope_boundary_on_merge_queue_surfaces`, `agent_jwt_cannot_transition_mr_outside_task_scope`, `spawn_minted_jwt_carries_task_scoped_claims`, `agent_push_cross_workspace_same_name_repo_rejected`, `agent_only_requires_exact_stack_hash_match_e2e`, `session_svid_session_segment_equals_jwt_sub`, `federated_agent_two_configuration_probe`, the MCP task-scope and MR task-scope tests, `cargo test -p gyre-server --lib api::orchestrator`, `--lib api::recovery`, `--lib api::merge_queue`, `--lib api::merge_requests`, `--lib rbac`, `--test spec_enforcement`, `--test git_integration`, `--test e2e_ralph_loop`, `--test m18_oidc_integration`, `--test task134_review_probe`) and the full `cargo test --all`.
-
-### Out-of-scope statements (justified)
-
-- **`wl_pid`/`wl_container_id` at mint time**: these facts do not exist until launch completes; minting them would fabricate them. They are recorded in the fresh workload-attestation record immediately post-launch.
-- **MCP `gyre_agent_complete`**: already enforced self-only for agent JWTs pre-task — unchanged.
-- **MCP `gyre_spawn_repo_orchestrator`**: already requires workspace-orchestrator tool scope (`validate_tool_scope`) — unreachable for worker JWTs; the REST denial mirrors it.
-- **Admin snapshot create/delete and BCP drill**: read-only capture of task state (or deletion of a backup file) — no task row, task-scoped secret, or MR is mutated; the state-replacing effect is `admin_restore_snapshot`, which is gated.
-- **`PUT /api/v1/admin/retention`**: mutates retention configuration only; the purge effect runs through the job registry, whose manual trigger is gated and whose scheduled runs are system-initiated, not agent-callable.
-- **`PUT /api/v1/repos/:id/queue/pause` / `queue/resume`** (recovery.rs): mutate merge-queue pause KV state only — no task row, task-scoped secret, or MR is mutated; the recovery protocol they arm is executed by the system merge processor, not the caller.
-- **`PUT /api/v1/repos/:id/post-merge-gates`** (recovery.rs): replaces post-merge gate configuration rows only — no task-owned state is mutated.
-- **MR dependency surfaces** (`PUT/GET/DELETE /api/v1/merge-requests/:id/dependencies`, `PUT .../atomic-group`): mutate MR-dependency/group rows, not task rows, task-scoped secrets, or MRs.
