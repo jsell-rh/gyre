@@ -782,6 +782,88 @@ describe('TenantSettings', () => {
     }, { timeout: 3000 });
   });
 
+  // TASK-273 (review): the Audit tab renders the SAME filter set
+  // /audit/events supports — outcome and since/until bound the durable
+  // query, agent/workspace/user/repo/resource scope it.
+  it('Audit tab outcome and since/until filters reach the admin audit endpoint', async () => {
+    api.adminAudit.mockResolvedValue({ events: [], count: 0 });
+    const { container } = render(TenantSettings);
+    container.querySelector('[data-testid="tenant-settings-tab-audit"]')?.click();
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="audit-filter-outcome"]')).toBeTruthy();
+    }, { timeout: 3000 });
+
+    const outcome = container.querySelector('[data-testid="audit-filter-outcome"]');
+    outcome.value = 'blocked';
+    await fireEvent.change(outcome);
+    await waitFor(() => {
+      expect(api.adminAudit).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'blocked' }));
+    }, { timeout: 3000 });
+
+    const since = container.querySelector('[data-testid="audit-filter-since"]');
+    // datetime-local in local time so the expected epoch is stable. Svelte
+    // binds value on the `input` event; the refresh handler rides
+    // `change` — fire both.
+    since.value = '2026-01-01T00:00';
+    await fireEvent.input(since);
+    await fireEvent.change(since);
+    await waitFor(() => {
+      const calls = api.adminAudit.mock.calls;
+      const last = calls[calls.length - 1][0];
+      expect(last.since).toBeGreaterThan(0);
+      // The local-time interpretation of the picked datetime, in seconds.
+      expect(last.since).toBe(Math.floor(new Date('2026-01-01T00:00').getTime() / 1000));
+    }, { timeout: 3000 });
+
+    const until = container.querySelector('[data-testid="audit-filter-until"]');
+    until.value = '2026-01-02T00:00';
+    await fireEvent.input(until);
+    await fireEvent.change(until);
+    await waitFor(() => {
+      const calls = api.adminAudit.mock.calls;
+      const last = calls[calls.length - 1][0];
+      expect(last.until).toBe(Math.floor(new Date('2026-01-02T00:00').getTime() / 1000));
+    }, { timeout: 3000 });
+  });
+
+  it('Audit tab scope filters reach the admin audit endpoint', async () => {
+    api.adminAudit.mockResolvedValue({ events: [], count: 0 });
+    const { container } = render(TenantSettings);
+    container.querySelector('[data-testid="tenant-settings-tab-audit"]')?.click();
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="audit-filter-agent"]')).toBeTruthy();
+    }, { timeout: 3000 });
+    const input = container.querySelector('[data-testid="audit-filter-agent"]');
+    input.value = 'agent-42';
+    await fireEvent.input(input);
+    await fireEvent.keyDown(input, { key: 'Enter' });
+    await waitFor(() => {
+      expect(api.adminAudit).toHaveBeenCalledWith(expect.objectContaining({ agent_id: 'agent-42' }));
+    }, { timeout: 3000 });
+  });
+
+  // TASK-273 (review): the Server Logs tab exposes the `since` filter its
+  // subtitle advertises (level, since, limit) — a relative window
+  // converted to the endpoint's epoch-millisecond `since`.
+  it('Server Logs tab since window passes epoch-ms since to the endpoint', async () => {
+    api.adminServerLogs.mockResolvedValue({ entries: [], count: 0 });
+    const { container } = render(TenantSettings);
+    container.querySelector('[data-testid="tenant-settings-tab-logs"]')?.click();
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="server-logs-since"]')).toBeTruthy();
+    }, { timeout: 3000 });
+    const before = Date.now();
+    const select = container.querySelector('[data-testid="server-logs-since"]');
+    select.value = '3600000';
+    await fireEvent.change(select);
+    await waitFor(() => {
+      const calls = api.adminServerLogs.mock.calls;
+      const last = calls[calls.length - 1][0];
+      expect(last.since).toBeGreaterThan(before - 3600000 - 5000);
+      expect(last.since).toBeLessThanOrEqual(Date.now() - 3600000 + 5000);
+    }, { timeout: 3000 });
+  });
+
   // ── Tab switching ──────────────────────────────────────────────────────────
   it('clicking a tab shows its panel', async () => {
     const { container } = render(TenantSettings);

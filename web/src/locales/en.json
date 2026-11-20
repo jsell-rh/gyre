@@ -2084,7 +2084,19 @@
       "loading": "Loading audit log…",
       "event_type": "Event type",
       "all_events": "All events",
-      "col_action": "Action"
+      "col_action": "Action",
+      "filter_agent": "Agent",
+      "filter_workspace": "Workspace",
+      "filter_user": "User",
+      "filter_repo": "Repo",
+      "filter_resource": "Resource",
+      "filter_outcome": "Outcome",
+      "filter_outcome_all": "All outcomes",
+      "filter_outcome_success": "Success",
+      "filter_outcome_failure": "Failure",
+      "filter_outcome_blocked": "Blocked",
+      "filter_since": "From",
+      "filter_until": "To"
     },
     "health": {
       "title": "Health",
@@ -2126,6 +2138,11 @@
       "col_message": "Message",
       "level": "Level",
       "all_levels": "All levels",
+      "since": "Since",
+      "since_all": "All time",
+      "since_5m": "Last 5 minutes",
+      "since_1h": "Last hour",
+      "since_24h": "Last 24 hours",
       "limit": "Limit",
       "refresh": "Refresh"
     },
