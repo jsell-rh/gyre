@@ -373,7 +373,11 @@ async fn find_rebase_target(
 
 /// True while the shared rebase backoff window is active for the agent.
 async fn in_rebase_backoff(state: &Arc<AppState>, agent_id: &Id) -> bool {
-    match state.kv_store.kv_get(JJ_REBASE_BACKOFF_NS, agent_id.as_str()).await {
+    match state
+        .kv_store
+        .kv_get(JJ_REBASE_BACKOFF_NS, agent_id.as_str())
+        .await
+    {
         Ok(Some(v)) => match v.parse::<u64>() {
             Ok(last) => crate::jobs::now_secs().saturating_sub(last) < JJ_REBASE_WINDOW_SECS,
             Err(_) => false,
@@ -419,16 +423,8 @@ async fn act_on_conflict(
             {
                 Ok(gyre_ports::JjRebaseOutcome::Success { rebased_count }) => {
                     persist_rebase_backoff(state, &target.agent_id).await;
-                    record_rebase_audit(
-                        state,
-                        ws,
-                        mr,
-                        &target,
-                        "success",
-                        rebased_count,
-                        &[],
-                    )
-                    .await;
+                    record_rebase_audit(state, ws, mr, &target, "success", rebased_count, &[])
+                        .await;
                     // A clean rebase clears the persisted conflict flag
                     // (same state repair as the merge processor).
                     if mr.has_conflicts == Some(true) {
@@ -471,8 +467,7 @@ async fn act_on_conflict(
                 }
                 Err(e) => {
                     warn!(mr_id = %mr.id, error = %e, "pr_hygiene_check: rebase attempt failed");
-                    record_rebase_audit(state, ws, mr, &target, "error", 0, &[])
-                        .await;
+                    record_rebase_audit(state, ws, mr, &target, "error", 0, &[]).await;
                 }
             }
         } else {
@@ -656,7 +651,14 @@ async fn nudge_unreviewed(
             {
                 nudged += 1;
             }
-        } else if state.agents.find_by_id(reviewer).await.ok().flatten().is_some() {
+        } else if state
+            .agents
+            .find_by_id(reviewer)
+            .await
+            .ok()
+            .flatten()
+            .is_some()
+        {
             state
                 .emit_event(
                     ws.id.clone(),
@@ -787,7 +789,14 @@ async fn deliver_author_message_or_notification(
     let Some(author_id) = mr.author_agent_id.clone() else {
         return;
     };
-    if state.agents.find_by_id(&author_id).await.ok().flatten().is_some() {
+    if state
+        .agents
+        .find_by_id(&author_id)
+        .await
+        .ok()
+        .flatten()
+        .is_some()
+    {
         state
             .emit_event(
                 ws.id.clone(),
@@ -801,7 +810,14 @@ async fn deliver_author_message_or_notification(
                 })),
             )
             .await;
-    } else if state.users.find_by_id(&author_id).await.ok().flatten().is_some() {
+    } else if state
+        .users
+        .find_by_id(&author_id)
+        .await
+        .ok()
+        .flatten()
+        .is_some()
+    {
         create_notification(
             state,
             ws,
@@ -858,8 +874,8 @@ mod tests {
     use super::*;
     use crate::mem::{test_state, test_state_with_git_ops, ConfigurableGitOps, ConfigurableJjOps};
     use gyre_domain::{
-        Agent, AgentWorktree, MergeRequest, MrStatus, ReviewDecision, Review, User,
-        Workspace, WorkspaceMembership, WorkspaceRole,
+        Agent, AgentWorktree, MergeRequest, MrStatus, Review, ReviewDecision, User, Workspace,
+        WorkspaceMembership, WorkspaceRole,
     };
 
     fn now_secs() -> u64 {
@@ -940,10 +956,7 @@ mod tests {
     /// Build a state with configurable git AND jj doubles: the git double
     /// decides `can_merge` (merge-base conflicts), the jj double records
     /// rebase calls and replays a programmed outcome.
-    fn state_with_doubles(
-        git: ConfigurableGitOps,
-        jj: Arc<ConfigurableJjOps>,
-    ) -> Arc<AppState> {
+    fn state_with_doubles(git: ConfigurableGitOps, jj: Arc<ConfigurableJjOps>) -> Arc<AppState> {
         let mut state = test_state_with_git_ops(Arc::new(git));
         let s = Arc::get_mut(&mut state).expect("test state is uniquely owned");
         s.jj_ops = jj;
@@ -999,7 +1012,11 @@ mod tests {
         state.agents.create(&author).await.unwrap();
         state
             .workspace_memberships
-            .create(&make_membership("user-admin", "ws-close", WorkspaceRole::Admin))
+            .create(&make_membership(
+                "user-admin",
+                "ws-close",
+                WorkspaceRole::Admin,
+            ))
             .await
             .unwrap();
 
@@ -1017,7 +1034,11 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(closed.status, MrStatus::Closed, "abandoned MR must be closed");
+        assert_eq!(
+            closed.status,
+            MrStatus::Closed,
+            "abandoned MR must be closed"
+        );
 
         // Explanatory comment on the MR (never a silent close).
         let comments = state
@@ -1025,7 +1046,11 @@ mod tests {
             .list_comments(&Id::new("mr-close"))
             .await
             .unwrap();
-        assert_eq!(comments.len(), 1, "one explanation comment, got {comments:?}");
+        assert_eq!(
+            comments.len(),
+            1,
+            "one explanation comment, got {comments:?}"
+        );
         assert!(comments[0].body.contains("closed automatically"));
         assert_eq!(comments[0].author_agent_id, "system");
 
@@ -1046,7 +1071,10 @@ mod tests {
                 }
             }
         }
-        assert!(saw_author_message, "author must receive the close explanation");
+        assert!(
+            saw_author_message,
+            "author must receive the close explanation"
+        );
 
         // Workspace Admins observe the auto-close.
         let admin_notifs =
@@ -1097,8 +1125,7 @@ mod tests {
 
         run_with(&state, &thresholds()).await.unwrap();
 
-        let notifs =
-            notifications_for(&state, "user-reviewer", "ws-nudge", "ReviewerNudge").await;
+        let notifs = notifications_for(&state, "user-reviewer", "ws-nudge", "ReviewerNudge").await;
         assert_eq!(
             notifs.len(),
             1,
@@ -1124,17 +1151,29 @@ mod tests {
 
         state
             .workspace_memberships
-            .create(&make_membership("user-dev", "ws-norev", WorkspaceRole::Developer))
+            .create(&make_membership(
+                "user-dev",
+                "ws-norev",
+                WorkspaceRole::Developer,
+            ))
             .await
             .unwrap();
         state
             .workspace_memberships
-            .create(&make_membership("user-admin", "ws-norev", WorkspaceRole::Admin))
+            .create(&make_membership(
+                "user-admin",
+                "ws-norev",
+                WorkspaceRole::Admin,
+            ))
             .await
             .unwrap();
         state
             .workspace_memberships
-            .create(&make_membership("user-viewer", "ws-norev", WorkspaceRole::Viewer))
+            .create(&make_membership(
+                "user-viewer",
+                "ws-norev",
+                WorkspaceRole::Viewer,
+            ))
             .await
             .unwrap();
 
@@ -1144,15 +1183,21 @@ mod tests {
         run_with(&state, &thresholds()).await.unwrap();
 
         assert_eq!(
-            notifications_for(&state, "user-dev", "ws-norev", "MrUnreviewed").await.len(),
+            notifications_for(&state, "user-dev", "ws-norev", "MrUnreviewed")
+                .await
+                .len(),
             1
         );
         assert_eq!(
-            notifications_for(&state, "user-admin", "ws-norev", "MrUnreviewed").await.len(),
+            notifications_for(&state, "user-admin", "ws-norev", "MrUnreviewed")
+                .await
+                .len(),
             1
         );
         assert_eq!(
-            notifications_for(&state, "user-viewer", "ws-norev", "MrUnreviewed").await.len(),
+            notifications_for(&state, "user-viewer", "ws-norev", "MrUnreviewed")
+                .await
+                .len(),
             0,
             "Viewers are not escalation targets"
         );
@@ -1176,7 +1221,11 @@ mod tests {
         make_user(&state, "user-reviewer").await;
         state
             .workspace_memberships
-            .create(&make_membership("user-admin", "ws-fresh", WorkspaceRole::Admin))
+            .create(&make_membership(
+                "user-admin",
+                "ws-fresh",
+                WorkspaceRole::Admin,
+            ))
             .await
             .unwrap();
 
@@ -1187,12 +1236,16 @@ mod tests {
         run_with(&state, &thresholds()).await.unwrap();
 
         assert_eq!(
-            notifications_for(&state, "user-reviewer", "ws-fresh", "ReviewerNudge").await.len(),
+            notifications_for(&state, "user-reviewer", "ws-fresh", "ReviewerNudge")
+                .await
+                .len(),
             0,
             "fresh MR must not be nudged"
         );
         assert_eq!(
-            notifications_for(&state, "user-admin", "ws-fresh", "MrUnreviewed").await.len(),
+            notifications_for(&state, "user-admin", "ws-fresh", "MrUnreviewed")
+                .await
+                .len(),
             0
         );
         let mr = state
@@ -1240,7 +1293,9 @@ mod tests {
         run_with(&state, &thresholds()).await.unwrap();
 
         assert_eq!(
-            notifications_for(&state, "user-reviewer", "ws-reviewed", "ReviewerNudge").await.len(),
+            notifications_for(&state, "user-reviewer", "ws-reviewed", "ReviewerNudge")
+                .await
+                .len(),
             0,
             "a reviewed MR must not be nudged as unreviewed"
         );
@@ -1322,11 +1377,17 @@ mod tests {
         // No rebase-required escalation: the rebase resolved it.
         state
             .workspace_memberships
-            .create(&make_membership("user-admin", "ws-conflict", WorkspaceRole::Admin))
+            .create(&make_membership(
+                "user-admin",
+                "ws-conflict",
+                WorkspaceRole::Admin,
+            ))
             .await
             .unwrap();
         assert_eq!(
-            notifications_for(&state, "user-admin", "ws-conflict", "MrNeedsRebase").await.len(),
+            notifications_for(&state, "user-admin", "ws-conflict", "MrNeedsRebase")
+                .await
+                .len(),
             0,
             "a successful rebase must not raise a rebase-required escalation"
         );
@@ -1349,7 +1410,11 @@ mod tests {
 
         state
             .workspace_memberships
-            .create(&make_membership("user-dev", "ws-rebareq", WorkspaceRole::Developer))
+            .create(&make_membership(
+                "user-dev",
+                "ws-rebareq",
+                WorkspaceRole::Developer,
+            ))
             .await
             .unwrap();
 
@@ -1361,8 +1426,7 @@ mod tests {
 
         run_with(&state, &thresholds()).await.unwrap();
 
-        let notifs =
-            notifications_for(&state, "user-dev", "ws-rebareq", "MrNeedsRebase").await;
+        let notifs = notifications_for(&state, "user-dev", "ws-rebareq", "MrNeedsRebase").await;
         assert_eq!(
             notifs.len(),
             1,
@@ -1381,7 +1445,9 @@ mod tests {
         .await
         .unwrap();
         assert!(
-            events.iter().any(|e| e.detail["action"] == "rebase_required"),
+            events
+                .iter()
+                .any(|e| e.detail["action"] == "rebase_required"),
             "rebase_required action must be audited"
         );
     }
@@ -1405,7 +1471,11 @@ mod tests {
 
         state
             .workspace_memberships
-            .create(&make_membership("user-admin", "ws-stale", WorkspaceRole::Admin))
+            .create(&make_membership(
+                "user-admin",
+                "ws-stale",
+                WorkspaceRole::Admin,
+            ))
             .await
             .unwrap();
 
@@ -1415,8 +1485,7 @@ mod tests {
 
         run_with(&state, &thresholds()).await.unwrap();
 
-        let notifs =
-            notifications_for(&state, "user-admin", "ws-stale", "MrStaleEscalation").await;
+        let notifs = notifications_for(&state, "user-admin", "ws-stale", "MrStaleEscalation").await;
         assert_eq!(notifs.len(), 1, "long-open MR must escalate to Admins");
         // Higher priority than a nudge (rank 3 vs 7).
         assert_eq!(notifs[0].priority_rank, 3);
@@ -1450,7 +1519,11 @@ mod tests {
         make_user(&state, "user-reviewer").await;
         state
             .workspace_memberships
-            .create(&make_membership("user-admin", "ws-idem", WorkspaceRole::Admin))
+            .create(&make_membership(
+                "user-admin",
+                "ws-idem",
+                WorkspaceRole::Admin,
+            ))
             .await
             .unwrap();
 
@@ -1463,7 +1536,9 @@ mod tests {
         run_with(&state, &thresholds()).await.unwrap();
 
         assert_eq!(
-            notifications_for(&state, "user-reviewer", "ws-idem", "ReviewerNudge").await.len(),
+            notifications_for(&state, "user-reviewer", "ws-idem", "ReviewerNudge")
+                .await
+                .len(),
             1,
             "second evaluation must not duplicate the nudge"
         );
@@ -1475,7 +1550,9 @@ mod tests {
         run_with(&state, &thresholds()).await.unwrap();
         run_with(&state, &thresholds()).await.unwrap();
         assert_eq!(
-            notifications_for(&state, "user-admin", "ws-idem", "MrStaleEscalation").await.len(),
+            notifications_for(&state, "user-admin", "ws-idem", "MrStaleEscalation")
+                .await
+                .len(),
             1,
             "second evaluation must not duplicate the escalation"
         );

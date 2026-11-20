@@ -8313,8 +8313,7 @@ specs:
         // Human principal: API key + Developer workspace membership (Write
         // repo permission).
         let user_id = Id::new("user-human-push");
-        let mut user =
-            gyre_domain::User::new(user_id.clone(), "ext-human-push", "human-push", 0);
+        let mut user = gyre_domain::User::new(user_id.clone(), "ext-human-push", "human-push", 0);
         user.tenant_id = Some(Id::new("default"));
         user.global_role = gyre_domain::GlobalRole::Member;
         user.roles = vec![gyre_domain::UserRole::Developer];
@@ -8331,7 +8330,11 @@ specs:
         state.workspace_memberships.create(&m).await.unwrap();
         state
             .api_keys
-            .create(&crate::auth::hash_api_key("gyre-test-human-push-key"), &user_id, "test")
+            .create(
+                &crate::auth::hash_api_key("gyre-test-human-push-key"),
+                &user_id,
+                "test",
+            )
             .await
             .unwrap();
 

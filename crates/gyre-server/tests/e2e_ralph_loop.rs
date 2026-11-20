@@ -205,7 +205,8 @@ async fn full_ralph_loop_via_gyre() {
         // Push HEAD to establish the base branch as `main` on the remote —
         // with the system token (the default branch is protected from
         // agent-principal pushes, task-270).
-        let push_main = git_with_token(&["push", "origin", "HEAD:main"], &work_dir, &system_token_c);
+        let push_main =
+            git_with_token(&["push", "origin", "HEAD:main"], &work_dir, &system_token_c);
         assert!(
             push_main.status.success(),
             "git push main failed: {}",
