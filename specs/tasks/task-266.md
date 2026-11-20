@@ -2,8 +2,8 @@
 title: "SCIM groups and group-to-workspace role mapping"
 spec_ref: "Spec gap spec-31d3ae72e12e22c52442e309 / scim-groups-workspace-mapping / b60edce5bc49"
 depends_on: [task-265]
-progress: ready-for-review
-commits: ["ae8acdb90c6ecf76820ea63df3c7752297e3485d", "70e1fa7b3b05b3f11546942a694f1e2226d9e968", "eee34c67807e51536f21fd3bc3b8ec91604bf9a9"]
+progress: not-started
+commits: []
 ---
 
 ## Required behavior
@@ -43,20 +43,3 @@ Canonical spec: `specs/system/identity-security.md`. Source: `fb1424fbac55cd23cb
     ]
   }
 ]
-
-## Shipped
-
-Both halves of the gap are implemented in production code on this branch: checkpoint commit `eee34c67` (all six Groups endpoints, gyre-ports `ScimGroupRepository`/`ScimMappingRepository` + SQLite/PostgreSQL adapters, migration `2026-11-14-000068_scim_groups_and_mappings`, mapping surface, effect logic, `tests/scim_groups.rs` integration suite), completed by `70e1fa7b` (formatting, SQLite contract-test defect fix, adapter contract tests, coverage row 10, api-reference docs). The branch then rebased onto the task-263 base (`d007a8af`) and merged main's task-269 completion (`2e077391`); verification of that head failed only on `clippy::unnecessary_sort_by` at `mem.rs:3280`, repaired by `ae8acdb9` (cmp-closure sort → `sort_by_key` on the same key; identical ordering, no behavior change). Everything else in `checks.sh` passed at that head: rustfmt changed-lines, architecture/hierarchy lints, all standing-invariant scripts, the web build (see /tmp/stage/findings.log and /tmp/stage/review-evidence/task-266-repair-evidence.md).
-
-### Behavior
-
-- **SCIM Groups surface:** all six `/scim/v2/Groups` endpoints registered in the production router and implemented in `api/scim.rs` per RFC 7643 §4.2 / RFC 7644: list with `startIndex`/`count` pagination plus `displayName`/`externalId` eq filters; GET `{id}` with 404 on unknown id; POST create (idempotent on `externalId`); PUT replace-membership; PATCH add/remove/replace members including the `members[value eq "x"]` path-filter and bare-body forms; DELETE (runs the mapping-revocation effect per member, then removes group + membership rows). Every endpoint enforces the dedicated `GYRE_SCIM_TOKEN` bearer via fail-closed `check_scim_auth` (403 on unset token, missing header, wrong bearer). Member `value` resolves to a Gyre user by user id → externalId → username; unresolvable members are skipped, never fabricated.
-- **Durable storage:** group state behind `gyre-ports` traits with BOTH SQLite and PostgreSQL adapters over migration `000068` (partial unique index on `scim_groups.external_id`; `(group_id, user_id)` and `(workspace_id, idp_group)` composite keys); wired through `build_state`'s `store!` pattern — no in-memory AppState store; the mem adapter guards the duplicate-external_id port contract in code.
-- **Mapping surface:** `PUT/GET /api/v1/workspaces/{id}/scim-mappings` (`api/scim_mappings.rs`) — whole-set PUT validated before persist (unknown role / empty / duplicate `idp_group` → 400, never partially applied), durable in `scim_workspace_mappings`. Authorized via the ABAC `RouteResourceMapping` entry (resource `scim_mapping`, `builtin:scim-mapping-management`, workspace Owner/Admin) plus a per-handler `can_manage` guard — a plain Developer member gets 403.
-- **Mapping effects:** `apply_member_added` / `apply_member_removed` run from every membership-changing push (create with members, PUT, PATCH, DELETE). Adding user U to a group whose externalId (else displayName) matches a workspace's mapping creates U's `WorkspaceMembership` with the mapped role — tenant-contained, idempotent (re-push never duplicates). Removing U revokes the mapped membership (a different-role grant is left intact). Unmapped groups create no membership anywhere. Each effect emits an audit event (`workspace_membership_created`/`workspace_membership_revoked`, `source: "scim"`).
-
-### Test evidence
-
-This sandbox has no network egress and no cargo build cache — every build is a cold fetch, so all compile/test gates are deferred to the independent verifier (an infrastructure restriction of this sandbox, not a code defect). Prior sandbox evidence for the same source (post-rebase, pre-merge): `cargo check -p gyre-server --tests` clean; `cargo test -p gyre-adapters sqlite::scim_group` — 5 passed; `cargo test -p gyre-domain --lib scim_group` — 1 passed; the verifier's own checks.sh at head `2e077391` type-checked the whole workspace (clippy surfaced only the `mem.rs:3280` lint repaired by `ae8acdb9`) and passed every standing-invariant script. The verifier must execute: `cargo test -p gyre-server --test scim_groups`, `cargo test -p gyre-server --test scim_lifecycle`, `cargo test -p gyre-adapters` (scim_group contract tests), `cargo test -p gyre-domain --lib scim_group`, full `cargo test --all`, and clippy/rustfmt.
-
-`tests/scim_groups.rs` (6 tests) drives every request through the full production `build_router()` stack over a real SQLite temp-file database: RFC 7644 CRUD + pagination + filters + 404s; SCIM-token enforcement on every endpoint; the verification-intent scenario (map G→Developer in W, push U into G — membership created and U's authenticated workspace access succeeds; remove U — the same access is denied); the unmapped control case (no WorkspaceMembership row anywhere); restart survival over the same db file; displayName-keyed mapping and cross-tenant containment.
