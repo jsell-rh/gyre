@@ -2,10 +2,10 @@
 title: "Implement meta-spec preview mode: real agent preview runs with branches, diffs, and cleanup"
 spec_ref: "meta-spec-reconciliation.md §5 Preview Mode: The Fast Iteration Loop"
 depends_on: []
-progress: ready-for-review
+progress: not-started
 coverage_sections:
   - "meta-spec-reconciliation.md §5 Preview Mode: The Fast Iteration Loop"
-commits: ["6fc510f87859731f9d0a19039cfde70b1854162f", "4c85e4d7227b423d384da579b18375de088496c4", "c8fe6fa5e7b2162d21c5ba8f770e69dd23c8eb06", "32104d17d4de32f1c9d40ede7d2ed8b735802efd", "4d521cbb32842fe94f66d154d0d824f4fe173b6c", "e2cf5b16ece23598afc776aab988e38346595566", "ff9d4e63798aae257708614ad5ed94216ce30ad6", "4a4d9b136cbefd84194424c8c2bb6ff211df8c7c", "c57f9a7714088e5b48e873ff1a7d6e66fcd446d6", "5a5477757c5d32f09a050d3a8613936a35797efb", "bb18260d29dafbc6a6389d7cb57009422f1e4eca", "f0e87a7d93b99d359c5a609f5777fa3f0a3ec696", "d603b9f0337d784cd313afc2ac34315957815d52", "6f55459cd8681c009117305386410a225fb126e5", "0513d409453bd1a863640aeb8cd6f7c21e989aa1", "c1a709ba62490cf3661b06b6ea6b72308488ebf4", "a4d8bd712ed166b78311ce648a70c58791082ea1", "2f10e8d134c1911f52b07400d7becabb910dbe21", "7cad12616cd28f691664cac1922337c9f5d72bef", "683da5a1afe0bb249a8fa0aa3e84e65006d9cde2", "f4ee98ba5521f5b8e973ae3172481dec4f2d34de", "8212fa5d945070afac1e859a96e1caae27af950c", "05c06fde1c501cd1f9f5ab5b729c1ec2a1ba2860", "cc3080ff119b5084d507330e038aafb30ee5a0d5", "69488298e887e8c4c76ea5a48f3ce01c10d175c6", "c33a86e2ce9c93de50a97ff3e7644a861cef17d6", "1622b73cdf7e36d32299a4010462b9b1c046eab9", "c8f9fed9abef048df4abf83d4a86e1407a17b9db", "001ec52dd65e890637751d40ecb1a64743a4934d", "a31a731a262c62f7c85202cbca727fe9d9633646", "2c1ddfe60be7f19c843d833e7eead308c3585c8f"]
+commits: []
 ---
 
 ## Spec Excerpt
@@ -124,22 +124,3 @@ These are workspace-scoped; the spec specifies the global routes `POST /api/v1/m
 - Read `crates/gyre-server/src/api/mr.rs` (or wherever the MR diff endpoint lives) for the git diff plumbing to reuse for preview diffs.
 - Read `docs/server-config.md` for config-knob conventions before adding the preview budget and GC TTL settings.
 - Follow conventional commits; run `cargo test -p gyre-server` and `bash scripts/check-arch.sh` before completing.
-
-## Shipped
-
-Meta-spec preview mode (meta-spec-reconciliation.md §5) is a real agent run path, implemented in the commits recorded in `commits:` above and independently review-approved in prior rounds. `POST /api/v1/meta-specs/preview` (Admin/Developer, global route per spec) spawns one real `Active` agent per target on `preview/{preview_id}/{slug}` branches with real worktrees and short-lived JWTs, returning the 202 spec shape exactly. The draft reaches the agent process env (`GYRE_META_SPEC_DRAFT_KIND`/`GYRE_META_SPEC_DRAFT_CONTENT`, `GYRE_SPEC_PATH`) and `docker/gyre-agent/agent-runner.mjs` builds the prompt with the draft as governing "how to build" context. Skip-ceremony is enforced (no task assignment, gates, MR, merge queue, provenance, refs writes; REST/MCP escape routes refuse preview-agent callers); completion tears down the worktree and token leaving the branch for `GET` status + merge-base diff; `DELETE` and the `meta_spec_preview_gc` job (TTL `GYRE_META_SPEC_PREVIEW_TTL_HOURS`, default 24 h) clean up everything. Budget defaults to the workspace budget with a separate configurable cap (`GYRE_PREVIEW_BUDGET_MAX_CONCURRENT`). The hollow structural-impact preview implementation is fully removed; the workspace-scoped preview paths remain registered as resolver-enforced, contained endpoints backed by the same §5 machinery (required by the frozen base exemption data).
-
-### This round: repair the 2026-11-20 verification failures (3 tests)
-
-Root causes and fixes (evidence: `/tmp/stage/review-evidence/task-206-repair-round.md`):
-
-- `registry_endpoints_reject_non_admin` / `registry_mutations_require_admin` (404 vs 403): a recovered-checkpoint addition of a leading `require_meta_spec_access` call in `delete_meta_spec_registry` leaked its raw NotFound for a missing row before the handler's documented 403-precedes-404 ordering. The leading call is removed — existing-row containment already lives in `authorize_meta_spec_delete`, and the missing-row ordering (non-Admin 403, Admin truthful 404) matches base 0a70b31e. All other registry DELETE tests use existing rows or Admin tokens and keep their outcomes.
-- `preview_launch_on_ssh_docker_target_is_not_failed`: the test shadowed PATH with a script named `fake-ssh`, which `Command::new("ssh")` can never resolve, so the dispatch invoked the real `ssh` (installed here) and the launch to `ci@fake-remote` failed. Added an `ssh_path` compute-target config knob mirroring `kubectl_path` (task-117 precedent): `SshTarget::with_ssh_path` drives every ssh client invocation (tunnels, bare spawn/kill/liveness, docker-over-SSH), parsed by `ssh_docker_target_from_config` and honored at the spawn/orchestrator/compute construction sites. The test now wires the fake via `ssh_path` (the passing kubernetes sibling's pattern, no PATH shadowing) and the `with_path_prepend` helper is removed. Unset `ssh_path` keeps `ssh` from PATH — no behavior change.
-
-### Verification evidence (this sandbox)
-
-`cargo check -p gyre-adapters -p gyre-server` and `cargo check -p gyre-server --tests` exit 0; `cargo test -p gyre-adapters compute::ssh` 19 passed / 0 failed (includes the two new `ssh_path` tests: stub-ssh records the remote `docker run`; unset knob defaults to PATH `ssh`); `rustfmt --check` clean on all changed files; `cargo clippy -p gyre-adapters --all-targets` shows no warnings in `compute/ssh.rs`; `bash scripts/check-arch.sh` and the relative-path/byte-slice/scope-literal checks pass. gyre-server test execution is reserved for the independent verifier (4 GiB build budget).
-
-### Required verifier tests
-
-`cargo test --all --quiet` (the finding's exact command), plus focused: the three repaired tests (`registry_endpoints_reject_non_admin`, `registry_mutations_require_admin`, `preview_launch_on_ssh_docker_target_is_not_failed`), `cargo test -p gyre-adapters compute::ssh`, `cargo test -p gyre-server --lib preview_`, `cargo test -p gyre-server --lib registry_tests`, `cargo test -p gyre-server --lib required_gate_rejects_non_admin`, `cargo test -p gyre-server --lib delete_meta_spec`, `cargo test -p gyre-server --lib orchestrator`, `cd docker/gyre-agent && node --test agent-runner.test.mjs`, `cd web && npm ci && npm test`, `cargo clippy --all-targets`, and GitHub CI at the PR head.
