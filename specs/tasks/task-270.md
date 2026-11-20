@@ -3,7 +3,7 @@ title: "PR collaboration invariants: reject agent-principal pushes to the defaul
 spec_ref: "Spec gap spec-4c39ca6ea3e71ce8a53398f3 / pr-protection-and-hygiene / d30f233daf86"
 depends_on: []
 progress: ready-for-review
-commits: ["d5888ad56a3369911836d9ccaeb06995dd73de9d", "c269022921fb4faddc818da21fd2d834d00ab63e"]
+commits: ["d5888ad56a3369911836d9ccaeb06995dd73de9d", "c269022921fb4faddc818da21fd2d834d00ab63e", "c9faf6a80ba0a216889c2d7efb5c82f71f58deee"]
 ---
 
 ## Required behavior
@@ -65,8 +65,11 @@ Canonical spec: `specs/development/agent-workflow.md`. Source: `fb1424fbac55cd23
 ## Shipped
 
 Both normative bullets of specs/development/agent-workflow.md §PRs as the
-Collaboration Primitive are now enforced in production code. Commits:
-`c2690229` (push protection), `d5888ad5` (PR hygiene job).
+Collaboration Primitive are now enforced in production code. Source
+commits: `c2690229` (push protection), `d5888ad5` (PR hygiene job),
+`c9faf6a8` (formatting-only finalizer pass: rustfmt over pr_hygiene.rs
+and the task-added test regions of git_http.rs / e2e_ralph_loop.rs; no
+behavior change).
 
 ### Agent-principal default-branch push protection
 
