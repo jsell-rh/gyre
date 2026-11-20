@@ -2,8 +2,8 @@
 title: "Admin Panel completion: SOPS/Vault secret backends, durable job history with logs, maintenance jobs, complete token refresh, server-log viewer, durable searchable admin audit"
 spec_ref: "Spec gap spec-5b647653a4554eea3e93ac19 / admin-panel-remaining-gap / e61ffd082155"
 depends_on: []
-progress: not-started
-commits: ["7548ead498317f2de4606238ee1e6cfb53eeac60", "7fe530de59c902ef18f9aadc7448aa6ff8acb3fe", "fa69e871b93d4c6e1cf2f6aeb2b39332dd9d7524", "44eb55a239681f4510d8388525ddf7a3257226dd", "3f51333665c3ad4284f27996e79c14af545db856", "56e5ea5f797f1f19037b40e65f529239c550d649", "a0dc3e637e6ffbae976675b755abf0b2891bf481", "4c71fe4827a62f792912b4e5ab257a50c1882860", "d6f32bd0269314f9ee552ed72df33322b0fe2238", "cd2f616e3ebd96addab2dcaf78242d31c58efc04", "808e3c10c035c9fc6fe8c5ee96d474fc5468acf3", "b979fefeeb7a6bb8340ccd85c64b467e0f46c553", "210dfa61bc1ea637a29a79c26af80746b2fb002c", "3ebd143d29eb52bb2bc0bd748f60fe52fa960f66", "9b81c9816f13a3d637057a6c3149c9be92f38a3c", "0fda00bfe9860c8c8b66ea1235f0d2e3251df67a", "1bc00b6cb9212e6ac6dfc7c764afede98ae8fd64", "a2b31ac19c05310ebd05a072ddde1acf0c51f2ec", "f6e31cf57779a7e117f5a0b9bd75720aed90ca56", "b101d27aafb7bde0907a568e7bb8a3ffbdd3ae67", "ee253c8854f16664f91d16171e08414effc314b7", "db320101b1540a35cf9986408e70ac46008b1982"]
+progress: ready-for-review
+commits: ["815b24d9bbcb59c8222a9c69176886ffd107f0b7", "7548ead498317f2de4606238ee1e6cfb53eeac60", "7fe530de59c902ef18f9aadc7448aa6ff8acb3fe", "fa69e871b93d4c6e1cf2f6aeb2b39332dd9d7524", "44eb55a239681f4510d8388525ddf7a3257226dd", "3f51333665c3ad4284f27996e79c14af545db856", "56e5ea5f797f1f19037b40e65f529239c550d649", "a0dc3e637e6ffbae976675b755abf0b2891bf481", "4c71fe4827a62f792912b4e5ab257a50c1882860", "d6f32bd0269314f9ee552ed72df33322b0fe2238", "cd2f616e3ebd96addab2dcaf78242d31c58efc04", "808e3c10c035c9fc6fe8c5ee96d474fc5468acf3", "b979fefeeb7a6bb8340ccd85c64b467e0f46c553", "210dfa61bc1ea637a29a79c26af80746b2fb002c", "3ebd143d29eb52bb2bc0bd748f60fe52fa960f66", "9b81c9816f13a3d637057a6c3149c9be92f38a3c", "0fda00bfe9860c8c8b66ea1235f0d2e3251df67a", "1bc00b6cb9212e6ac6dfc7c764afede98ae8fd64", "a2b31ac19c05310ebd05a072ddde1acf0c51f2ec", "f6e31cf57779a7e117f5a0b9bd75720aed90ca56", "b101d27aafb7bde0907a568e7bb8a3ffbdd3ae67", "ee253c8854f16664f91d16171e08414effc314b7", "db320101b1540a35cf9986408e70ac46008b1982"]
 ---
 
 ## Required behavior
@@ -119,3 +119,95 @@ Canonical spec: `specs/system/admin-panel.md`. Source: `fb1424fbac55cd23cb08606f
     ]
   }
 ]
+
+## Shipped
+
+The eight admin-panel deliverables are implemented on this branch and carried
+through the base merges with behavior preserved:
+
+1. **Secrets management — SOPS default, Vault option**
+   (`GYRE_SECRET_BACKEND`, default `sops`): the SOPS backend
+   (`crates/gyre-adapters/src/sops/`) stores secret values as genuine SOPS
+   JSON documents with an age-encrypted data key wrapped for the configured
+   identity (`GYRE_SOPS_AGE_KEY` / key file, auto-generated identity
+   persisted server-side when unset); decryption is server-side on
+   resolve/rotate and pre-change AES-256-GCM values are re-encrypted at first
+   access. The Vault backend (`crates/gyre-adapters/src/vault/`) serves
+   create/list/delete/rotate/resolve from Vault KV v2 with the server's
+   token/AppRole for writes and agent-JWT authentication for agent-scoped
+   resolution (agents never see Vault credentials); the HTTP client is
+   latency-bounded (30 s) and unreachable-Vault operations fail closed.
+2. **Durable job history with logs**: `JobRun` carries a `logs` field
+   (run-scoped sink handlers write to); runs persist through the
+   `gyre-ports` `JobRunRepository` (SQLite + PostgreSQL + mem parity,
+   portable migrations) wired via `store!` in `build_state` — the in-memory
+   HashMap is a fronting cache only. `GET /api/v1/admin/jobs` serves
+   persisted history with status, derived duration, error and logs; the
+   TenantSettings Jobs tab renders them. `job_history_cleanup` prunes runs
+   past the configured retention.
+3. **`repo_maintenance`** (daily): iterates every stored repository and runs
+   real git gc/prune/repack through the server's git execution layer,
+   recording per-repo outcomes (failures recorded without aborting the rest).
+4. **OAuth state + Claude Max enrollment**: Admin-only initiation generates
+   an OAuth 2.0 authorization request (state + PKCE verifier, initiating
+   admin/tenant derived server-side, expiry) persisted via the
+   `OAuthStateRepository` port; the callback validates the state row, does a
+   latency-bounded code exchange at the provider token endpoint and stores
+   the scoped `claude_max_refresh_token` secret. `oauth_state_cleanup`
+   deletes expired state rows.
+5. **Complete token refresh**: rotation dispatch matches credential-document
+   shape, not name — the RFC 6749 refresh-token grant applies to any OAuth
+   credential document; a GCP service-account handler exchanges SA JSON via
+   a real RS256-signed JWT-bearer grant; every expiring secret gets a
+   per-secret outcome (refreshed / no-refresh-mechanism / failed: reason) in
+   the durable run logs, with SecretExpiring escalation when no refresh
+   mechanism exists.
+6. **`remote_agent_cleanup`**: spawned instances are recorded durably at
+   spawn (port + adapters + portable migration, marked terminated on clean
+   exit/verified kill); the sweep kills still-recorded-running instances
+   whose agent is Dead/Stopped or absent — including restart orphans — via
+   `ComputeTarget::kill_process` with pid-identity verification, and records
+   what was reaped.
+7. **Server logs**: a bounded ring-buffer tracing capture layer in
+   `telemetry.rs` feeds the Admin-only `GET /api/v1/admin/server/logs`
+   endpoint (level/since/limit filters, ABAC-registered) and the
+   TenantSettings Server Logs tab.
+8. **Durable searchable admin audit**: `GET /api/v1/admin/audit` queries the
+   durable audit repository; `tenant_id` on `AuditEvent` is derived
+   server-side at emit (portable migration backfills from workspace scope);
+   `tenant_id` and free-text `q` filters are enforced in SQL by both
+   adapters (transparently decompressing zstd details, Unicode case
+   folding); the TenantSettings Audit tab renders durable events with the
+   full filter set including search.
+
+All new routes are in the ABAC resolver (no exemption growth) with
+per-handler authorization on exempt routes; migration numbers 000071–000075
+are portable across SQLite and PostgreSQL.
+
+### This round: checkpoint finalization
+
+`815b24d9` — rustfmt over the checkpoint's changed Rust surface
+(`gyre-adapters/src/compute/{kubernetes,mod}.rs`,
+`gyre-server/src/mem.rs`); formatting only, no behavior change. All 50
+branch-changed `.rs` files now pass `rustfmt --edition 2021 --check`
+(probe recorded in `/tmp/stage/review-evidence/probes.md`). Commit
+attribution refreshed via the dev-attribution tool.
+
+### Test evidence
+
+- Prior checkpoint rounds (carried on this branch, see commits list):
+  `cargo check -p gyre-server --all-targets` and
+  `-p gyre-adapters --all-targets` clean; focused adapter suites green
+  (`sqlite::audit` 24 passed, `vault::` 12 passed, `postgres::audit`
+  6 passed); clippy clean on touched crates; all mechanical invariant
+  scripts (arch, migration versions/portability, mem contracts, in-memory
+  stores, ABAC registry, unbounded HTTP, and siblings) passing with no new
+  exemptions.
+- This round added formatting-only changes, verified by rustfmt; no cold
+  rebuild of an unchanged crate was performed (stage instruction).
+- The verifier must execute the gyre-server test selection:
+  `maintenance_jobs::`, `api::admin::tests::` (kill/audit/server-logs),
+  `api::oauth::tests::`, and the spawn-path durable-recording tests in
+  `api::spawn::tests::`. `cargo test -p gyre-server` cannot run inside
+  this sandbox's 4 GiB build-guard — an infrastructure restriction, not a
+  code defect.
