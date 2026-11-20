@@ -531,16 +531,17 @@ pub(crate) async fn kill_agent(
     // captured for the AgentKilled audit event before the registry entry
     // is consumed.
     let mut killed_pid: Option<u32> = None;
-    // Whether a kill was actually ATTEMPTED for the durable instance
-    // record: marking a still-recorded-running instance terminated
-    // without attempting its kill would hide a live orphan from the
-    // remote_agent_cleanup sweep permanently (the sweep only considers
-    // records with terminated_at IS NULL) — worse than not having the
-    // durable store (review task-273).
-    let mut kill_attempted = false;
+    // Whether the durable instance record may be marked terminated for
+    // THIS kill: only when the instance's process was verifiably stopped
+    // (the kill succeeded, or the process is already gone). Marking a
+    // still-recorded-running instance terminated without stopping it
+    // would hide a live orphan from the remote_agent_cleanup sweep
+    // permanently (the sweep only considers records with terminated_at
+    // IS NULL) — worse than not having the durable store (review
+    // task-273).
+    let mut kill_succeeded = false;
     if let Some(handle) = state.process_registry.lock().await.remove(&id) {
         killed_pid = handle.pid;
-        kill_attempted = true;
         let backend = state.spawned_backends.lock().await.remove(&id);
         let kill_result = match backend.as_deref() {
             Some(b) => gyre_ports::ComputeTarget::kill_process(b, &handle).await,
@@ -552,15 +553,35 @@ pub(crate) async fn kill_agent(
                 .await
             }
         };
-        if let Err(e) = kill_result {
-            tracing::warn!(agent_id = %id, "kill_process failed: {e}");
+        match kill_result {
+            Ok(()) => kill_succeeded = true,
+            Err(e) => {
+                tracing::warn!(agent_id = %id, "kill_process failed: {e}");
+                // Restore the fast-path registries and leave the durable
+                // record running: remote_agent_cleanup retries the kill —
+                // with the REAL backend, whose connection details may not
+                // be reconstructable from the durable record (review
+                // task-273: a failed kill must not be recorded as done).
+                state
+                    .process_registry
+                    .lock()
+                    .await
+                    .insert(id.clone(), handle);
+                if let Some(b) = backend {
+                    state.spawned_backends.lock().await.insert(id.clone(), b);
+                }
+            }
         }
     } else {
         // Restart orphan (review task-273): the in-memory registry is
         // empty, but the durable instance record may still show the
         // instance running. Reconstruct the backend from the record —
         // the same reconstruction remote_agent_cleanup performs — and
-        // kill it for real.
+        // share the sweep's kill semantics (kill_and_mark / mark_gone /
+        // local pid-identity verification) so the two paths can never
+        // disagree on what "killed" means: a recycled pid is NOT killed,
+        // an already-exited pid is marked gone, and a failed kill leaves
+        // the record running for the sweep to retry.
         let durable_instance = state
             .agent_instances
             .find_by_agent(&id)
@@ -570,57 +591,137 @@ pub(crate) async fn kill_agent(
         if let Some(instance) = durable_instance {
             if instance.terminated_at.is_none() {
                 killed_pid = instance.pid;
-                let handle = gyre_ports::ProcessHandle {
-                    id: instance.handle_id.clone(),
-                    target_type: instance.target_type.clone(),
-                    pid: instance.pid,
-                };
+                let backend = state.spawned_backends.lock().await.get(&id).cloned();
                 // Container/Kubernetes kills address global resources
                 // (docker rm / kubectl delete pod) reachable from a
-                // default-constructed target; local kills by pid. A
-                // backend whose connection details are not persisted in
-                // the record cannot be reconstructed — the record stays
-                // running so the sweep keeps reporting it instead of
-                // silently marking it dead.
-                let kill_result: Option<anyhow::Result<()>> = match instance.backend.as_str() {
-                    "container" => {
-                        let target = gyre_adapters::compute::ContainerTarget::new("unused");
-                        Some(gyre_ports::ComputeTarget::kill_process(&target, &handle).await)
-                    }
-                    "kubernetes" => {
-                        let target = gyre_adapters::compute::KubernetesTarget::new("unused");
-                        Some(gyre_ports::ComputeTarget::kill_process(&target, &handle).await)
-                    }
-                    "local" => Some(
-                        gyre_ports::ComputeTarget::kill_process(
-                            &gyre_adapters::compute::LocalTarget,
-                            &handle,
+                // default-constructed target; local kills by pid — gated
+                // on the same pid-identity verification the sweep
+                // performs, because a restarted server must never trust a
+                // bare recorded pid (the kernel may have recycled it onto
+                // an unrelated process; review task-273). A backend whose
+                // connection details are not persisted in the record
+                // cannot be reconstructed — the record stays running so
+                // the sweep keeps reporting it instead of silently
+                // marking it dead.
+                let outcome: anyhow::Result<()> = match backend {
+                    Some(b) => {
+                        crate::maintenance_jobs::kill_and_mark(
+                            state,
+                            b.as_ref(),
+                            &instance,
+                            "admin_kill",
                         )
-                        .await,
-                    ),
-                    other => {
-                        tracing::warn!(
-                            agent_id = %id,
-                            backend = %other,
-                            "admin kill: backend cannot be reconstructed from the durable \
-                             record; leaving the instance recorded as running so \
-                             remote_agent_cleanup keeps reporting it"
-                        );
-                        None
+                        .await
                     }
+                    None => match instance.backend.as_str() {
+                        "container" => {
+                            let target = gyre_adapters::compute::ContainerTarget::new("unused");
+                            crate::maintenance_jobs::kill_and_mark(
+                                state,
+                                &target,
+                                &instance,
+                                "admin_kill",
+                            )
+                            .await
+                        }
+                        "kubernetes" => {
+                            let target = gyre_adapters::compute::KubernetesTarget::new("unused");
+                            crate::maintenance_jobs::kill_and_mark(
+                                state,
+                                &target,
+                                &instance,
+                                "admin_kill",
+                            )
+                            .await
+                        }
+                        "local" => {
+                            let pid_check = crate::maintenance_jobs::local_pid_check(&instance);
+                            match pid_check {
+                                Some(crate::maintenance_jobs::PidCheck::Matches) => {
+                                    let target = gyre_adapters::compute::LocalTarget;
+                                    crate::maintenance_jobs::kill_and_mark(
+                                        state,
+                                        &target,
+                                        &instance,
+                                        "admin_kill",
+                                    )
+                                    .await
+                                }
+                                Some(crate::maintenance_jobs::PidCheck::Gone) => {
+                                    // Already exited: nothing to kill — the
+                                    // record just needs the terminal mark
+                                    // and the fast-path registries cleaned.
+                                    crate::maintenance_jobs::mark_gone(
+                                        state,
+                                        &instance,
+                                        "admin_kill",
+                                    )
+                                    .await
+                                }
+                                Some(
+                                    crate::maintenance_jobs::PidCheck::Mismatch
+                                    | crate::maintenance_jobs::PidCheck::Unverifiable,
+                                ) => {
+                                    let pid = instance.pid.unwrap_or_default();
+                                    let why = match pid_check {
+                                        Some(crate::maintenance_jobs::PidCheck::Mismatch) => {
+                                            format!(
+                                                "recorded pid {pid} does not match the \
+                                                 instance's spawn time (recycled pid \
+                                                 suspected)"
+                                            )
+                                        }
+                                        _ => format!(
+                                            "pid {pid} identity cannot be verified on this \
+                                             platform"
+                                        ),
+                                    };
+                                    tracing::warn!(
+                                        agent_id = %id,
+                                        "admin kill: NOT killing — {why}; left for \
+                                         remote_agent_cleanup / manual verification"
+                                    );
+                                    Err(anyhow::anyhow!(why))
+                                }
+                                None => {
+                                    let target = gyre_adapters::compute::LocalTarget;
+                                    crate::maintenance_jobs::kill_and_mark(
+                                        state,
+                                        &target,
+                                        &instance,
+                                        "admin_kill",
+                                    )
+                                    .await
+                                }
+                            }
+                        }
+                        other => {
+                            tracing::warn!(
+                                agent_id = %id,
+                                backend = %other,
+                                "admin kill: backend cannot be reconstructed from the durable \
+                                 record; leaving the instance recorded as running so \
+                                 remote_agent_cleanup keeps reporting it"
+                            );
+                            Err(anyhow::anyhow!(
+                                "backend {other:?} cannot be reconstructed from the \
+                                 durable record"
+                            ))
+                        }
+                    },
                 };
-                if let Some(result) = kill_result {
-                    kill_attempted = true;
-                    if let Err(e) = result {
-                        tracing::warn!(agent_id = %id, "kill_process failed: {e}");
-                    }
+                if let Err(e) = outcome {
+                    tracing::warn!(agent_id = %id, "restart-orphan kill failed: {e:#}");
                 }
             }
         }
     }
     // TASK-273: the durable instance record reflects the admin kill — but
-    // ONLY when a kill was actually attempted.
-    if kill_attempted {
+    // ONLY when the in-memory fast path's kill actually succeeded (the
+    // restart-orphan branch marks through kill_and_mark / mark_gone on the
+    // same success-only condition; a failed or refused kill leaves the
+    // record running for remote_agent_cleanup).
+    if kill_succeeded {
         if let Err(e) = state
             .agent_instances
             .mark_terminated(&id, "admin_kill")
@@ -3656,6 +3757,9 @@ mod tests {
     // registries empty, durable instance record still running) must KILL
     /// the real process and mark the record terminated — and an
     /// unreconstructable record must NOT be silently marked terminated.
+    /// The record's `spawned_at` is "now" so the sweep-shared pid-identity
+    /// verification recognizes the just-spawned process as the recorded
+    /// instance's.
     #[tokio::test]
     async fn admin_kill_kills_restart_orphan_via_durable_record() {
         let state = test_state();
@@ -3666,6 +3770,7 @@ mod tests {
         agent.status = gyre_domain::AgentStatus::Active;
         state.agents.create(&agent).await.unwrap();
 
+        let spawned_at = crate::api::now_secs();
         let mut child = std::process::Command::new("sleep")
             .arg("300")
             .spawn()
@@ -3679,7 +3784,7 @@ mod tests {
                 target_type: "local".to_string(),
                 handle_id: pid.to_string(),
                 pid: Some(pid),
-                spawned_at: 1000,
+                spawned_at,
                 terminated_at: None,
                 terminated_reason: None,
             })
@@ -3755,6 +3860,99 @@ mod tests {
             record.terminated_at.is_none(),
             "an unreconstructable instance must stay recorded-running \
              (visible to remote_agent_cleanup), not be silently marked terminated"
+        );
+    }
+
+    /// Review task-273: an admin kill of a restart orphan whose recorded
+    /// pid has been recycled onto an UNRELATED live process must NOT kill
+    /// that process and must NOT mark the record terminated — the same
+    /// pid-identity verification remote_agent_cleanup performs (a bare
+    /// recorded pid is never trusted across process lifetimes). This is
+    /// also the failed-kill contract: any kill outcome that did not stop
+    /// the instance leaves the durable record running so the sweep keeps
+    /// reporting it, instead of permanently hiding it.
+    #[tokio::test]
+    async fn admin_kill_refuses_recycled_pid_and_leaves_record_running() {
+        let state = test_state();
+        let mut agent =
+            gyre_domain::Agent::new(gyre_common::Id::new("agent-recycled-kill"), "rk", 1000);
+        agent.status = gyre_domain::AgentStatus::Active;
+        state.agents.create(&agent).await.unwrap();
+
+        // A REAL live process, but the durable record claims it was
+        // spawned 10 days ago — the pid cannot be the recorded instance's
+        // process (recycled pid suspect).
+        let mut child = std::process::Command::new("sleep")
+            .arg("300")
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        state
+            .agent_instances
+            .record_spawned(&gyre_ports::AgentInstanceRecord {
+                agent_id: "agent-recycled-kill".to_string(),
+                backend: "local".to_string(),
+                target_type: "local".to_string(),
+                handle_id: pid.to_string(),
+                pid: Some(pid),
+                spawned_at: crate::api::now_secs().saturating_sub(10 * 86_400),
+                terminated_at: None,
+                terminated_reason: None,
+            })
+            .await
+            .unwrap();
+
+        // NOTE: no process_registry / spawned_backends entries — the
+        // in-memory fast path is empty, exactly like after a restart.
+        super::kill_agent(&state, &agent, "test", false, "user-admin", "admin_kill")
+            .await
+            .unwrap();
+
+        // The unrelated process was NOT killed...
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "a pid that does not match the recorded spawn time must not be killed"
+        );
+        child.kill().unwrap();
+        let _ = child.wait();
+
+        // ...and the durable record stays running (visible to
+        // remote_agent_cleanup), not silently marked terminated.
+        let record = state
+            .agent_instances
+            .find_by_agent("agent-recycled-kill")
+            .await
+            .unwrap()
+            .expect("record must survive");
+        assert!(
+            record.terminated_at.is_none(),
+            "a refused kill must leave the instance recorded-running \
+             (visible to remote_agent_cleanup), not silently marked terminated"
+        );
+    }
+
+    /// Review task-273: the admin-audit endpoint's authorization must be
+    /// exercised through the FULL middleware stack (ABAC resolver entry
+    /// for the "admin" resource) — a non-Admin JWT gets 403, not a
+    /// handler-level pass-through (previously pinned only for
+    /// /admin/server/logs, which shares the resolver policy chain).
+    #[tokio::test]
+    async fn admin_audit_non_admin_gets_403_through_full_stack() {
+        let app = crate::build_router(make_test_state_with_jwt());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/admin/audit")
+                    .header("Authorization", format!("Bearer {}", developer_jwt()))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "non-Admin callers must get 403 through the ABAC middleware"
         );
     }
 }
