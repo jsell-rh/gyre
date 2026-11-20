@@ -3142,6 +3142,171 @@ impl WorkspaceMembershipRepository for MemWorkspaceMembershipRepository {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// SCIM groups + group-to-workspace mappings (identity-security.md
+// §SCIM Provisioning / §Group-to-Workspace Mapping, task-266)
+// ──────────────────────────────────────────────────────────────────────────────
+
+use gyre_domain::{ScimGroup, ScimGroupMember, ScimWorkspaceMapping};
+use gyre_ports::{ScimGroupRepository, ScimMappingRepository};
+
+#[derive(Default)]
+pub struct MemScimGroupRepository {
+    groups: Arc<Mutex<HashMap<String, ScimGroup>>>,
+    members: Arc<Mutex<Vec<ScimGroupMember>>>,
+}
+
+#[async_trait]
+impl ScimGroupRepository for MemScimGroupRepository {
+    async fn create(&self, group: &ScimGroup) -> Result<()> {
+        let mut groups = self.groups.lock().await;
+        // Port contract: create fails when a group with the same
+        // non-empty external_id already exists. The mem adapter has no
+        // schema, so the guard lives in code (check-mem-port-contracts).
+        if !group.external_id.is_empty()
+            && groups.values().any(|g| g.external_id == group.external_id)
+        {
+            return Err(anyhow::anyhow!(
+                "SCIM group with external_id {:?} already exists",
+                group.external_id
+            ));
+        }
+        groups.insert(group.id.to_string(), group.clone());
+        Ok(())
+    }
+
+    async fn find_by_id(&self, id: &Id) -> Result<Option<ScimGroup>> {
+        Ok(self.groups.lock().await.get(id.as_str()).cloned())
+    }
+
+    async fn find_by_external_id(&self, external_id: &str) -> Result<Option<ScimGroup>> {
+        Ok(self
+            .groups
+            .lock()
+            .await
+            .values()
+            .find(|g| !g.external_id.is_empty() && g.external_id == external_id)
+            .cloned())
+    }
+
+    async fn list(&self) -> Result<Vec<ScimGroup>> {
+        let mut groups: Vec<ScimGroup> = self.groups.lock().await.values().cloned().collect();
+        groups.sort_by(|a, b| {
+            (a.created_at, &a.id.to_string()).cmp(&(b.created_at, &b.id.to_string()))
+        });
+        Ok(groups)
+    }
+
+    async fn update(&self, group: &ScimGroup) -> Result<()> {
+        self.groups
+            .lock()
+            .await
+            .insert(group.id.to_string(), group.clone());
+        Ok(())
+    }
+
+    async fn delete(&self, id: &Id) -> Result<()> {
+        self.groups.lock().await.remove(id.as_str());
+        self.members.lock().await.retain(|m| m.group_id != *id);
+        Ok(())
+    }
+
+    async fn list_members(&self, group_id: &Id) -> Result<Vec<ScimGroupMember>> {
+        let mut members: Vec<ScimGroupMember> = self
+            .members
+            .lock()
+            .await
+            .iter()
+            .filter(|m| m.group_id == *group_id)
+            .cloned()
+            .collect();
+        members.sort_by(|a, b| {
+            (a.added_at, &a.user_id.to_string()).cmp(&(b.added_at, &b.user_id.to_string()))
+        });
+        Ok(members)
+    }
+
+    async fn add_member(&self, member: &ScimGroupMember) -> Result<()> {
+        let mut members = self.members.lock().await;
+        // Port contract: idempotent row-wise — adding an existing member
+        // is Ok() and never duplicates the row. A push carrying a
+        // `display` refreshes the stored one (upsert, same contract as
+        // the SQLite/PostgreSQL adapters); a push without one leaves any
+        // previously stored `display` untouched.
+        if let Some(existing) = members
+            .iter_mut()
+            .find(|m| m.group_id == member.group_id && m.user_id == member.user_id)
+        {
+            if member.display.is_some() {
+                existing.display = member.display.clone();
+            }
+        } else {
+            members.push(member.clone());
+        }
+        Ok(())
+    }
+
+    async fn remove_member(&self, group_id: &Id, user_id: &Id) -> Result<()> {
+        self.members
+            .lock()
+            .await
+            .retain(|m| !(m.group_id == *group_id && m.user_id == *user_id));
+        Ok(())
+    }
+
+    async fn replace_members(&self, group_id: &Id, members: &[ScimGroupMember]) -> Result<()> {
+        let mut store = self.members.lock().await;
+        store.retain(|m| m.group_id != *group_id);
+        store.extend_from_slice(members);
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+pub struct MemScimMappingRepository {
+    mappings: Arc<Mutex<Vec<ScimWorkspaceMapping>>>,
+}
+
+#[async_trait]
+impl ScimMappingRepository for MemScimMappingRepository {
+    async fn replace_for_workspace(
+        &self,
+        workspace_id: &Id,
+        mappings: &[ScimWorkspaceMapping],
+    ) -> Result<()> {
+        let mut store = self.mappings.lock().await;
+        store.retain(|m| m.workspace_id != *workspace_id);
+        store.extend_from_slice(mappings);
+        Ok(())
+    }
+
+    async fn list_by_workspace(&self, workspace_id: &Id) -> Result<Vec<ScimWorkspaceMapping>> {
+        let mut mappings: Vec<ScimWorkspaceMapping> = self
+            .mappings
+            .lock()
+            .await
+            .iter()
+            .filter(|m| m.workspace_id == *workspace_id)
+            .cloned()
+            .collect();
+        mappings.sort_by(|a, b| a.idp_group.cmp(&b.idp_group));
+        Ok(mappings)
+    }
+
+    async fn list_by_idp_group(&self, idp_group: &str) -> Result<Vec<ScimWorkspaceMapping>> {
+        let mut mappings: Vec<ScimWorkspaceMapping> = self
+            .mappings
+            .lock()
+            .await
+            .iter()
+            .filter(|m| m.idp_group == idp_group)
+            .cloned()
+            .collect();
+        mappings.sort_by_key(|m| m.workspace_id.to_string());
+        Ok(mappings)
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // Repo access overrides (user-management.md §Repo Access)
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -5005,6 +5170,19 @@ impl Default for MemMessageRepository {
 #[async_trait]
 impl gyre_ports::MessageRepository for MemMessageRepository {
     async fn store(&self, message: &gyre_common::message::Message) -> Result<()> {
+        // Port contract (message-bus.md §Message Envelope), enforced in code
+        // by every adapter (SQLite/PostgreSQL `message_to_new_row` reject the
+        // same condition): store() returns Err on workspace_id: None — never
+        // panics, never silently inserts. Broadcast messages are never
+        // passed to store() by any send path (they are not persisted); a
+        // Broadcast (or any scopeless) message reaching this method is a
+        // contract violation and is rejected.
+        if message.workspace_id.is_none() {
+            return Err(anyhow::anyhow!(
+                "cannot store message without workspace scope (workspace_id is None; \
+                 Broadcast messages are never persisted)"
+            ));
+        }
         self.store
             .lock()
             .await
@@ -5185,6 +5363,64 @@ impl gyre_ports::MessageRepository for MemMessageRepository {
             !(is_target && m.created_at < older_than)
         });
         Ok((before - guard.len()) as u64)
+    }
+}
+
+#[cfg(test)]
+mod message_store_contract_tests {
+    use super::MemMessageRepository;
+    use gyre_common::message::{Destination, Message, MessageKind, MessageOrigin};
+    use gyre_common::Id;
+    use gyre_ports::MessageRepository as _;
+
+    /// Port contract (message-bus.md §Message Envelope), mirroring the
+    /// SQLite adapter's `store_broadcast_returns_error` test: store()
+    /// returns Err on workspace_id: None — never panics, never silently
+    /// inserts. Broadcast messages are never passed to store() by any send
+    /// path (both the REST and MCP handlers and the internal emitter skip
+    /// persistence for Broadcast); one reaching this method is a contract
+    /// violation.
+    #[tokio::test]
+    async fn mem_store_rejects_scopeless_message() {
+        let repo = MemMessageRepository::default();
+
+        let broadcast = Message {
+            id: Id::new("msg-broadcast"),
+            tenant_id: Id::new("tenant-1"),
+            from: MessageOrigin::Server,
+            workspace_id: None, // Broadcast — never persisted
+            to: Destination::Broadcast,
+            kind: MessageKind::DataSeeded,
+            payload: None,
+            created_at: 1_000,
+            signature: None,
+            key_id: None,
+            acknowledged: false,
+        };
+        assert!(repo.store(&broadcast).await.is_err());
+
+        // A malformed non-Broadcast message without a workspace scope is the
+        // same contract violation (the scopeless-message guard class).
+        let scopeless = Message {
+            id: Id::new("msg-scopeless"),
+            workspace_id: None,
+            to: Destination::Agent(Id::new("agent-1")),
+            kind: MessageKind::TaskAssignment,
+            ..broadcast.clone()
+        };
+        assert!(repo.store(&scopeless).await.is_err());
+        assert!(repo.find_by_id(&scopeless.id).await.unwrap().is_none());
+
+        // A properly scoped message stores fine (the guard must not
+        // over-block the happy path).
+        let scoped = Message {
+            id: Id::new("msg-scoped"),
+            workspace_id: Some(Id::new("ws-1")),
+            to: Destination::Agent(Id::new("agent-1")),
+            ..scopeless
+        };
+        assert!(repo.store(&scoped).await.is_ok());
+        assert!(repo.find_by_id(&scoped.id).await.unwrap().is_some());
     }
 }
 
@@ -5530,6 +5766,28 @@ struct TestStateOverrides {
     search: Option<Arc<dyn gyre_ports::SearchPort>>,
     secrets: Option<Arc<dyn gyre_ports::SecretRepository>>,
     kv: Option<Arc<dyn gyre_ports::KvJsonStore>>,
+    messages: Option<Arc<dyn gyre_ports::MessageRepository>>,
+}
+
+/// Build a test AppState whose message repository is replaced by `messages`
+/// (e.g. a counting wrapper asserting whether store() was called — the
+/// scopeless-message guard test needs to prove no message reaches the
+/// persistence port).
+#[cfg(test)]
+pub fn test_state_with_messages(
+    messages: Arc<dyn gyre_ports::MessageRepository>,
+) -> Arc<crate::AppState> {
+    let (workspaces, policies, ws_store) = shared_workspace_policy_pair_seeded();
+    test_state_inner(
+        Arc::new(NoopGitOps),
+        workspaces,
+        policies,
+        ws_store,
+        TestStateOverrides {
+            messages: Some(messages),
+            ..TestStateOverrides::default()
+        },
+    )
 }
 
 /// Shared builder for all in-memory test states. Callers supply the git ops
@@ -5562,6 +5820,7 @@ fn test_state_inner(
         search,
         secrets,
         kv,
+        messages,
     } = overrides;
     // Shared binding store: the meta-spec delete guard must see bindings
     // written through `meta_spec_bindings` (same wiring as lib.rs).
@@ -5763,13 +6022,15 @@ fn test_state_inner(
         notifications: Arc::new(MemNotificationRepository::default()),
         tenant_invitations: Arc::new(MemTenantInvitationRepository::default()),
         workspace_invitations: Arc::new(MemWorkspaceInvitationRepository::default()),
+        scim_groups: Arc::new(MemScimGroupRepository::default()),
+        scim_mappings: Arc::new(MemScimMappingRepository::default()),
         graph_store: Arc::new(gyre_adapters::MemGraphStore::new()),
         saved_views: Arc::new(gyre_adapters::MemSavedViewRepository::default()),
         wg_config: crate::WireGuardConfig::from_env(),
         agent_inbox_max: 1000,
         user_workspace_state: Arc::new(MemUserWorkspaceStateRepository::default()),
         rollout_policies: Arc::new(MemRolloutPolicyRepository::default()),
-        messages: Arc::new(MemMessageRepository::default()),
+        messages: messages.unwrap_or_else(|| Arc::new(MemMessageRepository::default())),
         message_dispatch_tx,
         message_dispatch_rx: std::sync::Arc::new(tokio::sync::Mutex::new(Some(
             message_dispatch_rx,

@@ -43,6 +43,7 @@ pub mod repository;
 pub mod review;
 pub mod rollout_policy;
 pub mod saved_view;
+pub mod scim_group;
 pub mod search;
 pub mod secret;
 pub mod session;

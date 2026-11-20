@@ -2140,6 +2140,7 @@ mod tests {
     /// (task-093 F10): the auth extractor is not in play in unit tests.
     fn auth_in_tenant(tenant: &str) -> crate::auth::AuthenticatedAgent {
         crate::auth::AuthenticatedAgent {
+            auth_mechanism: crate::auth::AuthMechanism::GlobalToken,
             agent_id: "caller-1".to_string(),
             user_id: None,
             roles: vec![gyre_domain::UserRole::Admin],

@@ -166,26 +166,23 @@ pub async fn extract_and_store_graph(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn do_extract(
+/// Snapshot a commit's tree into a fresh temp directory via `git archive`
+/// (shared by the push-triggered extraction pipeline and the two-commit
+/// graph-diff core — crates/gyre-server/src/graph_diff_core.rs).
+///
+/// `repo_path` may be a bare repository; `git archive --format=tar <sha>`
+/// works on bare repos. The returned TempDir owns the snapshot — dropping
+/// it cleans up.
+pub(crate) async fn snapshot_commit_tree(
     repo_path: &str,
-    repo_id: &str,
-    new_sha: &str,
-    graph_store: Arc<dyn GraphPort>,
+    sha: &str,
     git_bin: &str,
-    agent_ctx: Option<AgentPushContext>,
-    divergence_ports: Option<DivergencePorts<'_>>,
-    results_repo: Arc<dyn gyre_ports::SpecAssertionResultRepository>,
-    notification_scope: Option<PushNotificationScope>,
-    pass2_telemetry: Arc<CallGraphTelemetry>,
-) -> anyhow::Result<()> {
-    // --- Step 1: snapshot the commit tree into a temp directory ---------------
-
+) -> anyhow::Result<tempfile::TempDir> {
     let tmp = tempfile::TempDir::new()?;
 
     // `git archive --format=tar <sha>` on a bare repo outputs a tar stream.
     let archive = Command::new(git_bin)
-        .args(["-C", repo_path, "archive", "--format=tar", new_sha])
+        .args(["-C", repo_path, "archive", "--format=tar", sha])
         .output()
         .await?;
 
@@ -214,6 +211,26 @@ async fn do_extract(
     if !tar_status.success() {
         anyhow::bail!("tar extraction failed (exit code: {:?})", tar_status.code());
     }
+
+    Ok(tmp)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn do_extract(
+    repo_path: &str,
+    repo_id: &str,
+    new_sha: &str,
+    graph_store: Arc<dyn GraphPort>,
+    git_bin: &str,
+    agent_ctx: Option<AgentPushContext>,
+    divergence_ports: Option<DivergencePorts<'_>>,
+    results_repo: Arc<dyn gyre_ports::SpecAssertionResultRepository>,
+    notification_scope: Option<PushNotificationScope>,
+    pass2_telemetry: Arc<CallGraphTelemetry>,
+) -> anyhow::Result<()> {
+    // --- Step 1: snapshot the commit tree into a temp directory ---------------
+
+    let tmp = snapshot_commit_tree(repo_path, new_sha, git_bin).await?;
 
     // --- Step 2: run the Rust extractor (blocking, CPU-intensive) -------------
 
@@ -884,7 +901,7 @@ fn diff_nodes(old: &GraphNode, new: &GraphNode) -> Vec<FieldChange> {
 ///
 /// To add a new language extractor (S2/S3/S4), import it and push it onto the
 /// `extractors` vec — no other changes required.
-fn run_all_extractors(
+pub(crate) fn run_all_extractors(
     repo_root: &Path,
     commit_sha: &str,
     repo_id_str: &str,

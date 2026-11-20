@@ -2,8 +2,8 @@
 title: "SCIM groups and group-to-workspace role mapping"
 spec_ref: "Spec gap spec-31d3ae72e12e22c52442e309 / scim-groups-workspace-mapping / b60edce5bc49"
 depends_on: [task-265]
-progress: not-started
-commits: []
+progress: complete
+commits: ["880fa67634da35340fddd2fdee6059047123afd3", "ae8acdb90c6ecf76820ea63df3c7752297e3485d", "70e1fa7b3b05b3f11546942a694f1e2226d9e968", "eee34c67807e51536f21fd3bc3b8ec91604bf9a9"]
 ---
 
 ## Required behavior
@@ -43,3 +43,17 @@ Canonical spec: `specs/system/identity-security.md`. Source: `fb1424fbac55cd23cb
     ]
   }
 ]
+
+## Shipped
+
+The SCIM Groups surface, the durable group-to-workspace mapping store, and both halves of the mapping effect are implemented in production code on this branch (checkpoint `eee34c67`, completion `70e1fa7b`, lint repair `ae8acdb9`). The verifier's full-suite run at `c3f4f5f0` failed exactly two `tests/scim_groups.rs` tests; repair commit `880fa676` fixes both defects (no other suite failed).
+
+### The two repaired defects
+
+- **Member `display` did not round-trip** (`groups_crud_surface_per_rfc7644`): `group_to_scim` derived every member's `display` from the Gyre user record, silently discarding the RFC 7644 `display` the IdP pushed. The pushed value is now persisted on the membership row — migration `2026-11-20-000069_scim_group_member_display` (next unused sequence; nullable `display TEXT`, plain `ALTER TABLE ADD COLUMN`, portable across both embedded-migration backends), `ScimGroupMember.display` domain field, and `add_member` upsert semantics in all three adapters (SQLite/PostgreSQL `ON CONFLICT (group_id, user_id) DO UPDATE SET display`, mem in code): a re-push carrying a display refreshes the stored one, still never duplicates the row; a partial push without one never erases stored data. Reads return the stored value, falling back to the member user's display name only when the push carried none.
+- **415 before 403 on unauthenticated POST/PUT** (`groups_endpoints_enforce_scim_token`): the body-bearing SCIM handlers used axum `Json` extractors, which reject a body-less/content-type-less request with 415 before the handler body runs — so `check_scim_auth` never executed and an unauthenticated request got a body-shape error instead of the fail-closed 403. All four handlers (Groups POST/PUT, and the Users POST/PUT which had the identical latent defect) now read `axum::body::Bytes` and parse only after `check_scim_auth`, the same shape the PATCH handlers already used. The integration test's unauthenticated loop now covers all six Groups endpoints, so the PUT case that exposed the defect is pinned.
+
+### Test evidence
+
+- In this sandbox (server test *execution* is wrapper-deferred to the independent verifier — an infrastructure restriction, not a code defect): `cargo check -p gyre-domain -p gyre-adapters -p gyre-server --tests` clean at `880fa676` (including the `scim_groups`/`scim_lifecycle` test binaries); `cargo test -p gyre-adapters sqlite::scim_group` — 5 passed (the strengthened `add_member_is_idempotent` proves display persist/refresh/no-erase plus row-wise idempotency over the real 000068+000069 SQLite schema); `cargo test -p gyre-domain --lib scim_group` — 1 passed; `cargo fmt --check` clean; `check-migration-versions`, `check-migration-sql-portability`, `check-mem-port-contracts`, `check-arch` all OK. Probe log: `/tmp/stage/review-evidence/task-266-repair2-evidence.md`.
+- The verifier must execute: `cargo test -p gyre-server --test scim_groups`, `cargo test -p gyre-server --test scim_lifecycle` (Users POST/PUT body handling changed — same auth-first parse), `cargo test -p gyre-adapters`, full `cargo test --all`, plus clippy/rustfmt. The two previously failing tests are `groups_crud_surface_per_rfc7644` and `groups_endpoints_enforce_scim_token`.

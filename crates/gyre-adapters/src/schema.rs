@@ -449,6 +449,34 @@ diesel::table! {
 }
 
 diesel::table! {
+    scim_groups (id) {
+        id -> Text,
+        external_id -> Nullable<Text>,
+        display_name -> Text,
+        created_at -> BigInt,
+        updated_at -> BigInt,
+    }
+}
+
+diesel::table! {
+    scim_group_members (group_id, user_id) {
+        group_id -> Text,
+        user_id -> Text,
+        added_at -> BigInt,
+        display -> Nullable<Text>,
+    }
+}
+
+diesel::table! {
+    scim_workspace_mappings (workspace_id, idp_group) {
+        workspace_id -> Text,
+        idp_group -> Text,
+        workspace_role -> Text,
+        updated_at -> BigInt,
+    }
+}
+
+diesel::table! {
     tenant_invitations (id) {
         id -> Text,
         tenant_id -> Text,
@@ -881,6 +909,9 @@ diesel::allow_tables_to_appear_in_same_query!(
     tenant_invitations,
     workspace_invitations,
     repo_access_overrides,
+    scim_groups,
+    scim_group_members,
+    scim_workspace_mappings,
     notifications,
     policies,
     policy_decisions,

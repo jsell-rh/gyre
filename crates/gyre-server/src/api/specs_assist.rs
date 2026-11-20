@@ -1573,6 +1573,7 @@ mod tests {
         }
 
         let caller = AuthenticatedAgent {
+            auth_mechanism: crate::auth::AuthMechanism::ApiKey,
             agent_id: "user-admin".to_string(),
             user_id: Some(Id::new("user-admin")),
             roles: vec![],
@@ -2905,6 +2906,7 @@ mod tests {
         );
 
         let caller = AuthenticatedAgent {
+            auth_mechanism: crate::auth::AuthMechanism::ApiKey,
             agent_id: "user-a".to_string(),
             user_id: Some(Id::new("user-a")),
             roles: vec![],

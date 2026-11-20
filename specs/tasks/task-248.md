@@ -2,8 +2,8 @@
 title: "Message send-path guards: scope validation, mem store contract, WS acknowledged exclusion, auth-mechanism origin table, Agent-destination tenant isolation"
 spec_ref: "Spec gap spec-c62aac6701125cb09e0c736c / message-send-path-guards / 60b177f85a11"
 depends_on: []
-progress: not-started
-commits: []
+progress: complete
+commits: ["8a299761faad97ef855e3a61031b57a3e15d5125", "001f585ac686c90f601fd210ca4a40cc5cad7c9d", "951fa88b25aa0c530aab4dc4c4e2c59cbe6994f2", "a2781ff06b71bc443eda82aa1c0022edf011c972", "3bb9c9bd4099810d8583ab647018a5a41297f8c2", "873d0821ca7a33501c178303bdc618a1802ccbb6", "9dd4a1f0f07930760dddf8036a9fede6bbafb44c", "955c134a8c669070c3b936eac55f0e5e3f448418"]
 ---
 
 ## Required behavior
@@ -120,3 +120,77 @@ Canonical spec: `specs/system/message-bus.md`. Source: `4127964001113dda08e48524
     ]
   }
 ]
+
+## Shipped
+
+All five send-path guards are implemented on this branch (955c134a,
+9dd4a1f0, 873d0821, 3bb9c9bd, a2781ff0, 951fa88b, 001f585a), carried
+through the merge with base 00669baa, plus this round's compile repair
+(8a299761).
+
+### Behavior
+
+1. **Scopeless-message guard** — `emit_scoped_event`
+   (crates/gyre-server/src/lib.rs), the shared body of the internal
+   emitter family, returns `Err` and logs at error level when
+   `destination != Broadcast && workspace_id.is_none()`; the message is
+   never constructed, stored, or broadcast.
+2. **Mem store contract** — `MemMessageRepository::store`
+   (crates/gyre-server/src/mem.rs) returns `Err` on `workspace_id: None`,
+   matching the SQLite/PostgreSQL `message_to_new_row` contract; send
+   paths skip `store()` for Broadcast destinations.
+3. **WS `acknowledged` exclusion** — both WebSocket Message
+   serialization sites (live bus-delivery arm and Subscribe replay arm
+   in crates/gyre-server/src/ws.rs) serialize through
+   `ws_message_payload`, which strips `acknowledged` with the same
+   manual-removal pattern as `send_response`; GET inbox responses keep
+   the field.
+4. **Origin table** — `origin_from_auth` (crates/gyre-server/src/api/messages.rs)
+   derives origin from `AuthenticatedAgent.auth_mechanism`, set by the
+   extractor on every auth path: global `GYRE_AUTH_TOKEN` → Server;
+   API key / OIDC user JWT → `User(user_id)`; agent token / federated
+   JWT → `Agent(sub)`. Admin-role API-key/OIDC callers resolve to User
+   origin (server_only 403 gate and rule-3 membership check apply to
+   them); the separate rule-6 Admin-role check still lets them target
+   Broadcast; the global token keeps full forge authority.
+5. **Rule-1 tenant isolation, fail-closed** — the REST send handler and
+   the mirrored MCP `handle_message_send` resolve the target agent's
+   workspace record on every `Destination::Agent(id)` send and compare
+   its tenant with the caller's verified tenant; mismatch rejects 403
+   (nothing stored or broadcast), including Server-origin global-token
+   callers. An unresolvable workspace record rejects fail-closed.
+
+### This round — merged-base compile repair
+
+CI run 44680564932 (PR head 1bcfb6dd) failed to compile the
+gyre-server lib test: E0063, missing field `auth_mechanism` in an
+`AuthenticatedAgent` initializer at crates/gyre-server/src/api/spawn.rs.
+The initializer is `plain_auth`, a hand-rolled test fixture that came
+in with merged base 00669baa and predated the field task-248 added to
+the extractor. Commit 8a299761 sets it to
+`AuthMechanism::AgentToken`, matching the sibling spawner fixtures in
+the same test module (the same repair class as 001f585a in the prior
+round). No task-248 guard code changed this round; the field is
+consulted only by `origin_from_auth`, which this fixture's sole
+consumer (`complete_agent` direct drive) does not exercise.
+
+### Test evidence
+
+- In-sandbox probes this round (build-budget limit — large gyre-server
+  test compilation deferred to the verifier): `SKIP_WEB_BUILD=1 cargo
+  check -p gyre-server --tests` — clean, exit 0 (was the E0063
+  failure); `cargo fmt --check` — clean, exit 0;
+  `bash scripts/check-task-commit-attribution.sh` — full-history scan,
+  result recorded in review evidence.
+- Prior-round probes, unchanged by this round's one-line fixture
+  repair: origin-table probes (Admin API-key/OIDC server_only 403,
+  directed-send membership 403, global-token Server origin +
+  Broadcast authority, rule-6 Admin-Broadcast allowance), rule-1
+  cross-tenant 403 with empty store (REST + MCP), WS live/replay
+  `acknowledged` exclusion, GET inbox keeps `acknowledged`, mem-store
+  Err-on-None contract test, scopeless-guard Err + error-level log
+  with empty store/broadcast.
+- Deferred to the independent verifier: `cargo test -p gyre-server`
+  (the task-248 guard tests in api/messages.rs, mcp.rs, ws.rs, mem.rs,
+  and lib.rs, plus the spawn.rs fixture suite that includes
+  `plain_auth`).

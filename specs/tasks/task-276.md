@@ -2,8 +2,8 @@
 title: "View query diff scope: commit-range change set consumed from the shared two-commit graph-diff core (server resolver + renderer integration)"
 spec_ref: "Spec gap spec-57c2a110e6b0a8363571ac4d / diff-scope-commit-range / 78cf53a9a787"
 depends_on: []
-progress: not-started
-commits: []
+progress: complete
+commits: ["6ba5217eeb6d801d798029cd07baf41f72250eb3", "4d7101c24b1e7cbc5e89e95aa0d9749a668abc7e", "db3243b4957c5778d6cfef4c11b41b0b32dc8323", "41de1c4b2c8d49d6521ad4171a14ccff8ef520b8", "81e2dc0c1dd5cba53eb1a32b92ac661c93050fbd"]
 ---
 
 ## Required behavior
@@ -74,3 +74,116 @@ Canonical spec: `specs/system/view-query-grammar.md`. Source: `25497b9e3cc16c7e4
     ]
   }
 ]
+
+## Shipped
+
+The `diff` scope now implements the specced "Changes between two commits"
+semantics on every surface, computed from real per-commit repository state —
+the single-snapshot created_sha/last_modified_sha heuristic (and its
+"[info] approximate" concession) is gone from both the domain resolver and
+the renderer.
+
+### Shared core (single implementation, both contract surfaces)
+
+- `crates/gyre-server/src/graph_diff_core.rs` (new): resolves each boundary
+  ref against the repo's real git (`git rev-parse --verify` via
+  `git_refs::resolve_ref` — >=7-hex prefixes, branch names, tags, HEAD),
+  snapshots each boundary commit's tree via `git archive`
+  (`graph_extraction::snapshot_commit_tree`, factored out of do_extract
+  Step 1), runs the full extraction pipeline on each snapshot, and computes
+  the change set with the pure domain function. Serves BOTH
+  `GET /repos/{id}/graph/diff` (now returns `nodes:
+  {added,removed,modified}` by qualified name) and the view-query
+  `Scope::Diff` — no second implementation. Per-(repo, full resolved SHA)
+  extraction results are cached (bounded, immutable trees, results
+  unchanged). graph-diff-two-commits (realized-model plan
+  b26f707c1c6ea89a961ab82e824808bf1625a3e2b3a0c2312981a90a99f3fef3) had not
+  landed here, so the core was built once in this shared location per the
+  task's reconciliation clause; that task's definition must cross-reference
+  this one when the plans merge.
+- `crates/gyre-domain/src/graph_diff.rs` (new): pure
+  `compute_node_change_set` — identity by qualified_name; added = in to not
+  in from; removed = in from not in to; modified = in both with a
+  substantive content difference (signature/doc, file/lines, visibility,
+  spec linkage, metrics), excluding bookkeeping fields that differ by
+  construction (ids, sha stamps, timestamps, first/last_seen). No git or
+  infrastructure knowledge in gyre-domain (check-arch.sh passes).
+
+### Server wiring (view-query surfaces)
+
+- `gyre-domain` `InjectedDiffChangeSet` + `dry_run_with_diff_change_set` /
+  `resolve_scope_with_diff_change_set`: the server resolves the change set
+  and injects it; the domain performs the pure qualified_name → active node
+  id mapping. Matched set = added + modified; removed nodes are named in
+  `DryRunResult.warnings`; unresolvable refs surface the server's warning
+  with an empty matched set (never a fail-open default); from==to keeps the
+  empty-diff warning; `matched_node_ids` added to `DryRunResult` for the
+  renderer. Wired into REST `POST /repos/:id/graph/query-dryrun`
+  (api/graph.rs), the MCP `graph_query_dryrun` tool (mcp.rs), and both
+  explorer_ws dry-run paths (agent tool dispatch + conversational
+  self-check loop).
+
+### Renderer
+
+- `web/src/lib/api.js`: new `graphQueryDiffScope` client function (alongside
+  `repoGraphDiff`) calling the query-dryrun endpoint, returning
+  `{matchedIds, warnings, matchedNodes}`.
+- `web/src/lib/ExplorerCanvas.svelte`: SHA/ref-based diff scopes fetch the
+  matched set from the server and feed the returned ids into the existing
+  matched/depth machinery ({{count}}, emphasis, edges, zoom operate over it
+  uniformly); the local SHA-prefix heuristic block is removed; temporal
+  `~epoch` diff resolution stays local; loading/error/server-warning states
+  render an explicit `[data-diff-scope-status]` banner instead of an
+  incorrect set; a stale matched set is dropped when new boundaries are
+  queried.
+
+### Test evidence
+
+- Domain unit tests (579 pass, `cargo test -p gyre-domain`): change-set
+  classification; changed-and-reverted NOT modified (boundary-to-boundary);
+  bookkeeping-only differences NOT modified; resolver diff tests rewritten
+  against the injected-change-set contract (mid-range node matched,
+  no-change-set warns, removed/unresolvable-ref warnings,
+  matched_node_ids/{{count}}).
+- Server integration test
+  `test_view_query_diff_scope_commit_range` (gyre-server
+  tests/graph_integration.rs): real repo pushed through the real git HTTP
+  push flow — A adds f/g/h, B changes only f, C changes only g, graph
+  extracted at C; asserts Diff{A,C} == exactly {f,g} and Diff{A,B} ==
+  exactly {f} (kills both pre-fix failure modes: whole-graph match when
+  to == HEAD, empty set when to < HEAD), removed h named in warnings after
+  a second push deletes it, {{count}} == matched-set size, unresolvable
+  'no-such-branch' warns + empty, and GET /graph/diff serving the identical
+  change set. NOT executed in this sandbox — large gyre-server test
+  compilation is deferred to the independent verifier (4 GiB budget rule;
+  `cargo check -p gyre-server --tests` passes clean). Verifier command:
+  `cargo test -p gyre-server --test graph_integration test_view_query_diff_scope_commit_range -- --nocapture`.
+- Web tests: ExplorerCanvas.test.js rewritten diff-SHA tests (165/165 pass;
+  full suite 127 files / 2570 passed before the final stale-set refinement,
+  affected files re-run green after it) — server-set-driven {{count}}
+  including the mid-range node whose snapshot provenance matches neither
+  boundary (fails if local SHA resolution is restored), fetch-error and
+  server-warning banners, exact-id mirror tests, no local prefix filtering.
+- Invariant scripts re-run OK (arch, mcp write gates, in-memory stores,
+  unbounded http, relative paths, fail-open refs, byte slicing, inert
+  enforcement, lossy secrets, migration versions).
+
+### Verification-repair round (formatting + clippy only)
+
+- The prior verification run (finding 67f8f9c2cdcc40d690f2eef5dc832b3c,
+  exit 1) failed only on rustfmt changed-line violations in four files and
+  one `clippy::type_complexity` in graph_diff.rs:230 — no behavioral
+  finding. Repaired in commit 6ba5217e: the four files were passed through
+  `rustfmt` (token-stream-identical; the unchanged gyre-server crates were
+  not cold-rebuilt for formatting-only feedback) and the test fn-pointer
+  pair was named via a `Mutator` type alias. `cargo test -p gyre-domain`
+  re-run after the repair: 579 + 8 passed, 0 failed; `cargo clippy -p
+  gyre-domain --all-targets` shows no warning on changed lines
+  (type_complexity gone; remaining `useless vec!` warnings are pre-existing
+  test debt outside this round's changed lines). Probe evidence retained
+  at /tmp/stage/review-evidence/task-276-format-repair.md.
+
+### Deferred verification
+
+- `cargo test --all` and the server integration test above must run in the
+  independent verifier (see /tmp/stage/review-evidence/task-276-evidence.md).

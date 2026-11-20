@@ -650,6 +650,16 @@ impl ResourceResolver {
                     "workspace_member",
                     &[("PUT", "transfer_ownership")],
                 ),
+                // SCIM group-to-role mappings (task-266, identity-security.md
+                // §Group-to-Workspace Mapping): the `scim_mapping` resource —
+                // read/write gated by builtin-scim-mapping-management
+                // (workspace Owner/Admin) below, non-members additionally
+                // caught by workspace-membership-required (940).
+                RouteResourceMapping::api(
+                    "/api/v1/workspaces/:id/scim-mappings",
+                    "scim_mapping",
+                    None,
+                ),
                 // Tenant/workspace invitations (task-110). Management
                 // routes run ABAC (tenant resource); the TenantAdmin-only
                 // and Owner/Admin constraints are additionally enforced
@@ -855,6 +865,8 @@ impl ResourceResolver {
                 // ── SCIM (separate auth token, exempt from ABAC) ───────────
                 RouteResourceMapping::exempt("/scim/v2/Users"),
                 RouteResourceMapping::exempt("/scim/v2/Users/:id"),
+                RouteResourceMapping::exempt("/scim/v2/Groups"),
+                RouteResourceMapping::exempt("/scim/v2/Groups/:id"),
                 RouteResourceMapping::exempt("/scim/v2/ServiceProviderConfig"),
                 RouteResourceMapping::exempt("/scim/v2/Schemas"),
                 RouteResourceMapping::exempt("/scim/v2/ResourceTypes"),
@@ -1658,6 +1670,41 @@ pub fn m34_builtin_policies() -> Vec<Policy> {
             }],
             actions: vec!["admin".to_string()],
             resource_types: vec!["repo".to_string()],
+            enabled: true,
+            built_in: true,
+            immutable: false,
+            created_by: by.clone(),
+            created_at: now,
+            updated_at: now,
+        },
+        // Priority 808: workspace Owner/Admin members manage the
+        // workspace's SCIM group-to-role mappings (identity-security.md
+        // §Group-to-Workspace Mapping: "Workspace admins configure which
+        // IdP groups map to which workspace roles"). Gates the read/write
+        // actions the /scim-mappings route resolves to. Non-members are
+        // additionally denied by workspace-membership-required (940);
+        // the per-handler can_manage guard in api/scim_mappings.rs adds
+        // the same role check for callers that bypass ABAC (global
+        // token, API keys).
+        Policy {
+            id: Id::new("builtin-scim-mapping-management"),
+            name: "builtin:scim-mapping-management".to_string(),
+            description: "Workspace Owner/Admin members may configure the workspace's SCIM group-to-role mappings"
+                .to_string(),
+            scope: PolicyScope::Tenant,
+            scope_id: None,
+            priority: 808,
+            effect: PolicyEffect::Allow,
+            conditions: vec![Condition {
+                attribute: "subject.workspace_role".to_string(),
+                operator: ConditionOp::In,
+                value: ConditionValue::StringList(vec![
+                    "Owner".to_string(),
+                    "Admin".to_string(),
+                ]),
+            }],
+            actions: vec!["read".to_string(), "write".to_string()],
+            resource_types: vec!["scim_mapping".to_string()],
             enabled: true,
             built_in: true,
             immutable: false,

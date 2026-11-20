@@ -381,6 +381,8 @@ mod tests {
             notifications: base.notifications.clone(),
             tenant_invitations: base.tenant_invitations.clone(),
             workspace_invitations: base.workspace_invitations.clone(),
+            scim_groups: base.scim_groups.clone(),
+            scim_mappings: base.scim_mappings.clone(),
             graph_store: base.graph_store.clone(),
             saved_views: base.saved_views.clone(),
             wg_config: base.wg_config.clone(),

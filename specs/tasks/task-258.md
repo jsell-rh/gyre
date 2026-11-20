@@ -3,7 +3,7 @@ title: "Agent-to-commit tracking at session granularity: session persistence, br
 spec_ref: "Spec gap spec-36fad8fcafe7b73a2b6f2d0e / agent-session-commit-tracking / b580b93c564f"
 depends_on: []
 progress: complete
-commits: ["ec0fbff49ca8ee5a7a21216e82ad56e110e8599b", "f7d9c3883dda4d544507d78d6f7590e339f9ab96", "dfcb500fa9dfcc496f67b5a52b3ff830c0a9c77c", "fff11b71fb5e9a7f3a113c61bbcccfbd79e1b295", "eff02cffb16bbc5ad1026478ff46d2062b5c6ceb", "50452ac5318beaf98f0ff6a5b63557f02c0543b3"]
+commits: ["ec0fbff49ca8ee5a7a21216e82ad56e110e8599b", "f7d9c3883dda4d544507d78d6f7590e339f9ab96", "dfcb500fa9dfcc496f67b5a52b3ff830c0a9c77c", "fff11b71fb5e9a7f3a113c61bbcccfbd79e1b295", "eff02cffb16bbc5ad1026478ff46d2062b5c6ceb", "50452ac5318beaf98f0ff6a5b63557f02c0543b3", "001f585ac686c90f601fd210ca4a40cc5cad7c9d"]
 ---
 
 ## Required behavior

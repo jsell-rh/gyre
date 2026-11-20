@@ -47,6 +47,7 @@ pub mod repo_access;
 pub mod repos;
 pub mod saved_views;
 pub mod scim;
+pub mod scim_mappings;
 pub mod search;
 pub mod secrets;
 pub mod spawn;
@@ -1137,6 +1138,14 @@ pub fn api_router() -> Router<Arc<AppState>> {
             "/api/v1/workspaces/:id/members/:user_id",
             put(update_member_role).delete(remove_member),
         )
+        // SCIM group-to-workspace-role mappings (task-266,
+        // identity-security.md §Group-to-Workspace Mapping). Owner/Admin
+        // enforced per-handler (can_manage), ABAC resource `scim_mapping`.
+        .route(
+            "/api/v1/workspaces/:id/scim-mappings",
+            put(scim_mappings::put_workspace_scim_mappings)
+                .get(scim_mappings::get_workspace_scim_mappings),
+        )
         // Tenant invitations (task-110, user-management.md §API > Tenant
         // Invitations). TenantAdmin-only, enforced per-handler.
         .route("/api/v1/tenant/invite", post(invite_to_tenant))
@@ -1214,6 +1223,17 @@ pub fn api_router() -> Router<Arc<AppState>> {
         )
         .route("/scim/v2/Schemas", get(scim::scim_schemas))
         .route("/scim/v2/ResourceTypes", get(scim::scim_resource_types))
+        .route(
+            "/scim/v2/Groups",
+            get(scim::scim_list_groups).post(scim::scim_create_group),
+        )
+        .route(
+            "/scim/v2/Groups/:id",
+            get(scim::scim_get_group)
+                .put(scim::scim_update_group)
+                .patch(scim::scim_patch_group)
+                .delete(scim::scim_delete_group),
+        )
         // ── Knowledge graph (realized-model.md §7) ────────────────────────
         .route("/api/v1/repos/:id/graph", get(graph::get_repo_graph))
         .route("/api/v1/repos/:id/graph/types", get(graph::get_graph_types))

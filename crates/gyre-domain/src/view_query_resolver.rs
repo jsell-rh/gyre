@@ -46,6 +46,12 @@ pub struct DryRunResult {
     /// Only populated when scope is Focus or Concept.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub node_depths: HashMap<String, u32>,
+    /// Matched node ids in scope-resolution order. The renderer's SHA/ref-based
+    /// diff scope consumes these to highlight exactly the server-resolved
+    /// set — `matched_node_names` is display-truncated at 50 and cannot
+    /// serve as an id source.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub matched_node_ids: Vec<String>,
     /// Per-node metric values (for heat emphasis).
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub node_metrics: HashMap<String, f64>,
@@ -539,6 +545,34 @@ pub struct ScopeResult {
     pub warnings: Vec<String>,
 }
 
+/// Server-computed commit-range change set injected into a SHA/ref-based
+/// `Scope::Diff` (view-query-grammar.md §2 `diff`: "Changes between two
+/// commits").
+///
+/// The boundary-commit graph states and the node-level change set are
+/// computed by gyre-server from real per-commit repository state via the
+/// shared two-commit graph-diff core (the same production path that serves
+/// `GET /repos/{id}/graph/diff`). gyre-domain performs only the pure
+/// mapping from qualified names to current active node ids — no git or
+/// infrastructure knowledge crosses the hexagonal boundary.
+///
+/// Qualified names are the identity: added/modified entries whose node is
+/// still active are matched; removed entries cannot be rendered and are
+/// surfaced as warnings.
+#[derive(Debug, Clone, Default)]
+pub struct InjectedDiffChangeSet {
+    /// Qualified names of nodes added between the boundary commits.
+    pub added: Vec<String>,
+    /// Qualified names of nodes present at from_commit but absent at
+    /// to_commit — cannot be rendered; surfaced as warnings.
+    pub removed: Vec<String>,
+    /// Qualified names of nodes modified between the boundary commits.
+    pub modified: Vec<String>,
+    /// Warnings produced while resolving the boundary refs server-side
+    /// (e.g. an unresolvable ref).
+    pub warnings: Vec<String>,
+}
+
 /// Resolve a view query scope against the graph, returning the set of matched node IDs.
 pub fn resolve_scope(
     scope: &Scope,
@@ -557,7 +591,38 @@ pub fn resolve_scope_with_depths(
     selected_node_id: Option<&str>,
 ) -> ScopeResult {
     let (outgoing, incoming) = build_adjacency(edges);
-    resolve_scope_with_adjacency(scope, nodes, edges, selected_node_id, &outgoing, &incoming)
+    resolve_scope_with_adjacency(
+        scope,
+        nodes,
+        edges,
+        selected_node_id,
+        &outgoing,
+        &incoming,
+        None,
+    )
+}
+
+/// [`resolve_scope_with_depths`] with a server-computed commit-range change
+/// set injected for SHA/ref-based `Scope::Diff` resolution. `None` leaves
+/// diff scopes without an injected set (they resolve to an empty matched
+/// set with an explicit warning — never a snapshot-provenance heuristic).
+pub fn resolve_scope_with_diff_change_set(
+    scope: &Scope,
+    nodes: &[GraphNode],
+    edges: &[GraphEdge],
+    selected_node_id: Option<&str>,
+    diff_changes: Option<&InjectedDiffChangeSet>,
+) -> ScopeResult {
+    let (outgoing, incoming) = build_adjacency(edges);
+    resolve_scope_with_adjacency(
+        scope,
+        nodes,
+        edges,
+        selected_node_id,
+        &outgoing,
+        &incoming,
+        diff_changes,
+    )
 }
 
 /// Resolve a scope using pre-built adjacency maps (avoids rebuilding them).
@@ -568,6 +633,7 @@ fn resolve_scope_with_adjacency(
     selected_node_id: Option<&str>,
     outgoing: &HashMap<String, Vec<(String, EdgeType)>>,
     incoming: &HashMap<String, Vec<(String, EdgeType)>>,
+    diff_changes: Option<&InjectedDiffChangeSet>,
 ) -> ScopeResult {
     let active_nodes: Vec<&GraphNode> = nodes.iter().filter(|n| n.deleted_at.is_none()).collect();
     let all_ids: HashSet<String> = active_nodes.iter().map(|n| n.id.to_string()).collect();
@@ -749,15 +815,21 @@ fn resolve_scope_with_adjacency(
                     from_commit, to_commit
                 ));
             }
-            // Find nodes that changed between two commits by looking at SHA matches.
-            // A node is "changed" if its created_sha or last_modified_sha matches ANY
-            // commit in the range. Since we don't have git history, we use a best-effort
-            // approach: include nodes whose last_modified_sha or created_sha matches
-            // the to_commit (modified in the target), AND exclude nodes that were
-            // created before the from_commit by checking created_sha.
+            // Diff scope (view-query-grammar.md §2: "Changes between two
+            // commits"). Two query forms:
             //
-            // Also supports timestamp-based diff when commit SHAs contain "~" prefix
-            // (e.g., "~1712000000" for epoch seconds) for temporal queries.
+            // 1. Temporal ("~<epoch seconds>" on both boundaries): resolved
+            //    locally against node created_at/last_modified_at — a
+            //    different query form, unchanged.
+            // 2. SHA/ref-based: the matched set is the node-level change set
+            //    between the two boundary commits, computed by gyre-server
+            //    from real per-commit repository state via the shared
+            //    two-commit graph-diff core and INJECTED here as an
+            //    [`InjectedDiffChangeSet`] (qualified-name identity). The
+            //    single-snapshot created_sha/last_modified_sha provenance
+            //    heuristic was removed: it cannot express a commit range
+            //    (nodes changed by intermediate commits were silently
+            //    missed).
             let from_lower = from_commit.to_lowercase();
             let to_lower = to_commit.to_lowercase();
 
@@ -782,56 +854,44 @@ fn resolve_scope_with_adjacency(
                     })
                     .map(|n| n.id.to_string())
                     .collect()
-            } else {
-                // SHA-based diff: best-effort heuristic for finding nodes changed
-                // between two commits.
-                //
-                // Limitations (inherent to the graph model):
-                //   - Each node stores only `created_sha` and `last_modified_sha`.
-                //     We have no access to the full git log, so nodes changed by
-                //     intermediate commits between from_commit and to_commit will
-                //     be missed unless their last_modified_sha still points to one
-                //     of the boundary commits.
-                //   - Prefix matching requires at least 7 hex characters to avoid
-                //     false positives on short SHA fragments.
-                //
-                // For accurate range queries, prefer temporal diff with epoch
-                // prefixes (e.g., Scope::Diff { from: "~1712000000", to: "~1712100000" }).
-                warnings.push(
-                    "[info] SHA-based diff shows an approximate result. Each node only \
-                     records the commit that created it and the commit that last modified it, \
-                     so changes made by commits between the two boundary commits may not \
-                     appear. For a complete range, use a temporal diff with epoch timestamps \
-                     (e.g., Scope::Diff { from: \"~1712000000\", to: \"~1712100000\" })."
-                        .to_string(),
-                );
-                let sha_matches = |sha: &str, target: &str| -> bool {
-                    if target.is_empty() || target.len() < 7 {
-                        return false; // Require at least 7 hex chars to prevent false positives
-                    }
-                    let sha_lower = sha.to_lowercase();
-                    // Proper prefix matching: the query target must be a prefix of the
-                    // node's SHA. Do NOT match the reverse direction (node SHA as prefix
-                    // of query) as that causes false positives with abbreviated node data.
-                    sha_lower.starts_with(target) || sha_lower == target
-                };
-
+            } else if let Some(cs) = diff_changes {
+                // SHA/ref-based diff with the server-computed change set:
+                // matched = added + modified entries mapped to current
+                // active node ids via qualified_name. Removed nodes cannot
+                // be rendered and are surfaced by name instead of being
+                // silently dropped.
+                warnings.extend(cs.warnings.iter().cloned());
+                if !cs.removed.is_empty() {
+                    warnings.push(format!(
+                        "Diff removed {} node(s) present at from_commit but absent at to_commit \
+                         (cannot be rendered): {}",
+                        cs.removed.len(),
+                        cs.removed.join(", ")
+                    ));
+                }
+                let changed: HashSet<&str> = cs
+                    .added
+                    .iter()
+                    .chain(cs.modified.iter())
+                    .map(|s| s.as_str())
+                    .collect();
                 active_nodes
                     .iter()
-                    .filter(|n| {
-                        let created_matches_to = sha_matches(&n.created_sha, &to_lower);
-                        let modified_matches_to = sha_matches(&n.last_modified_sha, &to_lower);
-                        let created_matches_from = sha_matches(&n.created_sha, &from_lower);
-                        let modified_matches_from = sha_matches(&n.last_modified_sha, &from_lower);
-
-                        // Include nodes created or modified at to_commit.
-                        // Exclude nodes that already existed unchanged at from_commit
-                        // (created AND last-modified at or before from_commit).
-                        (created_matches_to || modified_matches_to)
-                            && !(created_matches_from && modified_matches_from)
-                    })
+                    .filter(|n| changed.contains(n.qualified_name.as_str()))
                     .map(|n| n.id.to_string())
                     .collect()
+            } else {
+                // SHA/ref-based diff without an injected change set: the
+                // caller did not (or could not) run the server-side
+                // commit-range resolution. Fail explicitly — never fall back
+                // to single-snapshot provenance matching.
+                warnings.push(
+                    "SHA/ref-based diff scope was resolved without a server-computed \
+                     commit-range change set (repository git state unavailable or caller \
+                     not wired); the matched set is empty."
+                        .to_string(),
+                );
+                HashSet::new()
             };
             (result, no_depths())
         }
@@ -1850,6 +1910,32 @@ pub fn dry_run_with_call_graph(
     selected_node_id: Option<&str>,
     call_graph_complete: Option<bool>,
 ) -> DryRunResult {
+    dry_run_with_diff_change_set(
+        query,
+        nodes,
+        edges,
+        selected_node_id,
+        call_graph_complete,
+        None,
+    )
+}
+
+/// [`dry_run_with_call_graph`] with a server-computed commit-range change
+/// set injected for SHA/ref-based `Scope::Diff` resolution.
+///
+/// `diff_changes` is `Some(&InjectedDiffChangeSet)` when the caller resolved
+/// the query's diff-scope boundary commits against the repository's real git
+/// state (gyre-server, shared two-commit graph-diff core). `None` leaves the
+/// diff scope without a change set — it resolves to an empty matched set
+/// with an explicit warning, never a provenance heuristic.
+pub fn dry_run_with_diff_change_set(
+    query: &ViewQuery,
+    nodes: &[GraphNode],
+    edges: &[GraphEdge],
+    selected_node_id: Option<&str>,
+    call_graph_complete: Option<bool>,
+    diff_changes: Option<&InjectedDiffChangeSet>,
+) -> DryRunResult {
     let mut warnings = Vec::new();
 
     // Validate ViewQuery fields (depth bounds, dim_unmatched range)
@@ -1878,6 +1964,7 @@ pub fn dry_run_with_call_graph(
         selected_node_id,
         &adjacency_outgoing,
         &adjacency_incoming,
+        diff_changes,
     );
     let result_set = scope_result.matched;
     let node_depths = scope_result.depths;
@@ -2312,6 +2399,7 @@ pub fn dry_run_with_call_graph(
     DryRunResult {
         matched_nodes: result_set.len(),
         matched_node_names,
+        matched_node_ids: result_set.into_iter().collect(),
         groups_resolved,
         callouts_resolved,
         callouts_unresolved,
@@ -4678,32 +4766,116 @@ mod tests {
     }
 
     #[test]
-    fn test_scope_diff_sha_prefix_matching() {
+    fn test_scope_diff_sha_injected_change_set_matches_by_qualified_name() {
+        // SHA/ref-based diff: the matched set comes from the server-computed
+        // change set (shared two-commit graph-diff core), mapped to current
+        // active node ids via qualified_name. The old boundary-SHA prefix
+        // predicate over created_sha/last_modified_sha is gone: a node whose
+        // provenance SHAs match NEITHER boundary is still matched when the
+        // per-commit extraction says its content differs — exactly the
+        // mid-range-commit case the heuristic silently missed.
+        let mut n1 = make_node("n1", "MidRange", NodeType::Type);
+        n1.last_modified_sha = "bbbbbbbbbbbbbbbb".to_string(); // intermediate commit
+        n1.created_sha = "1111111111111111".to_string();
+        let mut n2 = make_node("n2", "Untouched", NodeType::Type);
+        n2.last_modified_sha = "2222222222222222".to_string();
+        n2.created_sha = "1111111111111111".to_string();
+        let nodes = vec![n1, n2];
+        let edges = vec![];
+        let scope = Scope::Diff {
+            from_commit: "1111111".to_string(),
+            to_commit: "3333333".to_string(),
+        };
+        let cs = InjectedDiffChangeSet {
+            added: vec![],
+            removed: vec![],
+            modified: vec!["pkg.MidRange".to_string()],
+            warnings: vec![],
+        };
+        let result = resolve_scope_with_diff_change_set(&scope, &nodes, &edges, None, Some(&cs));
+        assert!(
+            result.matched.contains("n1"),
+            "node changed by an intermediate commit must be matched"
+        );
+        assert!(
+            !result.matched.contains("n2"),
+            "untouched node must not be matched"
+        );
+        assert!(
+            result.warnings.iter().all(|w| !w.contains("approximate")),
+            "the old approximation warning is gone"
+        );
+    }
+
+    #[test]
+    fn test_scope_diff_sha_without_change_set_warns_and_matches_nothing() {
+        // No injected change set (caller not wired / git state unavailable):
+        // explicit warning + empty matched set — never a snapshot-provenance
+        // fallback.
         let mut n1 = make_node("n1", "Changed", NodeType::Type);
         n1.last_modified_sha = "abcdef1234567890".to_string();
-        n1.created_sha = "1111111111111111".to_string(); // different from from_commit
+        n1.created_sha = "1111111111111111".to_string();
         let nodes = vec![n1];
         let edges = vec![];
-        // 6-char SHA prefix should NOT match (minimum 7 required)
-        let scope_short = Scope::Diff {
-            from_commit: "0000000".to_string(),
-            to_commit: "abcdef".to_string(),
-        };
-        let result_short = resolve_scope(&scope_short, &nodes, &edges, None);
-        assert!(
-            !result_short.contains("n1"),
-            "6-char SHA prefix should not match (minimum 7 chars required)"
-        );
-        // 7-char SHA prefix should match via prefix
         let scope = Scope::Diff {
             from_commit: "0000000".to_string(),
             to_commit: "abcdef1".to_string(),
         };
-        let result = resolve_scope(&scope, &nodes, &edges, None);
+        let result = resolve_scope_with_depths(&scope, &nodes, &edges, None);
         assert!(
-            result.contains("n1"),
-            "7-char SHA prefix should match last_modified_sha"
+            result.matched.is_empty(),
+            "without an injected change set the matched set must be empty"
         );
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| w.contains("without a server-computed commit-range change set")),
+            "must warn explicitly instead of guessing"
+        );
+    }
+
+    #[test]
+    fn test_scope_diff_removed_nodes_surfaced_as_warning() {
+        // Removed nodes cannot be rendered: they are named in warnings, not
+        // silently dropped, and never matched.
+        let nodes = vec![make_node("n1", "Kept", NodeType::Type)];
+        let edges = vec![];
+        let scope = Scope::Diff {
+            from_commit: "1111111".to_string(),
+            to_commit: "2222222".to_string(),
+        };
+        let cs = InjectedDiffChangeSet {
+            added: vec!["pkg.Kept".to_string()],
+            removed: vec!["pkg.Gone".to_string()],
+            modified: vec![],
+            warnings: vec![],
+        };
+        let result = resolve_scope_with_diff_change_set(&scope, &nodes, &edges, None, Some(&cs));
+        assert!(result.matched.contains("n1"));
+        assert!(
+            result.warnings.iter().any(|w| w.contains("pkg.Gone")),
+            "removed node must be named in warnings"
+        );
+    }
+
+    #[test]
+    fn test_scope_diff_unresolvable_ref_warning_passes_through() {
+        // The server resolves refs; an unresolvable ref arrives as an empty
+        // change set plus a warning (never a fabricated default).
+        let nodes = vec![make_node("n1", "Foo", NodeType::Type)];
+        let edges = vec![];
+        let scope = Scope::Diff {
+            from_commit: "no-such-branch".to_string(),
+            to_commit: "2222222".to_string(),
+        };
+        let cs = InjectedDiffChangeSet {
+            warnings: vec!["Diff from_commit 'no-such-branch' could not be resolved".to_string()],
+            ..Default::default()
+        };
+        let result = resolve_scope_with_diff_change_set(&scope, &nodes, &edges, None, Some(&cs));
+        assert!(result.matched.is_empty());
+        assert!(result.warnings.iter().any(|w| w.contains("no-such-branch")));
     }
 
     #[test]
@@ -5112,51 +5284,88 @@ mod tests {
     }
 
     #[test]
-    fn test_diff_scope_sha_requires_min_7_chars() {
+    fn test_diff_scope_sha_resolved_server_side() {
+        // SHA/ref-based diff scopes are resolved against the repository's
+        // real git by the server (shared two-commit graph-diff core): the
+        // >=7-hex prefix rule and ref resolution live there, and the domain
+        // receives the resulting change set. A change set that is empty
+        // (e.g. the boundary refs resolved to the same commit) matches
+        // nothing, without guessing from snapshot provenance fields.
         let mut node = make_node("n1", "A", NodeType::Function);
         node.last_modified_sha = "abcdef1234567890".to_string();
         node.created_sha = "1111111111111111".to_string();
         let nodes = vec![node];
         let edges: Vec<GraphEdge> = vec![];
-        // Short SHA "ab" (2 chars) should not match
-        let result = resolve_scope(
-            &Scope::Diff {
-                from_commit: "0000000".to_string(),
-                to_commit: "ab".to_string(),
+        let query = ViewQuery {
+            scope: Scope::Diff {
+                from_commit: "abcdef1".to_string(),
+                to_commit: "abcdef12".to_string(),
             },
-            &nodes,
-            &edges,
-            None,
-        );
+            emphasis: Default::default(),
+            edges: Default::default(),
+            zoom: Default::default(),
+            annotation: Default::default(),
+            groups: vec![],
+            callouts: vec![],
+            narrative: vec![],
+        };
+        // Empty injected change set (both refs resolved; nothing differs):
+        // matched set is exactly empty and no heuristic fires.
+        let cs = InjectedDiffChangeSet::default();
+        let result = dry_run_with_diff_change_set(&query, &nodes, &edges, None, None, Some(&cs));
+        assert_eq!(result.matched_nodes, 0);
         assert!(
-            !result.contains("n1"),
-            "2-char SHA should not match due to min 7-char requirement"
+            !result.warnings.iter().any(|w| w.contains("approximate")),
+            "no approximation warning may fire"
         );
-        // 6-char SHA prefix should NOT match (minimum 7 required)
-        let result2 = resolve_scope(
-            &Scope::Diff {
-                from_commit: "0000000".to_string(),
-                to_commit: "abcdef".to_string(),
+        // Matched ids are exposed for the renderer's server-driven diff
+        // highlighting.
+        assert!(result.matched_node_ids.is_empty());
+    }
+
+    #[test]
+    fn test_diff_scope_injected_set_drives_matched_ids_and_count() {
+        // Full dry-run: injected change set drives matched_node_ids (the
+        // renderer's id source) and the {{count}} annotation resolves to the
+        // matched-set size.
+        let n1 = make_node("n1", "f", NodeType::Function);
+        let n2 = make_node("n2", "g", NodeType::Function);
+        let nodes = vec![n1, n2];
+        let edges: Vec<GraphEdge> = vec![];
+        let query = ViewQuery {
+            scope: Scope::Diff {
+                from_commit: "1111111".to_string(),
+                to_commit: "2222222".to_string(),
             },
-            &nodes,
-            &edges,
-            None,
-        );
-        assert!(
-            !result2.contains("n1"),
-            "6-char SHA prefix should not match (minimum 7 chars required)"
-        );
-        // 7-char SHA prefix should match
-        let result3 = resolve_scope(
-            &Scope::Diff {
-                from_commit: "0000000".to_string(),
-                to_commit: "abcdef1".to_string(),
+            emphasis: Default::default(),
+            edges: Default::default(),
+            zoom: Default::default(),
+            annotation: gyre_common::view_query::ViewAnnotation {
+                title: Some("{{count}} changed".to_string()),
+                description: None,
             },
-            &nodes,
-            &edges,
-            None,
+            groups: vec![],
+            callouts: vec![],
+            narrative: vec![],
+        };
+        let cs = InjectedDiffChangeSet {
+            added: vec!["pkg.f".to_string()],
+            removed: vec![],
+            modified: vec!["pkg.g".to_string()],
+            warnings: vec![],
+        };
+        let result = dry_run_with_diff_change_set(&query, &nodes, &edges, None, None, Some(&cs));
+        assert_eq!(result.matched_nodes, 2);
+        let mut ids = result.matched_node_ids.clone();
+        ids.sort();
+        assert_eq!(ids, vec!["n1".to_string(), "n2".to_string()]);
+        assert_eq!(
+            result
+                .resolved_annotation
+                .as_ref()
+                .and_then(|a| a.title.clone()),
+            Some("2 changed".to_string())
         );
-        assert!(result3.contains("n1"), "7-char SHA prefix should match");
     }
 
     // ── Filter scope: computed + node_types combined ─────────────────────

@@ -19,7 +19,7 @@ use axum::{
     Json,
 };
 use gyre_common::Id;
-use gyre_domain::User;
+use gyre_domain::{ScimGroup, ScimGroupMember, ScimWorkspaceMapping, User};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -429,6 +429,12 @@ pub async fn scim_list_users(
 
 /// POST /scim/v2/Users — create user.
 ///
+/// The body is read as raw bytes and parsed AFTER `check_scim_auth`:
+/// an axum `Json` extractor rejects a body-less or content-type-less
+/// request with 415 before the handler runs, which would leak the
+/// auth-enforcement ordering (an unauthenticated request must get 403,
+/// never a body-shape error) — same shape as the PATCH handlers.
+///
 /// The username handle is derived from the SCIM `userName` exactly as the
 /// SSO first-login path derives it from `preferred_username`
 /// (auth.rs `find_or_create_user`): sanitized to the URL-safe handle
@@ -441,9 +447,12 @@ pub async fn scim_list_users(
 pub async fn scim_create_user(
     headers: HeaderMap,
     State(state): State<Arc<AppState>>,
-    Json(req): Json<ScimUserRequest>,
+    body: axum::body::Bytes,
 ) -> Result<(StatusCode, Json<ScimUser>), ApiError> {
     check_scim_auth(&headers)?;
+
+    let req: ScimUserRequest = serde_json::from_slice(&body)
+        .map_err(|e| ApiError::InvalidInput(format!("invalid JSON: {e}")))?;
 
     let now = now_secs();
     let ext_id = req.external_id.clone().unwrap_or_default();
@@ -535,9 +544,14 @@ pub async fn scim_update_user(
     headers: HeaderMap,
     Path(id): Path<String>,
     State(state): State<Arc<AppState>>,
-    Json(req): Json<ScimUserRequest>,
+    body: axum::body::Bytes,
 ) -> Result<Json<ScimUser>, ApiError> {
     check_scim_auth(&headers)?;
+
+    // Parsed after auth (see scim_create_user): an unauthenticated
+    // request must get 403, never a body-shape 415.
+    let req: ScimUserRequest = serde_json::from_slice(&body)
+        .map_err(|e| ApiError::InvalidInput(format!("invalid JSON: {e}")))?;
 
     let mut user = state
         .users
@@ -847,6 +861,791 @@ pub async fn scim_delete_user(
     Ok(StatusCode::NO_CONTENT)
 }
 
+// ── SCIM Groups (RFC 7643 §4.2 / RFC 7644, task-266) ─────────────────────
+
+/// One SCIM Group member reference: `value` holds the Gyre user id (or a
+/// resolvable handle — see `resolve_member_user`), `display` the user's
+/// display name.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScimGroupMemberRef {
+    pub value: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display: Option<String>,
+}
+
+/// SCIM Group resource (RFC 7643 §4.2).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScimGroupResource {
+    pub schemas: Vec<String>,
+    pub id: String,
+    pub external_id: Option<String>,
+    pub display_name: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub members: Vec<ScimGroupMemberRef>,
+    pub meta: ScimMeta,
+}
+
+/// Request body for POST /scim/v2/Groups and PUT /scim/v2/Groups/{id}.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScimGroupRequest {
+    pub display_name: Option<String>,
+    pub external_id: Option<String>,
+    #[serde(default)]
+    pub members: Vec<ScimGroupMemberRef>,
+}
+
+/// Serialize a stored group + its members as a SCIM Group resource.
+/// Each member's `display` is the IdP-pushed value persisted on the
+/// membership row (migration 000069) when the push carried one — the
+/// group read must round-trip exactly what the IdP pushed; when it did
+/// not, the member user's display name is the best-effort fallback (an
+/// unresolvable member is still listed with its raw `value`).
+async fn group_to_scim(
+    state: &Arc<AppState>,
+    group: &ScimGroup,
+) -> Result<ScimGroupResource, ApiError> {
+    let stored_members = state.scim_groups.list_members(&group.id).await?;
+    let mut members = Vec::with_capacity(stored_members.len());
+    for m in &stored_members {
+        let display = match &m.display {
+            Some(d) => Some(d.clone()),
+            None => state
+                .users
+                .find_by_id(&m.user_id)
+                .await?
+                .map(|u| u.display_name),
+        };
+        members.push(ScimGroupMemberRef {
+            value: m.user_id.to_string(),
+            display,
+        });
+    }
+    Ok(ScimGroupResource {
+        schemas: vec!["urn:ietf:params:scim:schemas:core:2.0:Group".to_string()],
+        id: group.id.to_string(),
+        external_id: if group.external_id.is_empty() {
+            None
+        } else {
+            Some(group.external_id.clone())
+        },
+        display_name: group.display_name.clone(),
+        members,
+        meta: ScimMeta {
+            resource_type: "Group".to_string(),
+            location: format!("/scim/v2/Groups/{}", group.id),
+            created: Some(epoch_to_iso(group.created_at)),
+            last_modified: Some(epoch_to_iso(group.updated_at)),
+        },
+    })
+}
+
+/// Resolve a SCIM member reference `value` to a Gyre user. IdPs echo back
+/// the id Gyre returned at user-provision time, but some push their own
+/// identifier instead — so the resolution chain is: the Gyre user id,
+/// then the user's externalId (the IdP's own user identifier), then the
+/// username handle. `None` (unresolvable) is skipped with a warning, not
+/// an error: a group push referencing a user Gyre has never provisioned
+/// must not fail the whole membership push, and it must not create any
+/// membership either (fail-closed in the no-effect direction).
+async fn resolve_member_user(
+    state: &Arc<AppState>,
+    value: &str,
+) -> Result<Option<gyre_domain::User>, ApiError> {
+    if value.is_empty() {
+        return Ok(None);
+    }
+    let by_id = state.users.find_by_id(&Id::new(value)).await?;
+    if by_id.is_some() {
+        return Ok(by_id);
+    }
+    let by_ext = state.users.find_by_external_id(value).await?;
+    if by_ext.is_some() {
+        return Ok(by_ext);
+    }
+    Ok(state.users.find_by_username(value).await?)
+}
+
+/// Every workspace mapping that governs this group: the union of the
+/// mappings whose `idp_group` key matches the group's externalId or
+/// displayName (`ScimGroup::mapping_keys`), deduplicated per workspace.
+async fn mappings_for_group(
+    state: &Arc<AppState>,
+    group: &ScimGroup,
+) -> Result<Vec<ScimWorkspaceMapping>, ApiError> {
+    let mut seen = std::collections::HashSet::new();
+    let mut all = Vec::new();
+    for key in group.mapping_keys() {
+        for mapping in state.scim_mappings.list_by_idp_group(&key).await? {
+            if seen.insert(mapping.workspace_id.to_string()) {
+                all.push(mapping);
+            }
+        }
+    }
+    Ok(all)
+}
+
+/// Record a mapping-driven membership lifecycle audit event. The SCIM
+/// provisioning token is a server-to-server credential with no agent/user
+/// identity, so — like the SCIM deactivation path — the event records the
+/// SCIM source in its detail instead of an actor id.
+async fn audit_membership_effect(
+    state: &Arc<AppState>,
+    event: &str,
+    user_id: &Id,
+    workspace_id: &Id,
+    role: gyre_domain::WorkspaceRole,
+    group: &ScimGroup,
+) {
+    use gyre_domain::audit::{AuditEvent, AuditEventType, AuditOutcome};
+    let now = now_secs();
+    let event = AuditEvent::new(
+        Id::new(uuid::Uuid::new_v4().to_string()),
+        AuditEventType::Custom(event.to_string()),
+        None,
+        Some(user_id.clone()),
+        None,
+        Some(workspace_id.clone()),
+        None,
+        "workspace_membership".to_string(),
+        Some(format!("{user_id}@{workspace_id}")),
+        AuditOutcome::Success,
+        serde_json::json!({
+            "user_id": user_id.to_string(),
+            "workspace_id": workspace_id.to_string(),
+            "role": role.as_str(),
+            "source": "scim",
+            "group_id": group.id.to_string(),
+            "group_display_name": group.display_name,
+            "group_external_id": group.external_id,
+        }),
+        None,
+        None,
+        now,
+    );
+    if let Err(e) = state.audit.record(&event).await {
+        tracing::warn!(
+            user_id = %user_id,
+            workspace_id = %workspace_id,
+            "SCIM membership-effect audit event recording failed: {e}"
+        );
+    }
+}
+
+/// Apply the mapping effect of a user being ADDED to a group
+/// (identity-security.md §Group-to-Workspace Mapping): for every
+/// workspace that maps this group to a role, ensure the user holds an
+/// accepted `WorkspaceMembership` with that role.
+///
+/// - Idempotent: a user who already holds a membership in the workspace
+///   (pending or accepted, any role) is left untouched — re-pushing the
+///   same group membership never duplicates or rewrites records. Only a
+///   missing membership is created.
+/// - Containment: cross-tenant sharing is not supported
+///   (user-management.md §Workspace Membership), so a user outside the
+///   workspace's tenant gets NO membership — the push is skipped with a
+///   warning (never a fabricated scope).
+/// - Unmapped groups have no effect: `mappings_for_group` is empty.
+async fn apply_member_added(
+    state: &Arc<AppState>,
+    group: &ScimGroup,
+    user: &gyre_domain::User,
+) -> Result<(), ApiError> {
+    for mapping in mappings_for_group(state, group).await? {
+        let Some(ws) = state.workspaces.find_by_id(&mapping.workspace_id).await? else {
+            tracing::warn!(
+                workspace_id = %mapping.workspace_id,
+                group_id = %group.id,
+                "SCIM mapping targets a workspace that no longer exists; skipping"
+            );
+            continue;
+        };
+        if user.tenant_id.as_ref() != Some(&ws.tenant_id) {
+            tracing::warn!(
+                user_id = %user.id,
+                workspace_id = %ws.id,
+                "skipping SCIM group-membership effect: user is not in the workspace's tenant"
+            );
+            continue;
+        }
+        let existing = state
+            .workspace_memberships
+            .find_by_user_and_workspace(&user.id, &mapping.workspace_id)
+            .await?;
+        match existing {
+            Some(_) => continue, // idempotent — never duplicate or rewrite
+            None => {
+                let now = now_secs();
+                let mut membership = gyre_domain::WorkspaceMembership::new(
+                    new_id(),
+                    user.id.clone(),
+                    mapping.workspace_id.clone(),
+                    mapping.workspace_role,
+                    Id::new("system"),
+                    now,
+                );
+                // The IdP asserts the membership directly — there is no
+                // invitation to accept; the record is active on creation
+                // (same semantics as the pre-assigned-workspace accept
+                // path in api/invitations.rs).
+                membership.accept(now);
+                state.workspace_memberships.create(&membership).await?;
+                audit_membership_effect(
+                    state,
+                    "workspace_membership_created",
+                    &user.id,
+                    &mapping.workspace_id,
+                    mapping.workspace_role,
+                    group,
+                )
+                .await;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Apply the mapping effect of a user being REMOVED from a group: for
+/// every workspace that maps this group to a role, revoke the user's
+/// membership — but only the membership this mapping governs. A
+/// membership holding a DIFFERENT role (admin-granted, or created by
+/// another group's mapping) is left in place: removal from one mapped
+/// group must not destroy an unrelated grant.
+async fn apply_member_removed(
+    state: &Arc<AppState>,
+    group: &ScimGroup,
+    user: &gyre_domain::User,
+) -> Result<(), ApiError> {
+    for mapping in mappings_for_group(state, group).await? {
+        let Some(m) = state
+            .workspace_memberships
+            .find_by_user_and_workspace(&user.id, &mapping.workspace_id)
+            .await?
+        else {
+            continue;
+        };
+        if m.role != mapping.workspace_role {
+            tracing::info!(
+                user_id = %user.id,
+                workspace_id = %mapping.workspace_id,
+                membership_role = m.role.as_str(),
+                mapped_role = mapping.workspace_role.as_str(),
+                "SCIM group removal leaves a membership holding a different role"
+            );
+            continue;
+        }
+        state.workspace_memberships.delete(&m.id).await?;
+        audit_membership_effect(
+            state,
+            "workspace_membership_revoked",
+            &user.id,
+            &mapping.workspace_id,
+            mapping.workspace_role,
+            group,
+        )
+        .await;
+    }
+    Ok(())
+}
+
+/// Extract the member id from a RFC 7644 path filter
+/// (`members[value eq "<id>"]`); `None` when the path carries no filter.
+fn member_filter_value(path: &str) -> Option<String> {
+    let start = path.find('[')?;
+    let end = path.rfind(']')?;
+    let inner = &path[start + 1..end];
+    let value = inner.strip_prefix("value eq ")?;
+    let value = value.trim();
+    value
+        .strip_prefix('"')
+        .and_then(|v| v.strip_suffix('"'))
+        .map(str::to_string)
+}
+
+/// The member targets of a PATCH operation on `members`: the path
+/// filter's id (`members[value eq "x"]`), else the op's value list.
+fn member_targets(path: &Option<String>, value: &serde_json::Value) -> Vec<ScimGroupMemberRef> {
+    if let Some(f) = path.as_deref().and_then(member_filter_value) {
+        return vec![ScimGroupMemberRef {
+            value: f,
+            display: None,
+        }];
+    }
+    patch_member_refs(value)
+}
+
+/// Extract member references from a PATCH operation `value`: an array of
+/// member objects (or bare id strings), a single member object, or a
+/// single bare id string.
+fn patch_member_refs(value: &serde_json::Value) -> Vec<ScimGroupMemberRef> {
+    match value {
+        serde_json::Value::Array(items) => items.iter().flat_map(patch_member_refs).collect(),
+        serde_json::Value::Object(o) => {
+            if let Some(v) = o.get("value").and_then(|v| v.as_str()) {
+                vec![ScimGroupMemberRef {
+                    value: v.to_string(),
+                    display: o
+                        .get("display")
+                        .and_then(|d| d.as_str())
+                        .map(str::to_string),
+                }]
+            } else {
+                Vec::new()
+            }
+        }
+        serde_json::Value::String(s) => vec![ScimGroupMemberRef {
+            value: s.clone(),
+            display: None,
+        }],
+        _ => Vec::new(),
+    }
+}
+
+/// GET /scim/v2/Groups — list groups (RFC 7644 §3.4.2: startIndex/count
+/// pagination, `displayName eq "..."` / `externalId eq "..."` filter).
+pub async fn scim_list_groups(
+    headers: HeaderMap,
+    Query(params): Query<ScimListQuery>,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    check_scim_auth(&headers)?;
+
+    let groups = state.scim_groups.list().await?;
+    let start_index = params.start_index.unwrap_or(1);
+    let count = params.count.unwrap_or(usize::MAX);
+
+    let filtered: Vec<ScimGroup> = if let Some(filter) = &params.filter {
+        if let Some(name) = filter
+            .strip_prefix("displayName eq \"")
+            .and_then(|s| s.strip_suffix('"'))
+        {
+            groups
+                .into_iter()
+                .filter(|g| g.display_name == name)
+                .collect()
+        } else if let Some(ext) = filter
+            .strip_prefix("externalId eq \"")
+            .and_then(|s| s.strip_suffix('"'))
+        {
+            groups
+                .into_iter()
+                .filter(|g| g.external_id == ext)
+                .collect()
+        } else {
+            groups
+        }
+    } else {
+        groups
+    };
+
+    let offset = start_index.saturating_sub(1) as usize;
+    let mut page = Vec::new();
+    for g in filtered.iter().skip(offset).take(count) {
+        page.push(group_to_scim(&state, g).await?);
+    }
+    let total = filtered.len();
+
+    let resp = serde_json::json!({
+        "schemas": ["urn:ietf:params:scim:api:messages:2.0:ListResponse"],
+        "totalResults": total,
+        "startIndex": start_index,
+        "itemsPerPage": page.len(),
+        "Resources": page,
+    });
+    Ok(Json(resp))
+}
+
+/// Load a group by id or 404 (RFC 7644 §3.4.1 unknown resource).
+async fn load_group(state: &Arc<AppState>, id: &str) -> Result<ScimGroup, ApiError> {
+    state
+        .scim_groups
+        .find_by_id(&Id::new(id))
+        .await?
+        .ok_or_else(|| ApiError::NotFound(format!("group {id} not found")))
+}
+
+/// GET /scim/v2/Groups/{id}.
+pub async fn scim_get_group(
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ScimGroupResource>, ApiError> {
+    check_scim_auth(&headers)?;
+    let group = load_group(&state, &id).await?;
+    Ok(Json(group_to_scim(&state, &group).await?))
+}
+
+/// POST /scim/v2/Groups — create a group, applying the mapping effect for
+/// every pushed member.
+///
+/// Idempotent on externalId: re-pushing a group that already exists
+/// returns the stored resource with 200 (the IdP sync-loop contract,
+/// same as the Users surface) instead of a 409.
+pub async fn scim_create_group(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    body: axum::body::Bytes,
+) -> Result<(StatusCode, Json<ScimGroupResource>), ApiError> {
+    check_scim_auth(&headers)?;
+
+    // Parsed after auth (see scim_patch_group): an unauthenticated
+    // request must get 403, never the Json extractor's 415 on a
+    // body-less/content-type-less request.
+    let req: ScimGroupRequest = serde_json::from_slice(&body)
+        .map_err(|e| ApiError::InvalidInput(format!("invalid JSON: {e}")))?;
+
+    let now = now_secs();
+    let ext_id = req.external_id.clone().unwrap_or_default();
+
+    if !ext_id.is_empty() {
+        if let Some(existing) = state.scim_groups.find_by_external_id(&ext_id).await? {
+            return Ok((
+                StatusCode::OK,
+                Json(group_to_scim(&state, &existing).await?),
+            ));
+        }
+    }
+
+    let display_name = req
+        .display_name
+        .clone()
+        .filter(|n| !n.trim().is_empty())
+        .ok_or_else(|| {
+            ApiError::InvalidInput("displayName is required for SCIM groups".to_string())
+        })?;
+
+    let group = ScimGroup::new(new_id(), ext_id, display_name, now);
+    state.scim_groups.create(&group).await?;
+
+    for member in &req.members {
+        add_member_with_effect(&state, &group, member).await?;
+    }
+
+    let created = load_group(&state, group.id.as_str()).await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(group_to_scim(&state, &created).await?),
+    ))
+}
+
+/// Add one member reference to a group and run the mapping effect.
+/// Unresolvable member values are skipped with a warning — the push
+/// succeeds for the resolvable members, and nothing is fabricated for
+/// the rest.
+async fn add_member_with_effect(
+    state: &Arc<AppState>,
+    group: &ScimGroup,
+    member: &ScimGroupMemberRef,
+) -> Result<(), ApiError> {
+    let Some(user) = resolve_member_user(state, &member.value).await? else {
+        tracing::warn!(
+            group_id = %group.id,
+            member_value = %member.value,
+            "SCIM group push references an unresolvable user; skipping member"
+        );
+        return Ok(());
+    };
+    state
+        .scim_groups
+        .add_member(&ScimGroupMember {
+            group_id: group.id.clone(),
+            user_id: user.id.clone(),
+            added_at: now_secs(),
+            display: member.display.clone(),
+        })
+        .await?;
+    apply_member_added(state, group, &user).await
+}
+
+/// Remove one member (by Gyre user id) from a group and run the mapping
+/// effect.
+async fn remove_member_with_effect(
+    state: &Arc<AppState>,
+    group: &ScimGroup,
+    user_id: &Id,
+) -> Result<(), ApiError> {
+    let Some(user) = state.users.find_by_id(user_id).await? else {
+        // The user row is gone (e.g. hard administrative cleanup): the
+        // membership row is removed but there is no user left to revoke
+        // workspace access for.
+        state.scim_groups.remove_member(&group.id, user_id).await?;
+        return Ok(());
+    };
+    state.scim_groups.remove_member(&group.id, user_id).await?;
+    apply_member_removed(state, group, &user).await
+}
+
+/// PUT /scim/v2/Groups/{id} — replace the group's membership set (RFC
+/// 7644 §3.5.1: PUT replaces the resource). The membership diff drives
+/// the mapping effects: added members gain mapped workspace memberships,
+/// removed members lose them. `displayName` is replaced when present;
+/// `externalId` is the immutable mapping join key — a changed value is
+/// ignored (same contract as the Users surface).
+pub async fn scim_update_group(
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    State(state): State<Arc<AppState>>,
+    body: axum::body::Bytes,
+) -> Result<Json<ScimGroupResource>, ApiError> {
+    check_scim_auth(&headers)?;
+
+    // Parsed after auth (see scim_patch_group): an unauthenticated
+    // request must get 403, never the Json extractor's 415 on a
+    // body-less/content-type-less request.
+    let req: ScimGroupRequest = serde_json::from_slice(&body)
+        .map_err(|e| ApiError::InvalidInput(format!("invalid JSON: {e}")))?;
+
+    let mut group = load_group(&state, &id).await?;
+
+    if let Some(name) = req.display_name {
+        if name.trim().is_empty() {
+            return Err(ApiError::InvalidInput(
+                "displayName must not be empty".to_string(),
+            ));
+        }
+        group.display_name = name;
+    }
+    group.updated_at = now_secs();
+    state.scim_groups.update(&group).await?;
+
+    // Membership diff (PUT = replace the set exactly): each side effect
+    // runs through the real mapping logic.
+    set_members_exact(&state, &group, &req.members).await?;
+
+    let updated = load_group(&state, &id).await?;
+    Ok(Json(group_to_scim(&state, &updated).await?))
+}
+
+/// Set a group's membership to exactly `refs` (PUT / PATCH-replace
+/// semantics): resolve the pushed member set to user ids, add the missing
+/// (with the mapping effect), remove the absent (with the mapping
+/// effect). Unresolvable member values are skipped with a warning — the
+/// rest of the set still applies.
+async fn set_members_exact(
+    state: &Arc<AppState>,
+    group: &ScimGroup,
+    refs: &[ScimGroupMemberRef],
+) -> Result<(), ApiError> {
+    let current = state.scim_groups.list_members(&group.id).await?;
+    let current_ids: std::collections::HashSet<Id> =
+        current.iter().map(|m| m.user_id.clone()).collect();
+
+    let mut pushed: Vec<(Id, Option<String>)> = Vec::new();
+    for member in refs {
+        match resolve_member_user(state, &member.value).await? {
+            Some(user) => pushed.push((user.id.clone(), member.display.clone())),
+            None => tracing::warn!(
+                group_id = %group.id,
+                member_value = %member.value,
+                "SCIM group push references an unresolvable user; skipping member"
+            ),
+        }
+    }
+    let pushed_set: std::collections::HashSet<Id> =
+        pushed.iter().map(|(id, _)| id.clone()).collect();
+
+    for (user_id, display) in &pushed {
+        if !current_ids.contains(user_id) {
+            let user = state
+                .users
+                .find_by_id(user_id)
+                .await?
+                .ok_or_else(|| ApiError::NotFound(format!("user {user_id} not found")))?;
+            state
+                .scim_groups
+                .add_member(&ScimGroupMember {
+                    group_id: group.id.clone(),
+                    user_id: user_id.clone(),
+                    added_at: now_secs(),
+                    display: display.clone(),
+                })
+                .await?;
+            apply_member_added(state, group, &user).await?;
+        }
+    }
+    for m in &current {
+        if !pushed_set.contains(&m.user_id) {
+            remove_member_with_effect(state, group, &m.user_id).await?;
+        }
+    }
+    Ok(())
+}
+
+/// Apply one PATCH operation targeting the `members` attribute with the
+/// resolved member references `refs`: `add` adds each, `remove` removes
+/// each (or every member when `refs` is empty — RFC 7644 §3.5.2.2 remove
+/// on the whole multi-valued attribute), `replace` sets the membership
+/// exactly.
+async fn apply_members_op(
+    state: &Arc<AppState>,
+    group: &ScimGroup,
+    kind: &str,
+    refs: Vec<ScimGroupMemberRef>,
+) -> Result<(), ApiError> {
+    if kind == "add" {
+        for member in &refs {
+            add_member_with_effect(state, group, member).await?;
+        }
+    } else if kind == "remove" {
+        if refs.is_empty() {
+            for m in state.scim_groups.list_members(&group.id).await? {
+                remove_member_with_effect(state, group, &m.user_id).await?;
+            }
+        } else {
+            for member in &refs {
+                if let Some(user) = resolve_member_user(state, &member.value).await? {
+                    remove_member_with_effect(state, group, &user.id).await?;
+                }
+            }
+        }
+    } else {
+        // replace: set the membership exactly (same diff as PUT).
+        set_members_exact(state, group, &refs).await?;
+    }
+    Ok(())
+}
+
+/// PATCH /scim/v2/Groups/{id} — partial update (RFC 7644 §3.5.2):
+/// `add`/`replace` members (replace = set the membership exactly),
+/// `remove` members (path filter `members[value eq "<id>"]`, a value
+/// list, or the whole attribute), and `replace displayName`. Same
+/// lenient body handling as the Users PATCH: a body without an
+/// `Operations` member is treated as one path-less replace.
+pub async fn scim_patch_group(
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    State(state): State<Arc<AppState>>,
+    body: axum::body::Bytes,
+) -> Result<Json<ScimGroupResource>, ApiError> {
+    check_scim_auth(&headers)?;
+
+    let group = load_group(&state, &id).await?;
+
+    let raw: serde_json::Value = serde_json::from_slice(&body)
+        .map_err(|e| ApiError::InvalidInput(format!("invalid JSON: {e}")))?;
+    let ops: Vec<ScimPatchOp> = if raw.get("Operations").is_some() {
+        serde_json::from_value::<ScimPatchRequest>(raw)
+            .map_err(|e| ApiError::InvalidInput(format!("invalid PatchOp request: {e}")))?
+            .operations
+    } else {
+        vec![ScimPatchOp {
+            op: Some("replace".to_string()),
+            path: None,
+            value: Some(raw),
+        }]
+    };
+
+    for op in ops {
+        let kind = op.op.as_deref().unwrap_or("replace").to_ascii_lowercase();
+        let kind = kind.as_str();
+        if !matches!(kind, "add" | "replace" | "remove") {
+            return Err(ApiError::InvalidInput(format!(
+                "unsupported PATCH op: {kind}"
+            )));
+        }
+        let path = op
+            .path
+            .as_deref()
+            .map(|p| p.split('[').next().unwrap_or(p).to_string());
+        let value = op.value.unwrap_or(serde_json::Value::Null);
+
+        match path.as_deref() {
+            Some("displayName") => {
+                let name = value.as_str().ok_or_else(|| {
+                    ApiError::InvalidInput("displayName requires a string value".to_string())
+                })?;
+                if name.trim().is_empty() {
+                    return Err(ApiError::InvalidInput(
+                        "displayName must not be empty".to_string(),
+                    ));
+                }
+                let mut g = load_group(&state, &id).await?;
+                g.display_name = name.to_string();
+                g.updated_at = now_secs();
+                state.scim_groups.update(&g).await?;
+            }
+            Some("externalId") | Some("id") | Some("schemas") => {
+                // Immutable identity attributes: ignored (same rationale
+                // as the Users surface — a 409 would break IdP sync
+                // loops).
+            }
+            Some("members") => {
+                // The member targets: the path filter's id
+                // (`members[value eq "x"]`), else the op's value list.
+                let refs = member_targets(&op.path, &value);
+                apply_members_op(&state, &group, kind, refs).await?;
+            }
+            None => {
+                // Path-less operation: apply every recognized attribute in
+                // the value object (the simplified bare-body form some
+                // provisioning integrations send).
+                let obj = value.as_object().ok_or_else(|| {
+                    ApiError::InvalidInput(
+                        "path-less PATCH operation requires an object value".to_string(),
+                    )
+                })?;
+                for (key, val) in obj {
+                    match key.as_str() {
+                        "displayName" => {
+                            let name = val.as_str().ok_or_else(|| {
+                                ApiError::InvalidInput(
+                                    "displayName requires a string value".to_string(),
+                                )
+                            })?;
+                            if name.trim().is_empty() {
+                                return Err(ApiError::InvalidInput(
+                                    "displayName must not be empty".to_string(),
+                                ));
+                            }
+                            let mut g = load_group(&state, &id).await?;
+                            g.display_name = name.to_string();
+                            g.updated_at = now_secs();
+                            state.scim_groups.update(&g).await?;
+                        }
+                        "members" => {
+                            let refs = patch_member_refs(val);
+                            apply_members_op(&state, &group, kind, refs).await?;
+                        }
+                        _ => {
+                            // Unknown attributes are ignored per RFC 7644
+                            // §3.5.2 leniency.
+                        }
+                    }
+                }
+            }
+            Some(other) => {
+                // Unknown path: ignore (RFC 7644 leniency) — IdPs
+                // routinely send attributes outside the implemented
+                // subset.
+                let _ = other;
+            }
+        }
+    }
+
+    let updated = load_group(&state, &id).await?;
+    Ok(Json(group_to_scim(&state, &updated).await?))
+}
+
+/// DELETE /scim/v2/Groups/{id} — delete the group. Every current member
+/// is removed first, so the mapping effects run for each (a deleted
+/// group grants nothing); then the group and its membership rows go.
+pub async fn scim_delete_group(
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    State(state): State<Arc<AppState>>,
+) -> Result<StatusCode, ApiError> {
+    check_scim_auth(&headers)?;
+
+    let group = load_group(&state, &id).await?;
+    for m in state.scim_groups.list_members(&group.id).await? {
+        remove_member_with_effect(&state, &group, &m.user_id).await?;
+    }
+    state.scim_groups.delete(&group.id).await?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
 /// GET /scim/v2/ServiceProviderConfig — SCIM capability document.
 pub async fn scim_service_provider_config(
     headers: HeaderMap,
@@ -880,7 +1679,7 @@ pub async fn scim_schemas(headers: HeaderMap) -> Result<Json<serde_json::Value>,
 
     Ok(Json(serde_json::json!({
         "schemas": ["urn:ietf:params:scim:api:messages:2.0:ListResponse"],
-        "totalResults": 2,
+        "totalResults": 3,
         "Resources": [{
             "id": "urn:ietf:params:scim:schemas:core:2.0:User",
             "name": "User",
@@ -902,6 +1701,16 @@ pub async fn scim_schemas(headers: HeaderMap) -> Result<Json<serde_json::Value>,
                 { "name": "manager", "type": "complex", "required": false,
                   "subAttributes": [ { "name": "value", "type": "string" } ] }
             ]
+        }, {
+            "id": "urn:ietf:params:scim:schemas:core:2.0:Group",
+            "name": "Group",
+            "description": "SCIM group (RFC 7643 §4.2) — membership drives workspace roles via the group-to-workspace mapping",
+            "attributes": [
+                { "name": "displayName", "type": "string", "required": true },
+                { "name": "members", "type": "complex", "multiValued": true,
+                  "subAttributes": [ { "name": "value", "type": "string" }, { "name": "display", "type": "string" } ] },
+                { "name": "externalId", "type": "string" }
+            ]
         }]
     })))
 }
@@ -912,7 +1721,7 @@ pub async fn scim_resource_types(headers: HeaderMap) -> Result<Json<serde_json::
 
     Ok(Json(serde_json::json!({
         "schemas": ["urn:ietf:params:scim:api:messages:2.0:ListResponse"],
-        "totalResults": 1,
+        "totalResults": 2,
         "Resources": [{
             "schemas": ["urn:ietf:params:scim:schemas:core:2.0:ResourceType"],
             "id": "User",
@@ -926,6 +1735,16 @@ pub async fn scim_resource_types(headers: HeaderMap) -> Result<Json<serde_json::
             "meta": {
                 "resourceType": "ResourceType",
                 "location": "/scim/v2/ResourceTypes/User"
+            }
+        }, {
+            "schemas": ["urn:ietf:params:scim:schemas:core:2.0:ResourceType"],
+            "id": "Group",
+            "name": "Group",
+            "endpoint": "/Groups",
+            "schema": "urn:ietf:params:scim:schemas:core:2.0:Group",
+            "meta": {
+                "resourceType": "ResourceType",
+                "location": "/scim/v2/ResourceTypes/Group"
             }
         }]
     })))
