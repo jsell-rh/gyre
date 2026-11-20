@@ -15,6 +15,21 @@ use tracing::{info, instrument, warn};
 use crate::auth::AuthenticatedAgent;
 use crate::{AppState, PresenceEntry};
 
+/// Serialize a bus Message for WebSocket delivery.
+///
+/// message-bus.md §Message Envelope (`acknowledged` field contract): the
+/// delivery-state field is excluded from send (POST) responses AND WebSocket
+/// pushes via conditional serialization — the field IS included in GET inbox
+/// responses (crash recovery). Same manual-removal pattern as `send_response`
+/// in api/messages.rs.
+fn ws_message_payload(msg: &gyre_common::message::Message) -> String {
+    let mut v = serde_json::to_value(msg).unwrap_or_default();
+    if let Some(obj) = v.as_object_mut() {
+        obj.remove("acknowledged");
+    }
+    v.to_string()
+}
+
 /// GET /ws - WebSocket upgrade endpoint.
 pub async fn ws_handler(
     ws: WebSocketUpgrade,
@@ -216,9 +231,13 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                                         pool.drain(REPLAY_LIMIT..);
                                     }
                                     // Deliver the selected window oldest-first.
+                                    // `acknowledged` is stripped here too: the
+                                    // field's contract excludes it from ALL
+                                    // WebSocket pushes (live and replay), while
+                                    // GET inbox responses keep it.
                                     pool.reverse();
                                     for m in pool {
-                                        let payload = serde_json::to_string(&m).unwrap();
+                                        let payload = ws_message_payload(&m);
                                         if sender.send(Message::Text(payload)).await.is_err() {
                                             return;
                                         }
@@ -498,7 +517,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                             }
                         };
                         if deliver {
-                            let payload = serde_json::to_string(&msg).unwrap();
+                            let payload = ws_message_payload(&msg);
                             if sender.send(Message::Text(payload)).await.is_err() {
                                 break;
                             }
@@ -1860,6 +1879,121 @@ mod tests {
                 assert_eq!(view, "disconnected");
             }
             other => panic!("expected UserPresence departure, got {other:?}"),
+        }
+    }
+
+    // ── `acknowledged` exclusion from WebSocket pushes (message-bus.md
+    // §Message Envelope: the field is excluded from send (POST) responses
+    // AND WebSocket pushes via conditional serialization — it IS included
+    // in GET inbox responses for crash recovery) ─────────────────────
+
+    /// Live bus-delivery arm: a Message pushed on the bus to a subscribed
+    /// agent session must NOT carry the `acknowledged` key in the JSON.
+    #[tokio::test]
+    async fn ws_live_delivery_strips_acknowledged() {
+        let (url, state) = start_test_server("tok").await;
+        seed_agent_ws_identity(&state, "agent-live-ack", "live-ack-token").await;
+
+        let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        auth_ws(&mut ws, "live-ack-token").await;
+
+        state
+            .emit_event(
+                gyre_common::Id::new("ws-live-agents"),
+                gyre_common::message::Destination::Agent(gyre_common::Id::new("agent-live-ack")),
+                gyre_common::message::MessageKind::TaskAssignment,
+                Some(serde_json::json!({"task_id": "TASK-ACK-1"})),
+            )
+            .await;
+
+        let msg = ws.next().await.unwrap().unwrap();
+        let tungstenite::Message::Text(text) = msg else {
+            panic!("expected text message");
+        };
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(v["kind"], "task_assignment");
+        assert_eq!(v["payload"]["task_id"], "TASK-ACK-1");
+        assert!(
+            v.get("acknowledged").is_none(),
+            "live WS delivery must exclude `acknowledged`, got: {v}"
+        );
+    }
+
+    /// Subscribe replay arm (review round-3 correction): connect, Subscribe
+    /// with last_seen=0 against a workspace with a persisted Event-tier
+    /// message, and assert the replayed JSON also lacks the `acknowledged`
+    /// key — BOTH WebSocket Message serialization sites strip it, not just
+    /// the live arm.
+    #[tokio::test]
+    async fn ws_subscribe_replay_strips_acknowledged() {
+        let (url, state) = start_test_server("tok").await;
+
+        // A persisted Event-tier message in a workspace the (Admin) global
+        // token is authorized to subscribe to.
+        let ws_id = gyre_common::Id::new("ws-replay-ack");
+        let workspace = gyre_domain::Workspace::new(
+            ws_id.clone(),
+            gyre_common::Id::new("default"),
+            "replay-ack",
+            "replay-ack",
+            now_secs(),
+        );
+        state.workspaces.create(&workspace).await.unwrap();
+        let msg = gyre_common::message::Message {
+            id: gyre_common::Id::new("msg-replay-ack"),
+            tenant_id: gyre_common::Id::new("default"),
+            from: gyre_common::message::MessageOrigin::Server,
+            workspace_id: Some(ws_id.clone()),
+            to: gyre_common::message::Destination::Workspace(ws_id.clone()),
+            kind: gyre_common::message::MessageKind::TaskCreated,
+            payload: Some(serde_json::json!({"task_id": "TASK-REPLAY-1"})),
+            created_at: 1_000,
+            signature: None,
+            key_id: None,
+            acknowledged: false,
+        };
+        state.messages.store(&msg).await.unwrap();
+
+        let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        auth_ws(&mut ws, "tok").await;
+
+        // Subscribe with last_seen=0 to force a full replay.
+        let sub = WsMessage::Subscribe {
+            scopes: vec![gyre_common::SubscribeScope {
+                workspace_id: gyre_common::Id::new("ws-replay-ack"),
+            }],
+            last_seen: Some(0),
+            session_id: None,
+        };
+        ws.send(tungstenite::Message::Text(
+            serde_json::to_string(&sub).unwrap(),
+        ))
+        .await
+        .unwrap();
+
+        // Read frames until the replayed message arrives (skipping any
+        // unrelated frames).
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            assert!(!remaining.is_zero(), "timed out waiting for replay");
+            let frame = tokio::time::timeout(remaining, ws.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            let tungstenite::Message::Text(text) = frame else {
+                continue;
+            };
+            let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+            if v["id"] == "msg-replay-ack" {
+                assert_eq!(v["kind"], "task_created");
+                assert!(
+                    v.get("acknowledged").is_none(),
+                    "replayed WS message must exclude `acknowledged`, got: {v}"
+                );
+                break;
+            }
         }
     }
 }

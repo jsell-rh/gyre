@@ -500,6 +500,7 @@ mod tests {
     #[test]
     fn attribution_extracts_task_and_spawner_from_claims() {
         let auth = crate::auth::AuthenticatedAgent {
+            auth_mechanism: crate::auth::AuthMechanism::AgentToken,
             agent_id: "agent-42".into(),
             user_id: None,
             roles: vec![],
@@ -525,6 +526,7 @@ mod tests {
     #[test]
     fn attribution_without_claims_uses_empty_not_fabricated() {
         let auth = crate::auth::AuthenticatedAgent {
+            auth_mechanism: crate::auth::AuthMechanism::GlobalToken,
             agent_id: "system".into(),
             user_id: None,
             roles: vec![],

@@ -5342,6 +5342,19 @@ impl Default for MemMessageRepository {
 #[async_trait]
 impl gyre_ports::MessageRepository for MemMessageRepository {
     async fn store(&self, message: &gyre_common::message::Message) -> Result<()> {
+        // Port contract (message-bus.md §Message Envelope), enforced in code
+        // by every adapter (SQLite/PostgreSQL `message_to_new_row` reject the
+        // same condition): store() returns Err on workspace_id: None — never
+        // panics, never silently inserts. Broadcast messages are never
+        // passed to store() by any send path (they are not persisted); a
+        // Broadcast (or any scopeless) message reaching this method is a
+        // contract violation and is rejected.
+        if message.workspace_id.is_none() {
+            return Err(anyhow::anyhow!(
+                "cannot store message without workspace scope (workspace_id is None; \
+                 Broadcast messages are never persisted)"
+            ));
+        }
         self.store
             .lock()
             .await
@@ -5522,6 +5535,64 @@ impl gyre_ports::MessageRepository for MemMessageRepository {
             !(is_target && m.created_at < older_than)
         });
         Ok((before - guard.len()) as u64)
+    }
+}
+
+#[cfg(test)]
+mod message_store_contract_tests {
+    use super::MemMessageRepository;
+    use gyre_common::message::{Destination, Message, MessageKind, MessageOrigin};
+    use gyre_common::Id;
+    use gyre_ports::MessageRepository as _;
+
+    /// Port contract (message-bus.md §Message Envelope), mirroring the
+    /// SQLite adapter's `store_broadcast_returns_error` test: store()
+    /// returns Err on workspace_id: None — never panics, never silently
+    /// inserts. Broadcast messages are never passed to store() by any send
+    /// path (both the REST and MCP handlers and the internal emitter skip
+    /// persistence for Broadcast); one reaching this method is a contract
+    /// violation.
+    #[tokio::test]
+    async fn mem_store_rejects_scopeless_message() {
+        let repo = MemMessageRepository::default();
+
+        let broadcast = Message {
+            id: Id::new("msg-broadcast"),
+            tenant_id: Id::new("tenant-1"),
+            from: MessageOrigin::Server,
+            workspace_id: None, // Broadcast — never persisted
+            to: Destination::Broadcast,
+            kind: MessageKind::DataSeeded,
+            payload: None,
+            created_at: 1_000,
+            signature: None,
+            key_id: None,
+            acknowledged: false,
+        };
+        assert!(repo.store(&broadcast).await.is_err());
+
+        // A malformed non-Broadcast message without a workspace scope is the
+        // same contract violation (the scopeless-message guard class).
+        let scopeless = Message {
+            id: Id::new("msg-scopeless"),
+            workspace_id: None,
+            to: Destination::Agent(Id::new("agent-1")),
+            kind: MessageKind::TaskAssignment,
+            ..broadcast.clone()
+        };
+        assert!(repo.store(&scopeless).await.is_err());
+        assert!(repo.find_by_id(&scopeless.id).await.unwrap().is_none());
+
+        // A properly scoped message stores fine (the guard must not
+        // over-block the happy path).
+        let scoped = Message {
+            id: Id::new("msg-scoped"),
+            workspace_id: Some(Id::new("ws-1")),
+            to: Destination::Agent(Id::new("agent-1")),
+            ..scopeless
+        };
+        assert!(repo.store(&scoped).await.is_ok());
+        assert!(repo.find_by_id(&scoped.id).await.unwrap().is_some());
     }
 }
 
@@ -5844,6 +5915,28 @@ struct TestStateOverrides {
     search: Option<Arc<dyn gyre_ports::SearchPort>>,
     secrets: Option<Arc<dyn gyre_ports::SecretRepository>>,
     kv: Option<Arc<dyn gyre_ports::KvJsonStore>>,
+    messages: Option<Arc<dyn gyre_ports::MessageRepository>>,
+}
+
+/// Build a test AppState whose message repository is replaced by `messages`
+/// (e.g. a counting wrapper asserting whether store() was called — the
+/// scopeless-message guard test needs to prove no message reaches the
+/// persistence port).
+#[cfg(test)]
+pub fn test_state_with_messages(
+    messages: Arc<dyn gyre_ports::MessageRepository>,
+) -> Arc<crate::AppState> {
+    let (workspaces, policies, ws_store) = shared_workspace_policy_pair_seeded();
+    test_state_inner(
+        Arc::new(NoopGitOps),
+        workspaces,
+        policies,
+        ws_store,
+        TestStateOverrides {
+            messages: Some(messages),
+            ..TestStateOverrides::default()
+        },
+    )
 }
 
 /// Shared builder for all in-memory test states. Callers supply the git ops
@@ -5885,6 +5978,7 @@ fn test_state_inner(
         search,
         secrets,
         kv,
+        messages,
     } = overrides;
     // Shared binding store: the meta-spec delete guard must see bindings
     // written through `meta_spec_bindings` (same wiring as lib.rs).
@@ -6091,7 +6185,7 @@ fn test_state_inner(
         agent_inbox_max: 1000,
         user_workspace_state: Arc::new(MemUserWorkspaceStateRepository::default()),
         rollout_policies: Arc::new(MemRolloutPolicyRepository::default()),
-        messages: Arc::new(MemMessageRepository::default()),
+        messages: messages.unwrap_or_else(|| Arc::new(MemMessageRepository::default())),
         message_dispatch_tx,
         message_dispatch_rx: std::sync::Arc::new(tokio::sync::Mutex::new(Some(
             message_dispatch_rx,
