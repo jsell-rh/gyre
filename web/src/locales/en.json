@@ -824,7 +824,12 @@
       "ImpersonationAlert": "Impersonation Alerts",
       "SecretExpiring": "Secrets Expiring",
       "PersonaChangePendingApproval": "Persona Changes Pending Approval",
-      "WorkspaceOwnerless": "Ownerless Workspaces"
+      "WorkspaceOwnerless": "Ownerless Workspaces",
+      "ReviewerNudge": "Review Nudges",
+      "MrUnreviewed": "MRs Needing Reviewers",
+      "MrNeedsRebase": "MRs Needing Rebase",
+      "MrStaleEscalation": "Stale MR Escalations",
+      "MrAutoClosed": "MRs Auto-Closed"
     },
     "switch_workspace": "Switch to {name} workspace",
     "enable_notification": "Enable {label} notifications",
