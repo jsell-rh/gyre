@@ -110,7 +110,13 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                                     // Record session_id for this connection (presence tracking).
                                     connection_session_id = session_id;
 
-                                    // Validate each requested workspace belongs to caller's tenant.
+                                    // Validate each requested workspace: tenant containment
+                                    // (preserved) plus real workspace membership
+                                    // (message-bus.md §Telemetry Store, Subscription
+                                    // authorization: "a client cannot subscribe to a
+                                    // workspace it doesn't belong to"). Users verify
+                                    // via WorkspaceMembershipRepository; agents verify
+                                    // against their own agent record's workspace.
                                     let mut authorized_workspaces: Vec<gyre_common::Id> = vec![];
                                     let mut rejected_workspaces: Vec<String> = vec![];
 
@@ -119,15 +125,69 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                                         match state.workspaces.find_by_id(ws_id).await {
                                             Ok(Some(workspace)) => {
                                                 // Admin bypass (global token): allow all workspaces.
-                                                let tenant_match = caller.roles.contains(&gyre_domain::UserRole::Admin)
-                                                    || workspace.tenant_id.as_str() == caller.tenant_id;
-                                                if tenant_match {
+                                                if caller.roles.contains(&gyre_domain::UserRole::Admin) {
                                                     authorized_workspaces.push(ws_id.clone());
-                                                } else {
+                                                    continue;
+                                                }
+                                                // Tenant containment: the workspace must belong
+                                                // to the caller's tenant.
+                                                if workspace.tenant_id.as_str() != caller.tenant_id {
                                                     warn!(
                                                         workspace_id = %ws_id,
                                                         caller_tenant = %caller.tenant_id,
                                                         "Subscribe: workspace belongs to different tenant, rejecting"
+                                                    );
+                                                    rejected_workspaces.push(ws_id.to_string());
+                                                    continue;
+                                                }
+                                                // Workspace membership: a same-tenant non-member
+                                                // must not receive the workspace's telemetry or
+                                                // bus messages (the buffer has no tenant isolation
+                                                // of its own — this check is the isolation).
+                                                let is_member = if let Some(user_id) = &caller.user_id {
+                                                    match state
+                                                        .workspace_memberships
+                                                        .find_by_user_and_workspace(user_id, ws_id)
+                                                        .await
+                                                    {
+                                                        Ok(Some(_)) => true,
+                                                        Ok(None) => false,
+                                                        Err(e) => {
+                                                            warn!(
+                                                                workspace_id = %ws_id,
+                                                                error = %e,
+                                                                "Subscribe: membership lookup error; rejecting"
+                                                            );
+                                                            false
+                                                        }
+                                                    }
+                                                } else {
+                                                    // Agent connection: subscribes to its own
+                                                    // workspace per its agent record.
+                                                    match state
+                                                        .agents
+                                                        .find_by_id(&gyre_common::Id::new(&caller.agent_id))
+                                                        .await
+                                                    {
+                                                        Ok(Some(agent)) => agent.workspace_id == *ws_id,
+                                                        Ok(None) => false,
+                                                        Err(e) => {
+                                                            warn!(
+                                                                workspace_id = %ws_id,
+                                                                agent_id = %caller.agent_id,
+                                                                error = %e,
+                                                                "Subscribe: agent record lookup error; rejecting"
+                                                            );
+                                                            false
+                                                        }
+                                                    }
+                                                };
+                                                if is_member {
+                                                    authorized_workspaces.push(ws_id.clone());
+                                                } else {
+                                                    warn!(
+                                                        workspace_id = %ws_id,
+                                                        "Subscribe: caller is not a member of this workspace, rejecting"
                                                     );
                                                     rejected_workspaces.push(ws_id.to_string());
                                                 }
@@ -867,6 +927,260 @@ mod tests {
         );
     }
 
+    // ── Subscribe workspace-membership authorization (message-bus.md
+    // §Telemetry Store: "The server verifies workspace membership when
+    // processing Subscribe messages — a client cannot subscribe to a
+    // workspace it doesn't belong to") ──────────────────────────────
+
+    /// Seed a user + API key bound to tenant "default" WITHOUT any
+    /// workspace membership — the same-tenant non-member the spec's
+    /// subscription-authorization requirement is about.
+    async fn seed_nonmember_api_key_user(state: &Arc<AppState>, user_id: &str, raw_key: &str) {
+        use gyre_domain::User;
+        let user = User {
+            tenant_id: Some(gyre_common::Id::new("default")),
+            ..User::new(
+                gyre_common::Id::new(user_id),
+                format!("ext-{user_id}"),
+                format!("user-{user_id}"),
+                1000,
+            )
+        };
+        state.users.create(&user).await.unwrap();
+        state
+            .api_keys
+            .create(&crate::auth::hash_api_key(raw_key), &user.id, "ws-leak-key")
+            .await
+            .unwrap();
+    }
+
+    /// Seed a workspace in tenant "default" and grant `user_id` membership.
+    async fn seed_member_workspace(
+        state: &Arc<AppState>,
+        workspace_id: &str,
+        user_id: Option<&str>,
+    ) {
+        let ws = gyre_domain::Workspace::new(
+            gyre_common::Id::new(workspace_id),
+            gyre_common::Id::new("default"),
+            workspace_id,
+            workspace_id,
+            now_secs(),
+        );
+        state.workspaces.create(&ws).await.unwrap();
+        if let Some(user_id) = user_id {
+            let membership = gyre_domain::WorkspaceMembership::new(
+                gyre_common::Id::new(format!("mem-{workspace_id}-{user_id}")),
+                gyre_common::Id::new(user_id),
+                ws.id.clone(),
+                gyre_domain::WorkspaceRole::Viewer,
+                gyre_common::Id::new("ws-leak-inviter"),
+                now_secs(),
+            );
+            state
+                .workspace_memberships
+                .create(&membership)
+                .await
+                .unwrap();
+        }
+    }
+
+    /// Read the next JSON frame on the socket (text frames only), or None
+    /// on timeout — used to prove a connection receives NOTHING.
+    async fn next_json_frame(
+        ws: &mut tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+        timeout: std::time::Duration,
+    ) -> Option<serde_json::Value> {
+        let msg = tokio::time::timeout(timeout, ws.next()).await.ok()??.ok()?;
+        match msg {
+            tungstenite::Message::Text(text) => serde_json::from_str(&text).ok(),
+            _ => None,
+        }
+    }
+
+    #[tokio::test]
+    async fn ws_subscribe_rejects_same_tenant_non_member() {
+        // Leak probe (task verification intent): a user in tenant T with no
+        // membership record for workspace W (which belongs to T) subscribes
+        // to W. The pre-fix handler accepted the subscription on tenant
+        // match alone and delivered W's telemetry and bus messages — this
+        // test asserts the connection receives NOTHING for W, so it fails
+        // against the tenant-match-only handler and passes only when the
+        // WorkspaceMembershipRepository check gates Subscribe.
+        let (url, state) = start_test_server("tok").await;
+        seed_member_workspace(&state, "ws-leak", Some("u-member")).await;
+        seed_nonmember_api_key_user(&state, "u-outsider", "key-out").await;
+        // The member needs an API key too (same tenant, member of W).
+        {
+            let user = gyre_domain::User {
+                tenant_id: Some(gyre_common::Id::new("default")),
+                ..gyre_domain::User::new(
+                    gyre_common::Id::new("u-member"),
+                    "ext-u-member",
+                    "user-u-member",
+                    1000,
+                )
+            };
+            state.users.create(&user).await.unwrap();
+            state
+                .api_keys
+                .create(
+                    &crate::auth::hash_api_key("key-member"),
+                    &user.id,
+                    "ws-leak-key",
+                )
+                .await
+                .unwrap();
+        }
+
+        // Non-member connection: Subscribe for W must be rejected.
+        let (mut outsider, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        auth_ws(&mut outsider, "key-out").await;
+        subscribe_ws(&mut outsider, "ws-leak", None).await;
+        let frame = next_json_frame(&mut outsider, std::time::Duration::from_secs(5))
+            .await
+            .expect("Subscribe for a non-member workspace must produce a SubscribeError");
+        assert_eq!(frame["type"], "SubscribeError");
+        assert_eq!(
+            frame["rejected_workspaces"],
+            serde_json::json!(["ws-leak"]),
+            "the non-member workspace must be named in the rejection"
+        );
+
+        // Member connection: Subscribe for W is accepted (no error frame —
+        // the next frame is the accepted subscription's empty replay, and
+        // in any case NOT a SubscribeError).
+        let (mut member, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        auth_ws(&mut member, "key-member").await;
+        subscribe_ws(&mut member, "ws-leak", None).await;
+        // The outsider's rejected Subscribe can never place "ws-leak" in
+        // the connection index, so observing it there proves the MEMBER's
+        // subscription was authorized before the emits below.
+        await_ws_subscription(&state, "ws-leak").await;
+
+        // Emit telemetry AND a workspace-scoped bus message to W.
+        state
+            .emit_telemetry(
+                gyre_common::Id::new("ws-leak"),
+                gyre_common::message::MessageKind::ToolCallStart,
+                Some(serde_json::json!({
+                    "agent_id": "agent-leak",
+                    "tool_name": "Read",
+                })),
+            )
+            .await;
+        state
+            .emit_event(
+                gyre_common::Id::new("ws-leak"),
+                gyre_common::message::Destination::Workspace(gyre_common::Id::new("ws-leak")),
+                gyre_common::message::MessageKind::TaskCreated,
+                Some(serde_json::json!({ "task_id": "TASK-LEAK" })),
+            )
+            .await;
+
+        // The member receives both the telemetry and the bus message.
+        let mut saw_telemetry = false;
+        let mut saw_event = false;
+        for _ in 0..8 {
+            let Some(frame) = next_json_frame(&mut member, std::time::Duration::from_secs(5)).await
+            else {
+                break;
+            };
+            match frame["kind"].as_str() {
+                Some("tool_call_start") => saw_telemetry = true,
+                Some("task_created") => saw_event = true,
+                _ => {}
+            }
+            if saw_telemetry && saw_event {
+                break;
+            }
+        }
+        assert!(
+            saw_telemetry && saw_event,
+            "a member of the workspace must receive its telemetry and bus messages"
+        );
+
+        // The non-member connection receives NOTHING for W — neither the
+        // telemetry nor the workspace-scoped bus message.
+        let leaked = next_json_frame(&mut outsider, std::time::Duration::from_millis(300)).await;
+        assert!(
+            leaked.is_none(),
+            "same-tenant non-member must not receive workspace telemetry or bus messages"
+        );
+    }
+
+    #[tokio::test]
+    async fn ws_subscribe_agent_scoped_to_own_workspace_record() {
+        // Agent connections subscribe to their own workspace per their
+        // agent record (task required behavior): an agent in W may
+        // subscribe to W; subscribing to a different workspace of the same
+        // tenant is rejected with no delivery.
+        let (url, state) = start_test_server("tok").await;
+        seed_member_workspace(&state, "ws-agent-own", None).await;
+        seed_member_workspace(&state, "ws-agent-other", None).await;
+
+        let mut agent =
+            gyre_domain::Agent::new(gyre_common::Id::new("agent-own-ws"), "agent-own-ws", 0);
+        agent.workspace_id = gyre_common::Id::new("ws-agent-own");
+        state.agents.create(&agent).await.unwrap();
+        state
+            .kv_store
+            .kv_set(
+                "agent_tokens",
+                "agent-own-ws",
+                "agent-own-token".to_string(),
+            )
+            .await
+            .unwrap();
+
+        // Own workspace: accepted (no SubscribeError follows).
+        let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        auth_ws(&mut ws, "agent-own-token").await;
+        subscribe_ws(&mut ws, "ws-agent-own", None).await;
+        // Synchronize on the server having authorized the subscription
+        // before emitting — otherwise the telemetry broadcast is consumed
+        // while the connection's subscribed list is still empty.
+        await_ws_subscription(&state, "ws-agent-own").await;
+
+        state
+            .emit_telemetry(
+                gyre_common::Id::new("ws-agent-own"),
+                gyre_common::message::MessageKind::RunStarted,
+                Some(serde_json::json!({ "agent_id": "agent-own-ws" })),
+            )
+            .await;
+        let frame = next_json_frame(&mut ws, std::time::Duration::from_secs(5))
+            .await
+            .expect("agent must receive its own workspace's telemetry");
+        assert_eq!(frame["kind"], "run_started");
+
+        // A different workspace in the same tenant: rejected, no delivery.
+        subscribe_ws(&mut ws, "ws-agent-other", None).await;
+        let frame = next_json_frame(&mut ws, std::time::Duration::from_secs(5))
+            .await
+            .expect("Subscribe for a non-own workspace must produce a SubscribeError");
+        assert_eq!(frame["type"], "SubscribeError");
+        assert_eq!(
+            frame["rejected_workspaces"],
+            serde_json::json!(["ws-agent-other"])
+        );
+
+        state
+            .emit_telemetry(
+                gyre_common::Id::new("ws-agent-other"),
+                gyre_common::message::MessageKind::RunStarted,
+                Some(serde_json::json!({ "agent_id": "agent-other" })),
+            )
+            .await;
+        let leaked = next_json_frame(&mut ws, std::time::Duration::from_millis(300)).await;
+        assert!(
+            leaked.is_none(),
+            "agent must not receive another workspace's telemetry"
+        );
+    }
+
     #[tokio::test]
     async fn ws_ping_pong() {
         let (url, _state) = start_test_server("tok").await;
@@ -1344,6 +1658,22 @@ mod tests {
             )
         };
         state.users.create(&user).await.unwrap();
+        // Subscribe requires workspace membership (message-bus.md §Telemetry
+        // Store) — seed the membership the production invitation-accept flow
+        // would have written, so the subject can subscribe for presence.
+        let membership = gyre_domain::WorkspaceMembership::new(
+            gyre_common::Id::new(format!("mem-{user_id}")),
+            user.id.clone(),
+            ws.id.clone(),
+            gyre_domain::WorkspaceRole::Viewer,
+            gyre_common::Id::new("presence-test-inviter"),
+            now_secs(),
+        );
+        state
+            .workspace_memberships
+            .create(&membership)
+            .await
+            .unwrap();
         state
             .api_keys
             .create(
@@ -1387,6 +1717,39 @@ mod tests {
         ))
         .await
         .unwrap();
+    }
+
+    /// Wait until the server has actually processed a Subscribe that
+    /// authorized `workspace_id` for a connection: poll the per-connection
+    /// workspace index until some connection's authorized list contains it.
+    ///
+    /// `subscribe_ws` only awaits the CLIENT-side send. On the current-thread
+    /// #[tokio::test] runtime the connection task is not polled until the
+    /// test task yields, so telemetry emitted immediately after `subscribe_ws`
+    /// would be broadcast (and consumed, and dropped) while the connection's
+    /// `subscribed_workspaces` is still empty — telemetry is never replayed
+    /// from the buffer, so it would be lost for good. Observing the index
+    /// entry (the Subscribe handler inserts it after authorization, before
+    /// returning to its select loop) synchronizes the emits with the
+    /// subscription deterministically, unlike a fixed sleep. A rejected
+    /// workspace never appears in the index, so this only returns for
+    /// accepted subscriptions.
+    async fn await_ws_subscription(state: &Arc<AppState>, workspace_id: &str) {
+        let ws_id = gyre_common::Id::new(workspace_id);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            {
+                let index = state.ws_connection_workspaces.read().await;
+                if index.values().any(|scopes| scopes.contains(&ws_id)) {
+                    return;
+                }
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "subscription for {workspace_id} was not authorized on the server within 5s"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
     }
 
     fn now_secs() -> u64 {
