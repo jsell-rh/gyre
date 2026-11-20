@@ -739,6 +739,7 @@ pub async fn resolve_impersonation_auth(
     }
 
     Some(AuthenticatedAgent {
+        auth_mechanism: crate::auth::AuthMechanism::Impersonation,
         agent_id: target.display_name.clone(),
         user_id: Some(target.id.clone()),
         roles: target.roles.clone(),
