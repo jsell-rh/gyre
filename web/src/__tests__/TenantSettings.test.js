@@ -641,9 +641,13 @@ describe('TenantSettings', () => {
   });
 
   it('Jobs tab shows jobs table with run button', async () => {
+    // TASK-273 review: the mock mirrors the REAL JobInfo response shape
+    // (name/status/interval_secs/description/recent_runs) — the server
+    // sends no `schedule` or `last_run` field, and a mock that invents
+    // them validates rendering of phantom data.
     api.adminJobs.mockResolvedValue([
-      { name: 'cleanup', schedule: '0 * * * *', status: 'ok', last_run: '2026-03-30T09:00:00Z' },
-      { name: 'reindex', schedule: '0 0 * * *', status: 'success', last_run: '2026-03-29T00:00:00Z' },
+      { name: 'cleanup', status: 'ok', interval_secs: 3600, description: 'retention cleanup', recent_runs: [] },
+      { name: 'reindex', status: 'success', interval_secs: 86400, description: 'code index', recent_runs: [] },
     ]);
     const { container } = render(TenantSettings);
     container.querySelector('[data-testid="tenant-settings-tab-jobs"]')?.click();
@@ -652,13 +656,16 @@ describe('TenantSettings', () => {
       expect(table).toBeTruthy();
       expect(table.textContent).toContain('cleanup');
       expect(table.textContent).toContain('reindex');
+      // The Schedule column renders the interval the API actually sends.
+      expect(table.textContent).toContain('every 1h');
+      expect(table.textContent).toContain('every 1d');
       expect(container.querySelector('[data-testid="run-job-cleanup"]')).toBeTruthy();
     }, { timeout: 3000 });
   });
 
   it('Jobs tab run button calls adminRunJob', async () => {
     api.adminJobs.mockResolvedValue([
-      { name: 'cleanup', schedule: '0 * * * *', status: 'ok' },
+      { name: 'cleanup', status: 'ok', interval_secs: 3600, description: 'retention cleanup', recent_runs: [] },
     ]);
     const { container } = render(TenantSettings);
     container.querySelector('[data-testid="tenant-settings-tab-jobs"]')?.click();
@@ -687,8 +694,9 @@ describe('TenantSettings', () => {
     api.adminJobs.mockResolvedValue([
       {
         name: 'repo_maintenance',
-        schedule: 'daily 04:00 UTC',
         status: 'success',
+        interval_secs: 86400,
+        description: 'git gc/prune across every stored repository',
         recent_runs: [
           {
             id: 'run-1',

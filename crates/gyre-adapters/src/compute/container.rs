@@ -4,6 +4,8 @@ use gyre_ports::{ComputeTarget, ProcessHandle, SpawnConfig};
 use std::collections::HashMap;
 use tokio::process::Command;
 
+use super::container_already_gone;
+
 /// Container runtime to use for spawning agents.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Runtime {
@@ -269,16 +271,33 @@ impl ComputeTarget for ContainerTarget {
         let runtime = self.resolve_runtime().await?;
         let bin = runtime.binary();
 
-        let status = Command::new(bin)
+        let output = Command::new(bin)
             .arg("rm")
             .arg("--force")
             .arg(&handle.id)
-            .status()
+            .output()
             .await
             .with_context(|| format!("{} rm --force failed", bin))?;
 
-        if !status.success() {
-            tracing::warn!(container_id = %handle.id, runtime = bin, "rm --force returned non-zero");
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            // A container that does not exist is already gone — a
+            // successful kill. Everything else (daemon unreachable,
+            // permission denied, wrong runtime) is a REAL failure that
+            // must surface: callers mark the instance terminated only
+            // after a verified kill, and a warn-and-return-Ok here would
+            // permanently hide a live orphan behind a "reaped" record
+            // (review task-273).
+            if container_already_gone(&stderr) {
+                tracing::info!(container_id = %handle.id, runtime = bin, "container already gone");
+                return Ok(());
+            }
+            return Err(anyhow::anyhow!(
+                "{} rm --force {} failed: {}",
+                bin,
+                handle.id,
+                stderr.trim()
+            ));
         }
         Ok(())
     }

@@ -28,6 +28,16 @@ pub struct AgentInstanceRecord {
     pub pid: Option<u32>,
     /// Unix epoch seconds of spawn.
     pub spawned_at: u64,
+    /// Kill-reconstruction details for restart-orphans, as JSON
+    /// (review task-273): the backend-specific connection facts needed to
+    /// address the instance's process/container/pod again after the
+    /// in-memory registries are gone — e.g. `{"runtime":"docker"}` for
+    /// the container backend, `{"namespace":…,"context":…,
+    /// "kubectl_path":…}` for Kubernetes. `None` when the backend needs
+    /// nothing beyond the handle (local) or cannot be reconstructed (ssh:
+    /// connection details are not persisted).
+    #[serde(default)]
+    pub backend_config: Option<String>,
     /// Unix epoch seconds the instance was marked terminated; `None` while
     /// recorded-running.
     pub terminated_at: Option<u64>,

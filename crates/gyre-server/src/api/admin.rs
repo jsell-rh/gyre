@@ -3785,6 +3785,7 @@ mod tests {
                 handle_id: pid.to_string(),
                 pid: Some(pid),
                 spawned_at,
+                backend_config: None,
                 terminated_at: None,
                 terminated_reason: None,
             })
@@ -3835,6 +3836,7 @@ mod tests {
                 handle_id: "remote-1".to_string(),
                 pid: None,
                 spawned_at: 1000,
+                backend_config: None,
                 terminated_at: None,
                 terminated_reason: None,
             })
@@ -3896,6 +3898,7 @@ mod tests {
                 handle_id: pid.to_string(),
                 pid: Some(pid),
                 spawned_at: crate::api::now_secs().saturating_sub(10 * 86_400),
+                backend_config: None,
                 terminated_at: None,
                 terminated_reason: None,
             })

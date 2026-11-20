@@ -180,23 +180,37 @@ impl SecretRotationHandler for OAuthRefreshHandler {
         _secret: &Secret,
         current_value: &[u8],
     ) -> anyhow::Result<RotatedSecret> {
-        let doc: OAuthCredentialDoc = serde_json::from_slice(current_value).context(
+        // Parse the document as a whole JSON object and only READ the
+        // grant fields through the typed view: an admin-supplied OAuth
+        // credential document can carry fields Gyre does not use (scope,
+        // issuer, provider hints, …) that MUST survive the refresh — the
+        // rotated document is re-serialized from the ORIGINAL value with
+        // only the rotated tokens overwritten, never from a lossy typed
+        // copy (review task-273: same treatment the GCP SA handler got).
+        let mut doc: serde_json::Value = serde_json::from_slice(current_value).context(
+            "value is not an OAuth credential document (JSON with token_endpoint, client_id, refresh_token)",
+        )?;
+        anyhow::ensure!(
+            doc.is_object(),
+            "OAuth credential document must be a JSON object"
+        );
+        let typed: OAuthCredentialDoc = serde_json::from_value(doc.clone()).context(
             "value is not an OAuth credential document (JSON with token_endpoint, client_id, refresh_token)",
         )?;
 
         let mut form: Vec<(&str, &str)> = vec![
             ("grant_type", "refresh_token"),
-            ("refresh_token", doc.refresh_token.as_str()),
-            ("client_id", doc.client_id.as_str()),
+            ("refresh_token", typed.refresh_token.as_str()),
+            ("client_id", typed.client_id.as_str()),
         ];
-        if let Some(cs) = doc.client_secret.as_deref() {
+        if let Some(cs) = typed.client_secret.as_deref() {
             form.push(("client_secret", cs));
         }
 
         // `http` is the AppState client, built with a 30 s total timeout, so
         // a hung provider cannot stall the job loop.
         let resp = http
-            .post(&doc.token_endpoint)
+            .post(&typed.token_endpoint)
             .form(&form)
             .send()
             .await
@@ -212,13 +226,6 @@ impl SecretRotationHandler for OAuthRefreshHandler {
             .and_then(|v| v.as_str())
             .context("token response missing access_token")?
             .to_string();
-        // RFC 6749 §6: the provider MAY issue a new refresh token; when
-        // absent the old one remains valid.
-        let refresh_token = tokens
-            .get("refresh_token")
-            .and_then(|v| v.as_str())
-            .unwrap_or(&doc.refresh_token)
-            .to_string();
         // expires_in is RECOMMENDED, not guaranteed — but fabricating a
         // lifetime the provider did not state would set a wrong expires_at
         // (and, for a value below the real lifetime, a perpetual
@@ -230,14 +237,21 @@ impl SecretRotationHandler for OAuthRefreshHandler {
             .and_then(|v| v.as_u64())
             .context("token response missing expires_in (cannot determine new expiry)")?;
 
-        let updated = OAuthCredentialDoc {
-            token_endpoint: doc.token_endpoint,
-            client_id: doc.client_id,
-            client_secret: doc.client_secret,
-            refresh_token,
-            access_token: Some(access_token),
-        };
-        let value = serde_json::to_vec(&updated).context("serializing rotated credential")?;
+        // Overwrite ONLY the rotated tokens on the original document —
+        // every other field the admin supplied (scope, issuer, provider
+        // hints, …) is preserved verbatim, so the stored value remains a
+        // complete credential document. RFC 6749 §6: the provider MAY
+        // issue a new refresh token; when absent the ORIGINAL field is
+        // left exactly as stored (review task-273).
+        let rotated_refresh = tokens
+            .get("refresh_token")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        if let Some(new_refresh) = rotated_refresh {
+            doc["refresh_token"] = serde_json::Value::String(new_refresh);
+        }
+        doc["access_token"] = serde_json::Value::String(access_token);
+        let value = serde_json::to_vec(&doc).context("serializing rotated credential")?;
         Ok(RotatedSecret {
             value,
             expires_at: Some(now_secs().saturating_add(expires_in)),
@@ -1342,7 +1356,13 @@ mod tests {
             "token_endpoint": endpoint,
             "client_id": "gyre-test",
             "client_secret": "test-client-secret",
-            "refresh_token": "old-refresh-token"
+            "refresh_token": "old-refresh-token",
+            // review task-273: fields Gyre does not read must survive the
+            // rotation — the rotated document is re-serialized from the
+            // ORIGINAL value, never from a lossy typed copy.
+            "scope": "openid profile email",
+            "issuer": "https://sso.example.com",
+            "provider_hint": "claude-max"
         });
         let state = seed_oauth(now, cred.to_string().as_bytes()).await;
 
@@ -1378,6 +1398,12 @@ mod tests {
         assert_eq!(doc["refresh_token"], "new-refresh-token");
         assert_eq!(doc["access_token"], "new-access-token");
         assert_eq!(doc["client_id"], "gyre-test");
+        // review task-273: every extra field the admin supplied survives
+        // the rotation verbatim (a typed re-serialization dropped them).
+        assert_eq!(doc["scope"], "openid profile email");
+        assert_eq!(doc["issuer"], "https://sso.example.com");
+        assert_eq!(doc["provider_hint"], "claude-max");
+        assert_eq!(doc["token_endpoint"], endpoint);
 
         // Expiry extended beyond the 1-hour window and last_rotated_at set.
         let stored = state
@@ -1413,6 +1439,56 @@ mod tests {
             notifs.is_empty(),
             "a handler-rotated secret must not notify admins"
         );
+    }
+
+    #[tokio::test]
+    async fn oauth_refresh_without_rotated_refresh_token_preserves_original_document() {
+        // review task-273: RFC 6749 §6 — the provider MAY issue a new
+        // refresh token. When it does not, the ORIGINAL refresh_token
+        // field (and every other admin-supplied field) must survive the
+        // rotation verbatim; nothing may be dropped or rewritten.
+        let (endpoint, _seen) = spawn_token_endpoint(
+            axum::http::StatusCode::OK,
+            // No refresh_token in the response — the old one remains
+            // valid per RFC 6749 §6.
+            serde_json::json!({ "access_token": "at-2", "expires_in": 3600 }),
+        )
+        .await;
+        let cred = serde_json::json!({
+            "token_endpoint": endpoint,
+            "client_id": "gyre-test",
+            "refresh_token": "original-refresh-token",
+            "scope": "openid"
+        });
+        let http = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .unwrap();
+        let secret = gyre_common::Secret {
+            id: Id::new("sec-direct"),
+            name: "PROD_API_CREDENTIALS".to_string(),
+            scope: gyre_common::SecretScope::Workspace,
+            scope_id: "ws-rot".to_string(),
+            secret_type: gyre_common::SecretType::Rotated,
+            created_by: "system".to_string(),
+            created_at: 0,
+            expires_at: None,
+            last_rotated_at: None,
+            tenant_id: "default".to_string(),
+        };
+        let rotated = OAUTH_REFRESH
+            .rotate(&http, &secret, cred.to_string().as_bytes())
+            .await
+            .unwrap();
+        let doc: serde_json::Value = serde_json::from_slice(&rotated.value).unwrap();
+        assert_eq!(
+            doc["refresh_token"], "original-refresh-token",
+            "the original refresh token must be preserved when the provider issues none"
+        );
+        assert_eq!(doc["access_token"], "at-2");
+        assert_eq!(doc["scope"], "openid");
+        assert_eq!(doc["token_endpoint"], endpoint);
+        assert!(rotated.expires_at.is_some());
     }
 
     #[tokio::test]

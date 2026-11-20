@@ -146,6 +146,30 @@ impl SqliteStorage {
         .await?
     }
 
+    /// Resolve an agent-principal event's tenant from the agent's own
+    /// tenant column (review task-273): server-emitted agent events
+    /// (container lifecycle, agent-principal Rbac/Abac denials) carry an
+    /// agent_id but no workspace/user — without this derivation they are
+    /// stored tenant_id NULL and become invisible to the tenant-scoped
+    /// admin audit trail. `Ok(None)` when the agent row does not exist —
+    /// the scope cannot be determined, so it is not attributed (skip,
+    /// never fabricate).
+    async fn tenant_of_agent(&self, agent_id: &str) -> Result<Option<String>> {
+        use crate::schema::agents;
+        let pool = Arc::clone(&self.pool);
+        let aid = agent_id.to_string();
+        tokio::task::spawn_blocking(move || -> Result<Option<String>> {
+            let mut conn = pool.get().context("get db connection")?;
+            Ok(agents::table
+                .filter(agents::id.eq(aid))
+                .select(agents::tenant_id)
+                .first::<String>(&mut conn)
+                .optional()?
+                .filter(|t| !t.is_empty()))
+        })
+        .await?
+    }
+
     /// Resolve a user's tenant binding (same contract as
     /// [`Self::tenant_of_workspace`]).
     async fn tenant_of_user(&self, user_id: &str) -> Result<Option<String>> {
@@ -172,9 +196,12 @@ impl AuditRepository for SqliteStorage {
         let mut e = event.clone();
         // Tenant scoping (admin-panel.md §Audit Log Viewer): derive the
         // scope server-side when the emitter did not — the workspace's
-        // owning tenant, or the acting user's tenant binding. A record
-        // that cannot be scoped keeps NULL (visible to unscoped internal
-        // reads only, never attributed to a tenant it did not come from).
+        // owning tenant, the acting user's tenant binding, or (review
+        // task-273) the agent principal's own tenant for server-emitted
+        // agent events (container lifecycle, agent-principal denials)
+        // that carry neither workspace nor user. A record that cannot be
+        // scoped keeps NULL (visible to unscoped internal reads only,
+        // never attributed to a tenant it did not come from).
         if e.tenant_id.is_none() {
             if let Some(ws_id) = e.workspace_id.as_ref() {
                 e.tenant_id = self.tenant_of_workspace(&ws_id.to_string()).await?;
@@ -182,6 +209,11 @@ impl AuditRepository for SqliteStorage {
             if e.tenant_id.is_none() {
                 if let Some(user_id) = e.user_id.as_ref() {
                     e.tenant_id = self.tenant_of_user(&user_id.to_string()).await?;
+                }
+            }
+            if e.tenant_id.is_none() {
+                if let Some(agent_id) = e.agent_id.as_ref() {
+                    e.tenant_id = self.tenant_of_agent(&agent_id.to_string()).await?;
                 }
             }
         }
@@ -596,6 +628,58 @@ mod tests {
             limit: 100,
             ..Default::default()
         }
+    }
+
+    #[tokio::test]
+    async fn audit_record_derives_tenant_for_agent_principal_events() {
+        // review task-273: server-emitted agent events (container
+        // lifecycle, agent-principal denials) carry an agent_id but no
+        // workspace/user — the derivation must attribute them to the
+        // agent's own tenant so they appear in that tenant's admin audit
+        // trail instead of vanishing as tenant_id NULL.
+        let (_tmp, s) = setup();
+        // An agent row in tenant-a (the agents table's tenant column is
+        // what tenant_of_agent reads).
+        let agent_store = s.with_tenant("tenant-a");
+        let agent = gyre_domain::Agent::new(Id::new("agent-1"), "worker", 1_000);
+        gyre_ports::AgentRepository::create(&agent_store, &agent)
+            .await
+            .unwrap();
+
+        // The container_audit::emit shape: agent_id set, workspace/user
+        // None.
+        record(
+            &s,
+            &make_event("e1", "agent-1", AuditEventType::ContainerCrashed, 100),
+        )
+        .await;
+
+        let visible = AuditRepository::query(
+            &s,
+            &AuditQueryFilter {
+                tenant_id: Some("tenant-a".to_string()),
+                ..all()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            visible.len(),
+            1,
+            "the agent-principal event must be attributed to the agent's tenant"
+        );
+
+        // A different tenant's admin does not see it.
+        let other = AuditRepository::query(
+            &s,
+            &AuditQueryFilter {
+                tenant_id: Some("tenant-b".to_string()),
+                ..all()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(other.is_empty());
     }
 
     #[tokio::test]
