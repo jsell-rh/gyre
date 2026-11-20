@@ -3,7 +3,7 @@ title: "Admin Panel completion: SOPS/Vault secret backends, durable job history 
 spec_ref: "Spec gap spec-5b647653a4554eea3e93ac19 / admin-panel-remaining-gap / e61ffd082155"
 depends_on: []
 progress: ready-for-review
-commits: ["a0dc3e637e6ffbae976675b755abf0b2891bf481", "4c71fe4827a62f792912b4e5ab257a50c1882860", "d6f32bd0269314f9ee552ed72df33322b0fe2238", "cd2f616e3ebd96addab2dcaf78242d31c58efc04", "808e3c10c035c9fc6fe8c5ee96d474fc5468acf3", "b979fefeeb7a6bb8340ccd85c64b467e0f46c553", "210dfa61bc1ea637a29a79c26af80746b2fb002c", "3ebd143d29eb52bb2bc0bd748f60fe52fa960f66", "9b81c9816f13a3d637057a6c3149c9be92f38a3c", "0fda00bfe9860c8c8b66ea1235f0d2e3251df67a", "1bc00b6cb9212e6ac6dfc7c764afede98ae8fd64", "a2b31ac19c05310ebd05a072ddde1acf0c51f2ec", "f6e31cf57779a7e117f5a0b9bd75720aed90ca56", "b101d27aafb7bde0907a568e7bb8a3ffbdd3ae67", "ee253c8854f16664f91d16171e08414effc314b7", "db320101b1540a35cf9986408e70ac46008b1982"]
+commits: ["56e5ea5f797f1f19037b40e65f529239c550d649", "a0dc3e637e6ffbae976675b755abf0b2891bf481", "4c71fe4827a62f792912b4e5ab257a50c1882860", "d6f32bd0269314f9ee552ed72df33322b0fe2238", "cd2f616e3ebd96addab2dcaf78242d31c58efc04", "808e3c10c035c9fc6fe8c5ee96d474fc5468acf3", "b979fefeeb7a6bb8340ccd85c64b467e0f46c553", "210dfa61bc1ea637a29a79c26af80746b2fb002c", "3ebd143d29eb52bb2bc0bd748f60fe52fa960f66", "9b81c9816f13a3d637057a6c3149c9be92f38a3c", "0fda00bfe9860c8c8b66ea1235f0d2e3251df67a", "1bc00b6cb9212e6ac6dfc7c764afede98ae8fd64", "a2b31ac19c05310ebd05a072ddde1acf0c51f2ec", "f6e31cf57779a7e117f5a0b9bd75720aed90ca56", "b101d27aafb7bde0907a568e7bb8a3ffbdd3ae67", "ee253c8854f16664f91d16171e08414effc314b7", "db320101b1540a35cf9986408e70ac46008b1982"]
 ---
 
 ## Required behavior
@@ -123,8 +123,8 @@ Canonical spec: `specs/system/admin-panel.md`. Source: `fb1424fbac55cd23cb08606f
 ## Shipped
 
 The eight admin-panel deliverables shipped in the earlier rounds on this
-branch and are carried through the base merges (most recently `6139844`
-via `bc2d92b9`), behavior preserved: SOPS-default/Vault-option secret
+branch and are carried through the base merges (most recently `cc61956d`
+via `7673e9da`), behavior preserved: SOPS-default/Vault-option secret
 backends (genuine SOPS documents with an age-wrapped data key; Vault KV
 v2 with agent-JWT resolution, server AppRole writes, fail-closed on
 unreachable Vault), durable job history with per-run logs through the
@@ -141,34 +141,50 @@ Server Logs tab), and the durable tenant-scoped searchable admin audit
 cadence, durable-history authority, Vault policy scoping, and clippy
 cleanliness; details live in those commits.
 
-### This round: base-merge verification repair (commit `a0dc3e63`)
+### This round: verification-repair of the four failing gyre-server tests (commit `56e5ea5f`)
 
-The `cargo test --all --quiet` verification run against the merged
-candidate failed on exactly one test:
-`sqlite::tests::migration_000058_backfills_unique_url_safe_usernames`
-panicked in migration `2026-11-13-000074_audit_events_tenant_id` with
-`no such column: u.tenant_id`. Root cause: that test deliberately
-applies every embedded migration EXCEPT `000058` (which owns
-`users.tenant_id`) before running `000058` alone against seeded legacy
-rows, and task-273's `000074` backfills `audit_events.tenant_id` from
-`users u` — so it cannot run in that pre-`000058` set. The fix excludes
-`000074` from the test's pre set and runs it after the target batch,
-the identical treatment `000065` already receives for the same
-dependency; on a deployed database `000058` (20261008000058) always
-sorts before `000074` (20261113000074), so production migration
-ordering is unchanged. Test-only change; no production code touched.
+The `cargo test --all --quiet` verification run against candidate
+`3e281e98` (merged onto base `cc61956d`) failed on exactly four
+gyre-server tests — the first execution of the server test binary for
+this task, since earlier rounds deferred it to the verifier per the
+4 GiB build budget. Root causes and repairs:
+
+1. `admin_jobs_status_and_runs_reflect_latest_run_on_memory_fallback`
+   — real production bug: `JobRegistry::durable_history`'s in-memory
+   fallback served the ring's oldest-first order while its documented
+   contract (and every consumer, including the GET /admin/jobs status
+   pill) is newest-first like `list_by_job`. The fallback now reverses
+   and truncates to the requested limit.
+2. `repo_maintenance_prunes_unreachable_objects_and_isolates_failures`
+   — test-isolation defect: the test used the process-shared default
+   test `repos_root` (/tmp/gyre-unit-test-repos-\<pid\>), so other
+   tests' git directories inflated the unregistered-repo scan
+   ("1 of 13" vs the asserted "1 of 3"). The test now points
+   repos_root at its own tempdir (the isolation the sibling
+   unregistered-repo test already uses); production unchanged.
+3. `gcp_sa_refresh_performs_real_rs256_jwt_bearer_grant_and_
+   preserves_document` — test-data defect: the test SA key constant is
+   the PKCS#1 RSAPrivateKey encoding of the test key, but the helper
+   armored it as PKCS#8 (the format Google issues and the handler
+   parses), so `RsaKeyPair::from_pkcs8` failed before any grant was
+   signed (empty captured POST body). The helper now wraps the PKCS#1
+   DER in a genuine PKCS#8 PrivateKeyInfo (verified: same key as the
+   endpoint's SPKI public half); production unchanged.
+4. `enroll_generates_state_pkce_and_redirects` — test defect: it
+   authenticated with the global dev token (whose server-derived
+   identity is honestly "system") but asserted the initiating admin
+   "user-admin". The test now signs a real admin JWT against a seeded
+   `user-admin` account, exercising the user-identity derivation the
+   spec's admin-initiated enrollment requires; production unchanged.
 
 ### Test evidence
 
-Executed in this sandbox: `cargo test -p gyre-adapters --lib` — 663
-passed, 0 failed (includes the repaired 000058 backfill test plus the
-task-273 suites: SOPS format/roundtrip/legacy-upgrade, Vault KV
-v2/JWT-auth/policy-denial/fail-closed, job-run/agent-instance/
-oauth-state adapters, audit filters). `cargo fmt --check` clean on all
-touched crates (gyre-ports, gyre-domain, gyre-adapters, gyre-server).
-`check-migration-versions.sh` and `check-migration-sql-portability.sh`
-pass with no new exemptions. gyre-server test execution and the full
-workspace suite remain with the independent verifier per the 4 GiB
-build budget.
+Executed in this sandbox: `cargo check -p gyre-server --lib --tests`
+clean (includes all four repaired tests' compilation); `cargo fmt --all
+--check` clean; `cargo clippy -p gyre-server --lib --tests` shows no
+warnings on changed lines (pre-existing baseline warnings untouched).
+The four repaired tests plus the full gyre-server suite are recorded
+for the independent verifier in /tmp/stage/review-evidence (server test
+builds exceed this sandbox's model-process budget).
 
 The acceptance checkboxes remain for the independent verifier.
