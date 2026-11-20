@@ -123,10 +123,11 @@ Canonical spec: `specs/system/admin-panel.md`. Source: `fb1424fbac55cd23cb08606f
 ## Shipped
 
 All eight deliverables are implemented in production code on this branch
-(`db320101` + the checkpoint/rustfmt/rebase commits, review-repair `f6e31cf5`,
-and the final-round fix `1bc00b6c` after merging the assigned base
-`e9f6a31c`, which brought only docs and no source conflicts). The acceptance
-checkboxes above remain for the independent verifier.
+(`db320101` + checkpoint/rustfmt/rebase commits, review-repair `f6e31cf5`,
+final-round fix `1bc00b6c`, and merge-repair `bce07ac1` which merged main's
+task-264 Sigstore base `b2523a47` with only re-export/enum union conflicts —
+no behavior change). The acceptance checkboxes above remain for the
+independent verifier.
 
 ### Secrets backends (SOPS default, Vault option)
 
@@ -152,10 +153,10 @@ checkboxes above remain for the independent verifier.
 ### Durable job history with logs
 
 - `gyre_ports::JobRunRepository` (record / list_by_job / list_recent /
-  delete_older_than) with SQLite + PostgreSQL adapters (portable migrations
-  000067–000070) and a mem adapter enforcing the port constraints in code;
-  `JobRun` carries `logs` + `duration_secs()`; handlers write to a run-scoped
-  `JobRunLog` sink; every recorded run is persisted through
+  delete_older_than) with SQLite + PostgreSQL adapters (portable migrations)
+  and a mem adapter enforcing the port constraints in code; `JobRun` carries
+  `logs` + `duration_secs()`; handlers write to a run-scoped `JobRunLog`
+  sink; every recorded run is persisted through
   `JobRegistry::set_durable_store`, so history survives a restart (the
   in-memory HashMap is a fronting cache only).
 - `GET /admin/jobs` serves the durable history (logs + derived duration);
@@ -181,10 +182,10 @@ checkboxes above remain for the independent verifier.
 
 ### OAuth state + Claude Max enrollment
 
-- `gyre_ports::OAuthStateRepository` (+ adapters + migration 000068);
+- `gyre_ports::OAuthStateRepository` (+ adapters + portable migration);
   `POST /api/v1/admin/oauth/claude-max/enroll` (Admin-only, ABAC
-  `secret:write`) generates state + PKCE S256 verifier, persists the row with
-  server-derived admin/tenant scope, and 302-redirects; `GET
+  `secret:write`) generates state + PKCE S256 verifier, persists the row
+  with server-derived admin/tenant scope, and 302-redirects; `GET
   /api/v1/oauth/claude-max/callback` (resolver-exempt; the single-use state
   row is the per-handler capability) validates exists/unexpired/unconsumed,
   consumes BEFORE the exchange, exchanges the code with the verifier at the
@@ -203,8 +204,8 @@ checkboxes above remain for the independent verifier.
   document is refreshed as a whole JSON document with only `access_token`
   overwritten (review fix `f6e31cf5`), so every Google-issued field survives
   verbatim.
-- Per-secret outcomes (refreshed / no-refresh-mechanism / failed: reason) are
-  written to the run-scoped log sink and land in the durable run record;
+- Per-secret outcomes (refreshed / no-refresh-mechanism / failed: reason)
+  are written to the run-scoped log sink and land in the durable run record;
   secrets with no refresh mechanism still emit SecretExpiring — no expiring
   credential is silently skipped.
 
@@ -217,56 +218,39 @@ checkboxes above remain for the independent verifier.
   TenantSettings renders it.
 - `GET /api/v1/admin/audit` queries the durable audit repository instead of
   the in-memory TelemetryBuffer; `AuditEvent.tenant_id` is derived
-  server-side at emit (never client-supplied) with migration 000070
+  server-side at emit (never client-supplied) with a portable migration
   backfilling from workspace scope; `tenant_id` + free-text `q` filters are
   enforced in SQL by BOTH adapters (portable lower() LIKE with escaped
-  wildcards; zstd-compressed rows decompressed and matched in the adapter);
-  the TenantSettings Audit tab renders durable events with the same filter
-  set including search.
-
-### Final-round fix (`1bc00b6c`)
-
-Merging the assigned base regressed `scripts/check-tenant-filter.sh` (the
-new `audit_events.tenant_id` column and `oauth_states` table brought this
-task's reads into the lint's checked set): the tenant filter now applies
-lexically inside `query_rows`/`count_rows` in both adapters (same predicate,
-behavior identical; PG SQL-shape test updated to mirror the entry-point
-scoping), and the script's documented spec §3 SKIP_LIST carries rationales
-for the three deployment-wide audit housekeeping reads, the pre-auth
-`oauth_state::find_by_state` capability lookup, and the user-keyed judgment
-ledger `list_for_user`. `scripts/*-exemptions.txt` untouched.
+  wildcards; zstd-compressed rows decompressed and matched in the adapter,
+  lexical scoping inside `query_rows`/`count_rows` per
+  `scripts/check-tenant-filter.sh`); the TenantSettings Audit tab renders
+  durable events with the same filter set including search.
 
 ### Test evidence
 
-Run in this sandbox this round (logs under
-`/tmp/stage/review-evidence/task-273-final/`):
-
-- `cargo check --workspace` — clean; `cargo check -p gyre-server --tests` —
-  clean; `cargo fmt --all -- --check` — clean.
-- `cargo test -p gyre-adapters --lib` — **635 passed, 0 failed** (vault KV
+- This round (merge repair, logs under
+  `/tmp/stage/review-evidence/task-273-rebase-b2523a47/`):
+  `cargo check -p gyre-server` clean; `cargo fmt --all -- --check` clean;
+  `cargo test -p gyre-adapters --lib` — 637 passed, 0 failed (vault KV
   v2/JWT-auth/fail-closed, sops cross-implementation vector, job_run /
-  oauth_state / agent_instance sqlite+pg adapters, audit tenant + q
-  filters; re-run green after the tenant-filter fix).
-- `cd web && npm test` — **127 files, 2571 passed, 41 skipped, 0 failed**
-  (includes the task-273 TenantSettings Jobs/Audit/Server-Logs tab tests).
-- Mechanical gates: every `scripts/check-*.sh` that passes on the assigned
-  base also passes on HEAD; the 36 scripts failing on HEAD fail IDENTICALLY
-  on the base (verified via a worktree of `e9f6a31c` — pre-existing
-  environment/baseline issues, e.g. mawk dialect errors). The only
-  HEAD-vs-base deltas were check-task-commit-attribution (fixed by this
-  attribution commit) and check-tenant-filter (fixed by `1bc00b6c`).
-
-Server test BUILDS exceed the model sandbox's 4 GiB budget (build wrapper);
-the verifier must run `cargo test -p gyre-server --lib -- secret_rotation::
-maintenance_jobs:: api::admin::tests::admin_jobs api::admin::tests::admin_audit
-api::oauth:: telemetry::jobs` (full rationale in
-`/tmp/stage/review-evidence/task-273-final/README.md`). Those tests cover the
-real RS256 JWT-bearer grant against a signature-verifying stub token
-endpoint, SA document preservation, shape-based dispatch under a
-non-`_refresh_token` name, no-refresh-mechanism run-log outcomes,
-repo_maintenance object reclamation and corrupted-repo failure isolation,
-finished-only history pruning, only-expired OAuth state cleanup,
-remote_agent_cleanup orphan kill via `ComputeTarget::kill_process`, the
-admin_jobs status-pill ordering, admin_audit durability/tenant scoping/q
-search, OAuth enrollment + callback with replayed/expired state rejection,
-and the server-log capture layer.
+  oauth_state / agent_instance adapters, audit tenant + q filters, plus the
+  merged task-264 suites). Mechanical gates all PASS with no new exemption
+  entries: check-arch, check-abac-route-registry,
+  check-migration-versions, check-migration-sql-portability,
+  check-mem-port-contracts, check-in-memory-state-stores,
+  check-unbounded-external-http, check-tenant-filter.
+- Server test BUILDS exceed the model sandbox's 4 GiB budget (build
+  wrapper); the verifier must run `cargo test -p gyre-server --lib --
+  secret_rotation:: maintenance_jobs:: api::admin::tests::admin_jobs
+  api::admin::tests::admin_audit api::oauth:: telemetry::jobs`, the
+  merge-touched integration tests (e2e_ralph_loop, git_integration,
+  graph_integration, spec_enforcement), and `cd web && npm test`. Those
+  tests cover the real RS256 JWT-bearer grant against a signature-verifying
+  stub token endpoint, SA document preservation, shape-based dispatch under
+  a non-`_refresh_token` name, no-refresh-mechanism run-log outcomes,
+  repo_maintenance object reclamation and corrupted-repo failure isolation,
+  finished-only history pruning, only-expired OAuth state cleanup,
+  remote_agent_cleanup orphan kill via `ComputeTarget::kill_process`, the
+  admin_jobs status-pill ordering, admin_audit durability/tenant scoping/q
+  search, OAuth enrollment + callback with replayed/expired state rejection,
+  and the server-log capture layer.
