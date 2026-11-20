@@ -3,7 +3,7 @@ title: "Message edge cases: 64KB send limit with 413 and JWKS historical-key ser
 spec_ref: "Spec gap spec-c62aac6701125cb09e0c736c / message-size-and-key-rotation / 60b177f85a11"
 depends_on: [task-247, task-251]
 progress: complete
-commits: ["7cdd66d072c448cc23200daac8b16e2e46d1b78d"]
+commits: ["7cdd66d072c448cc23200daac8b16e2e46d1b78d", "951fa88b25aa0c530aab4dc4c4e2c59cbe6994f2"]
 ---
 
 ## Required behavior
@@ -144,3 +144,17 @@ message_persistence.rs pattern):
   `--test m18_oidc_integration`, and `--lib` (messages unit tests: 429 queue
   depth, idempotent ack, fan-out, atomic sends). Command list recorded in
   /tmp/stage/review-evidence/task-254.md.
+
+### Post-approval attribution record (task-248 round 8)
+
+Commit 951fa88b (`fix(task-248): create workspace rows in task-254
+message fixtures for rule-1 resolution`) is recorded in this task's
+`commits:` frontmatter because its subject references task-254 and it
+modifies this task's test file
+(`crates/gyre-server/tests/message_size_and_key_rotation.rs`): the
+task-commit-attribution gate requires every task-labeled product-surface
+commit to be visible to that task's review scoping. The change itself is
+a fixture repair performed under task-248 (its rule-1 tenant-isolation
+guard made the pre-rule-1 fixtures fail); it is described in
+specs/tasks/task-248.md. No behavior of this task changed: the same
+sends must still return 201/413, no assertion weakened.

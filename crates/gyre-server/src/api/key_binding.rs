@@ -705,6 +705,7 @@ mod tests {
 
         // Caller is "user:bob" with Developer role (not Admin, not owner).
         let auth = AuthenticatedAgent {
+            auth_mechanism: crate::auth::AuthMechanism::ApiKey,
             agent_id: "bob".to_string(),
             user_id: None,
             roles: vec![UserRole::Developer],
