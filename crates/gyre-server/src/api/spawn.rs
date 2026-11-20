@@ -8377,9 +8377,7 @@ mod tests {
         // The monitor polls every EXIT_MONITOR_POLL_SECS — wait for it to
         // observe the exit and mark the record terminated.
         let deadline = std::time::Instant::now()
-            + std::time::Duration::from_secs(
-                crate::api::spawn::EXIT_MONITOR_POLL_SECS as u64 * 3 + 5,
-            );
+            + std::time::Duration::from_secs(crate::api::spawn::EXIT_MONITOR_POLL_SECS * 3 + 5);
         loop {
             let record = state
                 .agent_instances

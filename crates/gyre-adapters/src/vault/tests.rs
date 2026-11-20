@@ -14,6 +14,9 @@ type VaultStore = Arc<Mutex<HashMap<String, serde_json::Value>>>;
 /// namespace header).
 type NamespaceEvent = (&'static str, Option<String>);
 
+// (path, versions) for every KV v2 destroy request.
+type DestroyEvent = (String, Vec<String>);
+
 /// What the stub server observed (tokens per path, JWT logins,
 /// namespaces, AppRole token generations, version destroys).
 #[derive(Default, Clone)]
@@ -27,7 +30,7 @@ struct Observed {
     namespaces: Arc<Mutex<Vec<NamespaceEvent>>>,
     /// (path, versions) for every KV v2 destroy request (review
     /// task-273: rotate/replace must destroy the superseded versions).
-    destroys: Arc<Mutex<Vec<(String, Vec<String>)>>>,
+    destroys: Arc<Mutex<Vec<DestroyEvent>>>,
     /// KV v2 version model (stub server state, not just observation): a
     /// per-path write counter, incremented on every data POST and served
     /// as `/data/metadata/version` on reads — real Vault's versioned
