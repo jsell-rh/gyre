@@ -5221,6 +5221,7 @@ mod tests {
         let (status, _mr) = {
             let (code, body) = complete_agent(
                 axum::extract::State(state.clone()),
+                auth.clone(),
                 axum::extract::Path(agent_id.to_string()),
                 axum::Json(CompleteAgentRequest {
                     branch: "feat/moved".to_string(),
