@@ -1055,10 +1055,44 @@ pub(crate) fn system_principal_tenant() -> String {
     "default".to_string()
 }
 
+/// How the caller authenticated — set by the authentication extractor at
+/// token-validation time (message-bus.md §Origin and tenant resolution
+/// from auth context).
+///
+/// The mechanism, NOT role membership or identity strings, decides
+/// `MessageOrigin` on the message send path: only the global
+/// `GYRE_AUTH_TOKEN` resolves to `MessageOrigin::Server` (full forge
+/// authority over server-only kinds), while API-key and Keycloak/OIDC
+/// callers resolve to their verified user even when they hold the Admin
+/// role. Role membership is a separate axis (e.g. scoping rule 6 allows
+/// Admin-role API-key callers to target Broadcast via an explicit role
+/// check in the send handler, independent of origin).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AuthMechanism {
+    /// The global `GYRE_AUTH_TOKEN` (dev/system usage) — the only Server-origin
+    /// principal. Server-internal principals built with the same shape and
+    /// authority (the scheduler's system auth) use this variant too.
+    GlobalToken,
+    /// A per-agent token issued at spawn (UUID legacy or agent JWT).
+    AgentToken,
+    /// A `gyre_*` API key bound to a user record (user_id from key lookup).
+    ApiKey,
+    /// A Keycloak/OIDC user JWT (user_id from the verified token).
+    UserJwt,
+    /// A federation JWT from a trusted remote Gyre instance (agent principal).
+    FederatedJwt,
+    /// An impersonation JWT resolving to the target user.
+    Impersonation,
+}
+
 /// Resolved principal injected by the auth extractor.
 #[derive(Clone)]
 pub struct AuthenticatedAgent {
     pub agent_id: String,
+    /// How this principal authenticated. Set at token-validation time by the
+    /// extractor — the reliable discriminator for origin-sensitive paths
+    /// (`origin_from_auth`); never derived from spoofable strings or roles.
+    pub auth_mechanism: AuthMechanism,
     /// Present when auth was performed via JWT or API key.
     pub user_id: Option<Id>,
     pub roles: Vec<UserRole>,
@@ -1578,6 +1612,7 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedAgent {
                 .await;
             }
             return Ok(AuthenticatedAgent {
+                auth_mechanism: AuthMechanism::GlobalToken,
                 agent_id: "system".to_string(),
                 user_id: None,
                 roles: vec![UserRole::Admin],
@@ -1685,6 +1720,7 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedAgent {
                     .await;
                 }
                 let auth = AuthenticatedAgent {
+                    auth_mechanism: AuthMechanism::AgentToken,
                     agent_id,
                     user_id: None,
                     roles: vec![UserRole::Agent],
@@ -1861,6 +1897,7 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedAgent {
                     .await;
                 }
                 return Ok(AuthenticatedAgent {
+                    auth_mechanism: AuthMechanism::ApiKey,
                     agent_id: user.display_name.clone(),
                     user_id: Some(user.id),
                     roles: user.roles,
@@ -1941,6 +1978,7 @@ pub async fn authenticate_token(
     if tokens_equal(token, &state.auth_token) {
         record_auth_success(state, "global", Some("system"), None, None, None).await;
         return Ok(AuthenticatedAgent {
+            auth_mechanism: AuthMechanism::GlobalToken,
             agent_id: "system".to_string(),
             user_id: None,
             roles: vec![UserRole::Admin],
@@ -2018,6 +2056,7 @@ pub async fn authenticate_token(
             };
             record_auth_success(state, token_kind, Some(agent_id.as_str()), None, None, None).await;
             let auth = AuthenticatedAgent {
+                auth_mechanism: AuthMechanism::AgentToken,
                 agent_id,
                 user_id: None,
                 roles: vec![UserRole::Agent],
@@ -2117,6 +2156,7 @@ pub async fn authenticate_token(
             )
             .await;
             return Ok(AuthenticatedAgent {
+                auth_mechanism: AuthMechanism::ApiKey,
                 agent_id: user.display_name.clone(),
                 user_id: Some(user.id),
                 roles: user.roles,
@@ -2286,6 +2326,7 @@ async fn validate_jwt(
     }
 
     let auth = AuthenticatedAgent {
+        auth_mechanism: AuthMechanism::UserJwt,
         agent_id: user.display_name.clone(),
         user_id: Some(user_id),
         roles: user.roles,
@@ -2773,6 +2814,7 @@ async fn validate_federated_jwt(token: &str, state: &Arc<AppState>) -> Option<Au
         .trim_start_matches("http://");
     let fed_claims_json = serde_json::to_value(&claims).ok();
     let auth = AuthenticatedAgent {
+        auth_mechanism: AuthMechanism::FederatedJwt,
         agent_id: format!("{remote_host}/{}", claims.sub),
         user_id: None,
         roles: vec![UserRole::Agent],
@@ -5286,6 +5328,7 @@ mod tests {
     fn test_ws_ticket_issue_and_consume() {
         let store = WsTicketStore::new();
         let auth = AuthenticatedAgent {
+            auth_mechanism: crate::auth::AuthMechanism::GlobalToken,
             agent_id: "test-user".to_string(),
             user_id: None,
             roles: vec![UserRole::Admin],
@@ -5320,6 +5363,7 @@ mod tests {
     fn test_ws_ticket_does_not_expose_real_token() {
         let store = WsTicketStore::new();
         let auth = AuthenticatedAgent {
+            auth_mechanism: crate::auth::AuthMechanism::GlobalToken,
             agent_id: "test-user".to_string(),
             user_id: None,
             roles: vec![UserRole::Admin],
@@ -5776,6 +5820,7 @@ mod tests {
         // spoofing user cannot forge: their key/JWT resolves to their own
         // user id.
         let global_token = AuthenticatedAgent {
+            auth_mechanism: crate::auth::AuthMechanism::GlobalToken,
             agent_id: "system".to_string(),
             user_id: None,
             roles: vec![UserRole::Admin],
@@ -5792,6 +5837,7 @@ mod tests {
 
         // API-key user named "system": agent_id matches, user_id doesn't.
         let spoofed = AuthenticatedAgent {
+            auth_mechanism: crate::auth::AuthMechanism::ApiKey,
             agent_id: "system".to_string(),
             user_id: Some(gyre_common::Id::new("u-sys")),
             roles: vec![UserRole::Admin],
@@ -5808,6 +5854,7 @@ mod tests {
 
         // Ordinary user: neither field matches.
         let ordinary = AuthenticatedAgent {
+            auth_mechanism: crate::auth::AuthMechanism::ApiKey,
             agent_id: "jsell".to_string(),
             user_id: Some(gyre_common::Id::new("u-1")),
             roles: vec![UserRole::Admin],
