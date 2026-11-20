@@ -3,7 +3,7 @@ title: "View query diff scope: commit-range change set consumed from the shared 
 spec_ref: "Spec gap spec-57c2a110e6b0a8363571ac4d / diff-scope-commit-range / 78cf53a9a787"
 depends_on: []
 progress: ready-for-review
-commits: ["41de1c4b2c8d49d6521ad4171a14ccff8ef520b8", "db3243b4957c5778d6cfef4c11b41b0b32dc8323"]
+commits: ["4d7101c24b1e7cbc5e89e95aa0d9749a668abc7e", "db3243b4957c5778d6cfef4c11b41b0b32dc8323", "41de1c4b2c8d49d6521ad4171a14ccff8ef520b8"]
 ---
 
 ## Required behavior
