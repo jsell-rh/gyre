@@ -1346,11 +1346,25 @@ pub(crate) async fn finish_preview_agent(state: &AppState, agent_id: &str) -> bo
 }
 
 /// True when `agent_id` belongs to a preview run.
+///
+/// Fails CLOSED on a store error: every caller of this function is a
+/// refusal gate (REST ceremony guards, MCP dispatch denials), so during a
+/// kv outage the refusals must keep firing — returning `false` would let
+/// every preview agent's calls silently pass while the store is down.
+/// `finish_preview_agent`, which performs cleanup rather than refusal,
+/// reads the store directly and handles `Err` explicitly.
 pub(crate) async fn is_preview_agent(state: &AppState, agent_id: &str) -> bool {
-    matches!(
-        state.kv_store.kv_get(PREVIEW_AGENTS_NS, agent_id).await,
-        Ok(Some(_))
-    )
+    match state.kv_store.kv_get(PREVIEW_AGENTS_NS, agent_id).await {
+        Ok(Some(_)) => true,
+        Ok(None) => false,
+        Err(e) => {
+            tracing::warn!(
+                agent_id,
+                "preview registry unavailable; refusing the call as a preview agent (fail closed): {e:#}"
+            );
+            true
+        }
+    }
 }
 
 /// True when the caller authenticated via a Gyre-minted agent JWT whose
@@ -1540,9 +1554,14 @@ where
 
 /// Containment for status/teardown: the run's own repos define its scope, so
 /// every distinct repo must pass the caller's ABAC policy and tenant check.
-/// A repo deleted after the run started is skipped — the run is already
-/// heading for teardown — but an unresolvable workspace is denied rather than
-/// ridden on an assumed identity.
+/// A repo deleted after the run started cannot be ABAC-checked, but the
+/// scope must not silently vanish with it — the agent refs carry the
+/// workspace the run was provisioned in (captured from the real repo at
+/// spawn time, never caller-supplied), so the tenant check still anchors a
+/// run whose every target repo was deleted. Without this, deleting all of a
+/// run's repos would leave it readable and tearable by any Developer in any
+/// tenant. An unresolvable workspace is denied rather than ridden on an
+/// assumed identity.
 async fn require_preview_scope(
     state: &AppState,
     auth: &AuthenticatedAgent,
@@ -1554,29 +1573,58 @@ async fn require_preview_scope(
             continue;
         }
         checked.push(agent_ref.repo_id.clone());
-        let repo = match state.repos.find_by_id(&Id::new(&agent_ref.repo_id)).await? {
-            Some(repo) => repo,
-            None => continue,
-        };
-        crate::abac::check_repo_abac(state, &repo.id.to_string(), auth)
-            .await
-            .map_err(ApiError::Forbidden)?;
-        if auth.roles.contains(&UserRole::Admin) {
-            continue;
-        }
-        match state.workspaces.find_by_id(&repo.workspace_id).await? {
-            Some(ws) if ws.tenant_id.as_str() == auth.tenant_id => {}
-            Some(_) => {
-                return Err(ApiError::Forbidden(format!(
-                    "preview '{}' is outside the caller's tenant",
-                    record.preview_id
-                )))
+        match state.repos.find_by_id(&Id::new(&agent_ref.repo_id)).await? {
+            Some(repo) => {
+                crate::abac::check_repo_abac(state, &repo.id.to_string(), auth)
+                    .await
+                    .map_err(ApiError::Forbidden)?;
+                if auth.roles.contains(&UserRole::Admin) {
+                    continue;
+                }
+                match state.workspaces.find_by_id(&repo.workspace_id).await? {
+                    Some(ws) if ws.tenant_id.as_str() == auth.tenant_id => {}
+                    Some(_) => {
+                        return Err(ApiError::Forbidden(format!(
+                            "preview '{}' is outside the caller's tenant",
+                            record.preview_id
+                        )))
+                    }
+                    None => {
+                        return Err(ApiError::Forbidden(format!(
+                            "cannot determine the workspace scope of preview '{}'",
+                            record.preview_id
+                        )))
+                    }
+                }
             }
             None => {
-                return Err(ApiError::Forbidden(format!(
-                    "cannot determine the workspace scope of preview '{}'",
-                    record.preview_id
-                )))
+                // Repo deleted mid-run: no ABAC policy can be evaluated
+                // against a repo that no longer exists, so the recorded
+                // workspace's tenant is the remaining scope anchor. Admins
+                // stay cross-tenant by design; every other role must match
+                // the run's recorded tenant.
+                if auth.roles.contains(&UserRole::Admin) {
+                    continue;
+                }
+                match state
+                    .workspaces
+                    .find_by_id(&Id::new(&agent_ref.workspace_id))
+                    .await?
+                {
+                    Some(ws) if ws.tenant_id.as_str() == auth.tenant_id => {}
+                    Some(_) => {
+                        return Err(ApiError::Forbidden(format!(
+                            "preview '{}' is outside the caller's tenant",
+                            record.preview_id
+                        )))
+                    }
+                    None => {
+                        return Err(ApiError::Forbidden(format!(
+                            "cannot determine the workspace scope of preview '{}'",
+                            record.preview_id
+                        )))
+                    }
+                }
             }
         }
     }
@@ -4305,6 +4353,49 @@ mod tests {
         }
     }
 
+    /// kv wrapper whose `kv_get` on one namespace fails — forces the
+    /// preview-agent discriminator lookup to error, proving the refusal
+    /// gates fail closed during a store outage instead of silently
+    /// stopping all preview containment.
+    struct GetFailingKv {
+        inner: std::sync::Arc<dyn gyre_ports::KvJsonStore>,
+        fail_namespace: &'static str,
+    }
+
+    impl GetFailingKv {
+        fn new(
+            inner: std::sync::Arc<dyn gyre_ports::KvJsonStore>,
+            fail_namespace: &'static str,
+        ) -> Self {
+            Self {
+                inner,
+                fail_namespace,
+            }
+        }
+    }
+
+    #[axum::async_trait]
+    impl gyre_ports::KvJsonStore for GetFailingKv {
+        async fn kv_set(&self, namespace: &str, key: &str, value: String) -> anyhow::Result<()> {
+            self.inner.kv_set(namespace, key, value).await
+        }
+        async fn kv_get(&self, namespace: &str, _key: &str) -> anyhow::Result<Option<String>> {
+            if namespace == self.fail_namespace {
+                anyhow::bail!("injected kv get failure for namespace {namespace}");
+            }
+            self.inner.kv_get(namespace, _key).await
+        }
+        async fn kv_remove(&self, namespace: &str, key: &str) -> anyhow::Result<()> {
+            self.inner.kv_remove(namespace, key).await
+        }
+        async fn kv_list(&self, namespace: &str) -> anyhow::Result<Vec<(String, String)>> {
+            self.inner.kv_list(namespace).await
+        }
+        async fn kv_clear(&self, namespace: &str) -> anyhow::Result<()> {
+            self.inner.kv_clear(namespace).await
+        }
+    }
+
     /// agents wrapper whose create fails for preview agents — forces the
     /// agent-row persistence failure path (before any worktree, token or
     /// budget slot exists, but after the branch was created).
@@ -5867,6 +5958,112 @@ mod tests {
         .await;
     }
 
+    /// Task-206 review F6: deleting a run's target repos must not strip the
+    /// run's scope. `require_preview_scope` used to `continue` past deleted
+    /// repos, so a run whose EVERY target repo was deleted performed zero
+    /// scope checks — any Developer in any tenant could read and tear down
+    /// the record. The agent refs' recorded workspace (captured from the
+    /// real repo at spawn time, never caller-supplied) anchors the tenant
+    /// check instead.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn preview_scope_survives_target_repo_deletion() {
+        use crate::auth::test_helpers::{make_jwt_config, sign_test_jwt};
+
+        let dir = tempfile::tempdir().unwrap();
+        let (state, repo_id, _ws_id) = preview_state(dir.path(), 86_400, None).await;
+        let mut jwt_state = (*state).clone();
+        jwt_state.jwt_config = Some(make_jwt_config());
+        let jwt_state = std::sync::Arc::new(jwt_state);
+        let app = crate::api::api_router().with_state(jwt_state.clone());
+
+        let dev_tenant_b = sign_test_jwt(
+            &serde_json::json!({
+                "tenant_id": "tenant-b",
+                "sub": "dev-tenant-b",
+                "preferred_username": "dev-tenant-b",
+                "realm_access": { "roles": ["developer"] }
+            }),
+            3600,
+        );
+        let dev_tenant_default = sign_test_jwt(
+            &serde_json::json!({
+                "tenant_id": "default",
+                "sub": "dev-default",
+                "preferred_username": "dev-default",
+                "realm_access": { "roles": ["developer"] }
+            }),
+            3600,
+        );
+
+        let script = env_dump_script(dir.path(), &dir.path().join("agent-env.txt"));
+        with_agent_command(script.to_str().unwrap(), || async {
+            // Admin creates a real run to probe against.
+            let resp =
+                post_preview(&app, preview_body(&repo_id, &["specs/system/search.md"])).await;
+            assert_eq!(resp.status(), StatusCode::ACCEPTED);
+            let json = body_json(resp).await;
+            let preview_id = json["preview_id"].as_str().unwrap().to_string();
+
+            // Delete the run's ONLY target repo — the scope anchor the
+            // pre-fix code consulted. The run and its record remain.
+            jwt_state
+                .repos
+                .delete(&gyre_common::Id::new(&repo_id))
+                .await
+                .unwrap();
+            assert!(
+                jwt_state
+                    .kv_store
+                    .kv_get("meta_spec_previews", &preview_id)
+                    .await
+                    .unwrap()
+                    .is_some(),
+                "the preview record must outlive its repo row"
+            );
+
+            // Cross-tenant Developer: GET and DELETE must STILL be refused
+            // — with every repo deleted, this is exactly the input class
+            // that used to skip all scope checks.
+            let resp = get_preview_status_with_token(&app, &preview_id, &dev_tenant_b).await;
+            assert_eq!(
+                resp.status(),
+                StatusCode::FORBIDDEN,
+                "a deleted repo must not strip the run's tenant containment"
+            );
+            let resp = delete_preview_with_token(&app, &preview_id, &dev_tenant_b).await;
+            assert_eq!(
+                resp.status(),
+                StatusCode::FORBIDDEN,
+                "a deleted repo must not strip the run's teardown containment"
+            );
+            assert!(
+                jwt_state
+                    .kv_store
+                    .kv_get("meta_spec_previews", &preview_id)
+                    .await
+                    .unwrap()
+                    .is_some(),
+                "the refused cross-tenant DELETE must not tear the run down"
+            );
+
+            // In-tenant Developer: still allowed — the recorded workspace's
+            // tenant matches, so the fix is containment, not a broken route.
+            let resp = get_preview_status_with_token(&app, &preview_id, &dev_tenant_default).await;
+            assert_eq!(
+                resp.status(),
+                StatusCode::OK,
+                "an in-tenant Developer must still read a run whose repo was deleted"
+            );
+
+            // Admin still reads and tears down the orphaned run.
+            let resp = get_preview_status(&app, &preview_id).await;
+            assert_eq!(resp.status(), StatusCode::OK);
+            let resp = delete_preview(&app, &preview_id).await;
+            assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        })
+        .await;
+    }
+
     /// The separate preview budget cap: with `max_concurrent=1` pinned, a
     /// second concurrent spawn is rejected with 429.
     #[tokio::test(flavor = "multi_thread")]
@@ -6155,6 +6352,70 @@ mod tests {
         .await;
     }
 
+    /// Task-206 review F6: `is_preview_agent` must fail CLOSED on a store
+    /// error. Every caller of it (and of `caller_is_preview_agent`) is a
+    /// refusal gate, so during a kv outage the REST/MCP preview-agent
+    /// refusals must keep firing — the pre-fix `matches!(Ok(Some(_)))`
+    /// returned false on `Err` and silently stopped ALL preview containment
+    /// for as long as the store was down.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn preview_agent_guard_fails_closed_on_store_outage() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, _repo_id, _ws_id) = preview_state(dir.path(), 86_400, None).await;
+
+        let mut failing = (*state).clone();
+        failing.kv_store =
+            std::sync::Arc::new(GetFailingKv::new(state.kv_store.clone(), "preview_agents"));
+        let failing = std::sync::Arc::new(failing);
+
+        let mk_auth = |agent_id: &str, jwt_claims: Option<serde_json::Value>| {
+            crate::auth::AuthenticatedAgent {
+                agent_id: agent_id.to_string(),
+                user_id: None,
+                roles: vec![gyre_domain::UserRole::Agent],
+                tenant_id: "default".to_string(),
+                workspace_id: None,
+                repo_id: None,
+                scope: Vec::new(),
+                jwt_claims,
+                bearer_token: None,
+                deprecated_token_auth: false,
+                impersonation: None,
+            }
+        };
+
+        // Array-scoped agent JWT during an outage: the guard must fire —
+        // the caller is treated as a preview agent and refused.
+        assert!(
+            super::caller_is_preview_agent(
+                &failing,
+                &mk_auth(
+                    "any-agent",
+                    Some(serde_json::json!({ "scope": ["repo:r:write"] }))
+                )
+            )
+            .await,
+            "kv outage must fail closed: the preview-agent refusal keeps firing"
+        );
+
+        // Legacy string scope form: same fail-closed behavior.
+        assert!(
+            super::caller_is_preview_agent(
+                &failing,
+                &mk_auth("any-agent", Some(serde_json::json!({ "scope": "agent" })))
+            )
+            .await,
+            "legacy string scope must fail closed too"
+        );
+
+        // Claim-less principals (global token, API key) never reach the
+        // store lookup: the outage must not widen the guard to them.
+        assert!(
+            !super::caller_is_preview_agent(&failing, &mk_auth("any-agent", None)).await,
+            "claim-less caller must not match even during an outage"
+        );
+    }
+
     /// A preview agent must not be able to mint ceremony through the REST
     /// surface with its own live JWT (review finding: the §5 skip-ceremony
     /// invariant was enforced only in the MCP dispatch). POST
@@ -6313,6 +6574,123 @@ mod tests {
                 resp.status(),
                 StatusCode::CREATED,
                 "admin MR creation on a preview branch must still work"
+            );
+            let admin_mr = body_json(resp).await;
+            let mr_id = admin_mr["id"].as_str().unwrap().to_string();
+
+            // POST /api/v1/merge-requests/{id}/reviews → 403 (task-206
+            // review F1): a preview agent's review would be a real Review
+            // row counting toward real merge decisions — the same reason
+            // approve_spec refuses preview-agent callers.
+            let resp = prod
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!("/api/v1/merge-requests/{mr_id}/reviews"))
+                        .header("authorization", format!("Bearer {jwt}"))
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({
+                                "reviewer_agent_id": agent_id,
+                                "decision": "approve",
+                                "body": "ceremony escape",
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::FORBIDDEN,
+                "preview agent must not submit MR reviews via REST"
+            );
+            let json = body_json(resp).await;
+            assert!(
+                json["error"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("preview agents may not submit merge request reviews"),
+                "the 403 must come from the preview guard, not middleware: {json}"
+            );
+            assert!(
+                state
+                    .reviews
+                    .list_reviews(&gyre_common::Id::new(&mr_id))
+                    .await
+                    .unwrap()
+                    .is_empty(),
+                "no review may be recorded for the refused preview-agent call"
+            );
+
+            // POST /api/v1/workspaces/{ws}/messages → 403 (task-206 review
+            // F2): a Directed-tier message from a preview agent lands in a
+            // real agent's inbox and stays until acked — a durable
+            // footprint and influence channel out of scratch work. The
+            // message body is one the route would otherwise accept (the
+            // preview agent is a workspace member), so the 403 can only
+            // come from the preview guard, not incidental validation.
+            let repo = state
+                .repos
+                .find_by_id(&gyre_common::Id::new(&repo_id))
+                .await
+                .unwrap()
+                .unwrap();
+            let ws_id = repo.workspace_id.to_string();
+            let msg_body = serde_json::json!({
+                "to": {"agent": agent_id},
+                "kind": "status_update",
+                "payload": {"status": "in_progress", "summary": "ceremony escape"},
+            });
+            let resp = prod
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!("/api/v1/workspaces/{ws_id}/messages"))
+                        .header("authorization", format!("Bearer {jwt}"))
+                        .header("content-type", "application/json")
+                        .body(Body::from(msg_body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::FORBIDDEN,
+                "preview agent must not inject messages via REST"
+            );
+            let json = body_json(resp).await;
+            assert!(
+                json["error"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("preview agents may not send messages"),
+                "the 403 must come from the preview guard, not middleware: {json}"
+            );
+
+            // Positive control: the identical message from an Admin caller
+            // is accepted — the guard scopes to preview agents, not the
+            // route (and proves the 403 above was not validation).
+            let resp = prod
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!("/api/v1/workspaces/{ws_id}/messages"))
+                        .header("authorization", "Bearer test-token")
+                        .header("content-type", "application/json")
+                        .body(Body::from(msg_body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::CREATED,
+                "admin message send must still work (guard scopes to preview agents)"
             );
 
             let del = delete_preview(&app, &preview_id).await;

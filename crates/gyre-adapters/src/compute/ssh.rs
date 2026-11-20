@@ -309,13 +309,30 @@ impl ComputeTarget for SshTarget {
             ssh_args.push(self.destination());
             ssh_args.push(remote_cmd);
 
-            let status = Command::new("ssh")
+            let output = Command::new("ssh")
                 .args(&ssh_args)
-                .status()
+                .output()
                 .await
                 .context("ssh is_alive check failed")?;
 
-            Ok(status.success())
+            if output.status.success() {
+                return Ok(true);
+            }
+            // A failed remote `kill -0` (process gone, or not ours) exits
+            // non-zero with EMPTY stderr — that is a confirmed exit. SSH
+            // transport failures (connection refused, timeout, auth) also
+            // exit non-zero but print an "ssh: ..." diagnostic to stderr;
+            // those are probe failures, not evidence of death, and must not
+            // trigger the exit monitor's destructive teardown.
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if ssh_transport_failed(&stderr) {
+                return Err(anyhow::anyhow!(
+                    "ssh is_alive probe to {} failed: {}",
+                    self.destination(),
+                    stderr.trim()
+                ));
+            }
+            Ok(false)
         } else {
             Ok(false)
         }
@@ -325,6 +342,14 @@ impl ComputeTarget for SshTarget {
 /// Minimal shell quoting: wrap in single quotes, escape embedded single quotes.
 fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
+}
+
+/// True when non-zero-exit ssh stderr shows an ssh CLIENT failure ("ssh: ..."
+/// diagnostics: connection refused, timeout, auth). A remote command that
+/// merely exits non-zero prints nothing to stderr — that is a confirmed
+/// remote result, not a transport failure.
+fn ssh_transport_failed(stderr: &str) -> bool {
+    stderr.lines().any(|l| l.starts_with("ssh:"))
 }
 
 // ---------------------------------------------------------------------------
@@ -531,16 +556,37 @@ impl ComputeTarget for SshDockerTarget {
     }
 
     async fn is_alive(&self, handle: &ProcessHandle) -> Result<bool> {
-        let out = self
+        match self
             .remote_docker(&[
                 "inspect".to_string(),
                 "--format={{.State.Running}}".to_string(),
                 handle.id.clone(),
             ])
             .await
-            .unwrap_or_default();
-        Ok(out.trim() == "true")
+        {
+            Ok(out) => Ok(out.trim() == "true"),
+            // `docker run --rm` auto-removes an exited container, so "No
+            // such object" is the CONFIRMED-exit signal on this backend —
+            // not a probe failure.
+            Err(e) if remote_container_is_missing(&e) => Ok(false),
+            // SSH/daemon/transport failure: the container's state is
+            // UNKNOWN. Reporting `Ok(false)` here would make one transient
+            // probe failure look like a confirmed exit, and the exit
+            // monitor destroys preview work (token, worktree, budget slot)
+            // unrecoverably on that signal. Propagate the error so the
+            // monitor keeps polling instead of tearing down.
+            Err(e) => Err(e),
+        }
     }
+}
+
+/// True when a failed remote-docker command failed because the container
+/// does not exist (docker's "No such object" stderr) — a confirmed exit on
+/// this backend, since containers run with `--rm` are auto-removed when
+/// they stop. Anything else (SSH connection refused, daemon down) is a
+/// probe failure, not evidence of death.
+fn remote_container_is_missing(err: &anyhow::Error) -> bool {
+    format!("{err:#}").contains("No such object")
 }
 
 /// Build an [`SshDockerTarget`] from a compute-target config blob
@@ -880,5 +926,43 @@ mod tests {
         assert!(tunnel.is_alive().await);
 
         tunnel.close().await.unwrap();
+    }
+
+    /// Task-206 review F5: a docker-inspect failure must only read as a
+    /// confirmed exit when docker itself says the container is gone —
+    // "No such object" is the `--rm` auto-remove exit signal. SSH and
+    /// daemon failures are probe failures and must stay errors.
+    #[test]
+    fn docker_inspect_failure_classifies_missing_container() {
+        let missing =
+            anyhow::anyhow!("remote docker on user@host failed: Error: No such object: abc123");
+        assert!(remote_container_is_missing(&missing));
+
+        let refused = anyhow::anyhow!(
+            "remote docker on user@host failed: ssh: connect to host host port 22: Connection refused"
+        );
+        assert!(!remote_container_is_missing(&refused));
+
+        let daemon_down = anyhow::anyhow!(
+            "remote docker on user@host failed: Cannot connect to the Docker daemon at unix:///var/run/docker.sock"
+        );
+        assert!(!remote_container_is_missing(&daemon_down));
+    }
+
+    /// Task-206 review F5: bare-SSH stderr classification — an ssh client
+    /// diagnostic ("ssh: ...") is a transport failure; a silent non-zero
+    /// exit is the remote command's confirmed result.
+    #[test]
+    fn ssh_stderr_classifies_transport_failure() {
+        assert!(ssh_transport_failed(
+            "ssh: connect to host 10.0.0.9 port 22: Connection timed out\r\n"
+        ));
+        assert!(ssh_transport_failed(
+            "ssh: Could not resolve hostname host: Name or service not known"
+        ));
+        // Remote kill -0 on a gone process: non-zero exit, empty stderr.
+        assert!(!ssh_transport_failed(""));
+        // Remote command noise is not an ssh client diagnostic.
+        assert!(!ssh_transport_failed("kill: (4242) - No such process\n"));
     }
 }

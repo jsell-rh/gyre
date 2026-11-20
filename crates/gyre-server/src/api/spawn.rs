@@ -2717,9 +2717,26 @@ async fn monitor_poll_once(state: &AppState, agent_id: &str) -> bool {
             }
         }
     };
-    let alive = gyre_ports::ComputeTarget::is_alive(backend.as_ref(), &handle)
-        .await
-        .unwrap_or(false);
+    // Three-state probe (task-206 review F5): a liveness probe that ERRORS
+    // says nothing about the process. `Ok(false)` is a confirmed exit (the
+    // backend answered and reported the process gone); `Err` is a failed
+    // probe — transient SSH failure, unreachable daemon — and running the
+    // exit path on it would destroy preview work unrecoverably (token
+    // revoked, worktree force-removed, budget slot released) while the
+    // remote process still runs. A probe-failed agent stays monitored; the
+    // stale-agent detector and the preview GC own agents whose backend
+    // never becomes reachable again — normal agents park Idle through
+    // those paths, which is recoverable, unlike this path.
+    let alive = match gyre_ports::ComputeTarget::is_alive(backend.as_ref(), &handle).await {
+        Ok(alive) => alive,
+        Err(e) => {
+            tracing::warn!(
+                agent_id,
+                "exit-monitor liveness probe failed; agent stays monitored: {e:#}"
+            );
+            return true;
+        }
+    };
 
     if !alive {
         state.process_registry.lock().await.remove(agent_id);
@@ -8214,6 +8231,119 @@ mod tests {
                 .await;
         state.process_registry.lock().await.remove("agt-alive-1");
         state.spawned_backends.lock().await.remove("agt-alive-1");
+    }
+
+    /// Task-206 review F5: a liveness probe that ERRS must not run the exit
+    /// path. `monitor_poll_once` used to map an is_alive error to
+    /// not-alive (`.unwrap_or(false)`), so one transient SSH failure ran
+    /// the full exit path into `finish_preview_agent`'s destructive
+    /// teardown (token revoked, worktree force-removed, budget slot
+    /// released, row Stopped) while the remote process still ran and its
+    /// work was lost. Uses a real SSH-docker backend pointed at a refused
+    /// port — the probe fails at the transport layer ("ssh: connect ...
+    /// Connection refused"), the exact production failure class. When ssh
+    /// is absent the probe fails too, so the test holds either way.
+    #[tokio::test]
+    async fn monitor_iteration_survives_liveness_probe_failure() {
+        let state = test_state();
+
+        // A preview agent row the exit path would destroy: an index entry
+        // in preview_agents routes process exits to finish_preview_agent.
+        let mut agent = gyre_domain::Agent::new(Id::new("agt-probe-1"), "preview-x", 0);
+        agent
+            .transition_status(gyre_domain::AgentStatus::Active)
+            .unwrap();
+        state.agents.create(&agent).await.unwrap();
+        state
+            .kv_store
+            .kv_set(
+                "preview_agents",
+                "agt-probe-1",
+                serde_json::json!({
+                    "preview_id": "pv-probe",
+                    "agent_id": "agt-probe-1",
+                    "repo_id": "r-1",
+                    "workspace_id": "ws-1",
+                    "spec_path": "specs/system/search.md",
+                    "branch": "preview/pv-probe/search",
+                    "base_sha": "0".repeat(40),
+                    "worktree_path": "/nonexistent",
+                    "released": false,
+                })
+                .to_string(),
+            )
+            .await
+            .unwrap();
+
+        // Backend whose probe fails at the SSH transport layer: port 1 on
+        // localhost refuses connections immediately.
+        let backend = SpawnBackend::SshDocker(gyre_adapters::compute::SshDockerTarget::new(
+            gyre_adapters::compute::SshTarget::new("root", "127.0.0.1").with_port(1),
+            "gyre-agent:latest",
+        ));
+        state.process_registry.lock().await.insert(
+            "agt-probe-1".to_string(),
+            gyre_ports::ProcessHandle {
+                id: "probe-failed-container".to_string(),
+                target_type: "ssh-docker".to_string(),
+                pid: None,
+                options: std::collections::HashMap::new(),
+            },
+        );
+        state
+            .spawned_backends
+            .lock()
+            .await
+            .insert("agt-probe-1".to_string(), std::sync::Arc::new(backend));
+
+        // The probe FAILS (transport), it does not confirm death: the
+        // monitor must keep polling and leave every registration — and the
+        // preview agent's Active row — untouched.
+        assert!(
+            monitor_poll_once(&state, "agt-probe-1").await,
+            "a failed liveness probe must keep the monitor polling"
+        );
+        assert!(
+            state
+                .process_registry
+                .lock()
+                .await
+                .contains_key("agt-probe-1"),
+            "a probe failure must not unregister the handle"
+        );
+        assert!(
+            state
+                .spawned_backends
+                .lock()
+                .await
+                .contains_key("agt-probe-1"),
+            "a probe failure must not unregister the backend"
+        );
+        let agent = state
+            .agents
+            .find_by_id(&Id::new("agt-probe-1"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            agent.status,
+            gyre_domain::AgentStatus::Active,
+            "a probe failure must not terminal-ize the preview agent"
+        );
+        // And no teardown side effects fired: the preview index entry is
+        // still unreleased (no token revocation / budget release ran).
+        let raw = state
+            .kv_store
+            .kv_get("preview_agents", "agt-probe-1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            !serde_json::from_str::<serde_json::Value>(&raw).unwrap()["released"]
+                .as_bool()
+                .unwrap(),
+            "a probe failure must not release the preview agent's slot"
+        );
     }
     /// TASK-077 (F6): `create_interrogation_policies` must fail closed — if
     /// a policy cannot be created (e.g. duplicate id), the error propagates
