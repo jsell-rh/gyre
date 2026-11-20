@@ -920,6 +920,11 @@ pub fn api_router() -> Router<Arc<AppState>> {
                 .get(messages::list_workspace_messages)
                 .layer(DefaultBodyLimit::max(max_message_bytes)),
         )
+        // Workspace-scoped telemetry feed (message-bus.md §API > Telemetry)
+        .route(
+            "/api/v1/workspaces/:workspace_id/activity",
+            get(activity::workspace_activity_handler),
+        )
         // Presence (HSI §7)
         .route(
             "/api/v1/workspaces/:workspace_id/presence",
