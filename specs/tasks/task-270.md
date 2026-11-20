@@ -3,7 +3,7 @@ title: "PR collaboration invariants: reject agent-principal pushes to the defaul
 spec_ref: "Spec gap spec-4c39ca6ea3e71ce8a53398f3 / pr-protection-and-hygiene / d30f233daf86"
 depends_on: []
 progress: ready-for-review
-commits: ["f48a62f6be9ea6b85b94f5dd1293e137e7b51504", "34f7878e3734df124067c20b225ad7e2a150ec70", "041bddcdd54e58930beb34cfc06ca12a0d16e9fa", "c9faf6a80ba0a216889c2d7efb5c82f71f58deee", "d5888ad56a3369911836d9ccaeb06995dd73de9d", "c269022921fb4faddc818da21fd2d834d00ab63e"]
+commits: ["1b0cbd6c15741fee50202fe06682344f7a91b176", "f48a62f6be9ea6b85b94f5dd1293e137e7b51504", "34f7878e3734df124067c20b225ad7e2a150ec70", "041bddcdd54e58930beb34cfc06ca12a0d16e9fa", "c9faf6a80ba0a216889c2d7efb5c82f71f58deee", "d5888ad56a3369911836d9ccaeb06995dd73de9d", "c269022921fb4faddc818da21fd2d834d00ab63e"]
 ---
 
 ## Required behavior
@@ -66,10 +66,12 @@ Canonical spec: `specs/development/agent-workflow.md`. Source: `fb1424fbac55cd23
 
 Both normative bullets of specs/development/agent-workflow.md §PRs as the
 Collaboration Primitive are enforced in production code on this branch.
-Task commits: `c2690229` (push protection), `d5888ad5` (PR hygiene job),
-`c9faf6a8` (formatting), `041bddcd` (review repair: deletion bypass +
-agent nudge dedup), `34f7878e` (rustfmt/clippy repair), `f48a62f6`
-(review repair: packfile-carrying test receive-pack bodies).
+Product commits (oldest first): `c2690229` (push protection), `d5888ad5`
+(PR hygiene job), `c9faf6a8` (formatting), `041bddcd` (review repair:
+deletion bypass + agent nudge dedup), `34f7878e` (rustfmt/clippy
+repair), `f48a62f6` (review repair: packfile-carrying test receive-pack
+bodies), `1b0cbd6c` (review repair: rustfmt single-line assert in
+`pack_objects_for`).
 
 ### Agent-principal default-branch push protection
 
@@ -78,10 +80,10 @@ and an explicit reason directing the agent to the MR flow, any push whose
 target ref is `refs/heads/{default_branch}` — resolved from the
 Repository record's `default_branch` field, never a hardcoded "main" —
 when the caller is an agent principal (`auth.user_id.is_none() &&
-!auth.is_system_principal()`, git_http.rs ~754). The check is a direct,
-unconditional check in the push handler (not an opt-in named pre-accept
-gate) and runs BEFORE `git receive-pack` executes, so the ref is never
-updated server-side on rejection; it matches the RAW pkt-line ref-update
+!auth.is_system_principal()`). The check is a direct, unconditional
+check in the push handler (not an opt-in named pre-accept gate) and runs
+BEFORE `git receive-pack` executes, so the ref is never updated
+server-side on rejection; it matches the RAW pkt-line ref-update
 commands (`parse_ref_update_commands`), so agent-principal deletion of
 the default branch is rejected too. The rejection emits a `PushRejected`
 message-bus event and a `GitPushRejected` audit event (gate_name
@@ -99,44 +101,56 @@ in jobs.rs on a minutes-scale interval (default 5 minutes, configurable
 via GYRE_PR_HYGIENE_INTERVAL_SECS; NOT the daily abandoned_branch_check
 cadence) and evaluates every open MR per workspace against the stale
 classes using real persisted state (MergeRequest.updated_at, reviewer
-assignments, review records, a real merge-base conflict check): unreviewed
-beyond the nudge threshold nudges assigned reviewers (or escalates to
-workspace Developers/Admins when there are none); conflicted MRs get a
-real rebase attempt via the jj machinery for agent-authored branches with
-live worktrees (rate-limited by a KV backoff window) and otherwise a
-rebase-required escalation; long-open MRs beyond the escalation threshold
-notify workspace Admins/Owners at higher priority; abandoned MRs beyond
-the hard close threshold are closed with a persisted status transition,
-an explanatory MR comment, and delivery to the author — never a silent
-close. Every action is recorded (notification rows, message-bus events,
-`pr_hygiene` audit events). Thresholds configurable via
+assignments, review records, a real merge-base conflict check):
+unreviewed beyond the nudge threshold nudges assigned reviewers (or
+escalates to workspace Developers/Admins when there are none);
+conflicted MRs get a real rebase attempt via the jj machinery for
+agent-authored branches with live worktrees (rate-limited by a KV
+backoff window) and otherwise a rebase-required escalation; long-open
+MRs beyond the escalation threshold notify workspace Admins/Owners at
+higher priority; abandoned MRs beyond the hard close threshold are
+closed with a persisted status transition, an explanatory MR comment,
+and delivery to the author — never a silent close. Every action is
+recorded (notification rows, message-bus events, `pr_hygiene` audit
+events). Thresholds configurable via
 GYRE_PR_HYGIENE_{NUDGE,ESCALATE,CLOSE}_SECS (defaults 2d/7d/30d). The
 daily abandoned_branch_check job is untouched.
 
-### Test evidence and the round-bc9fa879 repair
+### Review repairs
 
-Review finding bc9fa879 (both details, same root cause): the task's
-receive-pack test bodies carried a ref-update command + flush but NO
-packfile, and `git receive-pack` applies nothing for such a non-delete
-request while still exiting 0 — so `agent_push_to_feature_branch_succeeds`
-and `human_push_to_default_branch_accepted_and_spec_lifecycle_runs`
-could never pass (refs never landed; no spec_changed event). Fixed in
-`f48a62f6`: new test helpers `pack_objects_for` /
-`receive_pack_body_with_pack` (the `git pack-objects --stdout` pattern
-already used elsewhere in this file) and `push_ref_as` now carries the
-packfile, so accepted pushes actually land server-side; rejection-path
-bodies are unaffected (the guard fires before receive-pack reads the
-body).
+Round bc9fa879: the task's receive-pack test bodies carried a
+ref-update command + flush but NO packfile, and `git receive-pack`
+applies nothing for such a non-delete request while still exiting 0.
+Fixed in `f48a62f6` with the `pack_objects_for` /
+`receive_pack_body_with_pack` helpers; `push_ref_as` now carries the
+packfile so accepted pushes actually land server-side. Round 6d79dadd
+(this assignment): CI rustfmt flagged the assert inside
+`pack_objects_for` as wrapped across four lines where rustfmt requires
+the single-line form (the identical pre-existing pattern sits at the two
+other `pack-objects` call sites in the same file). Fixed in `1b0cbd6c`
+by collapsing it to one line — behavior unchanged, formatting only; no
+cold rebuild performed for this formatting-only repair, per the
+assignment contract.
+
+### Test evidence
 
 In-sandbox evidence (no server build, per the 4 GiB budget policy):
 - `cargo check -p gyre-server` and `cargo check -p gyre-server --tests`:
-  clean (exit 0) at head `f48a62f6`.
+  clean (exit 0) at head `f48a62f6`; the `1b0cbd6c` repair is
+  formatting-only (whitespace collapse inside an assert macro, no token
+  or type changes).
 - Plain-git probe replicating the exact test construction (objects
   created in a bare repo via mktree/commit-tree, body = pkt-line create
   command + flush [+ pack] piped to `git receive-pack --stateless-rpc`):
   packfile-less body → exit 0, ref NOT created (reproduces the finding);
   packfile-carrying body → ref created. Script and output retained at
   /tmp/stage/review-evidence/receive_pack_packfile_probe{.py,.out}.
+- Rustfmt repair evidence at
+  /tmp/stage/review-evidence/rustfmt-repair-1b0cbd6c.out:
+  `python3 scripts/check-rustfmt-diff.py 00669baa` (the CI hard fmt
+  job's changed-lines check against the assignment base merged at
+  `f433afcf`) → "rustfmt: changed lines clean (9 Rust files checked)",
+  exit 0; `cargo fmt -p gyre-server -- --check` → exit 0.
 
 Deferred to the independent verifier (gyre-server test compilation must
 run there): `cargo test -p gyre-server` with the filter
