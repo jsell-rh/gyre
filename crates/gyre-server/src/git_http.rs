@@ -8667,16 +8667,15 @@ specs:
     }
 
     /// Push a real commit into the bare repo via plumbing, returning the new SHA.
+    ///
+    /// The tree is built through a scratch index (`GIT_INDEX_FILE` +
+    /// `update-index --cacheinfo` + `write-tree`): `git mktree` rejects
+    /// paths containing '/' (tree entries are flat), so a file at a nested
+    /// path like "specs/system/foo.md" needs the index route, which builds
+    /// the intermediate tree objects.
     async fn make_commit(repo_path: &str, files: &[(&str, String)]) -> String {
-        // Build a tree from {path: content}.
-        let mut tree = std::process::Command::new("git")
-            .args(["-C", repo_path, "mktree"])
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .unwrap();
-        let mut input = String::new();
+        // Build {path: blob sha}.
+        let mut entries: Vec<(String, &str)> = Vec::new();
         for (path, content) in files {
             let mut blob_sha = std::process::Command::new("git")
                 .args(["-C", repo_path, "hash-object", "-w", "--stdin"])
@@ -8694,15 +8693,38 @@ specs:
                 .unwrap();
             let out = blob_sha.wait_with_output().unwrap();
             let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            input.push_str(&format!("100644 blob {sha}\t{path}\n"));
+            assert!(!sha.is_empty(), "hash-object failed for {path}");
+            entries.push((sha, path));
         }
-        use std::io::Write as _;
-        tree.stdin
-            .as_mut()
-            .unwrap()
-            .write_all(input.as_bytes())
+
+        // Scratch index → nested tree. The index file lives in its own
+        // tempdir so it never collides with (or pollutes) the repo's.
+        let scratch = tempfile::TempDir::new().unwrap();
+        let index_file = scratch.path().join("make-commit-index");
+        let index_file = index_file.to_str().unwrap();
+        for (sha, path) in &entries {
+            let out = std::process::Command::new("git")
+                .args(["-C", repo_path, "update-index", "--add", "--cacheinfo"])
+                .arg(format!("100644,{sha},{path}"))
+                .env("GIT_INDEX_FILE", index_file)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "update-index failed for {path}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        let out = std::process::Command::new("git")
+            .args(["-C", repo_path, "write-tree"])
+            .env("GIT_INDEX_FILE", index_file)
+            .output()
             .unwrap();
-        let out = tree.wait_with_output().unwrap();
+        assert!(
+            out.status.success(),
+            "write-tree failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
         let tree_sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
 
         // Commit the tree.
@@ -10527,11 +10549,16 @@ specs:
 
         let tree = git(&["mktree"]);
         let base = git(&["commit-tree", &tree, "-m", "chore: base"]);
-        git(&["update-ref", "refs/heads/main", &base]);
-        let tip = git(&["commit-tree", &tree, "-p", &base, "-m", "feat: move main"]);
-        git(&["update-ref", "refs/heads/main", &tip]);
+        let tip = git(&["commit-tree", &tree, "-p", &base, "-m", "feat: move"]);
+        // Push target is a FEATURE branch: agent principals may not push
+        // to the repo's default branch (task-270 default-branch
+        // protection, which rejects with 403 before signing ever runs),
+        // and this test exercises the Fulcio signing-failure path (502),
+        // not the default-branch invariant.
+        let branch = "refs/heads/feat/fulcio-unreachable";
+        git(&["update-ref", branch, &base]);
 
-        let line = format!("{base} {tip} refs/heads/main");
+        let line = format!("{base} {tip} {branch}");
         let mut body = super::pkt_line(&line);
         body.extend_from_slice(b"0000");
         let pack = {
@@ -10586,7 +10613,7 @@ specs:
 
         // The refs were undone — the push did not land.
         assert_eq!(
-            git(&["rev-parse", "refs/heads/main"]),
+            git(&["rev-parse", branch]),
             base,
             "a push rejected for signing failure must undo its ref updates"
         );
