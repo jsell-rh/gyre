@@ -409,6 +409,12 @@ mod tests {
         // agent_persona_id under the same version, then to 20261113000065
         // when the task-110 rebase onto main head f764bc00 collided with
         // upstream's 2026-11-08 numbering; see its up.sql.)
+        // 2026-11-13-000074_audit_events_tenant_id (task-273) is excluded for
+        // the same dependency reason: its user-scoped backfill reads
+        // users.tenant_id, a column owned by 000058, so it cannot run in the
+        // pre-000058 set either. It runs after the target batch (in version
+        // order, after 000058) — column add + no-op backfills over the seed
+        // rows, so the backfill assertions below are unaffected.
         let all = MIGRATIONS.migrations().unwrap();
         // 000060 (user_preferences_channel_shape, task-112) must also be
         // excluded from `pre`: it rewrites 000058's flat backfill literal
@@ -417,20 +423,31 @@ mod tests {
         // sees them).
         let (pre, deferred): (Vec<_>, Vec<_>) = all.into_iter().partition(|m| {
             let v = m.name().version().to_string();
-            v != "20261008000058" && v != "20261109000060" && v != "20261113000065"
+            v != "20261008000058"
+                && v != "20261109000060"
+                && v != "20261113000065"
+                && v != "20261113000074"
         });
         let (target, rest): (Vec<_>, Vec<_>) = deferred
             .into_iter()
             .partition(|m| m.name().version().to_string() == "20261008000058");
         assert_eq!(target.len(), 1, "000058 not found in embedded migrations");
-        let (m60, m65): (Vec<_>, Vec<_>) = rest
+        let (m60, rest): (Vec<_>, Vec<_>) = rest
             .into_iter()
             .partition(|m| m.name().version().to_string() == "20261109000060");
         assert_eq!(m60.len(), 1, "000060 not found in embedded migrations");
+        let (m65, m74): (Vec<_>, Vec<_>) = rest
+            .into_iter()
+            .partition(|m| m.name().version().to_string() == "20261113000065");
         assert_eq!(
             m65.len(),
             1,
             "tenant-scope index migration not found in embedded migrations"
+        );
+        assert_eq!(
+            m74.len(),
+            1,
+            "audit-events tenant_id migration not found in embedded migrations"
         );
         use diesel::migration::MigrationConnection;
         // run_migrations is the raw harness method — unlike
@@ -591,6 +608,13 @@ mod tests {
         .expect("row u-alice-1");
         let want_prefs = serde_json::to_string(&gyre_domain::UserPreferences::default()).unwrap();
         assert_eq!(d.preferences.as_deref(), Some(want_prefs.as_str()));
+
+        // 000074 (audit_events tenant_id, task-273) runs in the same batch
+        // position a deployed database sees it: after 000058 (whose
+        // users.tenant_id column its user-scoped backfill reads). Column add
+        // + index + no-op backfills over these seed rows — the username
+        // assertions above are unaffected.
+        conn.run_migrations(&m74).unwrap();
     }
 
     /// Task-112 review repair: migration 000060 converges stored
