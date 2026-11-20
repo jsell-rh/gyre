@@ -3,7 +3,7 @@ title: "View query diff scope: commit-range change set consumed from the shared 
 spec_ref: "Spec gap spec-57c2a110e6b0a8363571ac4d / diff-scope-commit-range / 78cf53a9a787"
 depends_on: []
 progress: ready-for-review
-commits: ["4d7101c24b1e7cbc5e89e95aa0d9749a668abc7e", "db3243b4957c5778d6cfef4c11b41b0b32dc8323", "41de1c4b2c8d49d6521ad4171a14ccff8ef520b8"]
+commits: ["4d7101c24b1e7cbc5e89e95aa0d9749a668abc7e", "db3243b4957c5778d6cfef4c11b41b0b32dc8323", "41de1c4b2c8d49d6521ad4171a14ccff8ef520b8", "6ba5217eeb6d801d798029cd07baf41f72250eb3"]
 ---
 
 ## Required behavior
@@ -167,6 +167,21 @@ the renderer.
 - Invariant scripts re-run OK (arch, mcp write gates, in-memory stores,
   unbounded http, relative paths, fail-open refs, byte slicing, inert
   enforcement, lossy secrets, migration versions).
+
+### Verification-repair round (formatting + clippy only)
+
+- The prior verification run (finding 67f8f9c2cdcc40d690f2eef5dc832b3c,
+  exit 1) failed only on rustfmt changed-line violations in four files and
+  one `clippy::type_complexity` in graph_diff.rs:230 — no behavioral
+  finding. Repaired in commit 6ba5217e: the four files were passed through
+  `rustfmt` (token-stream-identical; the unchanged gyre-server crates were
+  not cold-rebuilt for formatting-only feedback) and the test fn-pointer
+  pair was named via a `Mutator` type alias. `cargo test -p gyre-domain`
+  re-run after the repair: 579 + 8 passed, 0 failed; `cargo clippy -p
+  gyre-domain --all-targets` shows no warning on changed lines
+  (type_complexity gone; remaining `useless vec!` warnings are pre-existing
+  test debt outside this round's changed lines). Probe evidence retained
+  at /tmp/stage/review-evidence/task-276-format-repair.md.
 
 ### Deferred verification
 
