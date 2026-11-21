@@ -3,7 +3,7 @@ title: "Dependency auto-detection: full extraction forms (git refs, structured c
 spec_ref: "Spec gap spec-cab97078efffe0fbfb7339be / dep-detection-extraction-forms / ed9f34316476"
 depends_on: []
 progress: ready-for-review
-commits: ["78bc6dacc4ca62bc2c05a164fda6cafc69011c3c", "08f3082ae98e67172f75986d158e2253ed32f15d", "05ba66134f77df6cffd99aa4720fd5d92764fe5a", "dcdb28f1eb469d2ab0cf694d975a90deaec628ad"]
+commits: ["05ba66134f77df6cffd99aa4720fd5d92764fe5a", "dcdb28f1eb469d2ab0cf694d975a90deaec628ad", "08f3082ae98e67172f75986d158e2253ed32f15d", "78bc6dacc4ca62bc2c05a164fda6cafc69011c3c", "0ba78217e343b3c488178b5970f47d099e5cb3a6"]
 ---
 
 ## Required behavior
@@ -37,16 +37,16 @@ All three gap areas are implemented in `crates/gyre-server/src/git_http.rs`, sco
 - **package.json / pyproject.toml:** `detect_package_json_deps` additionally extracts git URL values (`git+https://…`, `git+ssh://…`, stored verbatim; `#fragment` as version); `detect_pyproject_deps` additionally extracts PEP 508 direct references `pkg @ git+https://…`. go.mod unchanged. External registry deps still ignored — only references matching a known tenant repo (excluding self) create edges.
 - **API contracts (gap 8244b7d9):** `detect_openapi_refs` parses the document (serde_yaml; JSON is valid YAML) and extracts server URLs only — OpenAPI 3.x `servers[].url`, Swagger 2.0 `host`+`basePath` — matching known repo names as whole URL labels (`repo_name_in_url`). `detect_mcp_refs` parses the mcp.json structure for `mcpServers.<name>.url`/`.server` and `tools[].url`/`.server` fields only. A repo name appearing only in a description/title/unrelated field creates NO edge. Contract files are enumerated tree-wide (`api/openapi.yaml` carries its tree path as `source_artifact`). Proto import detection unchanged.
 
-### This repair round (78bc6dac)
+### This repair round (0ba78217)
 
-Formatting-only fix for the verification finding (`check-clippy-diff` exit 1): the five dependency-detection pattern closures flagged as `clippy::manual_pattern_char_comparison` (`repo_name_from_reference` rsplit, `detect_pyproject_deps` trim_matches/trim_end_matches, `repo_name_in_url` split, `detect_proto_imports` trim_end_matches) were converted to char-array patterns — behavior-identical, matching the repo's existing style (`email.rs`). No production behavior change.
+The previous verification run (`cargo test --all --quiet`, attempt 4ec6b6b4) failed one test: `git_http::tests::push_to_non_default_branch_detects_git_dependency_then_orphans` panicked because its local `git` closure invoked `git commit-tree` without any author identity, and the verification sandbox has no global git user configured ("Author identity unknown"). Every other `commit-tree` site in this file already sets identity (`make_commit` via `-c user.name=…`, `git_with_input` and the sibling closures via `GIT_AUTHOR_*`/`GIT_COMMITTER_*` env vars); this closure was the lone miss. The fix adds the same four env vars — a test-hermeticity repair with no production behavior change.
 
 ### Test evidence
 
-- `cargo check -p gyre-server` passes via the build wrapper (exit 0, 7m07s cold; log: `task-278-cargo-check.log` in review evidence).
-- Standalone probe compiling the exact post-fix functions (`/tmp/stage/review-evidence/task-278-clippy-probe/`): `cargo clippy --all-targets --all-features -W clippy::all -D clippy::manual_pattern_char_comparison` exits 0, and 4/4 behavior tests (git-URL reference extraction, URL whole-label matching, PEP 508 direct refs, proto import trimming) pass via `cargo test -p task-278-clippy-probe`.
-- rustfmt changed-lines check clean (edition 2021, `skip_children=true`) on the edited lines.
-- Full gyre-server test execution remains deferred to the independent verifier (model-phase 4 GiB budget; the cargo wrapper blocks server test builds mechanically). Required verifier probes: `cargo test -p gyre-server` — in particular `git_http::tests::detect_dependencies_on_push_full_extraction_forms` and `git_http::tests::push_to_non_default_branch_detects_git_dependency_then_orphans`, plus the detector unit tests in `api::dependencies::tests` (`test_cargo_toml_dep_detection_path_and_git_forms`, `test_repo_name_from_reference`, `test_detect_package_json_git_ref`, `test_detect_pyproject_pep508_git_ref`, `test_detect_openapi_description_mention_no_edge`, `test_detect_mcp_refs_unrelated_field_no_edge`, and the reconcile suite); plus the workspace clippy gate (`check-clippy-diff.py`) that this round repairs.
+- Standalone git probe (`/tmp/stage/review-evidence/git-identity-probe/`): in a HOME with no git identity, bare `git commit-tree` fails with "Author identity unknown" (the exact verification failure) while the same command with the closure's `GIT_AUTHOR_*`/`GIT_COMMITTER_*` env vars succeeds — confirming both the root cause and the fix mechanism.
+- `cargo check -p gyre-server` passes via the build wrapper after the fix (exit 0; log in review evidence).
+- rustfmt changed-lines check clean on the edited file (edition 2021, `skip_children=true`).
+- Full gyre-server test execution remains deferred to the independent verifier (model-phase 4 GiB budget; the cargo wrapper blocks server test builds mechanically). Required verifier probes: `cargo test -p gyre-server` — in particular `git_http::tests::push_to_non_default_branch_detects_git_dependency_then_orphans` (the test this round repairs) and `git_http::tests::detect_dependencies_on_push_full_extraction_forms`, plus the detector unit tests in `api::dependencies::tests` (`test_cargo_toml_dep_detection_path_and_git_forms`, `test_repo_name_from_reference`, `test_detect_package_json_git_ref`, `test_detect_pyproject_pep508_git_ref`, `test_detect_openapi_description_mention_no_edge`, `test_detect_mcp_refs_unrelated_field_no_edge`, and the reconcile suite).
 
 ## Discovery evidence
 
