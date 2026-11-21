@@ -2,8 +2,8 @@
 title: "Breaking change detection: API-contract-change route and MCP notification of the dependent repo's orchestrator"
 spec_ref: "Spec gap spec-cab97078efffe0fbfb7339be / breaking-change-contract-route / ed9f34316476"
 depends_on: []
-progress: ready-for-review
-commits: ["e2ed3b9a15f1171ab9556196226f1d492ed36bb0", "843fae5350751ff8abd1585a19143b7a383827e5"]
+progress: not-started
+commits: []
 ---
 
 ## Required behavior
@@ -23,32 +23,6 @@ The conventional-commit route and the entire downstream cascade (BreakingChange 
 Push to repo B a commit titled `fix: tidy contract` that removes `DELETE /widgets` from openapi.yaml, with repo A depending on B via a DependencyEdge: pre-fix detect_breaking_changes_on_push's ONLY detection input is detect_breaking_commits over conventional-commit markers, so an unmarked contract removal returns early — no BreakingChange record, no task, no edge status change — and the notify path has no MCP delivery at all (only notify_rich user notifications and a workspace-destination bus broadcast; grep of mcp.rs/message-bus writers for a breaking-change orchestrator notification finds nothing). The probe must fail until the contract-diff route feeds the cascade and the Directed MCP message to the dependent repo's orchestrator is delivered.
 
 Update the relevant coverage rows only after implementing the behavior, with concrete source evidence. Do not mark unrelated rows complete or claim independent verification before it occurs.
-
-## Shipped
-
-Both normative shortfalls are closed in production code; the conventional-commit route and the downstream cascade are unchanged.
-
-### API-contract-change route
-
-`detect_breaking_changes_on_push` (crates/gyre-server/src/git_http.rs) now runs `detect_api_contract_changes` alongside `detect_breaking_commits` and feeds both routes' `(sha, description)` tuples into the same `process_breaking_changes` cascade, gated on existing dependents identically. When a push modifies any `openapi.yaml`/`openapi.yml`/`swagger.json` (matched by file name anywhere in the tree, via the push path's existing `parse_name_status` tree-enumeration helper), the contract is read at `old_sha` and `new_sha` (`read_git_file` both sides) and the operation sets (`method + path` from the `paths` object, shared by OpenAPI 3.x / Swagger 2.0) are diffed. An operation present in the old contract and absent from the new one produces a description of the form `API contract change: removed DELETE /widgets from openapi.yaml`. YAML parses via serde_yaml (superset of JSON), JSON via serde_json; an unparseable or unreadable contract on either side logs a warning and skips the route for the whole push (returns no changes — no panic, no fail-open cascade). Additive-only changes (including added contract files and branch creation with a zero old sha) return no changes. Renames (R) diff old-path vs new-path; deletion (D) treats every old operation as removed; addition (A) is additive by definition.
-
-### MCP orchestrator notification (step 3b)
-
-`process_breaking_changes` now also resolves the dependent repo's live repo orchestrator via `signal_chain::find_live_repo_orchestrator` (made `pub(crate)`; reads the same agent source `gyre_list_repo_orchestrators`/`list_repo_orchestrators_core` serves) and emits a Directed `Destination::Agent(orchestrator_id)` `breaking_change_detected` message through `emit_event` — persisted (non-Broadcast messages are stored via `messages.store`) until acked, on the bus `gyre_message_poll` serves — carrying repo, description, breaking-change id, dependent repo, dependency edge id, and commit sha. Member notifications (`notify_rich`) and the workspace-bus broadcast are unchanged and still fire. When no live orchestrator exists (or resolution fails, or the dependent repo record is missing), a warning names the dependent repo and the MCP arm is skipped — no silent drop of the other channels.
-
-### Test evidence
-
-- `cargo check -p gyre-server --tests`: 0 errors (logs: /tmp/stage/review-evidence/cargo-check-gyre-server-2.log; the first run caught one real compile error in the new mcp.rs test — `list_by_source_repo(&repo_b)` passed a `&Repository` where `&Id` is expected — fixed in e2ed3b9a).
-- rustfmt clean on all three touched files.
-- New tests (compiled by the check; execution deferred to the independent verifier per the 4 GiB build budget — the verifier should run them):
-  - `gyre-server` git_http.rs tests: `parse_contract_operations_yaml_and_json_forms`, `detect_api_contract_changes_flags_removed_operation`, `detect_api_contract_changes_swagger_json_form`, `detect_api_contract_changes_additive_only_not_breaking`, `detect_api_contract_changes_unparseable_skips_route`, `breaking_change_contract_route_e2e`, `breaking_change_contract_route_additive_only_no_cascade`, `breaking_change_contract_route_no_orchestrator_member_notifications_remain`, `breaking_change_contract_route_block_policy_fails_merge_until_acked` (suggested filter: `cargo test -p gyre-server breaking_change_contract_route` and `cargo test -p gyre-server detect_api_contract_changes` plus `parse_contract_operations`).
-  - `gyre-server` mcp.rs test: `mcp_message_poll_returns_breaking_change_orchestrator_notification` (suggested filter: `cargo test -p gyre-server mcp_message_poll_returns_breaking_change`).
-- The e2e test drives the real `detect_breaking_changes_on_push` over a real git fixture whose second commit is a plain `fix: tidy contract` (no `!`, no footer) removing `DELETE /widgets`, and asserts the BreakingChange record, edge status `Breaking`, the exact task title/labels/priority, the Directed unacked orchestrator inbox message with the full payload, and the member notification. The block-policy test enqueues a real merge-queue entry, asserts it fails with "unacknowledged breaking change", acknowledges, and asserts a new entry is not blocked.
-
-### Notes
-
-- Coverage rows 10 (Breaking Change Detection) and 18 (Workspace Orchestrator Integration) in specs/coverage/system/dependency-graph.md were updated with concrete source evidence for the two new arms.
-- Source attribution: implementation checkpoint 843fae53 (from the prior incomplete run, unformatted and carrying the one compile error), finalized by e2ed3b9a (rustfmt pass + compile fix + coverage rows). Web/dist untouched.
 
 ## Discovery evidence
 
