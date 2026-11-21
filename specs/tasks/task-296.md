@@ -208,4 +208,16 @@ Publish exactly the independently reviewed missing-work plan below. Only create 
 
 ## Shipped
 
+Publication of the reviewed activity-dashboard backlog, rebased onto the updated main base (9e7cf62e) that carried the dependency-graph backlog (task-278..285).
+
+### What was done
+
+- Resolved the `specs/task-spec-inputs.json` merge conflict by keeping both sides: the base's dependency-graph backlog entries/bindings and this plan's `backlog/dba01522c9fb7fb9aa3be898` entry plus its `activity-dashboard-completion` binding. The resolved tree's diff vs 9e7cf62e is byte-identical in content to the original publication commit d8f37938 (+9 registry lines, task-295.md +92, task-296.md +211); `python3 -m json.tool` validates the registry.
+- Created `specs/tasks/task-295.md` exactly per the reviewed plan: title, `depends_on: []`, `progress: not-started`, required behavior covering audit gap `dba01522c9fb7fb9aa3be898` (all five spec bullets, failure modes (a)-(f)), the seven acceptance criteria, and the verification-intent probes, unchanged.
+- No product file, spec, existing task, coverage status, or gate was touched; no new coverage rows were marked.
+
+### Audit challenge (per required behavior)
+
+Re-read `specs/system/activity-dashboard.md` and spot-checked the audit's evidence against the current tree: the unified `activity_handler` declares `since: Option<u64>` and never reads it (only `limit` is used; `list_recent` is limit-only); `agentTtyUrl` in `web/src/lib/api.js:292` has zero consumers; "Tailscale" appears nowhere in `crates/` or `web/src`; no try-it/preview/ephemeral-environment route exists in `api/mod.rs`; the workspace `since`-filtered surface reads the in-memory `TelemetryBuffer`. The gap decision holds. The decomposition (one task covering the single-section spec) and empty dependencies are sound — the noted ui-layout overlap is file hygiene only. No duplicate active task targets this spec (only task-295 and this publication task reference it).
+
 Task definitions and explicit bindings only; no product implementation claimed.
