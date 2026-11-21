@@ -2,8 +2,8 @@
 title: "Cascade testing: real agent-executed test runs against the merged version, with durable result records"
 spec_ref: "Spec gap spec-cab97078efffe0fbfb7339be / cascade-test-execution / ed9f34316476"
 depends_on: []
-progress: not-started
-commits: ["935f408420804f6df661657ddca7e6e554e5b8cd"]
+progress: ready-for-review
+commits: ["935f408420804f6df661657ddca7e6e554e5b8cd", "15bae5c05d66aa91f6f1c46e2bcb09971557cfa7"]
 ---
 
 ## Required behavior
@@ -25,7 +25,6 @@ Update the relevant coverage rows only after implementing the behavior, with con
 ## Discovery evidence
 
 Canonical spec: `specs/system/dependency-graph.md`. Source: `678a8ac3e3bfeafeb66cdb47e897b44e8ecda2ce`; plan: `1745ed1044f3de3976ac34455f356a3300421816ea7a6e7574e2e5d9ec4ad3a4`.
-
 [
   {
     "id": "7014f11632cdabb887a52f2b",
@@ -51,3 +50,64 @@ Canonical spec: `specs/system/dependency-graph.md`. Source: `678a8ac3e3bfeafeb66
     ]
   }
 ]
+
+## Shipped
+
+The EXECUTION and DURABLE RESULTS links of §Cascade Testing are implemented in
+production code; the identification, task-filing, event, notification, and
+failure follow-up links are unchanged.
+
+### EXECUTION (agent actually spawned, no human action)
+
+- `trigger_cascade_tests` (crates/gyre-server/src/merge_processor.rs) now
+  creates each per-dependent cascade-test task with
+  `task_type = Some(TaskType::Implementation)` — the discriminator the worker
+  scheduler spawns (previously unset, so signal_chain.rs skipped the task:
+  "untyped → never spawned").
+- The task description is the spawned agent's instruction set, rendered into
+  its `system://context` prompt: full context (dependent repo, merged repo +
+  id, merge SHA) and the procedure — update the dependency reference to the
+  merged commit (or its tag), run the repo's full test suite, complete the
+  agent run on pass / fail the run with the failing test output on failure.
+  Completion/failure flows through the existing `report_cascade_test_result`
+  path (api/spawn.rs), unchanged.
+- The trigger-time context (merged repo id, merge SHA) is persisted in the KV
+  store keyed by cascade task id so the result record carries the full
+  identity of the triggering merge.
+
+### DURABLE RESULTS (survive restart)
+
+- New port `CascadeTestResultRepository` (crates/gyre-ports/src/cascade_test_result.rs)
+  with domain type `gyre_domain::CascadeTestResult` (dependent repo id, merged
+  repo id, merge SHA, cascade task id, pass/fail, failure details, timestamp).
+- Implemented by all three adapters with the identical contract — one result
+  row per cascade task, re-reporting REPLACES the row (upsert on
+  `cascade_task_id`): mem (code guard), Diesel SQLite, and PostgreSQL
+  (ON CONFLICT DO UPDATE).
+- Migration `2026-11-21-000070_cascade_test_results` uses the next unused
+  sequence number and plain portable SQL (TEXT/BOOLEAN/BIGINT), runnable by
+  both the SQLite and PostgreSQL embedded runners.
+- Wired via the `store!` macro as `AppState.cascade_test_results`
+  (crates/gyre-server/src/lib.rs) — not an `Arc<Mutex<HashMap>>`; the two
+  test-support AppState constructors were wired to the same store.
+- `report_cascade_test_result` persists the record on every report (pass and
+  fail) in addition to the existing one-shot workspace events, notifications,
+  and failure follow-up task, which remain unchanged.
+
+### Test evidence
+
+- `cargo test -p gyre-adapters cascade_test`: 5/5 passed, including
+  `result_survives_fresh_storage_instance` (a fresh storage instance over the
+  same DB file retrieves the record — restart survival) and
+  `record_replaces_row_for_same_task` (port upsert contract).
+- `cargo check -p gyre-server --tests`: clean — the server-side tests
+  (scheduler spawn proof `scheduler_spawns_agent_for_cascade_test_task`,
+  durable pass/fail/re-report record tests in merge_processor) compile; their
+  full test-binary run is deferred to the independent verifier under the
+  4 GiB build budget (list recorded in /tmp/stage/review-evidence).
+- Mechanical gates all green: check-arch, check-migration-versions,
+  check-migration-sql-portability, check-mem-port-contracts,
+  check-in-memory-state-stores, check-byte-slice-truncation.
+- Coverage row 12 (Cascade Testing) in
+  specs/coverage/system/dependency-graph.md updated to `implemented` with
+  source evidence; no other rows touched.
