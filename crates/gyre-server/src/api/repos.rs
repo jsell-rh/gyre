@@ -1006,6 +1006,12 @@ pub async fn sync_mirror(
                 Some(&state.workspaces),
                 Some(&state.repos),
                 workspace_tenant_id.as_ref(),
+                // Mirror fetches have no authenticated pushing principal —
+                // the content arrives from the configured upstream, so
+                // there is no linking user to validate (exempt).
+                None,
+                None,
+                Some(&state.kv_store),
                 Some(&state.tasks),
             )
             .await;
@@ -1135,6 +1141,10 @@ pub async fn sync_specs(
     let head_sha = String::from_utf8_lossy(&output.stdout).trim().to_string();
 
     let now = now_secs();
+    // Linking principal: the authenticated caller re-running the sync stands
+    // in for the pusher (spec-links.md §Cross-Repo and Cross-Workspace
+    // Links read-access validation).
+    let principal = crate::spec_registry::LinkPrincipal::from_auth(&auth);
     crate::spec_registry::sync_spec_ledger(
         &state.spec_ledger,
         &state.spec_links_store,
@@ -1147,6 +1157,9 @@ pub async fn sync_specs(
         Some(&state.workspaces),
         Some(&state.repos),
         Some(&workspace.tenant_id),
+        Some(&principal),
+        Some(&state.workspace_memberships),
+        Some(&state.kv_store),
         Some(&state.tasks),
     )
     .await;

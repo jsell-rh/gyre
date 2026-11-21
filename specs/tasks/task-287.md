@@ -2,8 +2,8 @@
 title: "Spec Links — cross-repo link validation: same-workspace format resolution, linking-user read access, target-manifest existence, tenant-scoped re-resolution"
 spec_ref: "Spec gap spec-10bdced21a063f819b1baabd / spec-links-cross-repo-resolution / 5a915155d9bc"
 depends_on: []
-progress: not-started
-commits: []
+progress: complete
+commits: ["f3234b354d86e84d618043429da5a0178728f140", "16d08a2bcdbe32aacc49407aff2663d2e32601cf", "e3270d273935b77b6b1c71df894320b232bde919", "5afb12e079b522701b1e24a263634a5500d8b205"]
 ---
 
 ## Required behavior
@@ -62,3 +62,54 @@ Canonical spec: `specs/system/spec-links.md`. Source: `678a8ac3e3bfeafeb66cdb47e
     ]
   }
 ]
+
+## Shipped
+
+All four specced validation behaviors for cross-repo/cross-workspace links
+(spec-links.md §Cross-Repo and Cross-Workspace Links) are implemented in
+production code, shared by every sync entry point (git_http push handler,
+api/repos.rs sync_specs + sync_mirror, mirror_sync) via `sync_spec_ledger`:
+
+1. **Same-workspace `@{repo}/{path}` resolution** — `validate_cross_repo_target`
+   (spec_registry.rs) resolves the repo via `find_by_name_and_workspace` on the
+   SOURCE workspace id; the staleness pass re-resolves unresolved links of
+   this form via the source link's repo → workspace. Because a three-segment
+   target (`@B/system/auth.md`) is syntactically ambiguous between
+   `@{ws}/{repo}/{path}` and `@{repo}/{slashed path}`, both resolution sites
+   disambiguate by existence: the workspace form takes precedence, and when
+   the tenant-scoped `find_by_slug` definitively returns `Ok(None)` the first
+   segment is a repo name resolved within the source workspace (commit
+   f3234b35 — repairs verification round 967b021c, where the three cross-repo
+   tests failed on the workspace-only parse).
+2. **Linking-user read access** — `LinkPrincipal::from_auth` threads the
+   authenticated pusher into `sync_spec_ledger`; `validate_cross_workspace_target`
+   checks workspace membership (system principals and server-originated syncs
+   exempt, fail-closed on lookup error); a denial stores the link
+   "unresolved" with target_repo_id NULL, a warning naming principal and
+   target, and a durable KV marker the staleness pass consults so a denied
+   link is never flipped "active".
+3. **Target-manifest existence** — `target_manifest_declares_path` reads the
+   target repo's current `specs/manifest.yaml` (git-show on
+   refs/heads/{default_branch}) at push time AND at staleness re-resolution;
+   a missing path stores "unresolved" with the path named in the warning.
+4. **Tenant-scoped re-resolution** — `resolve_unresolved_cross_workspace_links`
+   derives the tenant from source repo → workspace → tenant (the fabricated
+   literal "default" tenant is gone) and skips with a log when the scope
+   cannot be derived.
+
+### Test evidence
+
+Local probes (build wrapper enforced): `cargo check -p gyre-server --lib`
+exit 0; `check-rustfmt-diff.py` and `check-clippy-diff.py` vs base
+3ee882f clean on changed lines. gyre-server test compilation is deferred to
+the independent verifier (4 GiB budget); required probes:
+`cargo test --all --quiet`, or focused —
+`spec_registry::tests::cross_repo_same_workspace_link_resolves_active_then_stale_on_target_change`,
+`spec_registry::tests::cross_repo_link_unresolved_when_target_path_not_in_target_manifest`,
+`spec_registry::tests::cross_workspace_link_denied_without_read_access_stays_unresolved`,
+`spec_link_staleness::tests::staleness_pass_resolves_cross_workspace_link_under_source_tenant`,
+`spec_link_staleness::tests::staleness_pass_resolves_cross_repo_same_workspace_link`,
+`spec_link_staleness::tests::staleness_does_not_flip_access_denied_link_active`.
+Round 967b021c failed the first, second, and fifth on the ambiguity bug
+fixed by f3234b35; the other three passed and must stay green. Evidence
+retained in /tmp/stage/review-evidence/task-287-disambiguation-repair.md.

@@ -66,6 +66,13 @@ pub async fn run_once(state: &Arc<AppState>) -> anyhow::Result<()> {
                             Some(&state.workspaces),
                             Some(&state.repos),
                             workspace_tenant_id.as_ref(),
+                            // Mirror fetches have no authenticated pushing
+                            // principal — the content arrives from the
+                            // configured upstream, so there is no linking
+                            // user to validate (exempt).
+                            None,
+                            None,
+                            Some(&state.kv_store),
                             Some(&state.tasks),
                         )
                         .await;
