@@ -1,8 +1,18 @@
 //! Spec link staleness background job (spec-links.md §Automatic Staleness Detection).
 //!
-//! Runs daily. For each `SpecLinkEntry` in the spec links store:
-//! - Checks if the target spec's current SHA in the ledger differs from the link's pinned `target_sha`.
-//! - If they differ, marks the link as `"stale"` and sets `stale_since`.
+//! Runs daily. For each `SpecLinkEntry` in the spec links store, re-evaluates
+//! the link's stored status against CURRENT conditions (task-288,
+//! spec-links.md §Link Status — the stored graph reflects current conditions,
+//! not a one-way ratchet):
+//! - `conflicted` — a conflicts_with link whose two endpoints are Approved.
+//! - `broken` — the target is absent from the ledger, or absent from its
+//!   repo's current manifest.
+//! - `stale` — the target spec's current SHA in the ledger differs from the
+//!   link's pinned `target_sha`.
+//! - `active` — otherwise.
+//! Links already stale/broken/conflicted are RE-CHECKED, not skipped: a
+//! target that re-enters its repo's manifest (or is restored to the ledger)
+//! transitions the link back per the normal active/stale rules.
 //! - For cross-repo/cross-workspace links (target_display starts with `@`), re-resolves the
 //!   workspace/repo — tenant-scoped from the source link (source repo → workspace → tenant),
 //!   with the target path required to be declared in the target repo's manifest. Links denied
@@ -35,66 +45,78 @@ pub async fn run_once(state: &Arc<AppState>) -> anyhow::Result<()> {
     let mut stale_count = 0u32;
 
     for link in &links {
-        // Only check links that have a pinned target_sha and are currently active.
-        let Some(pinned_sha) = &link.target_sha else {
-            continue;
-        };
-
-        if link.status == "stale" || link.status == "broken" {
-            // Already known stale/broken — skip.
+        // Unresolved cross-repo/cross-workspace links are re-resolved by
+        // the pass below, against the target repo's manifest — a failed
+        // resolution is not a status verdict.
+        if link.status == "unresolved" {
             continue;
         }
 
-        // Resolve current SHA from the ledger.
-        let current_sha = match state.spec_ledger.find_by_path(&link.target_path).await {
-            Ok(Some(entry)) => entry.current_sha,
-            Ok(None) => {
-                // Target spec not in ledger — mark as broken.
-                mark_link_status(state, &link.id, "broken", now_secs).await;
+        // Full current-condition re-evaluation (task-288): every status,
+        // including stale/broken/conflicted, is RE-CHECKED — a link whose
+        // defining condition has ceased transitions back per the normal
+        // active/stale rules instead of being skipped forever.
+        let new_status =
+            crate::spec_registry::evaluate_link_status(&state.spec_ledger, Some(&state.repos), link)
+                .await;
+
+        if new_status == link.status {
+            // No transition — stale_since is preserved (not re-stamped).
+            continue;
+        }
+
+        let prior_status = link.status.clone();
+        mark_link_status(state, &link.id, &new_status, now_secs).await;
+
+        match new_status.as_str() {
+            "stale" => {
+                stale_count += 1;
                 info!(
                     source = %link.source_path,
                     target = %link.target_path,
-                    "spec_link_staleness: target not in ledger — marking broken"
+                    link_type = %link.link_type,
+                    pinned = ?link.target_sha,
+                    "spec_link_staleness: SHA mismatch — marking stale"
                 );
-                continue;
+                // Create notifications for workspace members.
+                if let Some(source_repo_id) = &link.source_repo_id {
+                    notify_workspace_members(
+                        state,
+                        source_repo_id,
+                        &link.source_path,
+                        &link.target_path,
+                        now_secs,
+                    )
+                    .await;
+                }
+
+                // user-management.md §Who Gets Notified — "Spec drift detected"
+                // also notifies the spec owner.
+                notify_spec_owner_of_drift(state, &link.source_path, &link.target_path).await;
             }
-            Err(e) => {
-                warn!(
+            "broken" => {
+                info!(
+                    source = %link.source_path,
                     target = %link.target_path,
-                    error = %e,
-                    "spec_link_staleness: failed to look up target in ledger"
+                    "spec_link_staleness: target deleted or no longer in the manifest — marking broken"
                 );
-                continue;
             }
-        };
-
-        if !current_sha.is_empty() && &current_sha != pinned_sha {
-            mark_link_status(state, &link.id, "stale", now_secs).await;
-            stale_count += 1;
-
-            info!(
-                source = %link.source_path,
-                target = %link.target_path,
-                link_type = %link.link_type,
-                pinned = %pinned_sha,
-                current = %current_sha,
-                "spec_link_staleness: SHA mismatch — marking stale"
-            );
-            // Create notifications for workspace members.
-            if let Some(source_repo_id) = &link.source_repo_id {
-                notify_workspace_members(
-                    state,
-                    source_repo_id,
-                    &link.source_path,
-                    &link.target_path,
-                    now_secs,
-                )
-                .await;
+            "conflicted" => {
+                info!(
+                    source = %link.source_path,
+                    target = %link.target_path,
+                    "spec_link_staleness: conflicts_with link with both endpoints approved — marking conflicted"
+                );
             }
-
-            // user-management.md §Who Gets Notified — "Spec drift detected"
-            // also notifies the spec owner.
-            notify_spec_owner_of_drift(state, &link.source_path, &link.target_path).await;
+            _ => {
+                // Reversion out of stale/broken/conflicted back to active.
+                info!(
+                    source = %link.source_path,
+                    target = %link.target_path,
+                    prior = %prior_status,
+                    "spec_link_staleness: defining condition ceased — reverting link to active"
+                );
+            }
         }
     }
 
@@ -114,21 +136,36 @@ pub async fn run_once(state: &Arc<AppState>) -> anyhow::Result<()> {
 /// the mutation to the durable graph (spec-links.md §Forge-Maintained Spec
 /// Graph — the SQL table is authoritative).
 async fn mark_link_status(state: &AppState, link_id: &str, status: &str, now: u64) {
-    let updated: Option<crate::spec_registry::SpecLinkEntry> = {
-        let mut store = state.spec_links_store.lock().await;
-        store.iter_mut().find(|l| l.id == link_id).map(|link| {
-            link.status = status.to_string();
-            if status == "stale" {
-                link.stale_since = Some(now);
-            }
-            link.clone()
-        })
-    };
-    if let Some(entry) = updated {
-        if let Err(e) = state.spec_link_repo.save(&entry).await {
-            warn!(link_id = %link_id, "spec_link_staleness: failed to persist link status: {e}");
-        }
-    }
+    crate::spec_registry::write_link_status(
+        &state.spec_links_store,
+        &state.spec_link_repo,
+        link_id,
+        status,
+        now,
+    )
+    .await;
+}
+
+/// task-288 (spec-links.md §Link Status): reconcile the stored `conflicted`
+/// status of every link touching `spec_path` (as source or target) against
+/// current conditions. Called whenever an approval changes — approve,
+/// revoke — so a both-approved conflicts_with pair becomes "conflicted"
+/// and a ceased conflict reverts to the active/stale/broken rules without
+/// waiting for the daily pass.
+pub(crate) async fn refresh_conflicts_for_spec(state: &Arc<AppState>, spec_path: &str) {
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    crate::spec_registry::refresh_conflict_statuses_for_spec(
+        &state.spec_ledger,
+        Some(&state.repos),
+        &state.spec_links_store,
+        &state.spec_link_repo,
+        spec_path,
+        now_secs,
+    )
+    .await;
 }
 
 /// Re-resolve unresolved cross-repo / cross-workspace links (target_display
@@ -850,7 +887,14 @@ mod tests {
     async fn staleness_job_skips_links_without_target_sha() {
         let state = test_state();
 
-        // Link without a pinned SHA should be skipped entirely.
+        // A link without a pinned SHA has no SHA-staleness verdict — but it
+        // is still health-evaluated (task-288): with the target present in
+        // the ledger, the link stays active; it can be broken (target gone)
+        // or conflicted (both endpoints approved) without any pin.
+        let target =
+            make_ledger_entry("system/target.md", "some_sha", ApprovalStatus::Approved);
+        state.spec_ledger.save(&target).await.unwrap();
+
         let link = make_link(
             "link6",
             "system/source.md",
@@ -868,6 +912,294 @@ mod tests {
         let store = state.spec_links_store.lock().await;
         let updated = store.iter().find(|l| l.id == "link6").unwrap();
         assert_eq!(updated.status, "active");
+    }
+
+    // -----------------------------------------------------------------------
+    // task-288: stored link statuses — broken on manifest removal with
+    // reversion, conflicted on both-approved with reversion
+    // (spec-links.md §Link Status)
+    // -----------------------------------------------------------------------
+
+    /// Commit file changes to an existing test git repo (the repo's HEAD
+    /// moves; the manifest is read from the default branch by the staleness
+    /// pass).
+    fn git_commit_files(dir: &tempfile::TempDir, files: &[(&str, &str)]) {
+        let path = dir.path();
+        for (file, content) in files {
+            let full = path.join(file);
+            std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+            std::fs::write(&full, content).unwrap();
+        }
+        for args in [
+            vec!["add", "-A"],
+            vec!["commit", "-m", "update"],
+        ] {
+            let out = std::process::Command::new("git")
+                .args(&args)
+                .current_dir(path)
+                .output()
+                .expect("git command failed");
+            assert!(
+                out.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+    }
+
+    /// Initialize a fresh git repo (default branch main, matching the
+    /// Repository entities below) and make the initial commit.
+    fn git_init_and_commit(dir: &tempfile::TempDir, files: &[(&str, &str)]) {
+        let path = dir.path();
+        for args in [
+            vec!["init", "-b", "main"],
+            vec!["config", "user.email", "test@test.com"],
+            vec!["config", "user.name", "Test"],
+        ] {
+            let out = std::process::Command::new("git")
+                .args(&args)
+                .current_dir(path)
+                .output()
+                .expect("git command failed");
+            assert!(
+                out.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        git_commit_files(dir, files);
+    }
+
+    /// AC 1 + AC 5 (daily-pass half): a target spec removed from its repo's
+    /// manifest is kept in the ledger as Deprecated, so the ledger alone can
+    /// never fire the "no longer in the manifest" half of `broken` — the
+    /// pass must consult the target repo's CURRENT manifest. Re-adding the
+    /// target must revert the link (active when the pinned SHA matches the
+    /// restored current SHA) — the one-way-ratchet defect.
+    ///
+    /// Against the pre-task code this fails twice: the link stays "active"
+    /// through the removal pass (Ok(Some(entry)) leaves it untouched), and
+    /// after re-adding the target it is skipped forever by the
+    /// `status == "broken" → continue` guard.
+    #[tokio::test]
+    async fn staleness_pass_tracks_target_manifest_presence_both_ways() {
+        let state = test_state();
+
+        // Real git repo B whose manifest declares system/b.md.
+        let dir = tempfile::TempDir::new().unwrap();
+        let manifest_with_b =
+            "version: 1\nspecs:\n  - path: system/b.md\n    title: B\n    owner: user:test\n";
+        git_init_and_commit(
+            &dir,
+            &[
+                ("specs/manifest.yaml", manifest_with_b),
+                ("specs/system/b.md", "# B\n"),
+            ],
+        );
+        let repo_b = make_named_repo(
+            "repo-b",
+            "repo-b",
+            "ws1",
+            dir.path().to_str().unwrap(),
+        );
+        state.repos.create(&repo_b).await.unwrap();
+
+        // Target present in the ledger at the pinned SHA — but the ledger
+        // keeps it (as Deprecated) even after manifest removal, so the
+        // manifest is the only signal that can fire `broken`.
+        let target = make_ledger_entry("system/b.md", "sha-b", ApprovalStatus::Approved);
+        state.spec_ledger.save(&target).await.unwrap();
+
+        // Inbound link from repo A targeting repo B's spec (a resolved
+        // cross-repo link: target_repo_id = repo-b).
+        let mut link = make_link(
+            "link-manifest",
+            "system/a.md",
+            "system/b.md",
+            SpecLinkType::DependsOn,
+            Some("sha-b"),
+        );
+        link.source_repo_id = Some("repo-a".to_string());
+        link.target_repo_id = Some("repo-b".to_string());
+        {
+            let mut store = state.spec_links_store.lock().await;
+            store.push(link);
+        }
+
+        // Baseline: the manifest declares the target — the link is active.
+        run_once(&state).await.unwrap();
+        {
+            let store = state.spec_links_store.lock().await;
+            let l = store.iter().find(|l| l.id == "link-manifest").unwrap();
+            assert_eq!(l.status, "active", "declared target must keep the link active");
+        }
+
+        // Push the removal: B's manifest no longer declares system/b.md
+        // (the ledger entry survives as Deprecated — save, not delete).
+        let manifest_without_b = "version: 1\nspecs: []\n";
+        git_commit_files(&dir, &[("specs/manifest.yaml", manifest_without_b)]);
+        let mut deprecated = target.clone();
+        deprecated.approval_status = ApprovalStatus::Deprecated;
+        state.spec_ledger.save(&deprecated).await.unwrap();
+
+        run_once(&state).await.unwrap();
+        {
+            let store = state.spec_links_store.lock().await;
+            let l = store.iter().find(|l| l.id == "link-manifest").unwrap();
+            assert_eq!(
+                l.status, "broken",
+                "a target still in the ledger but absent from its repo's current \
+                 manifest must transition the link to broken"
+            );
+        }
+        // The transition is written through to the durable graph.
+        {
+            let persisted = state.spec_link_repo.list_all().await.unwrap();
+            let row = persisted.iter().find(|l| l.id == "link-manifest").unwrap();
+            assert_eq!(row.status, "broken");
+        }
+
+        // Re-add the target to B's manifest and run the pass again — the
+        // previously-broken link must be RE-CHECKED, not skipped, and leave
+        // "broken" per the normal SHA rules (pinned == current → active).
+        git_commit_files(&dir, &[("specs/manifest.yaml", manifest_with_b)]);
+        let mut restored = target;
+        restored.approval_status = ApprovalStatus::Approved;
+        state.spec_ledger.save(&restored).await.unwrap();
+
+        run_once(&state).await.unwrap();
+        let store = state.spec_links_store.lock().await;
+        let l = store.iter().find(|l| l.id == "link-manifest").unwrap();
+        assert_eq!(
+            l.status, "active",
+            "a target that re-enters its repo's manifest must revert the broken \
+             link (active when the pinned SHA matches the current SHA)"
+        );
+        drop(store);
+        let persisted = state.spec_link_repo.list_all().await.unwrap();
+        let row = persisted.iter().find(|l| l.id == "link-manifest").unwrap();
+        assert_eq!(row.status, "active");
+    }
+
+    /// AC 3: deprecation is not deletion. A target deprecated via supersedes
+    /// approval but still declared in its repo's manifest must NOT break
+    /// inbound links — `broken` fires on manifest absence, not on the
+    /// Deprecated approval status.
+    #[tokio::test]
+    async fn staleness_pass_does_not_break_deprecated_target_still_in_manifest() {
+        let state = test_state();
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let manifest =
+            "version: 1\nspecs:\n  - path: system/b.md\n    title: B\n    owner: user:test\n";
+        git_init_and_commit(
+            &dir,
+            &[
+                ("specs/manifest.yaml", manifest),
+                ("specs/system/b.md", "# B\n"),
+            ],
+        );
+        let repo_b = make_named_repo(
+            "repo-b",
+            "repo-b",
+            "ws1",
+            dir.path().to_str().unwrap(),
+        );
+        state.repos.create(&repo_b).await.unwrap();
+
+        // Deprecated via supersedes approval — but still in the manifest.
+        let target = make_ledger_entry("system/b.md", "sha-b", ApprovalStatus::Deprecated);
+        state.spec_ledger.save(&target).await.unwrap();
+
+        let mut link = make_link(
+            "link-deprecated",
+            "system/a.md",
+            "system/b.md",
+            SpecLinkType::DependsOn,
+            Some("sha-b"),
+        );
+        link.source_repo_id = Some("repo-a".to_string());
+        link.target_repo_id = Some("repo-b".to_string());
+        {
+            let mut store = state.spec_links_store.lock().await;
+            store.push(link);
+        }
+
+        run_once(&state).await.unwrap();
+
+        let store = state.spec_links_store.lock().await;
+        let l = store.iter().find(|l| l.id == "link-deprecated").unwrap();
+        assert_eq!(
+            l.status, "active",
+            "a deprecated-but-declared target must not break inbound links"
+        );
+    }
+
+    /// AC 2 + AC 4 (daily-pass half): a conflicts_with link whose two specs
+    /// are both Approved holds stored status "conflicted" (persisted), and
+    /// the status REVERTS when either endpoint loses Approved status —
+    /// the stored graph reflects current conditions, so a resolved conflict
+    /// is not misreported as active forever.
+    #[tokio::test]
+    async fn staleness_pass_sets_and_reverts_conflicted_status() {
+        let state = test_state();
+
+        let a = make_ledger_entry("system/a.md", "sha-a", ApprovalStatus::Approved);
+        let b = make_ledger_entry("system/b.md", "sha-b", ApprovalStatus::Approved);
+        state.spec_ledger.save(&a).await.unwrap();
+        state.spec_ledger.save(&b).await.unwrap();
+
+        let link = make_link(
+            "link-conflict",
+            "system/a.md",
+            "system/b.md",
+            SpecLinkType::ConflictsWith,
+            None,
+        );
+        {
+            let mut store = state.spec_links_store.lock().await;
+            store.push(link);
+        }
+
+        // Both endpoints Approved → stored status becomes "conflicted".
+        run_once(&state).await.unwrap();
+        {
+            let store = state.spec_links_store.lock().await;
+            let l = store.iter().find(|l| l.id == "link-conflict").unwrap();
+            assert_eq!(
+                l.status, "conflicted",
+                "a conflicts_with link with both endpoints approved must hold \
+                 stored status conflicted"
+            );
+        }
+        {
+            let persisted = state.spec_link_repo.list_all().await.unwrap();
+            let row = persisted.iter().find(|l| l.id == "link-conflict").unwrap();
+            assert_eq!(row.status, "conflicted", "conflicted must be persisted");
+        }
+
+        // One endpoint loses Approved status (e.g. approval reset to
+        // Pending via the extends drift path, or revoked) → the link's
+        // stored status reverts to what the active/stale/broken rules
+        // yield (here: active — the target is present and unpinned).
+        let mut a_pending = a.clone();
+        a_pending.approval_status = ApprovalStatus::Pending;
+        state.spec_ledger.save(&a_pending).await.unwrap();
+
+        run_once(&state).await.unwrap();
+        let store = state.spec_links_store.lock().await;
+        let l = store.iter().find(|l| l.id == "link-conflict").unwrap();
+        assert_eq!(
+            l.status, "active",
+            "a ceased both-approved condition must revert the stored \
+             conflicted status to the active/stale/broken rules"
+        );
+        drop(store);
+        let persisted = state.spec_link_repo.list_all().await.unwrap();
+        let row = persisted.iter().find(|l| l.id == "link-conflict").unwrap();
+        assert_eq!(row.status, "active");
     }
 
     // -----------------------------------------------------------------------
