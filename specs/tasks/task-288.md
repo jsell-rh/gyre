@@ -3,7 +3,7 @@ title: "Spec Links — stored link statuses: broken when the target leaves the m
 spec_ref: "Spec gap spec-10bdced21a063f819b1baabd / spec-links-status-lifecycle / 5a915155d9bc"
 depends_on: [task-287]
 progress: ready-for-review
-commits: ["6a4b091b4e0949090c5931d072e576869e06da32"]
+commits: ["6a4b091b4e0949090c5931d072e576869e06da32", "92850243600fa1961a29667beef3a37210a702a1"]
 ---
 
 ## Required behavior
