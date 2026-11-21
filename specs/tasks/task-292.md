@@ -3,7 +3,7 @@ title: "Spec Links — accountability integration: scheduled patrol job, ABAC-ga
 spec_ref: "Spec gap spec-10bdced21a063f819b1baabd / spec-links-accountability-patrol / 5a915155d9bc"
 depends_on: []
 progress: ready-for-review
-commits: ["d710d60a20fa7ccba16c208232588de4cfb65e74", "aa1b2c3a6fe63d10641fb3cb8530ade3d56b8630"]
+commits: ["aa1b2c3a6fe63d10641fb3cb8530ade3d56b8630", "d710d60a20fa7ccba16c208232588de4cfb65e74"]
 ---
 
 ## Required behavior
