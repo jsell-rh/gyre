@@ -132,8 +132,10 @@ SA RS256 JWT-bearer grant, `remote_agent_cleanup` with durable agent
 instance records, the server-logs tracing capture + Admin endpoint +
 TenantSettings tab, and the durable searchable admin audit
 (`tenant_id` scoping + free-text `q` over detail payloads). Those
-rounds' Shipped notes, test evidence and probe logs are in the branch
-history and under `/tmp/stage/review-evidence/`.
+rounds' Shipped notes and test evidence are in the branch history
+(see the `## Shipped` sections of commits `491b8464`, `3c0b9a77` and
+`57d330fd`); this round's probe evidence is saved at
+`/tmp/stage/review-evidence/task-273-migration-test-repair.md`.
 
 ### This round: repair of the migration_000058 test regression
 
