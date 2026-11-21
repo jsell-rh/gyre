@@ -2,7 +2,7 @@
 title: "Verify structural-lens complexity/churn indicators end-to-end on the live graph renderer (backend implementation owned by the realized-model plan's graph-node-metrics task)"
 spec_ref: "Spec gap spec-82658b0b4e08c1502a5f0793 / structural-metrics-verification / b3cd47ade570"
 depends_on: []
-progress: not-started
+progress: blocked-on-external-implementation
 commits: []
 ---
 
@@ -90,3 +90,39 @@ Canonical spec: `specs/system/explorer-canvas.md`. Source: `678a8ac3e3bfeafeb66c
     ]
   }
 ]
+
+## Shipped
+
+**Status: blocked-on-external-implementation — no closure claimed; section c3a39b320325eff390c4b56c remains open.**
+
+The realized-model.md plan's graph-node-metrics task (plan_id b26f707c1c6ea89a961ab82e824808bf1625a3e2b3a0c2312981a90a99f3fef3 — see plan file, status planned at publication) has **not landed** at this run's base (edf3ed9010f3a461308d3604988d5e511b8d9725), so the ordering guard applies: the end-to-end verification this task owns cannot run against populated metrics, and per the fixed ownership split this task ships **zero changes** to the extractors, the graph store/adapters, the upsert path, the layout registry, or any renderer.
+
+### Evidence that the backend implementation is unlanded (blocked state, base edf3ed90)
+
+- Source: all four language extractors still hardcode `complexity: None, churn_count_30d: 0` in their production node constructors (crates/gyre-domain/src/rust_extractor.rs:160-161, go_extractor.rs:135-136, python_extractor.rs:136-137, typescript_extractor.rs:129-130); the SQLite upsert still writes the extractor defaults back over stored values on re-extraction (crates/gyre-adapters/src/sqlite/graph.rs:366-367). No cyclomatic computation or churn accumulation exists anywhere in crates/ outside test fixtures.
+- History: no commit on any ref implements graph-node-metrics / cyclomatic complexity / 30-day churn accumulation.
+- Runtime probe (uncommitted, evidence-only, deleted after the run): an integration test seeded a Rust fixture with a nested-branch `branchy()` alongside a straight-line `straight()` and asserted the spec'd discriminator `complexity(branchy) > complexity(straight-line)`. It **failed as designed**: `branchy function complexity is None — backend metrics not extracted` (cargo test -p gyre-domain, exit 101). Log: /tmp/stage/review-evidence/task306-backend-unlanded-probe.log. This is exactly the "probe must fail at the current base" ownership-guard failure of the Verification intent — it leaves this task open rather than triggering any local backend implementation.
+
+### Renderer resolution at run time (verification precondition, satisfied)
+
+- `getLayout('graph')` was resolved at run time (not by source assumption) via an uncommitted vitest probe importing web/src/lib/layoutRegistry.js and identity-comparing the registered component against both candidates: `getLayout('graph').component === ExplorerCanvas` and `!== SvgGraphCanvas`, with no `engine` selector attached (exit 0). Log: /tmp/stage/review-evidence/task306-renderer-resolution-probe.log. The live renderer for ExplorerView's default `activeLayout='graph'` is therefore still ExplorerCanvas (Canvas 2D), whose indicator formulas remain in place (nodeWeight = Math.max(1, n.complexity || 1) at ExplorerCanvas.svelte:1813-1815; churnThickness = Math.min(4, 1 + (n?.churn_count_30d || 0) * 0.3) at :3717).
+- The ui-layout.md plan's explorer-surface-gaps d3-force rerouting (plan_id 2c7b116466535165ce9662e74653ac3a62425278b9986424aef39e8b4ad243ed, item 4) has **not landed** — the registry still maps 'graph' → ExplorerCanvas, so interaction case (3) does not apply at this base. No SVG-path indicator work was needed or performed.
+
+### Spec-vs-spec conflict escalation (acceptance criterion 5, recorded for the spec lifecycle)
+
+There is a genuine, unresolved conflict between two canonical specs over the rendering technology for the same layouts:
+
+- **explorer-canvas.md §Component Architecture**: "ExplorerCanvas (layout dispatcher — Canvas 2D graph for graph/timeline views)" — Canvas 2D for 'graph' and 'timeline'.
+- **ui-layout.md §10**: "The Explorer canvas uses SVG for graph/hierarchical/layered layouts"; engine table: graph → d3-force (Svelte wrapper), timeline → d3-scale + Svelte.
+
+These are mutually incompatible canonical requirements for the same layouts. This task does not resolve the conflict — no registry change, no unilateral renderer swap. It must be settled by a human through the spec lifecycle, not by whichever plan lands first. Note: the Component Architecture section's 'satisfied' disposition (79dcb4bb8b305568aa2d80f1) is valid only while ExplorerCanvas actually serves the 'graph' layout, which is the case at this base but would be invalidated by the pending ui-layout rerouting.
+
+### Coverage
+
+Section c3a39b320325eff390c4b56c (explorer-canvas.md §4 Lens Definitions / Structural complexity-churn indicators sub-requirement) **remains open**: specs/coverage/system/explorer-canvas.md row 4 stays `task-assigned` with a note recording this blocked verification (2026-11-27). No coverage status was changed and no other row was touched.
+
+### Remaining work (unblocks this task)
+
+1. The realized-model plan's graph-node-metrics task must land: per-extractor cyclomatic complexity, churn_count_30d accumulated from persisted ArchitecturalDelta history within the 30-day window, and the upsert no-overwrite fix at sqlite/graph.rs:366-367.
+2. Re-run this task's end-to-end probe: seed the branchy/straight-line fixture plus two ArchitecturalDelta modifications (10 and 60 days ago), assert via GET /repos/:id/graph that complexity(branchy) > complexity(straight-line) and churn_count_30d == 1, then assert — on whichever renderer `getLayout('graph')` resolves to **at that run time** (re-resolve; do not assume ExplorerCanvas) — that node size scales with complexity and border thickness with churn, using the real API payload.
+3. If the ui-layout d3-force rerouting has landed by then, run the renderer verification on the SVG path; if it lacks indicator encoding, either add size-by-complexity / stroke-width-by-churn to the SVG graph path only, or report blocked-on-conflict pending the spec-lifecycle decision above.
