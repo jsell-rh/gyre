@@ -2,7 +2,7 @@
 title: "Publish reviewed spec backlog for specs/system/spec-links.md"
 spec_ref: "GOAL.md — real implementations and meaningful verification"
 depends_on: []
-progress: complete
+progress: ready-for-review
 commits: []
 ---
 
@@ -936,4 +936,27 @@ Publish exactly the independently reviewed missing-work plan below. Only create 
 
 ## Shipped
 
-Task definitions and explicit bindings only; no product implementation claimed.
+Rebase repair of the task-294 backlog publication (PR 900, merge_conflict against
+main 9e7cf62e). Resolved the single conflicting path, `specs/task-spec-inputs.json`,
+as an exact union of both sides: the candidate's spec-links backlog section/bindings
+entries (task-286..293, spec-10bdced21a063f819b1baabd) and main's dependency-graph
+entries (task-278..285, spec-cab97078efffe0fbfb7339be). No task, spec, registry
+entry, coverage status, product file or gate was changed or dropped.
+
+### Validation
+
+- Merged JSON parses and was mechanically compared key-by-key against both parents:
+`sections` (292 entries) and `bindings` (242 keys) are exact unions of the two
+parents' maps with zero mutated or lost entries and no overlapping conflicting keys.
+- `specs/tasks/task-278.md`..`task-285.md` (from main) and `task-286.md`..`task-293.md`
+(unchanged from the reviewed candidate, all `not-started` with dependency frontmatter
+intact) coexist; task numbering does not collide.
+- Task-294 remains a definitions-and-bindings publication; no product implementation
+claimed. New tasks stay `not-started` pending merge, per the acceptance criteria.
+
+### Deferred to verifier
+
+No server build required: this change touches only `specs/` documents and JSON.
+`scripts/test_pipeline_spec_backlog.py` is pytest-based and pytest is not installed
+in this sandbox; run it in the verifier if pipeline-suite coverage of the merged
+registry file is required.
