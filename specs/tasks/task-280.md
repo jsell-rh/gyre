@@ -3,7 +3,7 @@ title: "Cascade testing: real agent-executed test runs against the merged versio
 spec_ref: "Spec gap spec-cab97078efffe0fbfb7339be / cascade-test-execution / ed9f34316476"
 depends_on: []
 progress: ready-for-review
-commits: ["935f408420804f6df661657ddca7e6e554e5b8cd", "15bae5c05d66aa91f6f1c46e2bcb09971557cfa7"]
+commits: ["15bae5c0fb9d06aa98ac05b08fd46a0264845c23", "935f408420804f6df661657ddca7e6e554e5b8cd"]
 ---
 
 ## Required behavior
