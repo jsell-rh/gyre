@@ -4981,7 +4981,10 @@ specs:
 
         state
             .spec_ledger
-            .save(&make_ledger_entry("system/self.md", ApprovalStatus::Pending))
+            .save(&make_ledger_entry(
+                "system/self.md",
+                ApprovalStatus::Pending,
+            ))
             .await
             .unwrap();
         // self → self (self-link)
