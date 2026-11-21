@@ -149,6 +149,12 @@ async fn mark_link_status(state: &AppState, link_id: &str, status: &str, now: u6
 /// Re-resolution applies the same target-manifest requirement as push-time
 /// resolution: a link whose target path is not declared in the target
 /// repo's current manifest stays unresolved.
+///
+/// Ambiguous three-segment displays (`@{a}/{b}/{c}/...`) disambiguate the
+/// same way as push-time resolution: the workspace form takes precedence,
+/// and when no workspace with that slug exists in the source tenant the
+/// first segment is a repo name in the source workspace (the
+/// `@{repo_name}/{spec_path}` form with a slashed spec path).
 async fn resolve_unresolved_cross_workspace_links(
     state: &AppState,
     links: &[crate::spec_registry::SpecLinkEntry],
@@ -224,16 +230,29 @@ async fn resolve_unresolved_cross_workspace_links(
                     .workspaces
                     .find_by_slug(&source_ws.tenant_id, workspace_slug)
                     .await
-                    .ok()
-                    .flatten()
                 {
-                    Some(target_ws) => state
+                    Ok(Some(target_ws)) => state
                         .repos
                         .find_by_name_and_workspace(&target_ws.id, repo_name)
                         .await
                         .ok()
                         .flatten(),
-                    None => None,
+                    Ok(None) => {
+                        // No workspace with that slug in the source tenant:
+                        // the display is the ambiguous three-segment form
+                        // and the target is the same-workspace cross-repo
+                        // link (@{repo_name}/{spec_path} with a slashed
+                        // path) — the first segment is the repo name,
+                        // resolved within the source link's workspace.
+                        state
+                            .repos
+                            .find_by_name_and_workspace(&source_ws.id, workspace_slug)
+                            .await
+                            .ok()
+                            .flatten()
+                    }
+                    // Lookup failed — cannot disambiguate; leave unresolved.
+                    Err(_) => None,
                 }
             }
             crate::spec_registry::CrossWorkspaceTarget::CrossRepo { repo_name, .. } => {

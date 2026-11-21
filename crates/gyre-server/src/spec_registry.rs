@@ -399,6 +399,16 @@ pub enum CrossWorkspaceTarget {
 /// - Same-repo:       `"system/spec.md"`                          (no `@` prefix)
 /// - Cross-repo:      `"@repo-name/system/spec.md"`               (single segment before path)
 /// - Cross-workspace: `"@ws-slug/repo-name/system/spec.md"`       (two segments before path)
+///
+/// NOTE: a three-segment target is syntactically ambiguous between the
+/// cross-repo form (repo name + slashed spec path) and the cross-workspace
+/// form (workspace slug + repo name + spec path) — a pure string split
+/// cannot tell them apart. This parser always yields the cross-workspace
+/// interpretation; resolution sites (push-time sync and the staleness
+/// re-resolution pass) disambiguate by existence: the workspace form takes
+/// precedence, and when no workspace with that slug exists in the tenant
+/// the target is treated as `@{repo_name}/{spec_path}` within the source
+/// workspace.
 pub fn parse_cross_workspace_target(target: &str) -> CrossWorkspaceTarget {
     if let Some(rest) = target.strip_prefix('@') {
         // Split into at most 3 parts: first two are the address segments, rest is the path.
@@ -641,20 +651,59 @@ pub async fn sync_spec_ledger(
                             path,
                         } => {
                             let display = format!("@{}/{}/{}", workspace_slug, repo_name, path);
-                            let (repo_id, status, denied) = validate_cross_workspace_target(
-                                workspaces,
-                                repos,
-                                tenant_id,
-                                memberships,
-                                principal,
-                                &entry.path,
-                                &link.target,
-                                workspace_slug,
-                                repo_name,
-                                path,
-                            )
-                            .await;
-                            (path.clone(), repo_id, Some(display), status, denied)
+                            // Three-segment targets are syntactically
+                            // ambiguous between the cross-workspace form
+                            // (@{workspace_slug}/{repo_name}/{spec_path})
+                            // and the same-workspace cross-repo form
+                            // (@{repo_name}/{spec_path}) whenever the spec
+                            // path itself contains a slash — spec-links.md
+                            // declares both formats. The fully-qualified
+                            // workspace form takes precedence; only when
+                            // no workspace with that slug exists in the
+                            // tenant is the target the same-workspace
+                            // cross-repo form, resolved within the SOURCE
+                            // workspace (whose write access the push
+                            // already required, subsuming read).
+                            let ws_exists = match (workspaces, tenant_id) {
+                                (Some(workspaces), Some(tenant_id)) => !matches!(
+                                    workspaces.find_by_slug(tenant_id, workspace_slug).await,
+                                    Ok(None)
+                                ),
+                                // No workspace context to disambiguate with:
+                                // keep the cross-workspace interpretation
+                                // (which cannot resolve without context).
+                                _ => true,
+                            };
+                            if ws_exists {
+                                let (repo_id, status, denied) = validate_cross_workspace_target(
+                                    workspaces,
+                                    repos,
+                                    tenant_id,
+                                    memberships,
+                                    principal,
+                                    &entry.path,
+                                    &link.target,
+                                    workspace_slug,
+                                    repo_name,
+                                    path,
+                                )
+                                .await;
+                                (path.clone(), repo_id, Some(display), status, denied)
+                            } else {
+                                // Fallback: seg1 is the repo name, the rest
+                                // is the slashed spec path.
+                                let fallback_path = format!("{repo_name}/{path}");
+                                let (repo_id, status) = validate_cross_repo_target(
+                                    repos,
+                                    source_workspace_id,
+                                    &entry.path,
+                                    &link.target,
+                                    workspace_slug,
+                                    &fallback_path,
+                                )
+                                .await;
+                                (fallback_path, repo_id, Some(display), status, false)
+                            }
                         }
                     };
 
