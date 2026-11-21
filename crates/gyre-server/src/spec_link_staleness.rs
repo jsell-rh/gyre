@@ -3,7 +3,10 @@
 //! Runs daily. For each `SpecLinkEntry` in the spec links store:
 //! - Checks if the target spec's current SHA in the ledger differs from the link's pinned `target_sha`.
 //! - If they differ, marks the link as `"stale"` and sets `stale_since`.
-//! - For cross-workspace links (target_display starts with `@`), re-resolves the workspace/repo.
+//! - For cross-repo/cross-workspace links (target_display starts with `@`), re-resolves the
+//!   workspace/repo — tenant-scoped from the source link (source repo → workspace → tenant),
+//!   with the target path required to be declared in the target repo's manifest. Links denied
+//!   for read access at push time are never re-resolved.
 //! - Creates `CrossWorkspaceSpecChange` notifications for workspace Admin/Developer members.
 
 use std::sync::Arc;
@@ -128,7 +131,24 @@ async fn mark_link_status(state: &AppState, link_id: &str, status: &str, now: u6
     }
 }
 
-/// Re-resolve unresolved cross-workspace links (target_display starts with `@`).
+/// Re-resolve unresolved cross-repo / cross-workspace links (target_display
+/// starts with `@`) — the spec_links table comment: "NULL for unresolved
+/// cross-workspace links (resolved later by staleness checker)".
+///
+/// Scope derivation never fabricates: the tenant comes from the source link
+/// (source repo → workspace → tenant), never a literal default tenant id
+/// (check-fabricated-scope-defaults invariant). When any hop is
+/// unresolvable, the link is skipped with a log line.
+///
+/// Access-denied links are NOT re-resolved: push-time denial records a
+/// durable marker (the linking principal is not recoverable from the link
+/// row — the spec's spec_links schema has no principal column), and this
+/// pass must not silently flip a denied link "active". The denial stands
+/// until the source repo is pushed again by a principal with read access.
+///
+/// Re-resolution applies the same target-manifest requirement as push-time
+/// resolution: a link whose target path is not declared in the target
+/// repo's current manifest stays unresolved.
 async fn resolve_unresolved_cross_workspace_links(
     state: &AppState,
     links: &[crate::spec_registry::SpecLinkEntry],
@@ -137,70 +157,143 @@ async fn resolve_unresolved_cross_workspace_links(
         if link.status != "unresolved" {
             continue;
         }
-        let Some(ref display) = link.target_display else {
+        let Some(ref target_display) = link.target_display else {
             continue;
         };
-        if !display.starts_with('@') {
+        if !target_display.starts_with('@') {
             continue;
         }
 
-        let parsed = crate::spec_registry::parse_cross_workspace_target(display);
-        let resolved_repo_id = match &parsed {
+        // Access-denied at push time — the denial stands until the source
+        // manifest is pushed again by a principal with read access.
+        if crate::spec_registry::link_denial(&state.kv_store, &link.id)
+            .await
+            .is_some()
+        {
+            debug!(
+                link_id = %link.id,
+                "spec_link_staleness: link denied for read access at push time — not re-resolving"
+            );
+            continue;
+        }
+
+        // Source scope: source repo → workspace (→ tenant). Skip and log
+        // when underivable — never fabricate a scope identity.
+        let Some(source_repo_id) = &link.source_repo_id else {
+            debug!(
+                link_id = %link.id,
+                "spec_link_staleness: link has no source repo — cannot derive workspace scope"
+            );
+            continue;
+        };
+        let source_repo = match state.repos.find_by_id(&Id::new(source_repo_id)).await {
+            Ok(Some(repo)) => repo,
+            _ => {
+                warn!(
+                    link_id = %link.id,
+                    source_repo_id,
+                    "spec_link_staleness: source repo not found — skipping cross-workspace re-resolution"
+                );
+                continue;
+            }
+        };
+        let source_ws = match state.workspaces.find_by_id(&source_repo.workspace_id).await {
+            Ok(Some(ws)) => ws,
+            _ => {
+                warn!(
+                    link_id = %link.id,
+                    source_repo_id,
+                    workspace_id = %source_repo.workspace_id,
+                    "spec_link_staleness: source workspace not found — skipping cross-workspace re-resolution"
+                );
+                continue;
+            }
+        };
+
+        let parsed = crate::spec_registry::parse_cross_workspace_target(target_display);
+        let resolved_repo = match &parsed {
             crate::spec_registry::CrossWorkspaceTarget::CrossWorkspace {
                 workspace_slug,
                 repo_name,
                 ..
             } => {
-                // Try to resolve workspace → repo.
-                let ws = state
+                // Tenant-scoped workspace lookup under the SOURCE link's
+                // tenant (source repo → workspace → tenant) — never a
+                // fabricated literal tenant id.
+                match state
                     .workspaces
-                    .find_by_slug(&Id::new("default"), workspace_slug)
+                    .find_by_slug(&source_ws.tenant_id, workspace_slug)
                     .await
                     .ok()
-                    .flatten();
-                if let Some(ws) = ws {
-                    state
+                    .flatten()
+                {
+                    Some(target_ws) => state
                         .repos
-                        .find_by_name_and_workspace(&ws.id, repo_name)
+                        .find_by_name_and_workspace(&target_ws.id, repo_name)
                         .await
                         .ok()
-                        .flatten()
-                        .map(|r| r.id.to_string())
-                } else {
-                    None
+                        .flatten(),
+                    None => None,
                 }
             }
             crate::spec_registry::CrossWorkspaceTarget::CrossRepo { repo_name, .. } => {
-                // For cross-repo same-workspace links, we'd need the source workspace.
-                // Without it, we can't resolve. Leave as unresolved.
-                debug!(
-                    link_id = %link.id,
-                    repo_name = %repo_name,
-                    "spec_link_staleness: cross-repo link needs workspace context to resolve"
-                );
-                None
+                // Same-workspace cross-repo: the source link's repo →
+                // workspace gives the scope the repo name resolves within.
+                state
+                    .repos
+                    .find_by_name_and_workspace(&source_ws.id, repo_name)
+                    .await
+                    .ok()
+                    .flatten()
             }
             _ => None,
         };
 
-        if let Some(repo_id) = resolved_repo_id {
-            let updated: Option<crate::spec_registry::SpecLinkEntry> = {
-                let mut store = state.spec_links_store.lock().await;
-                store.iter_mut().find(|l| l.id == link.id).map(|entry| {
-                    entry.target_repo_id = Some(repo_id);
-                    entry.status = "active".to_string();
-                    entry.clone()
-                })
-            };
-            if let Some(entry) = updated {
-                if let Err(e) = state.spec_link_repo.save(&entry).await {
-                    warn!(
-                        link_id = %link.id,
-                        "spec_link_staleness: failed to persist resolved link: {e}"
-                    );
-                }
-                info!(link_id = %link.id, "spec_link_staleness: cross-workspace link resolved");
+        let Some(target_repo) = resolved_repo else {
+            debug!(
+                link_id = %link.id,
+                target = %target_display,
+                "spec_link_staleness: cross-workspace target still unresolved"
+            );
+            continue;
+        };
+
+        // Same manifest-declaration requirement as push-time resolution:
+        // a target path absent from the target repo's manifest stays
+        // unresolved (spec-links.md: "Target spec path exists in the target
+        // repo's manifest").
+        if !crate::spec_registry::target_manifest_declares_path(&target_repo, &link.target_path)
+            .await
+        {
+            debug!(
+                link_id = %link.id,
+                target = %target_display,
+                target_path = %link.target_path,
+                "spec_link_staleness: target path not declared in target repo manifest — leaving unresolved"
+            );
+            continue;
+        }
+
+        let repo_id = target_repo.id.to_string();
+        let updated: Option<crate::spec_registry::SpecLinkEntry> = {
+            let mut store = state.spec_links_store.lock().await;
+            store.iter_mut().find(|l| l.id == link.id).map(|entry| {
+                entry.target_repo_id = Some(repo_id);
+                entry.status = "active".to_string();
+                entry.clone()
+            })
+        };
+        if let Some(entry) = updated {
+            if let Err(e) = state.spec_link_repo.save(&entry).await {
+                warn!(
+                    link_id = %link.id,
+                    "spec_link_staleness: failed to persist resolved link: {e}"
+                );
             }
+            info!(
+                link_id = %link.id,
+                "spec_link_staleness: cross-repo/cross-workspace link resolved"
+            );
         }
     }
 }
@@ -756,5 +849,288 @@ mod tests {
         let store = state.spec_links_store.lock().await;
         let updated = store.iter().find(|l| l.id == "link6").unwrap();
         assert_eq!(updated.status, "active");
+    }
+
+    // -----------------------------------------------------------------------
+    // task-287: re-resolution of unresolved cross-repo / cross-workspace
+    // links (spec-links.md §Cross-Repo and Cross-Workspace Links)
+    // -----------------------------------------------------------------------
+
+    fn make_workspace_in_tenant(id: &str, tenant: &str, slug: &str) -> gyre_domain::Workspace {
+        gyre_domain::Workspace {
+            id: Id::new(id),
+            tenant_id: Id::new(tenant),
+            name: format!("ws-{id}"),
+            slug: slug.to_string(),
+            description: None,
+            budget: None,
+            max_repos: None,
+            max_agents_per_repo: None,
+            trust_level: gyre_domain::TrustLevel::Guided,
+            llm_model: None,
+            created_at: 1_000_000,
+            compute_target_id: None,
+        }
+    }
+
+    fn make_named_repo(id: &str, name: &str, ws_id: &str, path: &str) -> gyre_domain::Repository {
+        gyre_domain::Repository {
+            id: Id::new(id),
+            name: name.to_string(),
+            path: path.to_string(),
+            workspace_id: Id::new(ws_id),
+            default_branch: "main".to_string(),
+            is_mirror: false,
+            mirror_url: None,
+            mirror_interval_secs: None,
+            last_mirror_sync: None,
+            description: None,
+            status: gyre_domain::RepoStatus::Active,
+            created_at: 1_000_000,
+            updated_at: 1_000_000,
+            max_agents: None,
+            max_agent_iterations: None,
+            budget: None,
+        }
+    }
+
+    /// Real git repo with a manifest declaring system/auth.md (the target
+    /// repo whose manifest the re-resolution must consult).
+    fn make_target_git_repo() -> tempfile::TempDir {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path();
+        let run = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(path)
+                .output()
+                .expect("git command failed");
+            assert!(
+                out.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        run(&["init", "-b", "main"]);
+        run(&["config", "user.email", "test@test.com"]);
+        run(&["config", "user.name", "Test"]);
+        let manifest =
+            "version: 1\nspecs:\n  - path: system/auth.md\n    title: Auth\n    owner: user:test\n";
+        for (file, content) in [
+            ("specs/manifest.yaml", manifest),
+            ("specs/system/auth.md", "# Auth\n"),
+        ] {
+            let full = path.join(file);
+            std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+            std::fs::write(&full, content).unwrap();
+            run(&["add", file]);
+        }
+        run(&["commit", "-m", "initial"]);
+        dir
+    }
+
+    fn make_unresolved_link(
+        id: &str,
+        source_repo: &str,
+        target_path: &str,
+        target_display: &str,
+    ) -> SpecLinkEntry {
+        let mut link = make_link(id, "system/a.md", target_path, SpecLinkType::DependsOn, None);
+        link.source_repo_id = Some(source_repo.to_string());
+        link.target_display = Some(target_display.to_string());
+        link.status = "unresolved".to_string();
+        link
+    }
+
+    /// AC 4: in a tenant whose id is not "default", an unresolved
+    /// cross-workspace link whose target workspace exists in that tenant
+    /// re-resolves on the next staleness pass.
+    ///
+    /// Against the pre-task code this fails: re-resolution looked the
+    /// workspace slug up under the fabricated literal tenant id "default",
+    /// so a workspace in any other tenant never resolved.
+    #[tokio::test]
+    async fn staleness_pass_resolves_cross_workspace_link_under_source_tenant() {
+        let state = test_state();
+
+        // tenant-287 ≠ literal "default": both workspaces live in it.
+        let ws_x = make_workspace_in_tenant("ws-x", "tenant-287", "ws-x");
+        let ws_y = make_workspace_in_tenant("ws-y", "tenant-287", "ws-y");
+        state.workspaces.create(&ws_x).await.unwrap();
+        state.workspaces.create(&ws_y).await.unwrap();
+
+        let state_repo_a = make_named_repo("repo-a", "A", "ws-x", "/repos/repo-a");
+        state.repos.create(&state_repo_a).await.unwrap();
+
+        // Target repo in ws-y really declares the target path.
+        let dir_y = make_target_git_repo();
+        let repo_y = make_named_repo(
+            "repo-y",
+            "repo-y",
+            "ws-y",
+            dir_y.path().to_str().unwrap(),
+        );
+        state.repos.create(&repo_y).await.unwrap();
+
+        // Unresolved cross-workspace link from repo-a (in ws-x) to
+        // @ws-y/repo-y/system/auth.md.
+        let link = make_unresolved_link(
+            "link-cw",
+            "repo-a",
+            "system/auth.md",
+            "@ws-y/repo-y/system/auth.md",
+        );
+        {
+            let mut store = state.spec_links_store.lock().await;
+            store.push(link);
+        }
+
+        run_once(&state).await.unwrap();
+
+        let store = state.spec_links_store.lock().await;
+        let updated = store.iter().find(|l| l.id == "link-cw").unwrap();
+        assert_eq!(
+            updated.status, "active",
+            "cross-workspace link must re-resolve under the source link's tenant, got {:?}",
+            updated
+        );
+        assert_eq!(updated.target_repo_id.as_deref(), Some("repo-y"));
+
+        // The resolution is written through to the durable graph.
+        let persisted = state.spec_link_repo.list_all().await.unwrap();
+        let row = persisted.iter().find(|l| l.id == "link-cw").unwrap();
+        assert_eq!(row.status, "active");
+        assert_eq!(row.target_repo_id.as_deref(), Some("repo-y"));
+    }
+
+    /// Requirement 1 (staleness half): unresolved same-workspace cross-repo
+    /// links re-resolve via the source link's repo → workspace. A link
+    /// whose target path is not declared in the target repo's manifest
+    /// stays unresolved.
+    ///
+    /// Against the pre-task code this fails: the staleness checker
+    /// explicitly refused to re-resolve CrossRepo links.
+    #[tokio::test]
+    async fn staleness_pass_resolves_cross_repo_same_workspace_link() {
+        let state = test_state();
+
+        let ws_x = make_workspace_in_tenant("ws-x", "tenant-287", "ws-x");
+        state.workspaces.create(&ws_x).await.unwrap();
+
+        let state_repo_a = make_named_repo("repo-a", "A", "ws-x", "/repos/repo-a");
+        state.repos.create(&state_repo_a).await.unwrap();
+        let dir_y = make_target_git_repo();
+        let repo_y = make_named_repo(
+            "repo-y",
+            "repo-y",
+            "ws-x",
+            dir_y.path().to_str().unwrap(),
+        );
+        state.repos.create(&repo_y).await.unwrap();
+
+        // One resolvable link (path declared in repo-y's manifest) and one
+        // whose target path repo-y does not declare.
+        let resolvable = make_unresolved_link(
+            "link-cr-ok",
+            "repo-a",
+            "system/auth.md",
+            "@repo-y/system/auth.md",
+        );
+        let missing_path = make_unresolved_link(
+            "link-cr-missing",
+            "repo-a",
+            "system/missing.md",
+            "@repo-y/system/missing.md",
+        );
+        {
+            let mut store = state.spec_links_store.lock().await;
+            store.push(resolvable);
+            store.push(missing_path);
+        }
+
+        run_once(&state).await.unwrap();
+
+        let store = state.spec_links_store.lock().await;
+        let ok = store.iter().find(|l| l.id == "link-cr-ok").unwrap();
+        assert_eq!(
+            ok.status, "active",
+            "same-workspace cross-repo link must re-resolve via source repo → workspace, got {:?}",
+            ok
+        );
+        assert_eq!(ok.target_repo_id.as_deref(), Some("repo-y"));
+
+        let missing = store.iter().find(|l| l.id == "link-cr-missing").unwrap();
+        assert_eq!(
+            missing.status, "unresolved",
+            "a target path absent from the target repo's manifest must stay unresolved"
+        );
+        assert_eq!(missing.target_repo_id, None);
+    }
+
+    /// AC 2 (staleness half): a link denied for read access at push time is
+    /// never flipped "active" by the staleness pass — the durable denial
+    /// marker blocks re-resolution until the source manifest is pushed
+    /// again by a principal with read access.
+    #[tokio::test]
+    async fn staleness_does_not_flip_access_denied_link_active() {
+        let state = test_state();
+
+        let ws_x = make_workspace_in_tenant("ws-x", "tenant-287", "ws-x");
+        let ws_y = make_workspace_in_tenant("ws-y", "tenant-287", "ws-y");
+        state.workspaces.create(&ws_x).await.unwrap();
+        state.workspaces.create(&ws_y).await.unwrap();
+
+        let state_repo_a = make_named_repo("repo-a", "A", "ws-x", "/repos/repo-a");
+        state.repos.create(&state_repo_a).await.unwrap();
+        let dir_y = make_target_git_repo();
+        let repo_y = make_named_repo(
+            "repo-y",
+            "repo-y",
+            "ws-y",
+            dir_y.path().to_str().unwrap(),
+        );
+        state.repos.create(&repo_y).await.unwrap();
+
+        let link = make_unresolved_link(
+            "link-denied",
+            "repo-a",
+            "system/auth.md",
+            "@ws-y/repo-y/system/auth.md",
+        );
+        let link_id = link.id.clone();
+        {
+            let mut store = state.spec_links_store.lock().await;
+            store.push(link);
+        }
+
+        // Push-time denial marker, recorded via the production helper.
+        let principal = crate::spec_registry::LinkPrincipal {
+            agent_id: "user-one".to_string(),
+            user_id: Some(Id::new("u-1")),
+            workspace_id: Some("ws-x".to_string()),
+            is_system: false,
+        };
+        crate::spec_registry::record_link_denial(
+            &state.kv_store,
+            &link_id,
+            Some(&principal),
+            "@ws-y/repo-y/system/auth.md",
+            1_700_000_000,
+        )
+        .await;
+
+        run_once(&state).await.unwrap();
+
+        // Everything the re-resolution needs exists (tenant-scoped workspace,
+        // repo, declared path) — the denial must still hold.
+        let store = state.spec_links_store.lock().await;
+        let updated = store.iter().find(|l| l.id == "link-denied").unwrap();
+        assert_eq!(
+            updated.status, "unresolved",
+            "the staleness pass must not flip an access-denied link active, got {:?}",
+            updated
+        );
+        assert_eq!(updated.target_repo_id, None);
     }
 }

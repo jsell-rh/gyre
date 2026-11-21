@@ -443,8 +443,16 @@ pub fn parse_cross_workspace_target(target: &str) -> CrossWorkspaceTarget {
 ///   and approval_status is invalidated to Pending.
 /// - Push-time inbound staleness: when a spec's SHA changes, ALL existing links targeting
 ///   that spec are marked stale immediately (spec-links.md §Automatic Staleness Detection).
-/// - Cross-workspace `@` targets: resolved to target_repo_id via workspace slug lookup.
-///   Unresolved targets stored with `status = "unresolved"` and `target_repo_id = None`.
+/// - Cross-repo `@repo/path` and cross-workspace `@ws/repo/path` targets are validated
+///   per spec-links.md §Cross-Repo and Cross-Workspace Links: target workspace exists
+///   (tenant-scoped) and the linking principal has read access, target repo exists
+///   within that workspace, and the target spec path is declared in the target
+///   repo's current manifest. Same-workspace `@repo/path` links resolve within the
+///   SOURCE workspace. Targets failing any check are stored with
+///   `status = "unresolved"` and `target_repo_id = None`.
+/// - Access-denied cross-workspace links record a durable denial marker so the
+///   staleness checker (which cannot recover the pushing principal from the link
+///   row) never silently flips them "active".
 #[allow(clippy::too_many_arguments)]
 pub async fn sync_spec_ledger(
     ledger: &Arc<dyn gyre_ports::SpecLedgerRepository>,
@@ -462,6 +470,15 @@ pub async fn sync_spec_ledger(
     workspaces: Option<&Arc<dyn gyre_ports::WorkspaceRepository>>,
     repos: Option<&Arc<dyn gyre_ports::RepoRepository>>,
     tenant_id: Option<&gyre_common::Id>,
+    // Linking-principal context (spec-links.md §Cross-Repo and Cross-Workspace
+    // Links: "the linking user has read access"). `principal` is the
+    // authenticated pusher at push-triggered syncs (git_http push handler,
+    // POST /repos/:id/sync-specs); `None` for server-originated syncs (mirror
+    // fetches, background jobs) — no linking user, exempt from the check.
+    principal: Option<&LinkPrincipal>,
+    memberships: Option<&Arc<dyn gyre_ports::WorkspaceMembershipRepository>>,
+    // KV store for durable cross-workspace access-denial markers.
+    kv: Option<&Arc<dyn gyre_ports::KvJsonStore>>,
     // Task repository for creating drift-review tasks (TASK-016 F2).
     tasks: Option<&Arc<dyn gyre_ports::TaskRepository>>,
 ) {
@@ -595,64 +612,66 @@ pub async fn sync_spec_ledger(
                 );
                 let parsed = parse_cross_workspace_target(&link.target);
 
-                let (target_path, target_repo_id, target_display, status) = match &parsed {
-                    CrossWorkspaceTarget::SameRepo { path } => {
-                        (path.clone(), None, None, "active".to_string())
-                    }
-                    CrossWorkspaceTarget::CrossRepo { repo_name, path } => {
-                        // Resolve repo name → repo_id within the source workspace.
-                        let display = format!("@{}/{}", repo_name, path);
-                        let resolved_repo_id = resolve_repo_by_name(
-                            repos, workspaces, tenant_id,
-                            None, // same workspace — we'll look up by name across all
-                            repo_name,
-                        )
-                        .await;
-                        if resolved_repo_id.is_none() {
-                            warn!(
-                                source = %entry.path,
-                                target = %link.target,
-                                "spec-registry: cross-repo target unresolved (repo not found)"
-                            );
+                let (target_path, target_repo_id, target_display, status, access_denied) =
+                    match &parsed {
+                        CrossWorkspaceTarget::SameRepo { path } => {
+                            (path.clone(), None, None, "active".to_string(), false)
                         }
-                        let status = if resolved_repo_id.is_some() {
-                            "active".to_string()
-                        } else {
-                            "unresolved".to_string()
-                        };
-                        (path.clone(), resolved_repo_id, Some(display), status)
-                    }
-                    CrossWorkspaceTarget::CrossWorkspace {
-                        workspace_slug,
-                        repo_name,
-                        path,
-                    } => {
-                        let display = format!("@{}/{}/{}", workspace_slug, repo_name, path);
-                        let resolved_repo_id = resolve_cross_workspace_repo(
-                            workspaces,
-                            repos,
-                            tenant_id,
+                        CrossWorkspaceTarget::CrossRepo { repo_name, path } => {
+                            // Same-workspace cross-repo (spec-links.md:
+                            // "@{repo_name}/{spec_path} (no workspace prefix)") —
+                            // resolved within the SOURCE workspace. No separate
+                            // read-access check: the push itself required write
+                            // access to that workspace, which subsumes read.
+                            let display = format!("@{}/{}", repo_name, path);
+                            let (repo_id, status) = validate_cross_repo_target(
+                                repos,
+                                source_workspace_id,
+                                &entry.path,
+                                &link.target,
+                                repo_name,
+                                path,
+                            )
+                            .await;
+                            (path.clone(), repo_id, Some(display), status, false)
+                        }
+                        CrossWorkspaceTarget::CrossWorkspace {
                             workspace_slug,
                             repo_name,
-                        )
-                        .await;
-                        if resolved_repo_id.is_none() {
-                            warn!(
-                                source = %entry.path,
-                                target = %link.target,
-                                workspace_slug = %workspace_slug,
-                                repo_name = %repo_name,
-                                "spec-registry: cross-workspace target unresolved"
-                            );
+                            path,
+                        } => {
+                            let display =
+                                format!("@{}/{}/{}", workspace_slug, repo_name, path);
+                            let (repo_id, status, denied) = validate_cross_workspace_target(
+                                workspaces,
+                                repos,
+                                tenant_id,
+                                memberships,
+                                principal,
+                                &entry.path,
+                                &link.target,
+                                workspace_slug,
+                                repo_name,
+                                path,
+                            )
+                            .await;
+                            (path.clone(), repo_id, Some(display), status, denied)
                         }
-                        let status = if resolved_repo_id.is_some() {
-                            "active".to_string()
-                        } else {
-                            "unresolved".to_string()
-                        };
-                        (path.clone(), resolved_repo_id, Some(display), status)
+                    };
+
+                // Keep the durable access-denial marker in step with this
+                // push (every default-branch push fully re-declares the
+                // manifest's links): a denial records the current principal
+                // so the staleness pass — which cannot recover the pusher
+                // from the link row — never silently flips the link
+                // "active"; any other outcome clears an earlier denial.
+                if let Some(kv) = kv {
+                    if access_denied {
+                        record_link_denial(kv, &id, principal, &link.target, now).await;
+                    } else {
+                        clear_link_denial(kv, &id).await;
                     }
-                };
+                }
 
                 new_links.push(SpecLinkEntry {
                     id,
@@ -1019,59 +1038,323 @@ async fn create_drift_review_task(
 }
 
 // ---------------------------------------------------------------------------
-// Cross-workspace resolution helpers
+// Cross-repo / cross-workspace link validation
+// (spec-links.md §Cross-Repo and Cross-Workspace Links)
 // ---------------------------------------------------------------------------
 
-/// Resolve a cross-workspace `@workspace_slug/repo_name/spec_path` link to a target repo ID.
+/// Identity of the principal whose push triggered this ledger sync — the
+/// "linking user" in spec-links.md §Cross-Repo and Cross-Workspace Links
+/// ("Target workspace exists and the linking user has read access").
 ///
-/// Resolution is tenant-scoped: looks up the workspace by slug within the caller's tenant,
-/// then finds the repo by name within that workspace.
-async fn resolve_cross_workspace_repo(
+/// Threaded from the authenticated caller at push-triggered syncs (git_http
+/// push handler, POST /repos/:id/sync-specs). Server-originated syncs
+/// (mirror fetches, background jobs) pass `None` — no linking principal.
+#[derive(Debug, Clone)]
+pub struct LinkPrincipal {
+    /// Authenticated agent id (a user's display name for API-key / user-JWT
+    /// auth — the same value the auth extractor reports).
+    pub agent_id: String,
+    /// Backing user id when the principal authenticated as a user.
+    /// `None` for agent JWTs and the global system token.
+    pub user_id: Option<gyre_common::Id>,
+    /// Workspace scope from the validated token hierarchy claims, when
+    /// present (workspace-scoped agent JWTs).
+    pub workspace_id: Option<String>,
+    /// True for the genuine system principal (global dev/system token) —
+    /// exempt from cross-workspace read-access validation.
+    pub is_system: bool,
+}
+
+impl LinkPrincipal {
+    /// Derive the linking principal from the auth extractor's resolved
+    /// identity. Reuses `AuthenticatedAgent::is_system_principal` (never a
+    /// bare agent_id string match — a user *named* "system" authenticates
+    /// with their own user_id and must not be exempt).
+    pub fn from_auth(auth: &crate::auth::AuthenticatedAgent) -> Self {
+        Self {
+            agent_id: auth.agent_id.clone(),
+            user_id: auth.user_id.clone(),
+            workspace_id: auth.workspace_id.clone(),
+            is_system: auth.is_system_principal(),
+        }
+    }
+}
+
+/// Durable record that a link id was denied resolution because the linking
+/// principal lacked read access to the target workspace. The staleness
+/// checker consults it so a denied link is never silently flipped
+/// "active": the pushing principal is not recoverable from the link row
+/// (the spec's spec_links schema has no principal column), so the denial
+/// travels in the KV store instead. Every re-push of the source manifest
+/// refreshes it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LinkAccessDenial {
+    /// Principal that was denied (agent_id / display name).
+    pub principal: String,
+    /// The link target as declared in the manifest.
+    pub target: String,
+    /// When the denial was recorded (unix seconds).
+    pub at: u64,
+}
+
+/// KV namespace for [`LinkAccessDenial`] markers, keyed by link id.
+pub(crate) const LINK_DENIAL_NAMESPACE: &str = "spec_link_denials";
+
+/// Record (or refresh) the access-denial marker for a link id.
+pub(crate) async fn record_link_denial(
+    kv: &Arc<dyn gyre_ports::KvJsonStore>,
+    link_id: &str,
+    principal: Option<&LinkPrincipal>,
+    target: &str,
+    now: u64,
+) {
+    let denial = LinkAccessDenial {
+        principal: principal
+            .map(|p| p.agent_id.clone())
+            .unwrap_or_else(|| "<unknown>".to_string()),
+        target: target.to_string(),
+        at: now,
+    };
+    match serde_json::to_string(&denial) {
+        Ok(value) => {
+            if let Err(e) = kv.kv_set(LINK_DENIAL_NAMESPACE, link_id, value).await {
+                warn!(
+                    link_id,
+                    error = %e,
+                    "spec-registry: failed to persist link access denial"
+                );
+            }
+        }
+        Err(e) => warn!(
+            link_id,
+            error = %e,
+            "spec-registry: failed to serialize link access denial"
+        ),
+    }
+}
+
+/// Clear the access-denial marker for a link id (the link resolved, or was
+/// re-declared by a push that is not access-denied).
+pub(crate) async fn clear_link_denial(kv: &Arc<dyn gyre_ports::KvJsonStore>, link_id: &str) {
+    if let Err(e) = kv.kv_remove(LINK_DENIAL_NAMESPACE, link_id).await {
+        warn!(
+            link_id,
+            error = %e,
+            "spec-registry: failed to clear link access denial"
+        );
+    }
+}
+
+/// Read the access-denial marker for a link id, if any.
+pub(crate) async fn link_denial(
+    kv: &Arc<dyn gyre_ports::KvJsonStore>,
+    link_id: &str,
+) -> Option<LinkAccessDenial> {
+    let raw = kv.kv_get(LINK_DENIAL_NAMESPACE, link_id).await.ok()??;
+    serde_json::from_str(&raw).ok()
+}
+
+/// spec-links.md §Cross-Repo and Cross-Workspace Links: "Target workspace
+/// exists and the linking user has read access."
+///
+/// - `principal: None` — server-originated sync (mirror fetch, background
+///   job): no linking user to validate, exempt.
+/// - System principal — exempt.
+/// - User principal — read access is workspace membership (any role grants
+///   workspace read; an unaccepted invitation is not access).
+/// - Agent principal — agents are workspace-scoped (platform-model.md §1
+///   hierarchy enforcement): read access exists only when the validated
+///   token's workspace scope IS the target workspace.
+///
+/// Fails closed when a user principal's membership cannot be checked
+/// (missing repo handle or lookup error): an unvalidatable principal must
+/// not get cross-workspace resolution.
+async fn principal_has_read_access(
+    memberships: Option<&Arc<dyn gyre_ports::WorkspaceMembershipRepository>>,
+    principal: Option<&LinkPrincipal>,
+    target_workspace_id: &gyre_common::Id,
+) -> bool {
+    let Some(p) = principal else {
+        return true; // server-originated sync — no linking user
+    };
+    if p.is_system {
+        return true;
+    }
+    match &p.user_id {
+        Some(user_id) => match memberships {
+            Some(memberships) => {
+                match memberships
+                    .find_by_user_and_workspace(user_id, target_workspace_id)
+                    .await
+                {
+                    Ok(Some(membership)) => membership.accepted,
+                    Ok(None) => false,
+                    Err(e) => {
+                        warn!(
+                            principal = %p.agent_id,
+                            workspace_id = %target_workspace_id,
+                            error = %e,
+                            "spec-registry: membership lookup failed — denying cross-workspace link (fail closed)"
+                        );
+                        false
+                    }
+                }
+            }
+            None => false, // cannot validate a user principal — fail closed
+        },
+        None => p.workspace_id.as_deref() == Some(target_workspace_id.as_str()),
+    }
+}
+
+/// spec-links.md §Cross-Repo and Cross-Workspace Links: "Target spec path
+/// exists in the target repo's manifest." Reads the target repo's current
+/// default-branch `specs/manifest.yaml` via the same git-show mechanism the
+/// sync itself uses and requires the target path to be declared. A missing
+/// or unparseable manifest declares nothing — the path does not exist.
+pub(crate) async fn target_manifest_declares_path(
+    repo: &gyre_domain::Repository,
+    target_path: &str,
+) -> bool {
+    let refname = format!("refs/heads/{}", repo.default_branch);
+    match read_manifest(&repo.path, &refname).await {
+        Some(manifest) => manifest
+            .specs
+            .iter()
+            .any(|e| normalize_spec_rel_path(&e.path) == normalize_spec_rel_path(target_path)),
+        None => false,
+    }
+}
+
+/// Validate and resolve a same-workspace cross-repo target
+/// (`@repo_name/spec_path`) at push time. Returns
+/// `(target_repo_id, status)`.
+///
+/// Validation chain: the repo exists within the SOURCE workspace, and the
+/// target path is declared in the target repo's current manifest.
+async fn validate_cross_repo_target(
+    repos: Option<&Arc<dyn gyre_ports::RepoRepository>>,
+    source_workspace_id: Option<&str>,
+    entry_path: &str,
+    link_target: &str,
+    repo_name: &str,
+    path: &str,
+) -> (Option<String>, String) {
+    let ws_id = source_workspace_id.map(gyre_common::Id::new);
+    let repo = match (repos, ws_id.as_ref()) {
+        (Some(repos), Some(ws_id)) => repos
+            .find_by_name_and_workspace(ws_id, repo_name)
+            .await
+            .ok()
+            .flatten(),
+        _ => None,
+    };
+    let Some(repo) = repo else {
+        warn!(
+            source = entry_path,
+            target = link_target,
+            repo_name,
+            "spec-registry: cross-repo target unresolved (repo not found in source workspace)"
+        );
+        return (None, "unresolved".to_string());
+    };
+    if !target_manifest_declares_path(&repo, path).await {
+        warn!(
+            source = entry_path,
+            target = link_target,
+            spec_path = path,
+            repo_id = %repo.id,
+            "spec-registry: cross-repo target unresolved (path not declared in target repo manifest)"
+        );
+        return (None, "unresolved".to_string());
+    }
+    (Some(repo.id.to_string()), "active".to_string())
+}
+
+/// Validate and resolve a cross-workspace target
+/// (`@workspace_slug/repo_name/spec_path`) at push time. Returns
+/// `(target_repo_id, status, access_denied)`.
+///
+/// Validation chain per spec-links.md §Cross-Repo and Cross-Workspace
+/// Links: target workspace exists (tenant-scoped) → the linking principal
+/// has read access → target repo exists within that workspace → target
+/// path is declared in the target repo's current manifest.
+#[allow(clippy::too_many_arguments)]
+async fn validate_cross_workspace_target(
     workspaces: Option<&Arc<dyn gyre_ports::WorkspaceRepository>>,
     repos: Option<&Arc<dyn gyre_ports::RepoRepository>>,
     tenant_id: Option<&gyre_common::Id>,
+    memberships: Option<&Arc<dyn gyre_ports::WorkspaceMembershipRepository>>,
+    principal: Option<&LinkPrincipal>,
+    entry_path: &str,
+    link_target: &str,
     workspace_slug: &str,
     repo_name: &str,
-) -> Option<String> {
-    let workspaces = workspaces?;
-    let repos = repos?;
-    let tenant_id = tenant_id?;
+    path: &str,
+) -> (Option<String>, String, bool) {
+    // 1. Target workspace exists (tenant-scoped — never a fabricated tenant).
+    let target_ws = match (workspaces, tenant_id) {
+        (Some(workspaces), Some(tenant_id)) => workspaces
+            .find_by_slug(tenant_id, workspace_slug)
+            .await
+            .ok()
+            .flatten(),
+        _ => None,
+    };
+    let Some(target_ws) = target_ws else {
+        warn!(
+            source = entry_path,
+            target = link_target,
+            workspace_slug,
+            "spec-registry: cross-workspace target unresolved (workspace not found in tenant)"
+        );
+        return (None, "unresolved".to_string(), false);
+    };
 
-    // 1. Resolve workspace slug → workspace ID (tenant-scoped).
-    let workspace = workspaces
-        .find_by_slug(tenant_id, workspace_slug)
-        .await
-        .ok()
-        .flatten()?;
+    // 2. The linking principal has read access to the target workspace.
+    if !principal_has_read_access(memberships, principal, &target_ws.id).await {
+        warn!(
+            source = entry_path,
+            target = link_target,
+            principal = principal.map(|p| p.agent_id.as_str()).unwrap_or("<none>"),
+            workspace_id = %target_ws.id,
+            "spec-registry: cross-workspace link DENIED — linking principal lacks read access to target workspace; storing unresolved"
+        );
+        return (None, "unresolved".to_string(), true);
+    }
 
-    // 2. Resolve repo name within that workspace.
-    repos
-        .find_by_name_and_workspace(&workspace.id, repo_name)
-        .await
-        .ok()
-        .flatten()
-        .map(|r| r.id.to_string())
-}
+    // 3. Target repo exists within that workspace.
+    let repo = match repos {
+        Some(repos) => repos
+            .find_by_name_and_workspace(&target_ws.id, repo_name)
+            .await
+            .ok()
+            .flatten(),
+        None => None,
+    };
+    let Some(repo) = repo else {
+        warn!(
+            source = entry_path,
+            target = link_target,
+            workspace_slug,
+            repo_name,
+            "spec-registry: cross-workspace target unresolved (repo not found in workspace)"
+        );
+        return (None, "unresolved".to_string(), false);
+    };
 
-/// Resolve a cross-repo same-workspace link (`@repo_name/spec_path`) to a target repo ID.
-///
-/// Looks up a repo by name within the given workspace. Returns None if no workspace_id
-/// is provided (same-workspace resolution requires knowing the current workspace).
-async fn resolve_repo_by_name(
-    repos: Option<&Arc<dyn gyre_ports::RepoRepository>>,
-    _workspaces: Option<&Arc<dyn gyre_ports::WorkspaceRepository>>,
-    _tenant_id: Option<&gyre_common::Id>,
-    workspace_id: Option<&gyre_common::Id>,
-    repo_name: &str,
-) -> Option<String> {
-    let repos = repos?;
-    let ws_id = workspace_id?;
-    repos
-        .find_by_name_and_workspace(ws_id, repo_name)
-        .await
-        .ok()
-        .flatten()
-        .map(|r| r.id.to_string())
+    // 4. Target spec path exists in the target repo's manifest.
+    if !target_manifest_declares_path(&repo, path).await {
+        warn!(
+            source = entry_path,
+            target = link_target,
+            spec_path = path,
+            repo_id = %repo.id,
+            "spec-registry: cross-workspace target unresolved (path not declared in target repo manifest)"
+        );
+        return (None, "unresolved".to_string(), false);
+    }
+
+    (Some(repo.id.to_string()), "active".to_string(), false)
 }
 
 /// Read a file from a specific git commit using `git show <sha>:<path>`.
@@ -1559,6 +1842,9 @@ concepts:
             1_700_000_000,
             Some("repo-1"),
             Some("ws-1"),
+            None,
+            None,
+            None,
             None,
             None,
             None,
@@ -3122,6 +3408,8 @@ specs:
             Some(&repos_ctx),
             None,
             None,
+            None,
+            None,
         )
         .await;
 
@@ -3232,6 +3520,8 @@ specs:
             Some("ws-1"),
             Some(&ws_ctx),
             Some(&repos_ctx),
+            None,
+            None,
             None,
             None,
         )
@@ -3351,6 +3641,8 @@ specs:
             Some(&repos_ctx),
             None,
             None,
+            None,
+            None,
         )
         .await;
         sync_spec_ledger(
@@ -3364,6 +3656,8 @@ specs:
             Some("ws-1"),
             Some(&ws_ctx),
             Some(&repos_ctx),
+            None,
+            None,
             None,
             None,
         )
@@ -3479,6 +3773,8 @@ specs:
             Some(&repos_ctx),
             None,
             None,
+            None,
+            None,
         )
         .await;
         assert_eq!(links_store.lock().await.len(), 1);
@@ -3500,6 +3796,8 @@ specs:
             Some(&repos_ctx),
             None,
             None,
+            None,
+            None,
         )
         .await;
 
@@ -3515,6 +3813,486 @@ specs:
         assert!(
             persisted.is_empty(),
             "removed link must be deleted from the durable table, got {persisted:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // task-287: cross-repo / cross-workspace link validation
+    // (spec-links.md §Cross-Repo and Cross-Workspace Links)
+    // -----------------------------------------------------------------------
+
+    fn make_workspace_in_tenant(
+        id: &str,
+        tenant: &str,
+        slug: &str,
+    ) -> gyre_domain::Workspace {
+        gyre_domain::Workspace {
+            id: gyre_common::Id::new(id),
+            tenant_id: gyre_common::Id::new(tenant),
+            name: format!("ws-{id}"),
+            slug: slug.to_string(),
+            description: None,
+            budget: None,
+            max_repos: None,
+            max_agents_per_repo: None,
+            trust_level: gyre_domain::TrustLevel::Guided,
+            llm_model: None,
+            created_at: 1_000_000,
+            compute_target_id: None,
+        }
+    }
+
+    fn make_repo_entity(
+        id: &str,
+        name: &str,
+        ws_id: &str,
+        path: &str,
+    ) -> gyre_domain::Repository {
+        gyre_domain::Repository {
+            id: gyre_common::Id::new(id),
+            name: name.to_string(),
+            path: path.to_string(),
+            workspace_id: gyre_common::Id::new(ws_id),
+            default_branch: "main".to_string(),
+            is_mirror: false,
+            mirror_url: None,
+            mirror_interval_secs: None,
+            last_mirror_sync: None,
+            description: None,
+            status: gyre_domain::RepoStatus::Active,
+            created_at: 1_000_000,
+            updated_at: 1_000_000,
+            max_agents: None,
+            max_agent_iterations: None,
+            budget: None,
+        }
+    }
+
+    fn make_membership_entity(
+        user_id: &str,
+        ws_id: &str,
+        role: gyre_domain::WorkspaceRole,
+    ) -> gyre_domain::WorkspaceMembership {
+        gyre_domain::WorkspaceMembership {
+            id: gyre_common::Id::new(uuid::Uuid::new_v4().to_string()),
+            user_id: gyre_common::Id::new(user_id),
+            workspace_id: gyre_common::Id::new(ws_id),
+            role,
+            invited_by: gyre_common::Id::new("admin"),
+            accepted: true,
+            accepted_at: Some(1_000_000),
+            created_at: 1_000_000,
+        }
+    }
+
+    /// Blob SHA of a file at a commit (same mechanism sync_spec_ledger uses
+    /// for ledger current_sha and link target_sha pinning).
+    fn blob_sha_at(dir: &tempfile::TempDir, sha: &str, file: &str) -> String {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir.path())
+            .args(["rev-parse", &format!("{sha}:{file}")])
+            .output()
+            .expect("git rev-parse failed");
+        assert!(
+            out.status.success(),
+            "git rev-parse {sha}:{file} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// AC 1: a manifest in repo A (workspace W) declaring depends_on
+    /// @B/system/auth.md, where repo B exists in W, resolves to B's repo id
+    /// with status "active" — and a subsequent change to B's target spec
+    /// marks A's link stale (push-time inbound staleness, step 6b).
+    ///
+    /// Against the pre-task code this fails at the first assertion:
+    /// push-time resolution passed None as the workspace to the repo-name
+    /// lookup (which returns None without a workspace scope), so every
+    /// same-workspace @repo/path link was stored "unresolved" forever.
+    #[tokio::test]
+    async fn cross_repo_same_workspace_link_resolves_active_then_stale_on_target_change() {
+        use crate::mem::{MemRepoRepository, MemSpecLedgerRepository, MemWorkspaceRepository};
+
+        // Target repo B in workspace ws-1 (tenant "tenant-287", ≠ the
+        // literal "default" — the scope the fabricated-tenant bug broke).
+        let (dir_b, sha_b) = make_test_repo(&[
+            (
+                "specs/manifest.yaml",
+                "version: 1\nspecs:\n  - path: system/auth.md\n    title: Auth\n    owner: user:test\n",
+            ),
+            ("specs/system/auth.md", "# Auth v1\n"),
+        ])
+        .await;
+
+        // Source repo A links @B/system/auth.md pinned to B's current blob SHA.
+        let auth_blob_v1 = blob_sha_at(&dir_b, &sha_b, "specs/system/auth.md");
+        let manifest_a = format!(
+            "version: 1\nspecs:\n  - path: system/a.md\n    title: A\n    owner: user:test\n    links:\n      - type: depends_on\n        target: \"@B/system/auth.md\"\n        target_sha: {auth_blob_v1}\n"
+        );
+        let (dir_a, sha_a) = make_test_repo(&[
+            ("specs/manifest.yaml", manifest_a.as_str()),
+            ("specs/system/a.md", "# A\n"),
+        ])
+        .await;
+
+        let ledger: Arc<dyn gyre_ports::SpecLedgerRepository> =
+            Arc::new(MemSpecLedgerRepository::default());
+        let links_store: SpecLinksStore = Arc::new(Mutex::new(Vec::new()));
+        let link_repo: Arc<dyn gyre_ports::SpecLinkRepository> =
+            Arc::new(crate::mem::MemSpecLinkRepository::default());
+
+        let ws_ctx: Arc<dyn gyre_ports::WorkspaceRepository> = MemWorkspaceRepository::default();
+        let ws = make_workspace_in_tenant("ws-1", "tenant-287", "ws-one");
+        ws_ctx.create(&ws).await.unwrap();
+        let repos_ctx: Arc<dyn gyre_ports::RepoRepository> = MemRepoRepository::default();
+        repos_ctx
+            .create(&make_repo_entity(
+                "repo-a",
+                "A",
+                "ws-1",
+                dir_a.path().to_str().unwrap(),
+            ))
+            .await
+            .unwrap();
+        repos_ctx
+            .create(&make_repo_entity(
+                "repo-b",
+                "B",
+                "ws-1",
+                dir_b.path().to_str().unwrap(),
+            ))
+            .await
+            .unwrap();
+        let tenant = gyre_common::Id::new("tenant-287");
+
+        // Push B first: registers system/auth.md in the ledger at v1.
+        sync_spec_ledger(
+            &ledger,
+            &links_store,
+            &link_repo,
+            dir_b.path().to_str().unwrap(),
+            &sha_b,
+            1_700_000_000,
+            Some("repo-b"),
+            Some("ws-1"),
+            Some(&ws_ctx),
+            Some(&repos_ctx),
+            Some(&tenant),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+
+        // Push A: the same-workspace cross-repo link must resolve to
+        // repo-b's id and be active (pinned SHA matches the ledger).
+        sync_spec_ledger(
+            &ledger,
+            &links_store,
+            &link_repo,
+            dir_a.path().to_str().unwrap(),
+            &sha_a,
+            1_700_000_100,
+            Some("repo-a"),
+            Some("ws-1"),
+            Some(&ws_ctx),
+            Some(&repos_ctx),
+            Some(&tenant),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+
+        let links: Vec<SpecLinkEntry> = links_store.lock().await.clone();
+        assert_eq!(links.len(), 1, "A's depends_on link must be recorded");
+        assert_eq!(links[0].target_repo_id.as_deref(), Some("repo-b"));
+        assert_eq!(links[0].status, "active");
+        assert_eq!(links[0].target_display.as_deref(), Some("@B/system/auth.md"));
+
+        // Subsequent change to B's target spec: A's link must go stale via
+        // push-time inbound staleness (sync step 6b).
+        let sha_b2 = add_commit(&dir_b, &[("specs/system/auth.md", "# Auth v2\n")]);
+        sync_spec_ledger(
+            &ledger,
+            &links_store,
+            &link_repo,
+            dir_b.path().to_str().unwrap(),
+            &sha_b2,
+            1_700_000_200,
+            Some("repo-b"),
+            Some("ws-1"),
+            Some(&ws_ctx),
+            Some(&repos_ctx),
+            Some(&tenant),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+
+        let links: Vec<SpecLinkEntry> = links_store.lock().await.clone();
+        assert_eq!(
+            links[0].status, "stale",
+            "a change to B's target spec must mark A's link stale, got {:?}",
+            links[0]
+        );
+        assert!(links[0].stale_since.is_some());
+    }
+
+    /// AC 3 / verification-intent probe 2: a link whose target repo resolves
+    /// but whose target path is absent from the target repo's manifest is
+    /// stored "unresolved" with the missing path named in the warning.
+    /// Against the pre-task code this fails: the link was marked "active"
+    /// on repo existence alone.
+    #[tokio::test]
+    async fn cross_repo_link_unresolved_when_target_path_not_in_target_manifest() {
+        use crate::mem::{MemRepoRepository, MemSpecLedgerRepository, MemWorkspaceRepository};
+
+        let (dir_b, sha_b) = make_test_repo(&[
+            (
+                "specs/manifest.yaml",
+                "version: 1\nspecs:\n  - path: system/auth.md\n    title: Auth\n    owner: user:test\n",
+            ),
+            ("specs/system/auth.md", "# Auth\n"),
+        ])
+        .await;
+        // A links a path B's manifest does NOT declare.
+        let manifest_a = "version: 1\nspecs:\n  - path: system/a.md\n    title: A\n    owner: user:test\n    links:\n      - type: depends_on\n        target: \"@B/system/nonexistent.md\"\n";
+        let (dir_a, sha_a) = make_test_repo(&[
+            ("specs/manifest.yaml", manifest_a),
+            ("specs/system/a.md", "# A\n"),
+        ])
+        .await;
+
+        let ledger: Arc<dyn gyre_ports::SpecLedgerRepository> =
+            Arc::new(MemSpecLedgerRepository::default());
+        let links_store: SpecLinksStore = Arc::new(Mutex::new(Vec::new()));
+        let link_repo: Arc<dyn gyre_ports::SpecLinkRepository> =
+            Arc::new(crate::mem::MemSpecLinkRepository::default());
+        let ws_ctx: Arc<dyn gyre_ports::WorkspaceRepository> = MemWorkspaceRepository::default();
+        ws_ctx
+            .create(&make_workspace_in_tenant("ws-1", "tenant-287", "ws-one"))
+            .await
+            .unwrap();
+        let repos_ctx: Arc<dyn gyre_ports::RepoRepository> = MemRepoRepository::default();
+        repos_ctx
+            .create(&make_repo_entity(
+                "repo-a",
+                "A",
+                "ws-1",
+                dir_a.path().to_str().unwrap(),
+            ))
+            .await
+            .unwrap();
+        // repo-b exists (its manifest just doesn't declare the target path).
+        repos_ctx
+            .create(&make_repo_entity(
+                "repo-b",
+                "B",
+                "ws-1",
+                dir_b.path().to_str().unwrap(),
+            ))
+            .await
+            .unwrap();
+        let tenant = gyre_common::Id::new("tenant-287");
+        let _ = sha_b;
+
+        sync_spec_ledger(
+            &ledger,
+            &links_store,
+            &link_repo,
+            dir_a.path().to_str().unwrap(),
+            &sha_a,
+            1_700_000_000,
+            Some("repo-a"),
+            Some("ws-1"),
+            Some(&ws_ctx),
+            Some(&repos_ctx),
+            Some(&tenant),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+
+        let links: Vec<SpecLinkEntry> = links_store.lock().await.clone();
+        assert_eq!(links.len(), 1);
+        assert_eq!(
+            links[0].status, "unresolved",
+            "a target path absent from the target repo's manifest must be unresolved, got {:?}",
+            links[0]
+        );
+        assert_eq!(links[0].target_repo_id, None);
+        assert_eq!(links[0].target_path, "system/nonexistent.md");
+    }
+
+    /// AC 2: a cross-workspace link pushed by a principal without read
+    /// access to the target workspace is stored "unresolved" (never
+    /// "active"), with the denial named in the durable marker (and the
+    /// warning). Positive control: once the principal holds membership in
+    /// the target workspace, a re-push resolves the link active and clears
+    /// the marker.
+    #[tokio::test]
+    async fn cross_workspace_link_denied_without_read_access_stays_unresolved() {
+        use crate::mem::{
+            MemKvStore, MemRepoRepository, MemSpecLedgerRepository, MemWorkspaceMembershipRepository,
+            MemWorkspaceRepository,
+        };
+
+        // Target repo C in workspace ws-two (same tenant, different workspace).
+        let (dir_c, _sha_c) = make_test_repo(&[
+            (
+                "specs/manifest.yaml",
+                "version: 1\nspecs:\n  - path: system/spec.md\n    title: Spec\n    owner: user:test\n",
+            ),
+            ("specs/system/spec.md", "# Spec\n"),
+        ])
+        .await;
+        let manifest_a = "version: 1\nspecs:\n  - path: system/a.md\n    title: A\n    owner: user:test\n    links:\n      - type: depends_on\n        target: \"@ws-two/C/system/spec.md\"\n";
+        let (dir_a, sha_a) = make_test_repo(&[
+            ("specs/manifest.yaml", manifest_a),
+            ("specs/system/a.md", "# A\n"),
+        ])
+        .await;
+
+        let ledger: Arc<dyn gyre_ports::SpecLedgerRepository> =
+            Arc::new(MemSpecLedgerRepository::default());
+        let links_store: SpecLinksStore = Arc::new(Mutex::new(Vec::new()));
+        let link_repo: Arc<dyn gyre_ports::SpecLinkRepository> =
+            Arc::new(crate::mem::MemSpecLinkRepository::default());
+
+        let ws_ctx: Arc<dyn gyre_ports::WorkspaceRepository> = MemWorkspaceRepository::default();
+        ws_ctx
+            .create(&make_workspace_in_tenant("ws-one-id", "tenant-287", "ws-one"))
+            .await
+            .unwrap();
+        ws_ctx
+            .create(&make_workspace_in_tenant("ws-two-id", "tenant-287", "ws-two"))
+            .await
+            .unwrap();
+        let repos_ctx: Arc<dyn gyre_ports::RepoRepository> = MemRepoRepository::default();
+        repos_ctx
+            .create(&make_repo_entity(
+                "repo-a",
+                "A",
+                "ws-one-id",
+                dir_a.path().to_str().unwrap(),
+            ))
+            .await
+            .unwrap();
+        repos_ctx
+            .create(&make_repo_entity(
+                "repo-c",
+                "C",
+                "ws-two-id",
+                dir_c.path().to_str().unwrap(),
+            ))
+            .await
+            .unwrap();
+
+        // The pushing principal is a user with membership in the SOURCE
+        // workspace only — no read access to ws-two.
+        let memberships: Arc<dyn gyre_ports::WorkspaceMembershipRepository> =
+            MemWorkspaceMembershipRepository::default();
+        memberships
+            .create(&make_membership_entity(
+                "u-1",
+                "ws-one-id",
+                gyre_domain::WorkspaceRole::Developer,
+            ))
+            .await
+            .unwrap();
+        let kv: Arc<dyn gyre_ports::KvJsonStore> = MemKvStore::default();
+        let principal = LinkPrincipal {
+            agent_id: "user-one".to_string(),
+            user_id: Some(gyre_common::Id::new("u-1")),
+            workspace_id: Some("ws-one-id".to_string()),
+            is_system: false,
+        };
+        let tenant = gyre_common::Id::new("tenant-287");
+
+        let sync_a = |principal: Option<&LinkPrincipal>| {
+            // Reborrow the Arcs for each call.
+            let ledger = ledger.clone();
+            let links_store = links_store.clone();
+            let link_repo = link_repo.clone();
+            let ws_ctx = ws_ctx.clone();
+            let repos_ctx = repos_ctx.clone();
+            let memberships = memberships.clone();
+            let kv = kv.clone();
+            let tenant = tenant.clone();
+            let dir_a = dir_a.path().to_str().unwrap().to_string();
+            async move {
+                sync_spec_ledger(
+                    &ledger,
+                    &links_store,
+                    &link_repo,
+                    &dir_a,
+                    &sha_a,
+                    1_700_000_000,
+                    Some("repo-a"),
+                    Some("ws-one-id"),
+                    Some(&ws_ctx),
+                    Some(&repos_ctx),
+                    Some(&tenant),
+                    principal,
+                    Some(&memberships),
+                    Some(&kv),
+                    None,
+                )
+                .await
+            }
+        };
+
+        // Push by the principal WITHOUT read access to ws-two: the link
+        // must be stored unresolved with target_repo_id NULL.
+        sync_a(Some(&principal)).await;
+        let links: Vec<SpecLinkEntry> = links_store.lock().await.clone();
+        assert_eq!(links.len(), 1);
+        assert_eq!(
+            links[0].status, "unresolved",
+            "a cross-workspace link pushed without read access must never be active, got {:?}",
+            links[0]
+        );
+        assert_eq!(links[0].target_repo_id, None);
+
+        // The denial is durably recorded, naming the principal and target
+        // (the staleness pass consults this so it cannot flip the link).
+        let denial = link_denial(&kv, &links[0].id).await;
+        let denial = denial.expect("access denial must be recorded for the denied link");
+        assert_eq!(denial.principal, "user-one");
+        assert_eq!(denial.target, "@ws-two/C/system/spec.md");
+
+        // Positive control: grant the principal Viewer membership in the
+        // target workspace and re-push — the link resolves active and the
+        // denial marker clears.
+        memberships
+            .create(&make_membership_entity(
+                "u-1",
+                "ws-two-id",
+                gyre_domain::WorkspaceRole::Viewer,
+            ))
+            .await
+            .unwrap();
+        sync_a(Some(&principal)).await;
+        let links: Vec<SpecLinkEntry> = links_store.lock().await.clone();
+        assert_eq!(links.len(), 1);
+        assert_eq!(
+            links[0].status, "active",
+            "a cross-workspace link pushed by a target-workspace member must resolve active, got {:?}",
+            links[0]
+        );
+        assert_eq!(links[0].target_repo_id.as_deref(), Some("repo-c"));
+        assert!(
+            link_denial(&kv, &links[0].id).await.is_none(),
+            "re-push by an authorized principal must clear the denial marker"
         );
     }
 
