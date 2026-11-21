@@ -157,8 +157,12 @@ async fn find_live_workspace_orchestrator(
         .find(|a| a.orchestrator_type == OrchestratorType::WorkspaceOrchestrator && is_live(a)))
 }
 
-/// Find the live repo orchestrator for a repo, if any.
-async fn find_live_repo_orchestrator(
+/// Find the live repo orchestrator for a repo, if any. Reads the same
+/// agent source `gyre_list_repo_orchestrators` /
+/// `list_repo_orchestrators_core` serves (workspace agents filtered to
+/// RepoOrchestrator + live); shared with the breaking-change MCP
+/// notification arm in `git_http::process_breaking_changes`.
+pub(crate) async fn find_live_repo_orchestrator(
     state: &AppState,
     repo: &Repository,
 ) -> anyhow::Result<Option<Agent>> {
