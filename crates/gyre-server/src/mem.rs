@@ -2172,11 +2172,20 @@ impl MemAuditRepository {
     }
 }
 
-/// Evaluate an [`AuditQueryFilter`] against one event in code — the mem
-/// adapter has no schema, so the port's filter contract (every dimension,
-/// including `repo_id`) is guarded here. Shared by `query` and
-/// `count_filtered` so the two can never disagree on what matches.
-fn audit_entry_matches(e: &AuditEvent, filter: &AuditQueryFilter) -> bool {
+/// Evaluate an [`AuditQueryFilter`] against one stored event in code —
+/// the mem adapter has no schema, so the port's filter contract (every
+/// dimension, including `repo_id`) is guarded here. Shared by `query`
+/// and `count_filtered` so the two can never disagree on what matches.
+///
+/// Takes the stored [`MemAuditEntry`], not just the domain event: after
+/// the log-compression job moves an event's payload to `detail_zstd`
+/// and nulls `event.detail`, the free-text `q` filter must decompress
+/// and match over the stored payload — the port contract the SQLite and
+/// PostgreSQL adapters implement via their `detail_matches` (review
+/// task-273 repair: matching only `event.detail` silently dropped
+/// compressed rows from every `q` search in pure-mem mode).
+fn audit_entry_matches(entry: &MemAuditEntry, filter: &AuditQueryFilter) -> bool {
+    let e = &entry.event;
     filter
         .agent_id
         .as_ref()
@@ -2213,15 +2222,28 @@ fn audit_entry_matches(e: &AuditEvent, filter: &AuditQueryFilter) -> bool {
             .as_ref()
             .is_none_or(|t| e.tenant_id.as_deref() == Some(t.as_str()))
         // Free-text search over the detail payload (case-insensitive),
-        // matching the SQL adapters' LIKE semantics.
+        // matching the SQL adapters' LIKE semantics. Compressed rows are
+        // decompressed first — the same JSON the uncompressed `detail`
+        // would hold — so search works uniformly across both storage
+        // states (mirrors the SQL adapters' `detail_matches`); a corrupt
+        // compressed payload matches nothing, same as the SQL adapters.
         && filter.q.as_ref().is_none_or(|q| {
             let needle = q.to_lowercase();
-            let detail = e
-                .detail
-                .as_str()
-                .map(str::to_string)
-                .unwrap_or_else(|| e.detail.to_string());
-            detail.to_lowercase().contains(&needle)
+            let haystack = if e.detail.is_null() {
+                match &entry.detail_zstd {
+                    Some(z) if !z.is_empty() => match zstd::decode_all(z.as_slice()) {
+                        Ok(raw) => String::from_utf8_lossy(&raw).to_string(),
+                        Err(_) => return false,
+                    },
+                    _ => e.detail.to_string(),
+                }
+            } else {
+                e.detail
+                    .as_str()
+                    .map(str::to_string)
+                    .unwrap_or_else(|| e.detail.to_string())
+            };
+            haystack.to_lowercase().contains(&needle)
         })
 }
 
@@ -2294,7 +2316,7 @@ impl AuditRepository for MemAuditRepository {
         let store = self.store.lock().await;
         let mut events: Vec<AuditEvent> = store
             .iter()
-            .filter(|e| audit_entry_matches(&e.event, filter))
+            .filter(|e| audit_entry_matches(e, filter))
             .map(MemAuditEntry::materialize)
             .collect::<Result<Vec<_>>>()?;
         events.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
@@ -2310,7 +2332,7 @@ impl AuditRepository for MemAuditRepository {
         let store = self.store.lock().await;
         Ok(store
             .iter()
-            .filter(|e| audit_entry_matches(&e.event, filter))
+            .filter(|e| audit_entry_matches(e, filter))
             .count() as u64)
     }
 
@@ -2546,6 +2568,127 @@ mod mem_audit_tenant_tests {
             .unwrap();
         let stored = audit.store.lock().await.last().unwrap().event.clone();
         assert_eq!(stored.tenant_id, None);
+    }
+}
+
+mod mem_audit_search_tests {
+    //! TASK-273 review (mem parity): the free-text `q` filter must match
+    //! rows whose detail payload was moved to `detail_zstd` by the
+    //! log-compression job — the port contract the SQLite and PostgreSQL
+    //! adapters implement via `detail_matches` (decompress + match). A
+    //! mem adapter matching only `event.detail` (Null after compression)
+    //! would silently lose q recall on compressed rows while SQLite/PG
+    //! stay correct.
+
+    use super::*;
+
+    fn detail_event(detail: serde_json::Value, timestamp: u64) -> AuditEvent {
+        let mut e = AuditEvent::new(
+            Id::new(format!("evt-{timestamp}")),
+            gyre_domain::AuditEventType::ProcessExec,
+            None,
+            None,
+            None,
+            None,
+            None,
+            "server".to_string(),
+            None,
+            gyre_domain::AuditOutcome::Success,
+            detail,
+            None,
+            None,
+            timestamp,
+        );
+        e.tenant_id = Some("tenant-a".to_string());
+        e
+    }
+
+    fn filter(q: &str) -> AuditQueryFilter {
+        AuditQueryFilter {
+            q: Some(q.to_string()),
+            tenant_id: Some("tenant-a".to_string()),
+            limit: 100,
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn q_matches_compressed_and_plain_detail_rows() {
+        let audit = MemAuditRepository::default();
+        audit
+            .record(&detail_event(
+                serde_json::json!({"cmd": "plain-row-findme"}),
+                1_000,
+            ))
+            .await
+            .unwrap();
+        audit
+            .record(&detail_event(
+                serde_json::json!({"cmd": "compressed-row-findme"}),
+                2_000,
+            ))
+            .await
+            .unwrap();
+        audit
+            .record(&detail_event(
+                serde_json::json!({"cmd": "compressed-row-absent"}),
+                3_000,
+            ))
+            .await
+            .unwrap();
+
+        // Compress everything older than the newest row: the two
+        // `compressed-row-*` payloads move to detail_zstd and their
+        // event.detail becomes Null.
+        let stats = audit.compress_details_before(3_000, 100).await.unwrap();
+        assert_eq!(stats.compressed, 2);
+        {
+            let store = audit.store.lock().await;
+            assert!(store[1].detail_zstd.is_some());
+            assert!(store[1].event.detail.is_null());
+        }
+
+        // A term in a compressed payload still matches (the review
+        // finding: it previously could not).
+        let hits = audit.query(&filter("compressed-row-findme")).await.unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].detail["cmd"], "compressed-row-findme");
+
+        // A term in a compressed payload that does NOT contain it is
+        // excluded — the decompressed match is a real filter, not a
+        // match-all over compressed rows.
+        let absent = audit.query(&filter("compressed-row-absent")).await.unwrap();
+        assert_eq!(absent.len(), 1);
+        assert_eq!(absent[0].detail["cmd"], "compressed-row-absent");
+
+        // Uncompressed rows keep matching as before.
+        let plain = audit.query(&filter("plain-row-findme")).await.unwrap();
+        assert_eq!(plain.len(), 1);
+
+        // count_filtered agrees with query on compressed rows.
+        let n = audit
+            .count_filtered(&filter("compressed-row-findme"))
+            .await
+            .unwrap();
+        assert_eq!(n, 1);
+    }
+
+    #[tokio::test]
+    async fn q_over_corrupt_compressed_payload_matches_nothing() {
+        // Parity with the SQL adapters: a payload that fails zstd
+        // decompression matches no term (never panics, never matches).
+        let audit = MemAuditRepository::default();
+        audit
+            .record(&detail_event(serde_json::json!({"cmd": "x"}), 1_000))
+            .await
+            .unwrap();
+        {
+            let mut store = audit.store.lock().await;
+            store[0].detail_zstd = Some(vec![0xFF, 0x00, 0x01]);
+            store[0].event.detail = serde_json::Value::Null;
+        }
+        let hits = audit.query(&filter("x")).await.unwrap();
+        assert!(hits.is_empty());
     }
 }
 

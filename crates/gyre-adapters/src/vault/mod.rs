@@ -787,23 +787,46 @@ impl SecretRepository for VaultSecretRepository {
             name: name.clone(),
         };
         let index_path = self.index_path(&tenant_id, secret.id.as_str());
+        // KV v2 compare-and-swap (review task-273 repair): the two
+        // pre-checks above are check-then-write — two concurrent creates
+        // of the same (tenant, scope, scope_id, name) can both pass them
+        // and both land as new KV versions, which violates the port's
+        // duplicate constraint that the SQLite/PostgreSQL adapters
+        // enforce absolutely via a UNIQUE index. `options.cas = 0` makes
+        // the data write fail (HTTP 400, "check-and-set parameter did
+        // not match the current version") unless the path holds zero
+        // versions, so Vault itself enforces the constraint atomically;
+        // that 400 maps to the port's duplicate error. The id index
+        // check stays as-is (the index path is keyed by the id, and the
+        // data-path cas is what guards the scoped-name uniqueness).
+        let duplicate_err = format!(
+            "secret '{}' already exists at scope {scope}:{scope_id}",
+            name
+        );
         self.server_token_retry(|token| {
             let payload = payload.clone();
             let data_path = data_path.clone();
+            let duplicate_err = duplicate_err.clone();
             async move {
                 let url = format!("{}/v1/{}", self.config.addr, data_path);
                 let mut req = self.http.post(&url);
                 req = Self::with_auth(req, &token, self.config.namespace.as_deref());
                 let resp = req
-                    .json(&serde_json::json!({ "data": payload }))
+                    .json(&serde_json::json!({
+                        "data": payload,
+                        "options": { "cas": 0 }
+                    }))
                     .send()
                     .await
                     .context("Vault write request failed")?;
-                anyhow::ensure!(
-                    resp.status().is_success(),
-                    "Vault write of secret failed: HTTP {}",
-                    resp.status()
-                );
+                let status = resp.status();
+                if !status.is_success() {
+                    let body = resp.text().await.unwrap_or_default();
+                    if status.as_u16() == 400 && body.contains("check-and-set") {
+                        anyhow::bail!("{duplicate_err}");
+                    }
+                    anyhow::bail!("Vault write of secret failed: HTTP {status}");
+                }
                 Ok(())
             }
         })

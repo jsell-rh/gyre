@@ -592,17 +592,28 @@ pub(crate) async fn kill_agent(
             if instance.terminated_at.is_none() {
                 killed_pid = instance.pid;
                 let backend = state.spawned_backends.lock().await.get(&id).cloned();
-                // Container/Kubernetes kills address global resources
-                // (docker rm / kubectl delete pod) reachable from a
-                // default-constructed target; local kills by pid — gated
-                // on the same pid-identity verification the sweep
-                // performs, because a restarted server must never trust a
-                // bare recorded pid (the kernel may have recycled it onto
-                // an unrelated process; review task-273). A backend whose
-                // connection details are not persisted in the record
-                // cannot be reconstructed — the record stays running so
-                // the sweep keeps reporting it instead of silently
-                // marking it dead.
+                // Local kills address the recorded pid — gated on the
+                // same pid-identity verification the sweep performs,
+                // because a restarted server must never trust a bare
+                // recorded pid (the kernel may have recycled it onto an
+                // unrelated process; review task-273). Container and
+                // Kubernetes kills address global resources (docker rm /
+                // kubectl delete pod), but NOT from a default-constructed
+                // target: the persisted `backend_config` carries the
+                // spawn-time container runtime and the pod's
+                // namespace/context/kubectl path, and ignoring it sends
+                // `kubectl delete pod` at the default namespace while the
+                // pod runs in a configured one — the delete fails
+                // NotFound, gets treated as already-gone, and the record
+                // is marked terminated over a live pod (review task-273
+                // repair). So these arms reconstruct the target from the
+                // record exactly like the sweep's
+                // reconstruct_container_target / reconstruct_kubernetes_target
+                // — the same reconstruction remote_agent_cleanup performs.
+                // A backend whose connection details are not persisted in
+                // the record cannot be reconstructed — the record stays
+                // running so the sweep keeps reporting it instead of
+                // silently marking it dead.
                 let outcome: anyhow::Result<()> = match backend {
                     Some(b) => {
                         crate::maintenance_jobs::kill_and_mark(
@@ -615,7 +626,8 @@ pub(crate) async fn kill_agent(
                     }
                     None => match instance.backend.as_str() {
                         "container" => {
-                            let target = gyre_adapters::compute::ContainerTarget::new("unused");
+                            let target =
+                                crate::maintenance_jobs::reconstruct_container_target(&instance);
                             crate::maintenance_jobs::kill_and_mark(
                                 state,
                                 &target,
@@ -625,7 +637,8 @@ pub(crate) async fn kill_agent(
                             .await
                         }
                         "kubernetes" => {
-                            let target = gyre_adapters::compute::KubernetesTarget::new("unused");
+                            let target =
+                                crate::maintenance_jobs::reconstruct_kubernetes_target(&instance);
                             crate::maintenance_jobs::kill_and_mark(
                                 state,
                                 &target,

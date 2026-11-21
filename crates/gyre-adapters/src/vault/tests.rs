@@ -61,6 +61,7 @@ async fn spawn_vault() -> (String, VaultStore, Observed) {
     let data_versions = Arc::clone(&observed.data_versions);
     let data_versions_read = Arc::clone(&data_versions);
     let data_versions_write = Arc::clone(&data_versions);
+    let data_versions_delete = Arc::clone(&data_versions);
     let reject_approle_upto = Arc::clone(&observed.reject_approle_upto);
     let agent_denied_reads = Arc::clone(&observed.agent_denied_prefixes);
     let agent_denied_lists = Arc::clone(&observed.agent_denied_prefixes);
@@ -234,6 +235,25 @@ async fn spawn_vault() -> (String, VaultStore, Observed) {
                         let key = format!("secret/data/{path}");
                         let mut versions = data_versions_write.lock().await;
                         let version = versions.entry(key.clone()).or_insert(0);
+                        // KV v2 compare-and-set (review task-273 repair):
+                        // a write carrying options.cas = N fails with
+                        // HTTP 400 unless the path's current version is
+                        // exactly N — real Vault's atomic write guard,
+                        // which create relies on (cas = 0) to enforce
+                        // the port's duplicate constraint under
+                        // concurrency instead of check-then-write.
+                        if let Some(cas) = v.pointer("/options/cas").and_then(|c| c.as_u64()) {
+                            if *version != cas {
+                                return (
+                                    axum::http::StatusCode::BAD_REQUEST,
+                                    axum::Json(serde_json::json!({
+                                        "errors": [
+                                            "check-and-set parameter did not match the current version"
+                                        ]
+                                    })),
+                                );
+                            }
+                        }
                         *version += 1;
                         store.lock().await.insert(key, data);
                         (
@@ -352,6 +372,7 @@ async fn spawn_vault() -> (String, VaultStore, Observed) {
                     let store = Arc::clone(&store_delete);
                     let namespaces = ns_delete;
                     let reject_upto = reject_delete;
+                    let data_versions_delete = Arc::clone(&data_versions_delete);
                     async move {
                         let token = headers
                             .get("X-Vault-Token")
@@ -374,6 +395,16 @@ async fn spawn_vault() -> (String, VaultStore, Observed) {
                         let prefix = format!("secret/data/{path}");
                         let mut store = store.lock().await;
                         store.retain(|k, _| !k.starts_with(&prefix));
+                        // Real Vault's metadata DELETE destroys the path
+                        // entirely — every version AND the version counter
+                        // — so a subsequent write is version 1 again (the
+                        // cas=0 create-after-delete path relies on this;
+                        // a soft-deleted-only counter would make the stub
+                        // reject re-creates real Vault accepts).
+                        data_versions_delete
+                            .lock()
+                            .await
+                            .retain(|k, _| !k.starts_with(&prefix));
                         (
                             axum::http::StatusCode::OK,
                             axum::Json(serde_json::json!({})),
@@ -502,6 +533,55 @@ async fn create_rejects_duplicate_id_and_duplicate_scope_name() {
     let same_name = sample_secret("SHARED", SecretScope::Repo, "repo-1", "t1");
     let err = repo.create(&same_name, b"v").await.unwrap_err();
     assert!(err.to_string().contains("already exists"));
+}
+
+#[tokio::test]
+async fn concurrent_create_of_same_scoped_name_succeeds_exactly_once() {
+    // Review task-273 repair: the duplicate pre-checks are
+    // check-then-write, so two concurrent creates of the same
+    // (tenant, scope, scope_id, name) can both pass them — each landing
+    // as a new KV version, violating the port constraint the SQL
+    // adapters enforce with a UNIQUE index. The data write carries
+    // options.cas = 0 (Vault's compare-and-swap), so the second writer's
+    // POST fails with HTTP 400 and maps to the port's duplicate error:
+    // exactly one create succeeds, absolutely, not best-effort.
+    let (addr, store, _observed) = spawn_vault().await;
+    let repo = Arc::new(VaultSecretRepository::new(config(&addr)).unwrap());
+
+    let mut a = sample_secret("RACE", SecretScope::Repo, "repo-1", "t1");
+    a.id = Id::new("id-race-first");
+    let mut b = sample_secret("RACE", SecretScope::Repo, "repo-1", "t1");
+    b.id = Id::new("id-race-second");
+
+    let (ra, rb) = tokio::join!(repo.create(&a, b"first"), repo.create(&b, b"second"));
+    let results = [&ra, &rb];
+    let oks = results.iter().filter(|r| r.is_ok()).count();
+    let duplicate_errs = results
+        .iter()
+        .filter(|r| {
+            r.as_ref()
+                .err()
+                .is_some_and(|e| e.to_string().contains("already exists"))
+        })
+        .count();
+    assert_eq!(
+        oks, 1,
+        "exactly one concurrent create must succeed, got: {ra:?} / {rb:?}"
+    );
+    assert_eq!(
+        duplicate_errs, 1,
+        "the losing create must fail with the port's duplicate error"
+    );
+
+    // Exactly one data version exists at the contested path — the loser
+    // did not append a second KV version.
+    {
+        let s = store.lock().await;
+        let key = "secret/data/gyre-secrets/t1/repo/repo-1/RACE";
+        assert!(s.contains_key(key), "winner's payload stored");
+        let versions = _observed.data_versions.lock().await;
+        assert_eq!(versions.get(key), Some(&1), "no second KV version");
+    }
 }
 
 #[tokio::test]
