@@ -6688,13 +6688,21 @@ specs:
 
         // Stand in for the platform agent runtime (/gyre/entrypoint.sh):
         // dump the launched environment, keyed per agent id so concurrent
-        // gate agents cannot clobber each other's dumps.
+        // gate agents cannot clobber each other's dumps. The dump is
+        // renamed into place atomically (per-PID temp + mv): `env`'s stdout
+        // is block-buffered when redirected, so a bare `env >` is
+        // observable at every 4096-byte block prefix and a poller that
+        // reads once one early var is present would see a torn dump
+        // (same failure class as the meta_specs preview env-dump flake,
+        // CI run 44902138294).
         let dump_dir = tempfile::tempdir().unwrap();
         let script = dump_dir.path().join("runtime.sh");
         let dump_root = dump_dir.path().to_str().unwrap().to_string();
         std::fs::write(
             &script,
-            format!("#!/bin/sh\nenv > '{dump_root}/env-'\"$GYRE_AGENT_ID\"\n"),
+            format!(
+                "#!/bin/sh\nd='{dump_root}/env-'\"$GYRE_AGENT_ID\"\nenv > \"$d.tmp.$$\"\nmv \"$d.tmp.$$\" \"$d\"\n"
+            ),
         )
         .unwrap();
         #[cfg(unix)]
@@ -6722,13 +6730,16 @@ specs:
 
         // The launched runtime received the token and its review context.
         // The dump appears asynchronously — the launch returns as soon as
-        // the process is forked — so poll briefly for it.
+        // the process is forked — so poll briefly for it. The script writes
+        // it atomically (temp + rename), so once it exists it is complete;
+        // the content check also guards against reading another agent's
+        // dump before this agent's launch.
         let dump_path = dump_dir.path().join(format!("env-{}", agent.id.as_str()));
         let mut dump = None;
         for _ in 0..100 {
             if let Ok(d) = std::fs::read_to_string(&dump_path) {
-                // The shell truncates the file before writing it — wait for
-                // actual content, not mere existence.
+                // Wait for the dump's content, not mere existence (also
+                // skips a stale/partial file from an earlier iteration).
                 if d.contains("GYRE_AUTH_TOKEN=") {
                     dump = Some(d);
                     break;
