@@ -858,6 +858,7 @@ impl From<PreviewEnvironment> for PreviewEnvironmentResponse {
 mod tests {
     use crate::mem::test_state;
     use axum::{body::Body, Router};
+    use gyre_common::Id;
     use gyre_domain::{
         MergeRequest, MrStatus, Repository, User, Workspace, WorkspaceMembership, WorkspaceRole,
     };
@@ -983,7 +984,7 @@ mod tests {
     #[tokio::test]
     async fn try_it_non_member_gets_403_with_no_side_effects() {
         let state = test_state();
-        seed_merged_mr(&state, "ws-try", "mr-try-1", MrStatus::Merged, Some(sha())).await;
+        seed_merged_mr(&state, "ws-try", "mr-try-1", MrStatus::Merged, Some(&sha())).await;
         let non_member_key = seed_user(&state, "ws-try", "u-nonmember", false).await;
 
         let peers_before = state.network_peers.list().await.unwrap().len();
@@ -1012,7 +1013,7 @@ mod tests {
     #[tokio::test]
     async fn try_it_canonical_route_enforces_the_same_membership() {
         let state = test_state();
-        seed_merged_mr(&state, "ws-try", "mr-try-2", MrStatus::Merged, Some(sha())).await;
+        seed_merged_mr(&state, "ws-try", "mr-try-2", MrStatus::Merged, Some(&sha())).await;
         let non_member_key = seed_user(&state, "ws-try", "u-nonmember2", false).await;
 
         let resp = app(state.clone())
@@ -1121,7 +1122,10 @@ mod tests {
         );
         let peer = peer.unwrap();
         assert_eq!(peer.mesh_ip, env.mesh_ip);
-        assert_eq!(env.peer_id.as_deref(), Some(peer.id.as_str()));
+        assert_eq!(
+            env.peer_id.as_ref().map(|id| id.as_str()),
+            Some(peer.id.as_str())
+        );
 
         // Trial analytics recorded with user/workspace/repo/mr scope.
         assert_eq!(count_preview_events(&state, "preview.started").await, 1);
@@ -1162,7 +1166,7 @@ mod tests {
     #[tokio::test]
     async fn try_it_get_surfaces_enforce_membership() {
         let state = test_state();
-        seed_merged_mr(&state, "ws-try", "mr-g", MrStatus::Merged, Some(sha())).await;
+        seed_merged_mr(&state, "ws-try", "mr-g", MrStatus::Merged, Some(&sha())).await;
         let member_key = seed_user(&state, "ws-try", "u-member-c", true).await;
         let outsider_key = seed_user(&state, "ws-try", "u-outsider-c", false).await;
 
@@ -1236,7 +1240,6 @@ mod tests {
     }
 
     async fn count_preview_events(state: &std::sync::Arc<crate::AppState>, name: &str) -> usize {
-        use gyre_ports::AnalyticsRepository;
         let filter = gyre_ports::AnalyticsQueryFilter {
             event_name: Some(name.to_string()),
             ..Default::default()

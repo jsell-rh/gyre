@@ -564,6 +564,26 @@
     return null;
   }
 
+  /** Gate-failure/test-result detection — same rule as the WorkspaceHome
+   * sidebar: an entry whose event type mentions a gate and a failure (or
+   * that carries a gate_name) must land on the MR's gate output, not the
+   * default tab (activity-dashboard.md §"Each activity entry links to the
+   * relevant artifact"). */
+  function isGateFailureEvent(event) {
+    const eventType = event.event_type ?? event.event ?? event.type ?? '';
+    return eventType.includes('gate') && (eventType.includes('fail') || Boolean(event.gate_name));
+  }
+
+  /** Deep-link payload for an activity entry: the artifact refs it
+   * carries, plus the _openTab hint for gate-failure/test-result entries. */
+  function activityNavData(event, type) {
+    const data = type === 'spec'
+      ? { path: event.spec_path, repo_id: event.repo_id }
+      : { repo_id: event.repo_id };
+    if (type === 'mr' && isGateFailureEvent(event)) data._openTab = 'gates';
+    return data;
+  }
+
   // ── Derived ──────────────────────────────────────────────────────────────
   let specsByKind = $derived.by(() => {
     const groups = {};
@@ -917,13 +937,13 @@
                 <span class="cwh-activity-detail">{event.entity_name ?? event.title ?? event.description}</span>
               {/if}
               {#if event.entity_id && event.entity_type}
-                <button class="ws-entity-link cwh-activity-entity-link" onclick={() => nav(event.entity_type, event.entity_id, event)} title="View {event.entity_type}: {event.entity_id}">{resolveEntityName(event.entity_type, event.entity_id)}</button>
+                <button class="ws-entity-link cwh-activity-entity-link" onclick={() => nav(event.entity_type, event.entity_id, activityNavData(event, event.entity_type))} title="View {event.entity_type}: {event.entity_id}">{resolveEntityName(event.entity_type, event.entity_id)}</button>
               {:else}
                 {#if event.agent_id}
                   <button class="ws-entity-link cwh-activity-entity-link" onclick={() => nav('agent', event.agent_id, { repo_id: event.repo_id })} title="View agent: {event.agent_id}">{resolveEntityName('agent', event.agent_id)}</button>
                 {/if}
                 {#if event.mr_id}
-                  <button class="ws-entity-link cwh-activity-entity-link" onclick={() => nav('mr', event.mr_id, { repository_id: event.repo_id })} title="View MR: {event.mr_id}">{resolveEntityName('mr', event.mr_id)}</button>
+                  <button class="ws-entity-link cwh-activity-entity-link" onclick={() => nav('mr', event.mr_id, activityNavData(event, 'mr'))} title="View MR: {event.mr_id}">{resolveEntityName('mr', event.mr_id)}</button>
                 {/if}
                 {#if event.task_id && !event.agent_id && !event.mr_id}
                   <button class="ws-entity-link cwh-activity-entity-link" onclick={() => nav('task', event.task_id, { repo_id: event.repo_id })} title="View task: {event.task_id}">{resolveEntityName('task', event.task_id)}</button>
