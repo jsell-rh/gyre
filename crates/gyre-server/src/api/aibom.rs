@@ -89,6 +89,71 @@ pub struct AibomResponse {
     /// ledger statuses, approval chains, manifest version, and spec-to-code
     /// binding status.
     pub spec_registry: AibomSpecRegistry,
+    /// Dependency-graph snapshot (dependency-graph.md §Version Drift
+    /// Tracking): the repo's outgoing dependency edges with the status /
+    /// drift values the push-time pass and the daily dep_staleness_check
+    /// job maintain, plus the stale-dependency flags (list + count) the
+    /// spec requires the AIBOM to carry.
+    pub dependencies: AibomDependencies,
+}
+
+// ── Dependency-graph snapshot (dependency-graph.md §Version Drift) ────────────
+
+/// One outgoing dependency edge in the AIBOM's dependency-graph
+/// snapshot: the stored edge state (target repo, dependency type,
+/// detection method, pinned version, target current version, version
+/// drift, status) as maintained by the push-time detection pass and the
+/// daily `dep_staleness_check` job — the AIBOM reads it, never
+/// re-derives it, so the graph and the AIBOM cannot disagree.
+#[derive(Serialize)]
+pub struct AibomDependencyEdge {
+    pub target_repo_id: String,
+    pub dependency_type: String,
+    pub detection_method: String,
+    pub pinned_version: Option<String>,
+    pub target_current_version: Option<String>,
+    pub version_drift: Option<u32>,
+    pub status: String,
+    /// True when the stored edge status is `stale` — the edge is flagged
+    /// as a supply-chain risk in the release report.
+    pub stale: bool,
+}
+
+/// A stale dependency named in the AIBOM's supply-chain risk list
+/// (dependency-graph.md §Version Drift Tracking: "The AIBOM flags stale
+/// dependencies in release reports") — the edge's drift and both
+/// versions, so a compliance reviewer sees exactly how far behind the
+/// release is.
+#[derive(Serialize)]
+pub struct AibomStaleDependency {
+    pub target_repo_id: String,
+    pub pinned_version: Option<String>,
+    pub target_current_version: Option<String>,
+    pub version_drift: Option<u32>,
+    /// Explicit supply-chain risk statement naming the drift and
+    /// versions (e.g. "stale dependency: pinned 1.2.0, target current
+    /// 1.5.0, drift 3").
+    pub supply_chain_risk: String,
+}
+
+/// The AIBOM's dependency-graph snapshot section: every outgoing edge of
+/// the repo, the count of repos depending on it, and the stale-dependency
+/// supply-chain risk list. Always present — an all-current dependency
+/// set shows the edges with an empty risk list, and a repo with no edges
+/// states that in `note` (an omitted section would hide the snapshot).
+#[derive(Serialize)]
+pub struct AibomDependencies {
+    /// Outgoing dependency edges (repo → its dependencies).
+    pub edges: Vec<AibomDependencyEdge>,
+    /// How many repos depend on this repo (incoming edges).
+    pub dependent_count: usize,
+    /// Stale dependencies — the supply-chain risk list, one entry per
+    /// edge whose stored status is `stale`.
+    pub stale_dependencies: Vec<AibomStaleDependency>,
+    pub stale_count: usize,
+    /// Present when the repo has no outgoing dependency edges.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 // ── Release artifact format (supply-chain.md §AIBOM Contents) ─────────────────
@@ -195,6 +260,12 @@ pub struct AibomReleaseResponse {
     /// `POST /api/v1/release/prepare` embed, so every release-time view
     /// of spec provenance agrees.
     pub spec_registry: AibomSpecRegistry,
+    /// Dependency-graph snapshot (dependency-graph.md §Version Drift
+    /// Tracking): the released repo's outgoing dependency edges from the
+    /// real dependency store, plus the stale-dependency supply-chain
+    /// risk list — the "AIBOM flags stale dependencies in release
+    /// reports" requirement.
+    pub dependencies: AibomDependencies,
     pub summary: ReleaseSummary,
 }
 
@@ -276,12 +347,19 @@ pub async fn get_aibom(
         .await
         .map_err(ApiError::Internal)?;
 
+    // Dependency-graph snapshot (dependency-graph.md §Version Drift):
+    // built here once from the REAL dependency store and embedded in BOTH
+    // output formats, so the working summary and the release artifact can
+    // never disagree about the dependency/stale state.
+    let dependencies = build_dependencies_section(&state, &repo).await?;
+
     // Release artifact format (supply-chain.md §AIBOM Contents): a
     // structured document with full agent attribution, stack attestation,
     // stack policy compliance, drift/violation history, and the spec
     // registry manifest state.
     if params.format.as_deref() == Some("release") {
-        let release = build_release_aibom(&state, &repo, &params, spec_registry).await?;
+        let release =
+            build_release_aibom(&state, &repo, &params, spec_registry, dependencies).await?;
         let value = serde_json::to_value(release).map_err(|e| ApiError::Internal(e.into()))?;
         return Ok(Json(value));
     }
@@ -459,12 +537,107 @@ pub async fn get_aibom(
         attested_percentage,
         chain_attested_count,
         spec_registry,
+        dependencies,
     };
     let value = serde_json::to_value(response).map_err(|e| ApiError::Internal(e.into()))?;
     Ok(Json(value))
 }
 
 // ── Release artifact builder (supply-chain.md §AIBOM Contents) ───────────────
+
+/// Serialize a `snake_case` serde enum (DependencyType /
+/// DetectionMethod / DependencyStatus) to its string form. These enums
+/// have only unit variants, so serialization cannot fail; the fallback
+/// keeps a future variant change from turning into a panic in a
+/// compliance artifact.
+fn enum_snapshot_str<T: Serialize>(value: &T) -> String {
+    serde_json::to_value(value)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_string))
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+/// Build the AIBOM's dependency-graph snapshot section
+/// (dependency-graph.md §Version Drift Tracking: "The AIBOM flags stale
+/// dependencies in release reports").
+///
+/// Reads the REAL dependency store (`state.dependencies`) — the
+/// status/drift values the push-time detection pass and the daily
+/// `dep_staleness_check` job already maintain — so there is no
+/// re-derivation drift between the dependency graph and the AIBOM: an
+/// edge marked stale (or resolved) in the store is reflected verbatim in
+/// the next AIBOM build for the same release inputs. Storage failures
+/// propagate — a compliance artifact must not silently under-report the
+/// dependency surface.
+async fn build_dependencies_section(
+    state: &Arc<AppState>,
+    repo: &gyre_domain::Repository,
+) -> Result<AibomDependencies, ApiError> {
+    use gyre_domain::DependencyStatus;
+
+    let edges = state
+        .dependencies
+        .list_by_repo(&repo.id)
+        .await
+        .map_err(ApiError::Internal)?;
+    let dependents = state
+        .dependencies
+        .list_dependents(&repo.id)
+        .await
+        .map_err(ApiError::Internal)?;
+
+    let snapshot: Vec<AibomDependencyEdge> = edges
+        .iter()
+        .map(|e| AibomDependencyEdge {
+            target_repo_id: e.target_repo_id.to_string(),
+            dependency_type: enum_snapshot_str(&e.dependency_type),
+            detection_method: enum_snapshot_str(&e.detection_method),
+            pinned_version: e.version_pinned.clone(),
+            target_current_version: e.target_version_current.clone(),
+            version_drift: e.version_drift,
+            status: enum_snapshot_str(&e.status),
+            stale: e.status == DependencyStatus::Stale,
+        })
+        .collect();
+
+    let stale_dependencies: Vec<AibomStaleDependency> = edges
+        .iter()
+        .filter(|e| e.status == DependencyStatus::Stale)
+        .map(|e| {
+            let pinned = e.version_pinned.clone();
+            let current = e.target_version_current.clone();
+            let drift = e.version_drift;
+            AibomStaleDependency {
+                target_repo_id: e.target_repo_id.to_string(),
+                pinned_version: pinned.clone(),
+                target_current_version: current.clone(),
+                version_drift: drift,
+                supply_chain_risk: format!(
+                    "stale dependency: pinned {}, target current {}, drift {}",
+                    pinned.as_deref().unwrap_or("unknown"),
+                    current.as_deref().unwrap_or("unknown"),
+                    drift
+                        .map(|d| d.to_string())
+                        .unwrap_or_else(|| "unknown".to_string()),
+                ),
+            }
+        })
+        .collect();
+
+    let note = if edges.is_empty() {
+        Some("repo has no outgoing dependency edges; empty dependency-graph snapshot".to_string())
+    } else {
+        None
+    };
+
+    Ok(AibomDependencies {
+        stale_count: stale_dependencies.len(),
+        edges: snapshot,
+        dependent_count: dependents.len(),
+        stale_dependencies,
+        note,
+    })
+}
 
 /// Run a git child, retrying OS-level execution failures. Returns the
 /// captured output when git ran to a clean exit — success OR a nonzero
@@ -594,6 +767,7 @@ async fn build_release_aibom(
     repo: &gyre_domain::Repository,
     params: &AibomQuery,
     spec_registry: AibomSpecRegistry,
+    dependencies: AibomDependencies,
 ) -> Result<AibomReleaseResponse, ApiError> {
     let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
     let repo_id = repo.id.to_string();
@@ -887,6 +1061,7 @@ async fn build_release_aibom(
             policy_violations,
         },
         spec_registry,
+        dependencies,
         summary: ReleaseSummary {
             total_commits,
             attested_commits,
@@ -1916,5 +2091,252 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    // ── Dependency-graph snapshot + stale flags (dependency-graph.md
+    //    §Version Drift: "The AIBOM flags stale dependencies in release
+    //    reports") ───────────────────────────────────────────────────
+
+    use gyre_domain::{DependencyEdge, DependencyStatus, DependencyType, DetectionMethod};
+
+    /// A dependency edge with explicit version state, as the push-time
+    /// detection pass and the daily dep_staleness_check job would have
+    /// left it in the store.
+    fn dep_edge(
+        id: &str,
+        source: &str,
+        target: &str,
+        pinned: Option<&str>,
+        current: Option<&str>,
+        drift: Option<u32>,
+        status: DependencyStatus,
+    ) -> DependencyEdge {
+        let mut e = DependencyEdge::new(
+            Id::new(id),
+            Id::new(source),
+            Id::new(target),
+            DependencyType::Code,
+            "Cargo.toml",
+            "target-crate",
+            DetectionMethod::CargoToml,
+            1_700_000_000,
+        );
+        e.version_pinned = pinned.map(str::to_string);
+        e.target_version_current = current.map(str::to_string);
+        e.version_drift = drift;
+        e.status = status;
+        e
+    }
+
+    async fn get_aibom_json(app: &Router, uri: String) -> serde_json::Value {
+        let resp = app
+            .clone()
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        expect_ok(resp).await
+    }
+
+    #[tokio::test]
+    async fn aibom_release_format_flags_stale_dependency() {
+        let ReleaseRepoFixture {
+            app,
+            state,
+            repo_id,
+            repo_path: _repo_path,
+            c1: _c1,
+            c2: _c2,
+            conv_sha: _conv_sha,
+        } = release_repo_with_commits().await;
+
+        // Repo A (the fixture repo) depends on B (stale: pins 1.2.0, B is
+        // at 1.5.0, drift 3 over the workspace policy — the state the
+        // dep_staleness pass leaves behind) and on C (current). Repo D
+        // depends on A → dependent_count 1.
+        let (app, repo_b) =
+            create_repo_named(app, &format!("dep-b-{}", uuid::Uuid::new_v4().simple())).await;
+        let (app, repo_c) =
+            create_repo_named(app, &format!("dep-c-{}", uuid::Uuid::new_v4().simple())).await;
+        let (app, repo_d) =
+            create_repo_named(app, &format!("dep-d-{}", uuid::Uuid::new_v4().simple())).await;
+        let _ = repo_d;
+        state
+            .dependencies
+            .save(&dep_edge(
+                "dep-edge-stale",
+                &repo_id,
+                &repo_b,
+                Some("1.2.0"),
+                Some("1.5.0"),
+                Some(3),
+                DependencyStatus::Stale,
+            ))
+            .await
+            .unwrap();
+        state
+            .dependencies
+            .save(&dep_edge(
+                "dep-edge-current",
+                &repo_id,
+                &repo_c,
+                Some("2.0.0"),
+                Some("2.0.0"),
+                Some(0),
+                DependencyStatus::Active,
+            ))
+            .await
+            .unwrap();
+        state
+            .dependencies
+            .save(&dep_edge(
+                "dep-edge-dependent",
+                &repo_d,
+                &repo_id,
+                Some("1.0.0"),
+                Some("1.0.0"),
+                Some(0),
+                DependencyStatus::Active,
+            ))
+            .await
+            .unwrap();
+
+        let uri = format!("/api/v1/repos/{repo_id}/aibom?format=release&release=v1.2.3");
+        let json = get_aibom_json(&app, uri.clone()).await;
+
+        // The dependencies section is present and carries the full
+        // outgoing-edge snapshot from the real store.
+        let deps = &json["dependencies"];
+        let edges = deps["edges"].as_array().unwrap();
+        assert_eq!(edges.len(), 2, "both outgoing edges are in the snapshot");
+        assert_eq!(deps["dependent_count"], 1, "repo D depends on A");
+
+        // The stale edge is listed with its stored state and flagged.
+        let stale_edge = edges
+            .iter()
+            .find(|e| e["target_repo_id"] == serde_json::json!(repo_b))
+            .unwrap();
+        assert_eq!(stale_edge["status"], "stale");
+        assert_eq!(stale_edge["stale"], true);
+        assert_eq!(stale_edge["dependency_type"], "code");
+        assert_eq!(stale_edge["detection_method"], "cargo_toml");
+        assert_eq!(stale_edge["pinned_version"], "1.2.0");
+        assert_eq!(stale_edge["target_current_version"], "1.5.0");
+        assert_eq!(stale_edge["version_drift"], 3);
+
+        // The current edge is listed unflagged.
+        let current_edge = edges
+            .iter()
+            .find(|e| e["target_repo_id"] == serde_json::json!(repo_c))
+            .unwrap();
+        assert_eq!(current_edge["status"], "active");
+        assert_eq!(current_edge["stale"], false);
+
+        // The supply-chain risk list names the stale dependency with its
+        // drift and versions.
+        let stale_list = deps["stale_dependencies"].as_array().unwrap();
+        assert_eq!(stale_list.len(), 1);
+        assert_eq!(stale_list[0]["target_repo_id"], serde_json::json!(repo_b));
+        assert_eq!(stale_list[0]["pinned_version"], "1.2.0");
+        assert_eq!(stale_list[0]["target_current_version"], "1.5.0");
+        assert_eq!(stale_list[0]["version_drift"], 3);
+        let risk = stale_list[0]["supply_chain_risk"].as_str().unwrap();
+        assert!(risk.contains("stale"), "risk statement: {risk}");
+        assert!(
+            risk.contains("1.2.0") && risk.contains("1.5.0"),
+            "risk names both versions: {risk}"
+        );
+        assert_eq!(deps["stale_count"], 1);
+        // The repo has edges → no empty-snapshot note.
+        assert!(deps.get("note").is_none() || deps["note"].is_null());
+
+        // The flags track the live store: resolve B's drift (an update
+        // lands, the staleness pass resets the edge to Active) and the
+        // next build for the SAME release inputs shows no stale flags —
+        // the snapshot section stays present, not omitted.
+        let mut resolved = dep_edge(
+            "dep-edge-stale",
+            &repo_id,
+            &repo_b,
+            Some("1.5.0"),
+            Some("1.5.0"),
+            Some(0),
+            DependencyStatus::Active,
+        );
+        resolved.last_verified_at = 1_700_001_000;
+        state.dependencies.save(&resolved).await.unwrap();
+
+        let json = get_aibom_json(&app, uri).await;
+        let deps = &json["dependencies"];
+        assert_eq!(
+            deps["stale_dependencies"].as_array().unwrap().len(),
+            0,
+            "resolved drift → empty risk list, not an omitted section"
+        );
+        assert_eq!(deps["stale_count"], 0);
+        let edges = deps["edges"].as_array().unwrap();
+        assert_eq!(edges.len(), 2, "snapshot still lists every edge");
+        let resolved_edge = edges
+            .iter()
+            .find(|e| e["target_repo_id"] == serde_json::json!(repo_b))
+            .unwrap();
+        assert_eq!(resolved_edge["stale"], false);
+        assert_eq!(resolved_edge["status"], "active");
+        assert_eq!(resolved_edge["version_drift"], 0);
+    }
+
+    #[tokio::test]
+    async fn aibom_summary_carries_stale_dependency_flags() {
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let repo_name = format!("dep-sum-{}", uuid::Uuid::new_v4().simple());
+        let (app, repo_a) = create_repo_named(app, &repo_name).await;
+        let (app, repo_b) =
+            create_repo_named(app, &format!("dep-sum-b-{}", uuid::Uuid::new_v4().simple())).await;
+
+        state
+            .dependencies
+            .save(&dep_edge(
+                "dep-edge-sum-stale",
+                &repo_a,
+                &repo_b,
+                Some("1.2.0"),
+                Some("1.5.0"),
+                Some(3),
+                DependencyStatus::Stale,
+            ))
+            .await
+            .unwrap();
+
+        // Default (summary) format: the stale-dependency list and count
+        // ride in the working-summary AIBOM.
+        let json = get_aibom_json(&app, format!("/api/v1/repos/{repo_a}/aibom")).await;
+        let deps = &json["dependencies"];
+        assert_eq!(deps["stale_count"], 1);
+        let stale_list = deps["stale_dependencies"].as_array().unwrap();
+        assert_eq!(stale_list.len(), 1);
+        assert_eq!(stale_list[0]["target_repo_id"], serde_json::json!(repo_b));
+        assert_eq!(stale_list[0]["pinned_version"], "1.2.0");
+        assert_eq!(stale_list[0]["target_current_version"], "1.5.0");
+        assert_eq!(stale_list[0]["version_drift"], 3);
+        let edges = deps["edges"].as_array().unwrap();
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0]["stale"], true);
+        assert_eq!(edges[0]["status"], "stale");
+
+        // A repo with no edges shows an EMPTY snapshot with that stated —
+        // the section is never omitted.
+        let (app, repo_e) =
+            create_repo_named(app, &format!("dep-sum-e-{}", uuid::Uuid::new_v4().simple())).await;
+        let _ = repo_e;
+        let json = get_aibom_json(&app, format!("/api/v1/repos/{repo_e}/aibom")).await;
+        let deps = &json["dependencies"];
+        assert!(deps["edges"].as_array().unwrap().is_empty());
+        assert_eq!(deps["stale_count"], 0);
+        assert!(deps["stale_dependencies"].as_array().unwrap().is_empty());
+        let note = deps["note"].as_str().expect("empty snapshot states it");
+        assert!(
+            note.contains("no outgoing dependency edges"),
+            "note: {note}"
+        );
     }
 }
