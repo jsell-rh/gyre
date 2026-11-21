@@ -3,7 +3,7 @@ title: "Admin Panel completion: SOPS/Vault secret backends, durable job history 
 spec_ref: "Spec gap spec-5b647653a4554eea3e93ac19 / admin-panel-remaining-gap / e61ffd082155"
 depends_on: []
 progress: ready-for-review
-commits: ["4647377515f604b9df541e77c570aa0ca53fff4d", "815b24d9bbcb59c8222a9c69176886ffd107f0b7", "7548ead498317f2de4606238ee1e6cfb53eeac60", "7fe530de59c902ef18f9aadc7448aa6ff8acb3fe", "fa69e871b93d4c6e1cf2f6aeb2b39332dd9d7524", "44eb55a239681f4510d8388525ddf7a3257226dd", "3f51333665c3ad4284f27996e79c14af545db856", "56e5ea5f797f1f19037b40e65f529239c550d649", "a0dc3e637e6ffbae976675b755abf0b2891bf481", "4c71fe4827a62f792912b4e5ab257a50c1882860", "d6f32bd0269314f9ee552ed72df33322b0fe2238", "cd2f616e3ebd96addab2dcaf78242d31c58efc04", "808e3c10c035c9fc6fe8c5ee96d474fc5468acf3", "b979fefeeb7a6bb8340ccd85c64b467e0f46c553", "210dfa61bc1ea637a29a79c26af80746b2fb002c", "3ebd143d29eb52bb2bc0bd748f60fe52fa960f66", "9b81c9816f13a3d637057a6c3149c9be92f38a3c", "0fda00bfe9860c8c8b66ea1235f0d2e3251df67a", "1bc00b6cb9212e6ac6dfc7c764afede98ae8fd64", "a2b31ac19c05310ebd05a072ddde1acf0c51f2ec", "f6e31cf57779a7e117f5a0b9bd75720aed90ca56", "b101d27aafb7bde0907a568e7bb8a3ffbdd3ae67", "ee253c8854f16664f91d16171e08414effc314b7", "db320101b1540a35cf9986408e70ac46008b1982"]
+commits: ["8d5c4fecf9851333871985a1118e2a7c1cd8a07d", "2344b83a9336eee2c958854a728b9a22c10edd1e", "368a152586c44e5c5a09a8e04cd14395b6f845d9", "9647021feafb12193398f6187add3fce73b20d14", "fd564b2102dd43e60613a0ceb97c9863a68be7ce", "ab179c656a435480c04708492ed30f6e4940e528", "8bb3e960f4d3cecc3f29a178567fc4cdc92d8030", "39fe7ae7407ac131d0a5e377874046fea1d8ea15", "7bd484b74876bbe84a2e87bcf77df01ef2280151", "4c7107606884371d67cb302c846cee8ddf331eae", "6bb8e01d1bf164b8baa8c4b83fe1ad2924b29c27", "b5bbf1129a3bccb6228b47f6de1c5db307495cff", "48ca42998edc1a07edb6d58666dfdcbcb6b2e028", "5a3ff27f9bc2e1efbf4b81b5a91a4c67feecaa28", "4d49c8980b8d23e476ce73a3cd9d5dd92b66dbe6", "40cd127051cf2a3caf58f7a367912a54cfb834c6", "4f3f422ba75db56a839779071ef893fec83dda3c", "dac8d7bbdd4b01a8a14e27450fa1309a941c359f", "feef86973ce2e11573c658a89658db1cb1372033", "fee74fb7bb39834241c98e34af5e561a24b145e0", "a956f2c0eaf79e2e09efd311869bb1dec5990cbb", "c42c31e0f8a5970faccb61806730d734866756bd", "67a7efbda3ccfa56526ac4f983597ad20f88f1ef", "88e17eb55af0336e60076e0e1249bf11006868f3", "2613d477db14df74055be8942981aab68f0e17b9"]
 ---
 
 ## Required behavior
@@ -181,38 +181,61 @@ through the base merges with behavior preserved:
    full filter set including search.
 
 All new routes are in the ABAC resolver (no exemption growth) with
-per-handler authorization on exempt routes; migration numbers 000071–000075
-are portable across SQLite and PostgreSQL.
+per-handler authorization on exempt routes; migration numbers 000070–000073 and
+000075 are portable across SQLite and PostgreSQL (000071–000073 renumbered
+onto free sequence slots during the rebase onto 678a8ac3; the base had
+taken 000067–000069).
 
-### This round: verification-repair (clippy findings 262ddcc8)
+### This round: rebase repair onto 678a8ac3
 
-`46473775` — clears the two clippy findings that failed the verification
-checks at `cb0c1419` (everything else in that run passed): dropped the
-redundant `as u64` on `EXIT_MONITOR_POLL_SECS` in
-`gyre-server/src/api/spawn.rs` (already `u64`) and factored a
-`DestroyEvent` type alias for the `destroys` field in
-`gyre-adapters/src/vault/tests.rs` (`clippy::type_complexity`).
-Behavior-preserving changes in test code only.
+The saved source was rebased onto base `678a8ac3` (task-206 meta-spec
+preview mode + task-270 PR hygiene landed there). All 24 task-273 commits
+replayed with behavior preserved on both sides; conflict resolutions and
+the repair commit `8d5c4fec`:
+
+- `gyre-server/src/jobs.rs`: the base's `meta_spec_preview_gc` and
+  `pr_hygiene_check` registrations adapted to the task-273 two-argument
+  `JobHandler` signature (state + run-scoped log sink); handlers unchanged.
+- `ProcessHandle` gained an `options` field on the base: added to the
+  maintenance `kill_and_mark` reconstruction and affected test initializers;
+  an empty map preserves behavior — the owning `SpawnBackend` /
+  reconstructed targets carry the connection facts.
+- `gyre-server/src/api/spawn.rs`: the task-273 durable
+  `mark_terminated("clean_exit")` was ported into the base's refactored
+  `on_agent_process_exit` shared exit path (the base had split the old
+  inline monitor loop into `monitor_poll_once` + `on_agent_process_exit`
+  with a three-state liveness probe — that structure is kept whole).
+- `mem.rs`/`lib.rs`: union of the base's SPIFFE / preview-agent state and
+  the task-273 durable stores, plus the shared `users` repo feeding mem
+  audit tenant derivation; `agent_jwt_ttl` keeps the base's spec-default
+  3600 s.
+- Migrations renumbered: the base took 000067–000069, so task-273
+  `job_runs`/`oauth_states`/`agent_instances` moved to 000071–000073
+  (`audit_events_tenant_id` stays 000070, `backend_config` 000075) —
+  `check-migration-versions.sh` passes with no duplicate Diesel versions.
+- The `commits:` frontmatter was regenerated with the post-rebase SHAs
+  (the rebase rewrote every commit; the pre-rebase SHAs no longer resolve).
 
 ### Test evidence
 
-- This round: `rustfmt --edition 2021 --check` clean on both touched
-  files; `cargo clippy -p gyre-adapters --all-targets` and
-  `-p gyre-server --all-targets` re-run in this sandbox via the build
-  wrapper — zero matches for the two findings (`vault/tests.rs`,
-  `unnecessary_cast`/`spawn.rs:7885`). Remaining local clippy notes
-  (spawn.rs:2221/2225/3137 and dependency-crate lint noise) are pre-existing
-  base lines outside this branch's diff hunks, confirmed by hunk map and by
-  the verifier's own clippy run not flagging them. Probes recorded in
-  `/tmp/stage/review-evidence/probes.md`. No cold rebuild of unchanged
-  crates for this lint-only repair (stage instruction).
-- Prior rounds (carried on this branch, see commits list): `cargo check -p
-  gyre-server --all-targets` and `-p gyre-adapters --all-targets` clean;
-  focused adapter suites green (`sqlite::audit` 24 passed, `vault::` 12
-  passed, `postgres::audit` 6 passed); all mechanical invariant scripts
-  (arch, migration versions/portability, mem contracts, in-memory stores,
-  ABAC registry, unbounded HTTP, and siblings) passing with no new
-  exemptions.
+- This round: `cargo check -p gyre-server --all-targets` and
+  `cargo check -p gyre-adapters --all-targets` clean via the build
+  wrapper; focused adapter suites green after the rebase (`vault::` 15
+  passed; `sops`/`sqlite::audit`/`postgres::audit`/`sqlite::job_run`/
+  `sqlite::oauth_state`/`sqlite::agent_instance` 62 passed, including the
+  agent-instance restart-durability test); `rustfmt --edition 2021
+  --check` clean on every hand-merged file; all mechanical invariant
+  scripts re-run passing with no new exemptions (arch, migration
+  versions/portability, mem contracts, in-memory stores, ABAC registry
+  + exempt handlers, unbounded HTTP, byte-slice, dead kinds, forged
+  scopes, forwarded headers, lossy secrets, fabricated scope defaults,
+  scope literal defaults, inert enforcement, relative paths, fail-open
+  refs, MCP write tools). Probes recorded under
+  `/tmp/stage/review-evidence/probes.md`.
+- Prior rounds (carried through the rebase, see commits list): the full
+  task-273 delivery with verification-repair history — see
+  `/tmp/stage/review-evidence/probes.md` and the pre-rebase Shipped
+  notes in the branch history.
 - The verifier must execute the gyre-server test selection:
   `maintenance_jobs::`, `api::admin::tests::` (kill/audit/server-logs),
   `api::oauth::tests::`, and the spawn-path durable-recording tests in
