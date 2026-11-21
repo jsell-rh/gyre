@@ -1594,6 +1594,23 @@ pub async fn git_receive_pack(
         }
         // Spec registry: sync ledger from manifest on pushes to the default branch (M21.1).
         let default_ref = format!("refs/heads/{default_branch_clone}");
+        // Dependency graph auto-detection (dependency-graph.md §Automatic
+        // Detection: "On every push to any repo"): runs for EVERY applied
+        // non-delete ref update on ANY branch, not only the default ref —
+        // deletes are already filtered out of `applied_updates` at parse
+        // time. All detectors parse the manifests and contracts present at
+        // the pushed tip; reconciliation is idempotent for pushes that
+        // change no dependency declarations, and an edge whose declaration
+        // vanishes from the tip is marked Orphaned, never deleted.
+        for update in applied_updates.iter() {
+            detect_dependencies_on_push(
+                &state_clone,
+                &repo_id_clone,
+                &repo_path_clone,
+                &update.new_sha,
+            )
+            .await;
+        }
         // Resolve workspace tenant_id for cross-workspace link resolution.
         let workspace_tenant_id = state_clone
             .workspaces
@@ -1629,14 +1646,6 @@ pub async fn git_receive_pack(
                 &state_clone,
                 &repo_id_clone,
                 &repo_workspace_id_str,
-                &repo_path_clone,
-                &update.new_sha,
-            )
-            .await;
-            // Dependency graph: auto-detect Cargo.toml path deps (M22.4).
-            detect_dependencies_on_push(
-                &state_clone,
-                &repo_id_clone,
                 &repo_path_clone,
                 &update.new_sha,
             )
@@ -3779,16 +3788,31 @@ async fn notify_cross_workspace_dependents(
     }
 }
 
-// ── Cargo.toml path dep auto-detection (M22.4) ─────────────────────────────
+// ── Cargo.toml dependency auto-detection (M22.4 / dependency-graph.md §1) ──
 
-/// Parse `path = "..."` entries from a Cargo.toml `[dependencies]` section.
+/// A `[dependencies]` entry referencing another local or Gyre-hosted crate.
+#[derive(Clone, Debug)]
+pub(crate) struct CargoDepRef {
+    /// The `path = "..."` value (local path) or `git = "<url>"` value.
+    pub reference: String,
+    /// The `version`/`tag`/`rev` key value when present.
+    pub version: Option<String>,
+}
+
+/// Parse `[dependencies]` entries with `path` and `git` references from a
+/// Cargo.toml manifest.
 ///
-/// Returns the list of local path values (e.g. `"../other-repo"`).
-/// Only path-based dependencies are returned; crates.io / git deps are ignored.
-/// This is the auto-detection stub for M22.4 — only Cargo.toml path deps are
-/// detected in this milestone; other detection methods are stubs.
-pub fn detect_cargo_path_deps(toml_content: &str) -> Vec<String> {
-    let mut paths = Vec::new();
+/// Per dependency-graph.md §1: "Cargo.toml -> extract [dependencies] with
+/// git/path references to other Gyre repos". Both inline-table forms are
+/// extracted:
+/// - `crate = { path = "../sibling" }`
+/// - `crate = { git = "https://gyre.example.com/<ws>/repo-b.git", tag = "v1" }`
+///
+/// The pinned version is the `version`, `tag`, or `rev` key when present.
+/// Simple string entries (`crate = "1.2"`) are registry deps and are ignored —
+/// only Gyre-to-Gyre dependencies are tracked.
+pub fn detect_cargo_deps(toml_content: &str) -> Vec<CargoDepRef> {
+    let mut deps = Vec::new();
     let mut in_dependencies = false;
 
     for line in toml_content.lines() {
@@ -3806,33 +3830,75 @@ pub fn detect_cargo_path_deps(toml_content: &str) -> Vec<String> {
             continue;
         }
 
-        // Match lines with: crate-name = { path = "../sibling" }
-        if let Some(path_val) = extract_path_value(trimmed) {
-            paths.push(path_val);
-        }
+        // Match inline-table entries: crate-name = { path = ".." | git = "url" }.
+        let reference = if let Some(path_val) = extract_toml_string_value(trimmed, "path") {
+            path_val
+        } else if let Some(git_val) = extract_toml_string_value(trimmed, "git") {
+            git_val
+        } else {
+            continue;
+        };
+
+        let version = extract_toml_string_value(trimmed, "version")
+            .or_else(|| extract_toml_string_value(trimmed, "tag"))
+            .or_else(|| extract_toml_string_value(trimmed, "rev"));
+
+        deps.push(CargoDepRef { reference, version });
     }
 
-    paths
+    deps
 }
 
-/// Extract the value of `path = "..."` from a TOML dependency line.
-fn extract_path_value(line: &str) -> Option<String> {
-    let path_idx = line.find("path")?;
-    let after_path = line[path_idx + 4..].trim_start();
-    let after_eq = after_path.strip_prefix('=')?;
-    let value_str = after_eq.trim();
+/// Extract the quoted value of `key = "..."` from a TOML dependency line.
+///
+/// The key must appear at a word boundary (line start, or preceded by
+/// whitespace, `{`, or `,`) so `path` cannot match inside a dep name like
+/// `some-path-crate` or inside a `git = "https://…/path…"` URL value.
+fn extract_toml_string_value(line: &str, key: &str) -> Option<String> {
+    let bytes = line.as_bytes();
+    let mut search_from = 0;
+    while let Some(rel) = line[search_from..].find(key) {
+        let start = search_from + rel;
+        search_from = start + key.len();
+        if start > 0 {
+            let prev = bytes[start - 1];
+            if !matches!(prev, b' ' | b'\t' | b'{' | b',') {
+                continue;
+            }
+        }
+        let after_key = line[search_from..].trim_start();
+        let rest = match after_key.strip_prefix('=') {
+            Some(r) => r,
+            None => continue,
+        };
+        let value = rest.trim_start();
+        let (quote_char, val) = if let Some(v) = value.strip_prefix('"') {
+            ('"', v)
+        } else if let Some(v) = value.strip_prefix('\'') {
+            ('\'', v)
+        } else {
+            // Not a string value (number, bool, nested table) — keep scanning.
+            continue;
+        };
+        if let Some(end) = val.find(quote_char) {
+            return Some(val[..end].to_string());
+        }
+    }
+    None
+}
 
-    // Strip the opening quote and find the closing quote.
-    let (quote_char, rest) = if let Some(s) = value_str.strip_prefix('"') {
-        ('"', s)
-    } else if let Some(s) = value_str.strip_prefix('\'') {
-        ('\'', s)
-    } else {
-        return None;
-    };
-
-    let end = rest.find(quote_char)?;
-    Some(rest[..end].to_string())
+/// Extract a repo-name candidate from a dependency reference.
+///
+/// - Local paths (`../repo-b`) → final path segment.
+/// - Git URLs (`https://host/<ws>/repo-b.git`,
+///   `git+ssh://git@host/<ws>/repo-b.git#v1.2`, `git@host:<ws>/repo-b`) →
+///   last path segment with any `#fragment`/`?query` stripped and the
+///   `.git` suffix removed, handling `<workspace>/<repo>.git` forms.
+pub(crate) fn repo_name_from_reference(reference: &str) -> &str {
+    let base = reference.split('#').next().unwrap_or(reference);
+    let base = base.split('?').next().unwrap_or(base);
+    let last_segment = base.rsplit(['/', ':']).next().unwrap_or(base);
+    last_segment.strip_suffix(".git").unwrap_or(last_segment)
 }
 
 /// Extract the `version = "X.Y.Z"` value from a Cargo.toml [package] section.
@@ -3861,61 +3927,24 @@ pub(crate) fn extract_cargo_version(toml_content: &str) -> Option<String> {
     None
 }
 
-/// Extract the pinned version for a specific dependency from Cargo.toml.
-///
-/// Handles both `crate = "1.2.3"` and `crate = { version = "1.2.3", ... }` formats.
-pub(crate) fn extract_dep_version(toml_content: &str, dep_name: &str) -> Option<String> {
-    let mut in_dependencies = false;
-
-    for line in toml_content.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with('[') {
-            in_dependencies = trimmed == "[dependencies]"
-                || trimmed == "[dev-dependencies]"
-                || trimmed == "[build-dependencies]";
-            continue;
-        }
-        if !in_dependencies {
-            continue;
-        }
-        // Match the dependency name at the start of the line.
-        if let Some(rest) = trimmed.strip_prefix(dep_name) {
-            let rest = rest.trim_start();
-            if let Some(rest) = rest.strip_prefix('=') {
-                let rest = rest.trim();
-                // Simple form: dep = "1.2.3"
-                if rest.starts_with('"') || rest.starts_with('\'') {
-                    let val = rest.trim_matches('"').trim_matches('\'');
-                    if !val.is_empty() {
-                        return Some(val.to_string());
-                    }
-                }
-                // Inline table form: dep = { version = "1.2.3", ... }
-                if rest.starts_with('{') {
-                    if let Some(ver_idx) = rest.find("version") {
-                        let after = &rest[ver_idx + 7..];
-                        let after = after.trim_start();
-                        if let Some(after) = after.strip_prefix('=') {
-                            let after = after.trim();
-                            if after.starts_with('"') {
-                                if let Some(end) = after[1..].find('"') {
-                                    return Some(after[1..1 + end].to_string());
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    None
+/// True when a package/dependency reference value is a git URL reference
+/// (`git+https://…`, `git+ssh://…`, `git://…`, `ssh://…`, or `git@host:path`).
+fn is_git_reference(ver: &str) -> bool {
+    ver.starts_with("git+")
+        || ver.starts_with("git:")
+        || ver.starts_with("git@")
+        || ver.starts_with("ssh://")
 }
 
-/// Parse `package.json` for local path dependencies (`file:` or `workspace:` references).
+/// Parse `package.json` for dependencies pointing to Gyre-hosted packages.
 ///
-/// Returns `(reference_value, version)` tuples. For `file:` references the reference
-/// is the local path (e.g. `"../other-repo"`). For `workspace:` the reference is the
-/// package name. Only local/workspace references are returned; npm registry deps are ignored.
+/// Returns `(reference_value, version)` tuples. For `file:` references the
+/// reference is the local path (e.g. `"../other-repo"`). For `workspace:` the
+/// reference is the package name. For git URL references
+/// (`"repo-b": "git+https://gyre.example.com/<ws>/repo-b.git#v1.2"`, git+ssh
+/// forms) the reference is the URL and a `#fragment` carries the pinned
+/// version. npm registry deps are ignored — only Gyre-to-Gyre dependencies
+/// are tracked.
 pub fn detect_package_json_deps(content: &str) -> Vec<(String, Option<String>)> {
     let mut results = Vec::new();
 
@@ -3938,6 +3967,14 @@ pub fn detect_package_json_deps(content: &str) -> Vec<(String, Option<String>)> 
                             Some(ws_ver.to_string())
                         };
                         results.push((name.clone(), version));
+                    } else if is_git_reference(ver_str) {
+                        // Git URL reference to a Gyre-hosted package: matched
+                        // by URL last path segment (`.git` stripped).
+                        let (url, fragment) = match ver_str.split_once('#') {
+                            Some((u, f)) => (u, Some(f.to_string())),
+                            None => (ver_str, None),
+                        };
+                        results.push((url.to_string(), fragment));
                     }
                 }
             }
@@ -4040,13 +4077,15 @@ pub fn detect_go_mod_deps(content: &str) -> Vec<(String, Option<String>)> {
     results
 }
 
-/// Parse `pyproject.toml` for path dependencies.
+/// Parse `pyproject.toml` for dependencies referencing Gyre packages.
 ///
-/// Supports two formats:
+/// Supports three formats:
 /// - PEP 621 `[project.dependencies]` with `@ file:///path` references
+/// - PEP 508 direct git references: `pkg @ git+https://...`
 /// - Poetry `[tool.poetry.dependencies]` with `{path = "..."}` entries
 ///
-/// Returns `(path_or_name, version)` tuples for local path dependencies only.
+/// Returns `(reference, pkg_name)` tuples for local path and git URL
+/// dependencies only; PyPI registry deps are ignored.
 pub fn detect_pyproject_deps(content: &str) -> Vec<(String, Option<String>)> {
     let mut results = Vec::new();
     let mut current_section = String::new();
@@ -4068,25 +4107,27 @@ pub fn detect_pyproject_deps(content: &str) -> Vec<(String, Option<String>)> {
             || current_section == "tool.poetry.dev-dependencies"
         {
             // Match: dep-name = { path = "../local-path" }
-            if let Some(path_val) = extract_path_value(trimmed) {
+            if let Some(path_val) = extract_toml_string_value(trimmed, "path") {
                 let dep_name = trimmed.split('=').next().unwrap_or("").trim().to_string();
                 results.push((path_val, Some(dep_name)));
             }
         }
 
-        // PEP 621: [project] dependencies = [...] with `pkg @ file:///path`
+        // PEP 621: [project] dependencies = [...] with direct references:
+        // `pkg @ file:///path` and PEP 508 git URLs `pkg @ git+https://...`.
         if current_section == "project" || current_section == "project.dependencies" {
-            // Match: "package-name @ file:../local-path" in a list
-            if let Some(at_pos) = trimmed.find(" @ file:") {
-                let pkg_name = trimmed
-                    .trim_start_matches(|c: char| c == '"' || c == '\'' || c == '-' || c == ' ')
-                    .split(|c: char| c == ' ' || c == '@')
-                    .next()
-                    .unwrap_or("");
-                let path = &trimmed[at_pos + 8..];
-                let path = path.trim_end_matches(|c: char| c == '"' || c == '\'' || c == ',');
-                if !pkg_name.is_empty() {
-                    results.push((path.to_string(), Some(pkg_name.to_string())));
+            if let Some(at_pos) = trimmed.find(" @ ") {
+                let pkg_name = trimmed[..at_pos]
+                    .trim()
+                    .trim_matches(['"', '\'', ','])
+                    .to_string();
+                let rest = trimmed[at_pos + 3..].trim();
+                let rest = rest.trim_end_matches(['"', '\'', ',']);
+                if rest.starts_with("file:") || is_git_reference(rest) {
+                    let reference = rest.strip_prefix("file:").unwrap_or(rest);
+                    if !pkg_name.is_empty() {
+                        results.push((reference.to_string(), Some(pkg_name)));
+                    }
                 }
             }
         }
@@ -4134,19 +4175,56 @@ pub fn detect_manifest_spec_links(manifest_yaml: &str) -> Vec<(String, String, S
 
 /// Detect API contract references in an OpenAPI/Swagger document.
 ///
-/// Scans `servers[].url` and `$ref` values for patterns matching other Gyre repo names.
-/// Best-effort: many API contracts don't explicitly reference repo names.
+/// Parses the contract document (YAML or JSON — JSON is valid YAML) and
+/// extracts server URLs only:
+/// - OpenAPI 3.x: `servers[].url`
+/// - Swagger 2.0: `host` (+ `basePath`)
+///
+/// A repo name appearing only in a description, title, or other arbitrary
+/// string creates NO edge — only the extracted server URLs are matched
+/// against known repo names.
 pub fn detect_openapi_refs(content: &str, known_repos: &[&str]) -> Vec<String> {
-    let mut results = Vec::new();
+    let doc: serde_yaml::Value = match serde_yaml::from_str(content) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
 
-    for repo_name in known_repos {
-        // Match repo names in server URLs, $ref paths, and other string values.
-        if content.contains(repo_name) {
-            results.push(repo_name.to_string());
+    let mut urls: Vec<String> = Vec::new();
+
+    // OpenAPI 3.x: servers:
+    //   - url: https://gyre.example.com/<ws>/repo-b/api/v1
+    if let Some(servers) = doc.get("servers").and_then(|v| v.as_sequence()) {
+        for server in servers {
+            if let Some(url) = server.get("url").and_then(|u| u.as_str()) {
+                urls.push(url.to_string());
+            }
         }
     }
 
+    // Swagger 2.0: host (+ basePath).
+    if let Some(host) = doc.get("host").and_then(|h| h.as_str()) {
+        let base_path = doc.get("basePath").and_then(|b| b.as_str()).unwrap_or("");
+        urls.push(format!("{host}{base_path}"));
+    }
+
+    let mut results = Vec::new();
+    for repo_name in known_repos {
+        if urls.iter().any(|u| repo_name_in_url(u, repo_name)) {
+            results.push(repo_name.to_string());
+        }
+    }
     results
+}
+
+/// Match a known repo name within a server URL.
+///
+/// The name must appear as a whole label between URL separators (`/`, `:`,
+/// `.`, `?`, `=`, `&`), so `https://payment-service.internal/api` matches
+/// `payment-service`, `https://gyre.example.com/<ws>/repo-b.git` matches
+/// `repo-b`, while `https://xrepo-b.example.com` does not match `repo-b`.
+fn repo_name_in_url(url: &str, repo_name: &str) -> bool {
+    url.split(['/', ':', '.', '?', '=', '&'])
+        .any(|label| label == repo_name)
 }
 
 /// Detect protobuf import paths that reference other Gyre repos.
@@ -4163,7 +4241,7 @@ pub fn detect_proto_imports(content: &str, known_repos: &[&str]) -> Vec<String> 
             let path = rest
                 .trim()
                 .trim_start_matches('"')
-                .trim_end_matches(|c: char| c == '"' || c == ';');
+                .trim_end_matches(['"', ';']);
             // First path segment is typically the package/repo name.
             if let Some(first_seg) = path.split('/').next() {
                 if known_repos.contains(&first_seg) {
@@ -4181,18 +4259,46 @@ pub fn detect_proto_imports(content: &str, known_repos: &[&str]) -> Vec<String> 
 
 /// Detect MCP tool references pointing to other Gyre repos.
 ///
-/// Parses `mcp.json` for `server` or `url` fields matching known repo names.
+/// Parses the `mcp.json` document structure and extracts server URL fields —
+/// `mcpServers.<name>.url` entries and `tools[].server`/`tools[].url` values
+/// — matching known repo names within those URLs. A repo name appearing only
+/// in an unrelated string field creates NO edge.
 pub fn detect_mcp_refs(content: &str, known_repos: &[&str]) -> Vec<String> {
-    let mut results = Vec::new();
+    let parsed: serde_json::Value = match serde_json::from_str(content) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
 
-    for repo_name in known_repos {
-        if content.contains(repo_name) {
-            results.push(repo_name.to_string());
+    let mut urls: Vec<String> = Vec::new();
+
+    // mcpServers.<name>.url — canonical MCP client config shape.
+    if let Some(servers) = parsed.get("mcpServers").and_then(|v| v.as_object()) {
+        for server in servers.values() {
+            for field in ["url", "server"] {
+                if let Some(u) = server.get(field).and_then(|v| v.as_str()) {
+                    urls.push(u.to_string());
+                }
+            }
         }
     }
 
-    results.sort();
-    results.dedup();
+    // tools[].server / tools[].url — tool-invocation shape.
+    if let Some(tools) = parsed.get("tools").and_then(|v| v.as_array()) {
+        for tool in tools {
+            for field in ["url", "server"] {
+                if let Some(u) = tool.get(field).and_then(|v| v.as_str()) {
+                    urls.push(u.to_string());
+                }
+            }
+        }
+    }
+
+    let mut results = Vec::new();
+    for repo_name in known_repos {
+        if urls.iter().any(|u| repo_name_in_url(u, repo_name)) {
+            results.push(repo_name.to_string());
+        }
+    }
     results
 }
 
@@ -4374,6 +4480,27 @@ pub(crate) async fn reconcile_dependencies(
     }
 }
 
+/// List all files in a repo at a given SHA via `git ls-tree -r --name-only`.
+async fn git_ls_tree_files(git_bin: &str, repo_path: &str, sha: &str) -> Vec<String> {
+    let out = Command::new(git_bin)
+        .arg("-C")
+        .arg(repo_path)
+        .arg("ls-tree")
+        .arg("-r")
+        .arg("--name-only")
+        .arg(sha)
+        .output()
+        .await;
+
+    match out {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+            .lines()
+            .map(|line| line.to_string())
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 /// List all files in a repo at a given SHA that end with the specified extension.
 ///
 /// Uses `git ls-tree -r --name-only <sha>` to enumerate all files, then filters
@@ -4386,33 +4513,44 @@ async fn list_files_by_extension(
     sha: &str,
     extension: &str,
 ) -> Vec<String> {
-    let out = Command::new(git_bin)
-        .arg("-C")
-        .arg(repo_path)
-        .arg("ls-tree")
-        .arg("-r")
-        .arg("--name-only")
-        .arg(sha)
-        .output()
-        .await;
-
-    let out = match out {
-        Ok(o) if o.status.success() => o,
-        _ => return Vec::new(),
-    };
-
-    let text = String::from_utf8_lossy(&out.stdout);
-    text.lines()
+    git_ls_tree_files(git_bin, repo_path, sha)
+        .await
+        .into_iter()
         .filter(|line| line.ends_with(extension))
-        .map(|line| line.to_string())
         .collect()
 }
 
-/// Post-push auto-detection: scan changed files for dependency declarations.
+/// List all files in a repo at a given SHA whose file name (final path
+/// segment) is one of `names`.
 ///
-/// On pushes to the default branch, reads dependency files at the new SHA and creates
-/// DependencyEdge records for any dependencies pointing to known Gyre repos.
-/// Runs reconciliation after all detectors to mark orphaned edges.
+/// Tree-wide enumeration by file name — e.g. every `Cargo.toml` in the tree
+/// including workspace-member subdirectories, or every
+/// `openapi.yaml`/`openapi.yml`/`swagger.json`/`mcp.json` contract at any
+/// depth (the spec's own entity example uses `api/openapi.yaml` as a
+/// source_artifact), not only root-level files.
+async fn list_files_by_names(
+    git_bin: &str,
+    repo_path: &str,
+    sha: &str,
+    names: &[&str],
+) -> Vec<String> {
+    git_ls_tree_files(git_bin, repo_path, sha)
+        .await
+        .into_iter()
+        .filter(|line| names.contains(&line.rsplit('/').next().unwrap_or(line.as_str())))
+        .collect()
+}
+
+/// Post-push auto-detection: parse the dependency manifests and API contracts
+/// present at the pushed tip and reconcile the dependency graph.
+///
+/// Runs on EVERY push (dependency-graph.md §Automatic Detection: "On every
+/// push to any repo") — any branch, whether or not dependency files changed
+/// in the push. All detectors parse the files at the pushed tip, so a
+/// dependency that starts matching (e.g. a target repo created after the
+/// manifest was committed) is picked up by the next push, and one whose
+/// declaration vanished from the tip is marked Orphaned by reconciliation.
+/// Reconciliation is idempotent for no-change pushes.
 /// Also resolves target repo versions and computes version drift (TASK-021).
 pub(crate) async fn detect_dependencies_on_push(
     state: &Arc<AppState>,
@@ -4424,65 +4562,6 @@ pub(crate) async fn detect_dependencies_on_push(
     use gyre_domain::{DependencyType, DetectionMethod};
 
     let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
-
-    // List all changed files in this push.
-    let diff_out = match Command::new(&git_bin)
-        .arg("-C")
-        .arg(repo_path)
-        .arg("diff-tree")
-        .arg("--no-commit-id")
-        .arg("-r")
-        .arg("--name-only")
-        .arg(new_sha)
-        .output()
-        .await
-    {
-        Ok(o) if o.status.success() => o.stdout,
-        _ => return,
-    };
-
-    let changed_files = String::from_utf8_lossy(&diff_out);
-    let changed: Vec<&str> = changed_files.lines().collect();
-
-    // Determine which dependency files were changed.
-    let has_cargo_toml = changed
-        .iter()
-        .any(|f| *f == "Cargo.toml" || f.ends_with("/Cargo.toml"));
-    let has_package_json = changed
-        .iter()
-        .any(|f| *f == "package.json" || f.ends_with("/package.json"));
-    let has_go_mod = changed
-        .iter()
-        .any(|f| *f == "go.mod" || f.ends_with("/go.mod"));
-    let has_pyproject = changed
-        .iter()
-        .any(|f| *f == "pyproject.toml" || f.ends_with("/pyproject.toml"));
-    let has_manifest = changed.iter().any(|f| *f == "specs/manifest.yaml");
-    let has_openapi = changed.iter().any(|f| {
-        *f == "openapi.yaml"
-            || *f == "openapi.yml"
-            || *f == "swagger.json"
-            || f.ends_with("/openapi.yaml")
-            || f.ends_with("/openapi.yml")
-            || f.ends_with("/swagger.json")
-    });
-    let has_proto = changed.iter().any(|f| f.ends_with(".proto"));
-    let has_mcp_json = changed
-        .iter()
-        .any(|f| *f == "mcp.json" || f.ends_with("/mcp.json"));
-
-    // Early return if no dependency-related files changed.
-    if !has_cargo_toml
-        && !has_package_json
-        && !has_go_mod
-        && !has_pyproject
-        && !has_manifest
-        && !has_openapi
-        && !has_proto
-        && !has_mcp_json
-    {
-        return;
-    }
 
     let all_repos = match state.repos.list().await {
         Ok(r) => r,
@@ -4507,28 +4586,28 @@ pub(crate) async fn detect_dependencies_on_push(
     let mut ran_methods: std::collections::HashSet<DetectionMethod> =
         std::collections::HashSet::new();
 
-    // --- Cargo.toml ---
-    if has_cargo_toml {
-        ran_methods.insert(DetectionMethod::CargoToml);
+    // --- Cargo.toml (every manifest in the tree: root + workspace members) ---
+    // dependency-graph.md §1: "[dependencies] with git/path references to
+    // other Gyre repos". Both forms are extracted; git URLs are matched by
+    // last path segment (`.git` stripped), local paths by final path segment,
+    // and the manifest's tree path is the source_artifact.
+    ran_methods.insert(DetectionMethod::CargoToml);
+    let cargo_files = list_files_by_names(&git_bin, repo_path, new_sha, &["Cargo.toml"]).await;
+    for cargo_file in &cargo_files {
         if let Some(content) =
-            crate::spec_registry::read_git_file(&git_bin, repo_path, new_sha, "Cargo.toml").await
+            crate::spec_registry::read_git_file(&git_bin, repo_path, new_sha, cargo_file).await
         {
-            let path_deps = detect_cargo_path_deps(&content);
-            for path_dep in &path_deps {
-                let basename = std::path::Path::new(path_dep)
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or(path_dep);
-                if let Some(target_repo) = all_repos.iter().find(|r| r.name == basename) {
+            for dep in detect_cargo_deps(&content) {
+                let candidate = repo_name_from_reference(&dep.reference);
+                if let Some(target_repo) = all_repos.iter().find(|r| r.name == candidate) {
                     if target_repo.id.as_str() != repo_id {
-                        let version = extract_dep_version(&content, basename);
                         detected_edges.push(DetectedEdge {
                             target_repo_id: target_repo.id.to_string(),
-                            source_artifact: "Cargo.toml".to_string(),
-                            target_artifact: basename.to_string(),
+                            source_artifact: cargo_file.to_string(),
+                            target_artifact: candidate.to_string(),
                             dep_type: DependencyType::Code,
                             method: DetectionMethod::CargoToml,
-                            version,
+                            version: dep.version.clone(),
                         });
                     }
                 }
@@ -4537,134 +4616,133 @@ pub(crate) async fn detect_dependencies_on_push(
     }
 
     // --- package.json ---
-    if has_package_json {
-        ran_methods.insert(DetectionMethod::PackageJson);
-        if let Some(content) =
-            crate::spec_registry::read_git_file(&git_bin, repo_path, new_sha, "package.json").await
-        {
-            let pkg_deps = detect_package_json_deps(&content);
-            for (ref_val, version) in &pkg_deps {
-                // For file: refs, extract basename as repo name candidate.
-                let candidate = std::path::Path::new(ref_val)
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or(ref_val);
-                if let Some(target_repo) = all_repos.iter().find(|r| r.name == candidate) {
-                    if target_repo.id.as_str() != repo_id {
-                        detected_edges.push(DetectedEdge {
-                            target_repo_id: target_repo.id.to_string(),
-                            source_artifact: "package.json".to_string(),
-                            target_artifact: candidate.to_string(),
-                            dep_type: DependencyType::Code,
-                            method: DetectionMethod::PackageJson,
-                            version: version.clone(),
-                        });
-                    }
+    ran_methods.insert(DetectionMethod::PackageJson);
+    if let Some(content) =
+        crate::spec_registry::read_git_file(&git_bin, repo_path, new_sha, "package.json").await
+    {
+        let pkg_deps = detect_package_json_deps(&content);
+        for (ref_val, version) in &pkg_deps {
+            // Repo-name candidate: final path segment for `file:` refs,
+            // the package name for `workspace:` refs, URL last segment
+            // (`.git` stripped) for git refs.
+            let candidate = repo_name_from_reference(ref_val);
+            if let Some(target_repo) = all_repos.iter().find(|r| r.name == candidate) {
+                if target_repo.id.as_str() != repo_id {
+                    detected_edges.push(DetectedEdge {
+                        target_repo_id: target_repo.id.to_string(),
+                        source_artifact: "package.json".to_string(),
+                        target_artifact: candidate.to_string(),
+                        dep_type: DependencyType::Code,
+                        method: DetectionMethod::PackageJson,
+                        version: version.clone(),
+                    });
                 }
             }
         }
     }
 
     // --- go.mod ---
-    if has_go_mod {
-        ran_methods.insert(DetectionMethod::GoMod);
-        if let Some(content) =
-            crate::spec_registry::read_git_file(&git_bin, repo_path, new_sha, "go.mod").await
-        {
-            let go_deps = detect_go_mod_deps(&content);
-            for (module_path, version) in &go_deps {
-                // Extract the last path segment as repo name candidate.
-                let candidate = module_path.rsplit('/').next().unwrap_or(module_path);
-                if let Some(target_repo) = all_repos.iter().find(|r| r.name == candidate) {
-                    if target_repo.id.as_str() != repo_id {
-                        detected_edges.push(DetectedEdge {
-                            target_repo_id: target_repo.id.to_string(),
-                            source_artifact: "go.mod".to_string(),
-                            target_artifact: module_path.to_string(),
-                            dep_type: DependencyType::Code,
-                            method: DetectionMethod::GoMod,
-                            version: version.clone(),
-                        });
-                    }
+    ran_methods.insert(DetectionMethod::GoMod);
+    if let Some(content) =
+        crate::spec_registry::read_git_file(&git_bin, repo_path, new_sha, "go.mod").await
+    {
+        let go_deps = detect_go_mod_deps(&content);
+        for (module_path, version) in &go_deps {
+            // Extract the last path segment as repo name candidate.
+            let candidate = module_path.rsplit('/').next().unwrap_or(module_path);
+            if let Some(target_repo) = all_repos.iter().find(|r| r.name == candidate) {
+                if target_repo.id.as_str() != repo_id {
+                    detected_edges.push(DetectedEdge {
+                        target_repo_id: target_repo.id.to_string(),
+                        source_artifact: "go.mod".to_string(),
+                        target_artifact: module_path.to_string(),
+                        dep_type: DependencyType::Code,
+                        method: DetectionMethod::GoMod,
+                        version: version.clone(),
+                    });
                 }
             }
         }
     }
 
     // --- pyproject.toml ---
-    if has_pyproject {
-        ran_methods.insert(DetectionMethod::PyprojectToml);
-        if let Some(content) =
-            crate::spec_registry::read_git_file(&git_bin, repo_path, new_sha, "pyproject.toml")
-                .await
-        {
-            let py_deps = detect_pyproject_deps(&content);
-            for (path_val, pkg_name) in &py_deps {
-                let candidate = std::path::Path::new(path_val)
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or(path_val);
-                if let Some(target_repo) = all_repos.iter().find(|r| r.name == candidate) {
-                    if target_repo.id.as_str() != repo_id {
-                        detected_edges.push(DetectedEdge {
-                            target_repo_id: target_repo.id.to_string(),
-                            source_artifact: "pyproject.toml".to_string(),
-                            target_artifact: pkg_name.as_deref().unwrap_or(candidate).to_string(),
-                            dep_type: DependencyType::Code,
-                            method: DetectionMethod::PyprojectToml,
-                            version: None,
-                        });
-                    }
+    ran_methods.insert(DetectionMethod::PyprojectToml);
+    if let Some(content) =
+        crate::spec_registry::read_git_file(&git_bin, repo_path, new_sha, "pyproject.toml").await
+    {
+        let py_deps = detect_pyproject_deps(&content);
+        for (ref_val, pkg_name) in &py_deps {
+            // Repo-name candidate: final path segment for `file:` refs, URL
+            // last segment (`.git` stripped) for git refs.
+            let candidate = repo_name_from_reference(ref_val);
+            if let Some(target_repo) = all_repos.iter().find(|r| r.name == candidate) {
+                if target_repo.id.as_str() != repo_id {
+                    detected_edges.push(DetectedEdge {
+                        target_repo_id: target_repo.id.to_string(),
+                        source_artifact: "pyproject.toml".to_string(),
+                        target_artifact: pkg_name.as_deref().unwrap_or(candidate).to_string(),
+                        dep_type: DependencyType::Code,
+                        method: DetectionMethod::PyprojectToml,
+                        version: None,
+                    });
                 }
             }
         }
     }
 
     // --- specs/manifest.yaml ---
-    if has_manifest {
-        ran_methods.insert(DetectionMethod::ManifestLink);
-        if let Some(content) =
-            crate::spec_registry::read_git_file(&git_bin, repo_path, new_sha, "specs/manifest.yaml")
-                .await
-        {
-            let spec_links = detect_manifest_spec_links(&content);
-            for (target_repo_name, target_path, _link_type) in &spec_links {
-                if let Some(target_repo) = all_repos.iter().find(|r| r.name == *target_repo_name) {
-                    if target_repo.id.as_str() != repo_id {
-                        detected_edges.push(DetectedEdge {
-                            target_repo_id: target_repo.id.to_string(),
-                            source_artifact: "specs/manifest.yaml".to_string(),
-                            target_artifact: target_path.to_string(),
-                            dep_type: DependencyType::Spec,
-                            method: DetectionMethod::ManifestLink,
-                            version: None,
-                        });
-                    }
+    ran_methods.insert(DetectionMethod::ManifestLink);
+    if let Some(content) =
+        crate::spec_registry::read_git_file(&git_bin, repo_path, new_sha, "specs/manifest.yaml")
+            .await
+    {
+        let spec_links = detect_manifest_spec_links(&content);
+        for (target_repo_name, target_path, _link_type) in &spec_links {
+            if let Some(target_repo) = all_repos.iter().find(|r| r.name == *target_repo_name) {
+                if target_repo.id.as_str() != repo_id {
+                    detected_edges.push(DetectedEdge {
+                        target_repo_id: target_repo.id.to_string(),
+                        source_artifact: "specs/manifest.yaml".to_string(),
+                        target_artifact: target_path.to_string(),
+                        dep_type: DependencyType::Spec,
+                        method: DetectionMethod::ManifestLink,
+                        version: None,
+                    });
                 }
             }
         }
     }
 
-    // --- OpenAPI / Swagger ---
-    if has_openapi {
-        ran_methods.insert(DetectionMethod::OpenApiRef);
-        for api_file in &["openapi.yaml", "openapi.yml", "swagger.json"] {
-            if let Some(content) =
-                crate::spec_registry::read_git_file(&git_bin, repo_path, new_sha, api_file).await
-            {
-                let refs = detect_openapi_refs(&content, &repo_names);
-                for ref_name in &refs {
-                    if let Some(target_repo) = all_repos.iter().find(|r| r.name == *ref_name) {
-                        if target_repo.id.as_str() != repo_id {
-                            detected_edges.push(DetectedEdge {
-                                target_repo_id: target_repo.id.to_string(),
-                                source_artifact: api_file.to_string(),
-                                target_artifact: ref_name.to_string(),
-                                dep_type: DependencyType::Api,
-                                method: DetectionMethod::OpenApiRef,
-                                version: None,
-                            });
-                        }
+    // --- OpenAPI / Swagger (every contract file in the tree) ---
+    // dependency-graph.md §3: "extract server URLs matching other Gyre repos"
+    // — structured extraction of servers[].url (OpenAPI 3.x) and host+basePath
+    // (Swagger 2.0) only, so a repo name appearing just in a description
+    // creates no edge. Nested contracts (e.g. api/openapi.yaml) carry their
+    // tree path as the source_artifact.
+    ran_methods.insert(DetectionMethod::OpenApiRef);
+    let contract_files = list_files_by_names(
+        &git_bin,
+        repo_path,
+        new_sha,
+        &["openapi.yaml", "openapi.yml", "swagger.json"],
+    )
+    .await;
+    for api_file in &contract_files {
+        if let Some(content) =
+            crate::spec_registry::read_git_file(&git_bin, repo_path, new_sha, api_file).await
+        {
+            let refs = detect_openapi_refs(&content, &repo_names);
+            for ref_name in &refs {
+                if let Some(target_repo) = all_repos.iter().find(|r| r.name == *ref_name) {
+                    if target_repo.id.as_str() != repo_id {
+                        detected_edges.push(DetectedEdge {
+                            target_repo_id: target_repo.id.to_string(),
+                            source_artifact: api_file.to_string(),
+                            target_artifact: ref_name.to_string(),
+                            dep_type: DependencyType::Api,
+                            method: DetectionMethod::OpenApiRef,
+                            version: None,
+                        });
                     }
                 }
             }
@@ -4676,38 +4754,39 @@ pub(crate) async fn detect_dependencies_on_push(
     // triggered we must scan ALL .proto files — not just changed ones. Scanning only
     // changed files while inserting ProtoImport into ran_methods would cause
     // reconciliation to falsely orphan edges from unchanged .proto files (TASK-048 F4).
-    if has_proto {
-        ran_methods.insert(DetectionMethod::ProtoImport);
-        // Enumerate all .proto files in the repo at the pushed commit.
-        let all_proto_files = list_files_by_extension(&git_bin, repo_path, new_sha, ".proto").await;
-        for proto_file in &all_proto_files {
-            if let Some(content) =
-                crate::spec_registry::read_git_file(&git_bin, repo_path, new_sha, proto_file).await
-            {
-                let refs = detect_proto_imports(&content, &repo_names);
-                for ref_name in &refs {
-                    if let Some(target_repo) = all_repos.iter().find(|r| r.name == *ref_name) {
-                        if target_repo.id.as_str() != repo_id {
-                            detected_edges.push(DetectedEdge {
-                                target_repo_id: target_repo.id.to_string(),
-                                source_artifact: proto_file.to_string(),
-                                target_artifact: ref_name.to_string(),
-                                dep_type: DependencyType::Schema,
-                                method: DetectionMethod::ProtoImport,
-                                version: None,
-                            });
-                        }
+    ran_methods.insert(DetectionMethod::ProtoImport);
+    // Enumerate all .proto files in the repo at the pushed commit.
+    let all_proto_files = list_files_by_extension(&git_bin, repo_path, new_sha, ".proto").await;
+    for proto_file in &all_proto_files {
+        if let Some(content) =
+            crate::spec_registry::read_git_file(&git_bin, repo_path, new_sha, proto_file).await
+        {
+            let refs = detect_proto_imports(&content, &repo_names);
+            for ref_name in &refs {
+                if let Some(target_repo) = all_repos.iter().find(|r| r.name == *ref_name) {
+                    if target_repo.id.as_str() != repo_id {
+                        detected_edges.push(DetectedEdge {
+                            target_repo_id: target_repo.id.to_string(),
+                            source_artifact: proto_file.to_string(),
+                            target_artifact: ref_name.to_string(),
+                            dep_type: DependencyType::Schema,
+                            method: DetectionMethod::ProtoImport,
+                            version: None,
+                        });
                     }
                 }
             }
         }
     }
 
-    // --- mcp.json ---
-    if has_mcp_json {
-        ran_methods.insert(DetectionMethod::McpToolRef);
+    // --- mcp.json (every mcp.json in the tree) ---
+    // Structured extraction of server URL fields (mcpServers.<name>.url,
+    // tools[].server/url) — not arbitrary document text.
+    ran_methods.insert(DetectionMethod::McpToolRef);
+    let mcp_files = list_files_by_names(&git_bin, repo_path, new_sha, &["mcp.json"]).await;
+    for mcp_file in &mcp_files {
         if let Some(content) =
-            crate::spec_registry::read_git_file(&git_bin, repo_path, new_sha, "mcp.json").await
+            crate::spec_registry::read_git_file(&git_bin, repo_path, new_sha, mcp_file).await
         {
             let refs = detect_mcp_refs(&content, &repo_names);
             for ref_name in &refs {
@@ -4715,7 +4794,7 @@ pub(crate) async fn detect_dependencies_on_push(
                     if target_repo.id.as_str() != repo_id {
                         detected_edges.push(DetectedEdge {
                             target_repo_id: target_repo.id.to_string(),
-                            source_artifact: "mcp.json".to_string(),
+                            source_artifact: mcp_file.to_string(),
                             target_artifact: ref_name.to_string(),
                             dep_type: DependencyType::Api,
                             method: DetectionMethod::McpToolRef,
@@ -4767,17 +4846,18 @@ pub(crate) async fn detect_dependencies_on_push(
             continue;
         }
 
-        // Read Cargo.toml to extract pinned version.
-        let toml_content =
-            match crate::spec_registry::read_git_file(&git_bin, repo_path, new_sha, "Cargo.toml")
-                .await
-            {
-                Some(c) => c,
-                None => continue,
-            };
-
-        let target_name = edge.target_artifact.clone();
-        let version_pinned = extract_dep_version(&toml_content, &target_name);
+        // The pinned version for this edge, as detected from the edge's
+        // manifest in this push (the `version`/`tag`/`rev` key on the
+        // dependency line — including workspace-member manifests, whose
+        // tree path is the edge's source_artifact).
+        let version_pinned = detected_edges
+            .iter()
+            .find(|de| {
+                de.method == DetectionMethod::CargoToml
+                    && de.target_repo_id == edge.target_repo_id.as_str()
+                    && de.source_artifact == edge.source_artifact
+            })
+            .and_then(|de| de.version.clone());
 
         // Look up target repo to resolve its current version.
         let target_repo = all_repos.iter().find(|r| r.id == edge.target_repo_id);
@@ -9842,6 +9922,330 @@ specs:
             .status()
             .unwrap()
             .success()
+    }
+
+    /// Wait for the spawned post-receive dependency detection to persist an
+    /// edge from `source` matching `predicate` (polls the dependency store —
+    /// post-receive processing runs in a spawned task).
+    async fn wait_for_dependency_edge<F>(
+        state: &crate::AppState,
+        source: &Id,
+        predicate: F,
+    ) -> gyre_domain::DependencyEdge
+    where
+        F: Fn(&gyre_domain::DependencyEdge) -> bool,
+    {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            let edges = state
+                .dependencies
+                .list_by_repo(source)
+                .await
+                .unwrap_or_default();
+            if let Some(edge) = edges.iter().find(|e| predicate(e)) {
+                return edge.clone();
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no matching dependency edge was recorded within 30s"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
+
+    /// dependency-graph.md §Automatic Detection ("On every push to any repo")
+    /// + §1 ("Cargo.toml -> extract [dependencies] with git/path references"):
+    /// a push to a NON-default branch whose Cargo.toml declares a git
+    /// reference to a known tenant repo must create a Code/CargoToml edge.
+    /// Pre-fix this failed twice over: detection only ran for
+    /// `u.refname == default_ref` updates (a feature-branch push never ran
+    /// detection at all), and the Cargo parser only extracted `path = "..."`
+    /// values (a git reference produced no edge). A later push whose tip no
+    /// longer contains the declaration must mark the edge Orphaned — never
+    /// delete it (§4 Reconcile).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn push_to_non_default_branch_detects_git_dependency_then_orphans() {
+        let (app, state, _tmp, ws_slug, repo_name, repo_path) = git_app_with_repo().await;
+
+        let git = |args: &[&str]| -> String {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo_path)
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@t")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@t")
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+
+        // A known tenant repo named repo-b for the git reference to match.
+        let repo_b = Repository::new(
+            Id::new("repo-b-id"),
+            Id::new("ws-test"),
+            "repo-b",
+            "/nonexistent/repo-b.git",
+            0,
+        );
+        state.repos.create(&repo_b).await.unwrap();
+
+        let cargo_toml = "[dependencies]\nrepo-b = { git = \"https://gyre.example.com/test-ws/repo-b.git\", tag = \"v1.2.0\" }\n".to_string();
+        let sha = make_commit(&repo_path, &[("Cargo.toml", cargo_toml)]).await;
+
+        // Push to a NON-default branch (the repo's default branch is main).
+        let feature_ref = "refs/heads/feature/dep";
+        let resp = push_ref_as(
+            app.clone(),
+            &ws_slug,
+            &repo_name,
+            "Bearer test-token",
+            &sha,
+            feature_ref,
+            &repo_path,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(git(&["rev-parse", feature_ref]), sha);
+
+        let source_id = Id::new("repo-1");
+        let edge = wait_for_dependency_edge(&state, &source_id, |e| {
+            e.target_repo_id.as_str() == "repo-b-id"
+                && e.detection_method == gyre_domain::DetectionMethod::CargoToml
+        })
+        .await;
+        assert_eq!(edge.source_artifact, "Cargo.toml");
+        assert_eq!(edge.version_pinned, Some("v1.2.0".to_string()));
+        assert_eq!(edge.status, gyre_domain::DependencyStatus::Active);
+
+        // A later push to the same branch whose tip no longer contains the
+        // declaration: the edge must be marked Orphaned, not deleted.
+        let sha2 = make_commit(&repo_path, &[("README.md", "# no deps\n".to_string())]).await;
+        let tree = git(&["rev-parse", &format!("{sha2}^{{tree}}")]);
+        let sha3 = git(&["commit-tree", &tree, "-p", &sha, "-m", "remove dependency"]);
+
+        let line = format!("{sha} {sha3} {feature_ref}");
+        let mut body = pkt_line(&line);
+        body.extend_from_slice(b"0000");
+        body.extend_from_slice(&pack_objects_for(&repo_path, &sha3));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/git/{ws_slug}/{repo_name}/git-receive-pack"))
+                    .header("Authorization", "Bearer test-token")
+                    .header("content-type", "application/x-git-receive-pack-request")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(git(&["rev-parse", feature_ref]), sha3);
+
+        let edge = wait_for_dependency_edge(&state, &source_id, |e| {
+            e.target_repo_id.as_str() == "repo-b-id"
+                && e.status == gyre_domain::DependencyStatus::Orphaned
+        })
+        .await;
+        assert_eq!(
+            edge.detection_method,
+            gyre_domain::DetectionMethod::CargoToml
+        );
+        // Orphaned, never deleted: the edge is still present.
+        let edges = state.dependencies.list_by_repo(&source_id).await.unwrap();
+        assert_eq!(edges.len(), 1);
+    }
+
+    /// End-to-end detection at a pushed tip (called directly, bypassing the
+    /// HTTP layer): tree-wide Cargo.toml enumeration (workspace-member
+    /// manifests carry their tree path as source_artifact), nested
+    /// api/openapi.yaml and mcp.json contracts with structured server-URL
+    /// extraction (a repo name in a description/unrelated field creates no
+    /// edge), package.json/pyproject.toml git forms, and the removed
+    /// changed-dependency-file short-circuit (a repo created after the
+    /// manifest was committed is matched by the next push, even one that
+    /// touches no dependency file).
+    #[tokio::test]
+    async fn detect_dependencies_on_push_full_extraction_forms() {
+        let state = crate::mem::test_state();
+        crate::mem::ensure_test_workspace(&state, "proj-1").await;
+
+        // Real bare source repo on disk.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let repo_path = tmp.path().join("repo-a.git");
+        std::fs::create_dir_all(&repo_path).unwrap();
+        let status = std::process::Command::new("git")
+            .arg("init")
+            .arg("--bare")
+            .arg(&repo_path)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git init --bare failed");
+        let repo_path_str = repo_path.to_str().unwrap().to_string();
+
+        // Known tenant repos the references point at. repo-c does NOT exist
+        // yet — created after the first detection pass.
+        for (id, name) in [("repo-b-id", "repo-b"), ("repo-d-id", "repo-d")] {
+            let repo = Repository::new(
+                Id::new(id),
+                Id::new("proj-1"),
+                name,
+                format!("/nonexistent/{name}.git"),
+                0,
+            );
+            state.repos.create(&repo).await.unwrap();
+        }
+        let source_id = Id::new("repo-a-id");
+        let source = Repository::new(
+            source_id.clone(),
+            Id::new("proj-1"),
+            "repo-a",
+            &repo_path_str,
+            0,
+        );
+        state.repos.create(&source).await.unwrap();
+
+        // Tip 1: manifests and contracts referencing repo-b (known), repo-c
+        // (not yet created), and repo-d only in non-URL positions (must
+        // create no edge).
+        let tip_files = vec![
+            (
+                "Cargo.toml",
+                "[package]\nname = \"repo-a\"\nversion = \"0.1.0\"\n\n[dependencies]\nrepo-c = { git = \"https://gyre.example.com/proj-1/repo-c.git\" }\n".to_string(),
+            ),
+            (
+                "crates/member/Cargo.toml",
+                "[package]\nname = \"member\"\n\n[dependencies]\nrepo-b = { path = \"../../repo-b\" }\n".to_string(),
+            ),
+            (
+                "package.json",
+                "{\n  \"name\": \"repo-a\",\n  \"dependencies\": {\n    \"repo-b\": \"git+https://gyre.example.com/proj-1/repo-b.git\"\n  }\n}\n".to_string(),
+            ),
+            (
+                "pyproject.toml",
+                "[project]\nname = \"repo-a\"\ndependencies = [\n    \"repo-b @ git+https://gyre.example.com/proj-1/repo-b.git\",\n]\n".to_string(),
+            ),
+            (
+                "api/openapi.yaml",
+                "openapi: \"3.0.0\"\ninfo:\n  title: repo-a API\n  description: Calls repo-d for extra features\nservers:\n  - url: https://gyre.example.com/proj-1/repo-b/api/v1\n".to_string(),
+            ),
+            (
+                "mcp.json",
+                "{\n  \"mcpServers\": {\n    \"billing\": {\n      \"url\": \"https://gyre.example.com/proj-1/repo-b/mcp\",\n      \"description\": \"repo-d tools are not referenced here\"\n    }\n  }\n}\n".to_string(),
+            ),
+        ];
+        let sha1 = make_commit(&repo_path_str, &tip_files).await;
+
+        detect_dependencies_on_push(&state, source_id.as_str(), &repo_path_str, &sha1).await;
+
+        let edges = state.dependencies.list_by_repo(&source_id).await.unwrap();
+
+        // Workspace-member manifest: detected with the manifest's tree path
+        // as source_artifact.
+        let member_edge = edges
+            .iter()
+            .find(|e| e.source_artifact == "crates/member/Cargo.toml")
+            .expect("nested Cargo.toml edge");
+        assert_eq!(member_edge.target_repo_id.as_str(), "repo-b-id");
+        assert_eq!(
+            member_edge.detection_method,
+            gyre_domain::DetectionMethod::CargoToml
+        );
+
+        // package.json / pyproject.toml git-URL forms.
+        for method in [
+            gyre_domain::DetectionMethod::PackageJson,
+            gyre_domain::DetectionMethod::PyprojectToml,
+        ] {
+            let edge = edges
+                .iter()
+                .find(|e| e.detection_method == method)
+                .unwrap_or_else(|| panic!("missing {method:?} edge"));
+            assert_eq!(edge.target_repo_id.as_str(), "repo-b-id");
+            assert_eq!(edge.status, gyre_domain::DependencyStatus::Active);
+        }
+
+        // Nested api/openapi.yaml: Api edge from servers[].url matching
+        // repo-b, with the tree path as source_artifact.
+        let openapi_edge = edges
+            .iter()
+            .find(|e| e.detection_method == gyre_domain::DetectionMethod::OpenApiRef)
+            .expect("openapi edge");
+        assert_eq!(openapi_edge.source_artifact, "api/openapi.yaml");
+        assert_eq!(openapi_edge.target_repo_id.as_str(), "repo-b-id");
+
+        // mcp.json: Api/McpToolRef edge from the mcpServers url field.
+        let mcp_edge = edges
+            .iter()
+            .find(|e| e.detection_method == gyre_domain::DetectionMethod::McpToolRef)
+            .expect("mcp edge");
+        assert_eq!(mcp_edge.source_artifact, "mcp.json");
+        assert_eq!(mcp_edge.target_repo_id.as_str(), "repo-b-id");
+
+        // Over-match guards: repo-d appears only in a description and an
+        // unrelated mcp.json field — no edge to it. repo-c does not exist
+        // yet — no edge to it either.
+        assert!(edges
+            .iter()
+            .all(|e| e.target_repo_id.as_str() != "repo-d-id"));
+        assert!(edges
+            .iter()
+            .all(|e| e.target_repo_id.as_str() != "repo-c-id"));
+
+        // repo-c is created AFTER the manifest already referenced it. The
+        // next push re-commits the SAME manifest blobs (identical content →
+        // identical blob SHAs, so the push's changed-file set is README.md
+        // only — no dependency file changes) plus a README. make_commit
+        // builds each tree from only the files passed to that call, so the
+        // manifests must be re-listed to remain present at the pushed tip —
+        // the AC-6 scenario requires the committed manifest to still
+        // reference repo-c. With the changed-dependency-file short-circuit
+        // removed, detection still runs and creates the edge.
+        let repo_c = Repository::new(
+            Id::new("repo-c-id"),
+            Id::new("proj-1"),
+            "repo-c",
+            "/nonexistent/repo-c.git",
+            0,
+        );
+        state.repos.create(&repo_c).await.unwrap();
+
+        let mut tip2_files = tip_files.clone();
+        tip2_files.push(("README.md", "# repo-a\n".to_string()));
+        let sha2 = make_commit(&repo_path_str, &tip2_files).await;
+        detect_dependencies_on_push(&state, source_id.as_str(), &repo_path_str, &sha2).await;
+
+        let edges = state.dependencies.list_by_repo(&source_id).await.unwrap();
+        let repo_c_edge = edges
+            .iter()
+            .find(|e| e.target_repo_id.as_str() == "repo-c-id")
+            .expect("repo-c edge after repo creation + no-dep-file push");
+        assert_eq!(repo_c_edge.source_artifact, "Cargo.toml");
+        assert_eq!(
+            repo_c_edge.detection_method,
+            gyre_domain::DetectionMethod::CargoToml
+        );
+        assert_eq!(repo_c_edge.status, gyre_domain::DependencyStatus::Active);
+
+        // No-change pushes are idempotent: all repo-b edges stay Active.
+        assert!(edges
+            .iter()
+            .filter(|e| e.target_repo_id.as_str() == "repo-b-id")
+            .all(|e| e.status == gyre_domain::DependencyStatus::Active));
+        assert_eq!(
+            edges
+                .iter()
+                .filter(|e| e.target_repo_id.as_str() == "repo-b-id")
+                .count(),
+            5
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
