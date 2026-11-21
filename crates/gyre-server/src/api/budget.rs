@@ -496,7 +496,7 @@ pub async fn check_spawn_budget_for(
 ) -> Result<(), String> {
     let key = workspace_key(project_id);
     let config = effective_workspace_config(state, &key).await;
-    enforce_workspace_spawn_caps(state, project_id, &key, &config, requested).await
+    return enforce_workspace_spawn_caps(state, project_id, &key, &config, requested).await;
 }
 
 /// Check the workspace-level budget limits for a spawn into `repo` — the
@@ -526,7 +526,8 @@ pub async fn check_spawn_budget_for_repo(
     }
     let dependents = repo_dependent_count(state, &repo.id).await;
     let weighted = weight_inherited_caps(&config, dependent_boost_factor(dependents));
-    enforce_workspace_spawn_caps(state, repo.workspace_id.as_str(), &key, &weighted, 1).await
+    return enforce_workspace_spawn_caps(state, repo.workspace_id.as_str(), &key, &weighted, 1)
+        .await;
 }
 
 /// Workspace-level spawn-cap enforcement body shared by the plain and the
