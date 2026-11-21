@@ -126,11 +126,15 @@ async fn maintain_repo(path: &std::path::Path, label: &str, log: &JobRunLog) -> 
         .await;
         return false;
     }
+    // The server's git execution layer convention: deployments where git
+    // is only reachable via GYRE_GIT_PATH must not fail every repo's
+    // maintenance with a spawn error (review task-273).
+    let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
     // Bound each repository's gc so one huge repo cannot stall the job
     // forever (10 minutes; local disk work, not HTTP).
     let gc = tokio::time::timeout(
         std::time::Duration::from_secs(600),
-        tokio::process::Command::new("git")
+        tokio::process::Command::new(&git_bin)
             .arg("-C")
             .arg(path)
             .args(["gc", "--prune=now", "--quiet"])
@@ -241,8 +245,16 @@ pub async fn remote_agent_cleanup(state: Arc<AppState>, log: JobRunLog) -> Resul
             // Agent is gone (deleted, or orphaned by a server restart that
             // lost the in-memory registry): reap.
             None => true,
-            // Agent exists but is dead/stopped: reap.
-            Some(a) => matches!(a.status, AgentStatus::Dead | AgentStatus::Stopped),
+            // Agent exists but is dead/stopped/failed: reap. `Failed`
+            // agents are terminal too (max iterations, spawn failure,
+            // non-recoverable error) — a Failed agent whose clean-exit
+            // mark missed leaves a still-recorded-running instance that
+            // would otherwise leak in list_running() forever (review
+            // task-273). Live statuses (Active/Idle) are never reaped.
+            Some(a) => matches!(
+                a.status,
+                AgentStatus::Dead | AgentStatus::Stopped | AgentStatus::Failed
+            ),
         };
         if !reap {
             continue;
@@ -344,12 +356,55 @@ pub async fn remote_agent_cleanup(state: Arc<AppState>, log: JobRunLog) -> Resul
                                     continue;
                                 }
                                 PidCheck::Unverifiable => {
-                                    log.log(format!(
-                                        "agent {}: NOT REAPED — pid {pid} identity cannot \
-                                         be verified on this platform ({why})",
-                                        instance.agent_id
-                                    ))
-                                    .await;
+                                    // /proc-less platform: the pid's
+                                    // identity cannot be verified, so it is
+                                    // never SIGTERMed. Same bounded
+                                    // retention as unreconstructable
+                                    // backends — without it the record is
+                                    // re-logged on every sweep forever
+                                    // (review task-273).
+                                    let age = now_secs().saturating_sub(instance.spawned_at);
+                                    if age > UNREAPABLE_RETENTION_SECS {
+                                        match state
+                                            .agent_instances
+                                            .mark_terminated(
+                                                &instance.agent_id,
+                                                "retired_unverifiable_pid",
+                                            )
+                                            .await
+                                        {
+                                            Ok(()) => {
+                                                log.log(format!(
+                                                    "agent {}: RETIRED — instance {} (pid \
+                                                     {pid}) identity could not be verified \
+                                                     on this platform for {} days; recorded \
+                                                     as terminated. ESCALATION: verify and \
+                                                     clean up the process manually",
+                                                    instance.agent_id,
+                                                    instance.handle_id,
+                                                    age / 86_400
+                                                ))
+                                                .await;
+                                            }
+                                            Err(e) => {
+                                                log.log(format!(
+                                                    "agent {}: FAILED to retire unverifiable \
+                                                     instance {} ({why}): {e}",
+                                                    instance.agent_id, instance.handle_id
+                                                ))
+                                                .await;
+                                            }
+                                        }
+                                    } else {
+                                        log.log(format!(
+                                            "agent {}: NOT REAPED — pid {pid} identity cannot \
+                                             be verified on this platform ({why}); retries \
+                                             for another {} days, then retires",
+                                            instance.agent_id,
+                                            (UNREAPABLE_RETENTION_SECS - age) / 86_400
+                                        ))
+                                        .await;
+                                    }
                                     continue;
                                 }
                             },

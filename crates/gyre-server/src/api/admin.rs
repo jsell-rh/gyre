@@ -429,6 +429,15 @@ pub async fn admin_audit(
 /// GET /api/v1/admin/server/logs — recent server log events from the
 /// bounded capture buffer (Admin only; admin-panel.md §Server Logs,
 /// TASK-273).
+///
+/// Scoping decision (admin-panel.md §Server Logs, task-273 review): the
+/// captured events are process-level operational telemetry and CANNOT be
+/// attributed to a tenant (startup, background-job and infrastructure
+/// spans span tenants), so this surface is deliberately cross-tenant and
+/// restricted to the Admin role. Deployments hosting mutually untrusting
+/// tenants must treat tenant Admins as trusted operators for process
+/// telemetry; tenant-scoped activity trails are served by
+/// GET /api/v1/admin/audit (tenant_id-scoped), not here.
 #[derive(Deserialize)]
 pub struct ServerLogQuery {
     /// Minimum level (TRACE|DEBUG|INFO|WARN|ERROR).

@@ -146,6 +146,30 @@ fn kv_set(conn: &mut PgConnection, namespace: &str, key: &str, value: &str) -> R
     Ok(())
 }
 
+/// Insert `value` at `(namespace, key)` only when no row exists yet.
+/// Returns `true` when this call won the insert, `false` when a row
+/// already existed (the caller must re-read the stored value). Unlike
+/// [`kv_set`], a concurrent writer can never overwrite a winner — used
+/// for first-boot identity generation (review task-273 TOCTOU).
+fn kv_insert_if_absent(
+    conn: &mut PgConnection,
+    namespace: &str,
+    key: &str,
+    value: &str,
+) -> Result<bool> {
+    let rows = diesel::insert_into(kv_store::table)
+        .values((
+            kv_store::namespace.eq(namespace),
+            kv_store::key.eq(key),
+            kv_store::value_json.eq(value),
+            kv_store::updated_at.eq(now_secs() as i64),
+        ))
+        .on_conflict((kv_store::namespace, kv_store::key))
+        .do_nothing()
+        .execute(conn)?;
+    Ok(rows == 1)
+}
+
 /// Derive the 32-byte AES key from the `GYRE_SECRET_ENCRYPTION_KEY` value
 /// (hex string or SHA-256-hashed passphrase), identical to the SQLite
 /// adapter.
@@ -216,18 +240,37 @@ fn load_sops_identity(conn: &mut PgConnection) -> Result<AgeIdentity> {
             .with_context(|| "persisted SOPS age identity is unreadable"),
         None => {
             let identity = AgeIdentity::generate();
-            kv_set(
+            // First-boot race safety (review task-273): INSERT ... ON
+            // CONFLICT DO NOTHING, then re-read — identical to the
+            // SQLite adapter. With the previous kv_get -> generate ->
+            // kv_set sequence, two concurrent first-use operations each
+            // generated an identity and the second write OVERWROTE the
+            // first; secrets encrypted under the losing identity became
+            // permanently undecryptable. The loser adopts the stored
+            // winner.
+            let inserted = kv_insert_if_absent(
                 conn,
                 KEY_NAMESPACE,
                 SOPS_AGE_KV_KEY,
                 &identity.to_secret_string(),
             )?;
-            tracing::warn!(
-                "SOPS age identity: GYRE_SOPS_AGE_KEY is not set; generated an identity and \
-                 persisted it in the database. Set GYRE_SOPS_AGE_KEY (or \
-                 GYRE_SOPS_AGE_KEY_FILE) to manage the identity outside the database."
-            );
-            Ok(identity)
+            if inserted {
+                tracing::warn!(
+                    "SOPS age identity: GYRE_SOPS_AGE_KEY is not set; generated an identity and \
+                     persisted it in the database. Set GYRE_SOPS_AGE_KEY (or \
+                     GYRE_SOPS_AGE_KEY_FILE) to manage the identity outside the database."
+                );
+                Ok(identity)
+            } else {
+                match kv_get(conn, KEY_NAMESPACE, SOPS_AGE_KV_KEY)? {
+                    Some(stored) => sops::AgeIdentity::parse(&stored)
+                        .with_context(|| "persisted SOPS age identity is unreadable"),
+                    // Unreachable given the PK that just won the insert;
+                    // fall back to the freshly generated identity rather
+                    // than failing the secret operation.
+                    None => Ok(identity),
+                }
+            }
         }
     }
 }

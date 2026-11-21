@@ -15,3 +15,12 @@
   - *(more TBD)*
 - Full **job history stored and visible** in admin UI - status, duration, failures, logs.
 - **Server logs** - accessible from the admin UI.
+  - Explicit scoping decision (task-273 review): server logs are
+    **process-level operational telemetry** of the gyre-server process.
+    Tracing events cannot be reliably attributed to a single tenant
+    (startup, background-job and infrastructure spans span tenants), so
+    the server-log viewer is deliberately an operational, cross-tenant
+    surface restricted to the Admin role. Deployments hosting mutually
+    untrusting tenants must treat tenant Admins as trusted operators for
+    process telemetry. Tenant-scoped activity trails are served by the
+    audit log viewer (tenant_id-scoped), never by the server-log viewer.

@@ -426,7 +426,11 @@ pub async fn claude_max_callback(
         created_by: format!("oauth:claude-max:{}", record.initiated_by),
         created_at: now,
         expires_at: Some(now + expires_in),
-        last_rotated_at: None,
+        // The provider JUST issued this credential (the token-endpoint
+        // response is the freshest state) — recording the rotation time
+        // avoids one redundant immediate refresh on the next job cycle
+        // (review task-273).
+        last_rotated_at: Some(now),
         tenant_id: record.tenant_id.clone(),
     };
 

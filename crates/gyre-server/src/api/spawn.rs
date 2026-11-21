@@ -3124,9 +3124,23 @@ pub(crate) async fn launch_taskless_agent_process(
             agent_id = %agent.id,
             "workspace record unavailable; skipping tenant-scoped secret resolution"
         ),
+        // platform-model.md §7 / TASK-273: the preview agent's own freshly
+        // minted JWT (the `token` param, injected as GYRE_AUTH_TOKEN below)
+        // authenticates the resolution — under the Vault backend the JWT
+        // logs into Vault's JWT auth backend so Vault policies scope the
+        // returned secrets; the server's broad admin token is never applied
+        // to an agent read (review task-273: this path previously called
+        // `resolve_for_agent`, the server-token variant). The database
+        // backends ignore the JWT and serve the scope cascade directly.
         Some(tenant_id) => match state
             .secrets
-            .resolve_for_agent(&tenant_id, &repo.workspace_id.to_string(), repo_id, task_id)
+            .resolve_for_agent_as(
+                &tenant_id,
+                &repo.workspace_id.to_string(),
+                repo_id,
+                task_id,
+                token,
+            )
             .await
         {
             Ok(resolved) => {

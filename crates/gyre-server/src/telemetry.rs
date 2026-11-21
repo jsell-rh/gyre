@@ -32,6 +32,11 @@ pub struct ServerLogEntry {
 ///
 /// A process-wide singleton: the tracing subscriber is initialized before
 /// `AppState` exists, so the buffer outlives (and is shared with) it.
+/// Deliberately NOT tenant-scoped — see the explicit scoping decision in
+/// admin-panel.md §Server Logs (task-273 review): tracing events are
+/// process-level operational telemetry and cannot be reliably attributed
+/// to a tenant; the endpoint is Admin-only, and tenant-scoped trails are
+/// served by the durable audit store instead.
 pub struct ServerLogBuffer {
     entries: std::sync::RwLock<VecDeque<ServerLogEntry>>,
     capacity: usize,

@@ -12,7 +12,7 @@
 //!     "age": [ { "recipient": "age1…", "enc": "-----BEGIN AGE ENCRYPTED FILE-----…" } ],
 //!     "lastmodified": "2026-11-19T12:00:00Z",
 //!     "mac": "ENC[AES256_GCM,…,type:str]",
-//!     "pgp": null, "unencrypted_suffix": "", "version": "3.9.4"
+//!     "pgp": null, "unencrypted_suffix": "_unencrypted", "version": "3.9.4"
 //!   }
 //! }
 //! ```
@@ -44,6 +44,12 @@
 //!   (fail closed), exactly as `sops -d` does (Decrypter:
 //!   `cipher.Decrypt(metadata.mac, dataKey, lastmodified)` compared
 //!   against the recomputed tree hash).
+//! - **`unencrypted_suffix`**: emitted as `_unencrypted`, the sops CLI
+//!   default. sops's decrypt walk skips keys whose name ends with the
+//!   suffix; an empty suffix matches EVERY key, so `sops -d` on a
+//!   document carrying `""` would return the raw `ENC[...]` strings
+//!   instead of decrypting (review task-273). Our single `data` key does
+//!   not end with `_unencrypted`, so it is encrypted/decrypted normally.
 //!
 //! The legacy pre-SOPS storage format (ring AES-256-GCM with a 12-byte
 //! nonce in the `nonce` column) is transparently decryptable and
@@ -394,7 +400,7 @@ pub fn sops_encrypt(plaintext: &[u8], recipient: &AgeIdentity, now_secs: u64) ->
             "lastmodified": lastmodified,
             "mac": mac_enc,
             "pgp": null,
-            "unencrypted_suffix": "",
+            "unencrypted_suffix": "_unencrypted",
             "version": SOPS_VERSION,
         },
     });

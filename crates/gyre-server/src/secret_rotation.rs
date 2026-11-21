@@ -231,11 +231,15 @@ impl SecretRotationHandler for OAuthRefreshHandler {
         // (and, for a value below the real lifetime, a perpetual
         // refresh/notification loop). A response without it fails the
         // rotation honestly: the admin is notified and the stored
-        // credential is left untouched (review task-273).
+        // credential is left untouched (review task-273). Zero is rejected
+        // for the same reason — it would store an always-expired secret
+        // that every job cycle re-refreshes (review task-273; the
+        // enrollment callback applies the same filter).
         let expires_in = tokens
             .get("expires_in")
             .and_then(|v| v.as_u64())
-            .context("token response missing expires_in (cannot determine new expiry)")?;
+            .filter(|s| *s > 0)
+            .context("token response missing expires_in (or zero) — cannot determine new expiry")?;
 
         // Overwrite ONLY the rotated tokens on the original document —
         // every other field the admin supplied (scope, issuer, provider
@@ -399,11 +403,14 @@ impl SecretRotationHandler for GcpServiceAccountHandler {
             .to_string();
         // No fabricated lifetime: Google always states expires_in, and a
         // response without it cannot set an honest expires_at (review
+        // task-273). Zero is rejected likewise — an always-expired
+        // stored credential would be re-refreshed every cycle (review
         // task-273).
         let expires_in = tokens
             .get("expires_in")
             .and_then(|v| v.as_u64())
-            .context("token response missing expires_in (cannot determine new expiry)")?;
+            .filter(|s| *s > 0)
+            .context("token response missing expires_in (or zero) — cannot determine new expiry")?;
 
         // Overwrite ONLY the access token on the original document — every
         // other field the admin supplied (Google-issued SA key fields
