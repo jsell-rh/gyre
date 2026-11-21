@@ -54,11 +54,22 @@ Canonical spec: `specs/system/dependency-graph.md`. Source: `678a8ac3e3bfeafeb66
 
 ## Shipped
 
-The EXECUTION and DURABLE RESULTS links of dependency-graph.md §Cascade Testing
-are implemented in production code; the identification, task-filing, event,
-notification, and failure follow-up links are unchanged. This round finalizes
-the checkpoint: formatting verified, mechanical gates re-run green, evidence
-re-collected under /tmp/stage/review-evidence, and attribution restored.
+The EXECUTION and DURABLE RESULTS links of dependency-graph.md §Cascade
+Testing are implemented in production code; the identification, task-filing,
+event, notification, and failure follow-up links are unchanged from before
+this task.
+
+### This round (rebase repair)
+
+The saved task-280 source (44c7ecf) was rebased onto base f611524
+(task-284 AIBOM work). The only conflict, specs/coverage/system/
+dependency-graph.md, was resolved by keeping this branch's row 12 (Cascade
+Testing, task-280 implemented) and the incoming row 13 additions (task-284
+AIBOM stale-dependency flags in Version Drift Tracking). No production code
+conflicts: task-284 touched api/aibom.rs, api/meta_specs.rs, gate_executor.rs;
+task-280's cascade files were untouched by the merge. `cargo check -p
+gyre-server` passes on the merged tree; `cargo test -p gyre-adapters
+cascade_test` passes 5/5 (including `result_survives_fresh_storage_instance`).
 
 ### EXECUTION (agent actually spawned, no human action)
 
@@ -86,40 +97,32 @@ identity of the triggering merge.
 SHA, cascade task id, pass/fail, failure details, timestamp).
 - Implemented by all three adapters with the identical contract — one result
 row per cascade task, re-reporting REPLACES the row (upsert on
-`cascade_task_id`): mem (code guard), Diesel SQLite, and PostgreSQL
+`cascade_task_id`): mem (code guard in mem.rs), Diesel SQLite, and PostgreSQL
 (ON CONFLICT DO UPDATE).
 - Migration `2026-11-21-000070_cascade_test_results` uses the next unused
 sequence number and plain portable SQL (TEXT/BOOLEAN/BIGINT), runnable by
 both the SQLite and PostgreSQL embedded runners.
-- Wired via the `store!` macro as `AppState.cascade_test_results`
-(crates/gyre-server/src/lib.rs) — not an `Arc<Mutex<HashMap>>`; the
-test-support AppState constructors are wired to the same store.
-- `report_cascade_test_result` persists the record on every report (pass and
-fail) in addition to the existing one-shot workspace events, notifications,
-and failure follow-up task, which remain unchanged.
+- Wired via the `store!` macro as `AppState.cascade_test_results`.
 
-### Test evidence (this round, /tmp/stage/review-evidence)
+### Test evidence (this round, merged tree)
 
-- `cargo test -p gyre-adapters --lib cascade_test_result`: 5/5 passed in this
-sandbox (adapters-cascade-test.log) — including
-`result_survives_fresh_storage_instance` (a fresh storage instance over the
-same DB file retrieves the record — restart survival) and
-`record_replaces_row_for_same_task` (port upsert contract).
-- `cargo check -p gyre-server -p gyre-adapters -p gyre-ports -p gyre-domain`:
-clean, and `cargo check -p gyre-server --tests`: clean (server-check-tests.log)
-— the server-side tests compile; their full test-binary run is deferred to the
-independent verifier under the 4 GiB build budget (exact commands and
-acceptance-criteria mapping in verifier-test-list.md:
-`scheduler_spawns_agent_for_cascade_test_task` proves AC-1; the
-`report_cascade_test_result_persists_durable_*` and `..._rereport_replaces_record`
-tests prove AC-2).
-- `cargo fmt --all -- --check`: clean — the cascade-test Rust files are
-formatted.
-- Mechanical gates re-run green this round (logs in review-evidence):
-check-arch, check-migration-versions, check-migration-sql-portability,
-check-mem-port-contracts, check-in-memory-state-stores.
-check-task-commit-attribution needs full history and is left to CI; the three
-`implement(task-280)` product-surface commits are recorded in the frontmatter.
-- Coverage row 12 (Cascade Testing) in
-specs/coverage/system/dependency-graph.md is `implemented` with source
-evidence; no other rows touched.
+- `cargo check -p gyre-server` — clean (8m49s, /tmp/stage/bin/cargo).
+- `cargo test -p gyre-adapters cascade_test` — 5/5 passed:
+  record_and_find_by_task_roundtrip, record_replaces_row_for_same_task,
+  result_survives_fresh_storage_instance, failure_details_persisted,
+  list_by_dependent_and_merged_repo.
+- Mechanical gates re-run green on the merged tree: check-mem-port-contracts,
+  check-migration-sql-portability, check-in-memory-state-stores,
+  check-migration-versions, check-task-commit-attribution.
+- Evidence saved under /tmp/stage/review-evidence.
+
+### Deferred to the independent verifier (gyre-server test compile exceeds
+the 4 GiB sandbox budget)
+
+- `cargo test -p gyre-server --lib signal_chain` — includes
+  `scheduler_spawns_agent_for_cascade_test_task` (task → InProgress, agent
+  record tied to the dependent repo).
+- `cargo test -p gyre-server --lib merge_processor` — includes
+  report_cascade_test_result_{passed_no_follow_up_task,
+  failed_creates_follow_up_task, persists_durable_pass_record,
+  persists_durable_failure_record, rereport_replaces_record}.
