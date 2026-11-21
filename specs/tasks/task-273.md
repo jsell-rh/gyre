@@ -3,7 +3,7 @@ title: "Admin Panel completion: SOPS/Vault secret backends, durable job history 
 spec_ref: "Spec gap spec-5b647653a4554eea3e93ac19 / admin-panel-remaining-gap / e61ffd082155"
 depends_on: []
 progress: ready-for-review
-commits: ["fc9cddae5dae12efaec732c13355894706f4173f", "93385c7569c8394d2786461a3cf217217096f709", "8d5c4fecf9851333871985a1118e2a7c1cd8a07d", "2344b83a9336eee2c958854a728b9a22c10edd1e", "368a152586c44e5c5a09a8e04cd14395b6f845d9", "9647021feafb12193398f6187add3fce73b20d14", "fd564b2102dd43e60613a0ceb97c9863a68be7ce", "ab179c656a435480c04708492ed30f6e4940e528", "8bb3e960f4d3cecc3f29a178567fc4cdc92d8030", "39fe7ae7407ac131d0a5e377874046fea1d8ea15", "7bd484b74876bbe84a2e87bcf77df01ef2280151", "4c7107606884371d67cb302c846cee8ddf331eae", "6bb8e01d1bf164b8baa8c4b83fe1ad2924b29c27", "b5bbf1129a3bccb6228b47f6de1c5db307495cff", "48ca42998edc1a07edb6d58666dfdcbcb6b2e028", "5a3ff27f9bc2e1efbf4b81b5a91a4c67feecaa28", "4d49c8980b8d23e476ce73a3cd9d5dd92b66dbe6", "40cd127051cf2a3caf58f7a367912a54cfb834c6", "4f3f422ba75db56a839779071ef893fec83dda3c", "dac8d7bbdd4b01a8a14e27450fa1309a941c359f", "feef86973ce2e11573c658a89658db1cb1372033", "fee74fb7bb39834241c98e34af5e561a24b145e0", "a956f2c0eaf79e2e09efd311869bb1dec5990cbb", "c42c31e0f8a5970faccb61806730d734866756bd", "67a7efbda3ccfa56526ac4f983597ad20f88f1ef", "88e17eb55af0336e60076e0e1249bf11006868f3", "2613d477db14df74055be8942981aab68f0e17b9"]
+commits: ["77aef34b2ae43c328a991bd4b95252c0aeccf3d8", "fc9cddae5dae12efaec732c13355894706f4173f", "93385c7569c8394d2786461a3cf217217096f709", "8d5c4fecf9851333871985a1118e2a7c1cd8a07d", "2344b83a9336eee2c958854a728b9a22c10edd1e", "368a152586c44e5c5a09a8e04cd14395b6f845d9", "9647021feafb12193398f6187add3fce73b20d14", "fd564b2102dd43e60613a0ceb97c9863a68be7ce", "ab179c656a435480c04708492ed30f6e4940e528", "8bb3e960f4d3cecc3f29a178567fc4cdc92d8030", "39fe7ae7407ac131d0a5e377874046fea1d8ea15", "7bd484b74876bbe84a2e87bcf77df01ef2280151", "4c7107606884371d67cb302c846cee8ddf331eae", "6bb8e01d1bf164b8baa8c4b83fe1ad2924b29c27", "b5bbf1129a3bccb6228b47f6de1c5db307495cff", "48ca42998edc1a07edb6d58666dfdcbcb6b2e028", "5a3ff27f9bc2e1efbf4b81b5a91a4c67feecaa28", "4d49c8980b8d23e476ce73a3cd9d5dd92b66dbe6", "40cd127051cf2a3caf58f7a367912a54cfb834c6", "4f3f422ba75db56a839779071ef893fec83dda3c", "dac8d7bbdd4b01a8a14e27450fa1309a941c359f", "feef86973ce2e11573c658a89658db1cb1372033", "fee74fb7bb39834241c98e34af5e561a24b145e0", "a956f2c0eaf79e2e09efd311869bb1dec5990cbb", "c42c31e0f8a5970faccb61806730d734866756bd", "67a7efbda3ccfa56526ac4f983597ad20f88f1ef", "88e17eb55af0336e60076e0e1249bf11006868f3", "2613d477db14df74055be8942981aab68f0e17b9"]
 ---
 
 ## Required behavior
@@ -122,71 +122,42 @@ Canonical spec: `specs/system/admin-panel.md`. Source: `fb1424fbac55cd23cb08606f
 
 ## Shipped
 
-The eight admin-panel deliverables (SOPS default / Vault option secret
-backends, durable job history with per-run logs, `repo_maintenance`,
-OAuth state + Claude Max enrollment, shape-dispatched token refresh
-including the GCP SA JWT-bearer grant, `remote_agent_cleanup` with
-durable instance records, the server-logs capture + Admin endpoint +
-tab, and the durable searchable admin audit) shipped on this branch in
-earlier rounds; those rounds' Shipped notes, test evidence and probe
-logs are in the branch history and under `/tmp/stage/review-evidence/`.
+The eight admin-panel deliverables shipped on this branch across earlier
+rounds: SOPS-default / Vault-option secret backends (with CAS-guarded
+legacy AES-256-GCM re-encryption and fail-closed backend selection),
+durable job history with per-run logs via the JobRunRepository port,
+`repo_maintenance`, OAuth state storage + Claude Max enrollment +
+`oauth_state_cleanup`, shape-dispatched token refresh including the GCP
+SA RS256 JWT-bearer grant, `remote_agent_cleanup` with durable agent
+instance records, the server-logs tracing capture + Admin endpoint +
+TenantSettings tab, and the durable searchable admin audit
+(`tenant_id` scoping + free-text `q` over detail payloads). Those
+rounds' Shipped notes, test evidence and probe logs are in the branch
+history and under `/tmp/stage/review-evidence/`.
 
-### This round: repair of review findings F1–F3
+### This round: repair of the migration_000058 test regression
 
-Review checkpoint `68e9c6b5077977d9d3e6947b1cbbcf7409fa43dd` against
-candidate `3c0b9a77` found one lost-update race, one fail-open
-selector and three wrong doc citations; all are fixed:
+Review against candidate `1e4ed138` found one broken regression test
+introduced by this branch: rebase commit `8d5c4fec` renumbered the
+task-273 audit migration from `2026-11-13-000074_audit_events_tenant_id`
+to `2026-11-13-000070_audit_events_tenant_id`, but
+`sqlite::tests::migration_000058_backfills_unique_url_safe_usernames`
+(added by task commit `4c710760`) still partitioned on the stale version
+string `20261113000074`. The assertion failed ("audit-events tenant_id
+migration not found"), and the stale exclusion no longer deferred the
+renumbered migration out of the `pre` batch, so it would have run
+before 000058 — the exact ordering hazard the deferral exists to avoid
+(its user-scoped backfill reads `users.tenant_id`, a column owned by
+000058).
 
-1. **Lost-update race in the legacy→SOPS migration** (commit
-   `fc9cddae`, both `sqlite/secret.rs` and `postgres/secret.rs`): the
-   first-access re-encryption of pre-upgrade AES-256-GCM rows is now a
-   compare-and-swap — the UPDATE is conditioned on the legacy bytes
-   the read actually observed (`id` + `encrypted_value`). A rotation
-   committing between the read's SELECT and the migration UPDATE now
-   results in zero rows affected: the migration is skipped, the newer
-   stored value stands, and the racing read returns the plaintext it
-   decrypted. Previously the unguarded UPDATE silently reverted a
-   committed rotation to the pre-rotation plaintext. New regression
-   test `legacy_migration_does_not_revert_concurrent_rotation`
-   deterministically reproduces the interleaving (stale legacy bytes
-   handed to `decrypt_at_rest` after a concurrent rotation commits a
-   fresh SOPS document) and was verified to FAIL with the guard
-   removed and PASS with it.
-2. **Fail-open backend selector** (commit `fc9cddae`,
-   `gyre-server/src/lib.rs` `build_secret_repository`): unrecognized
-   `GYRE_SECRET_BACKEND` values (e.g. a typo'd `vualt` while Vault is
-   fully configured) now fail startup loudly, naming the value — the
-   accepted set is `sops` (default/unset), `legacy`/`aesgcm`/`aes-gcm`
-   and `vault`. Two new lib tests pin the rejection
-   (`catch_unwind` on `vualt`) and the accepted set.
-3. **Wrong citations** (commit `240d207b`): coverage row 3 now cites
-   the real audit migration `2026-11-13-000070_audit_events_tenant_id`
-   (was ...000074, which does not exist); row 10 no longer claims
-   sequence 000070 is unused (000070 is the audit migration); the
-   enroll route is documented as redirecting with 303 See Other
-   (coverage row 5 and `docs/api-reference.md`; the handler returns
-   `StatusCode::SEE_OTHER`).
+Fixed in commit `77aef34b`: all four references (comment, partition
+exclusion, assertion, trailing run comment) and the `m74` binding now
+use the `20261113000070` version. No production code changed.
 
 ### Test evidence (this sandbox)
 
-- `cargo test -p gyre-adapters --lib sqlite::secret` — 24 passed,
-  0 failed (includes the new race regression test).
-- `cargo test -p gyre-adapters --lib sops::` — 13 passed;
-  `cargo test -p gyre-adapters --lib vault` — 16 passed (adjacent
-  suites, no regressions).
-- `cargo check -p gyre-adapters`, `cargo check -p gyre-server` and
-  `cargo check -p gyre-server --lib --tests` — clean; the only
-  warnings are the two pre-existing dead-code warnings in `mem.rs`
-  test helpers, verified present on the candidate HEAD before this
-  round's changes.
-- `cargo fmt --check -p gyre-adapters -p gyre-server` — clean.
-- Kill-property check for the race test recorded in
-  `/tmp/stage/review-evidence/review-repair-findings.md`.
-
-### Deferred to the independent verifier
-
-`cargo test -p gyre-server --lib build_secret_repository` (the two new
-selector tests) — gyre-server test compilation exceeds this sandbox's
-build budget, so the lib was type-checked (`cargo check --lib
---tests`, clean) and the test run is recorded for the verifier.
-Evidence and commands: `/tmp/stage/review-evidence/review-repair-findings.md`.
+- `cargo test -p gyre-adapters --lib migration_000058` — the
+  previously failing test now passes.
+- `cargo test -p gyre-adapters --lib` — full suite: 684 passed,
+  0 failed (the review run on the candidate: 683 passed, 1 failed).
+- `cargo fmt --check -p gyre-adapters` — clean.
