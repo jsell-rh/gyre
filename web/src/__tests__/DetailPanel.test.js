@@ -388,6 +388,106 @@ describe('DetailPanel', () => {
     });
   });
 
+  // ── Link direction in spec Links tab ──────────────────────────────────
+  describe('Link direction in spec Links tab', () => {
+    const specEntityWithRepo = {
+      type: 'spec',
+      id: 'system/core.md',
+      data: { name: 'core.md', repo_id: 'repo-core' },
+    };
+
+    const inboundLink = {
+      id: 'link-in',
+      direction: 'inbound',
+      source_path: 'system/auth.md',
+      link_type: 'depends_on',
+      target_path: 'system/core.md',
+      status: 'stale',
+      created_at: 1700000000,
+    };
+    const outboundLink = {
+      id: 'link-out',
+      direction: 'outbound',
+      source_path: 'system/core.md',
+      link_type: 'depends_on',
+      target_path: 'system/billing.md',
+      status: 'active',
+      created_at: 1700000000,
+    };
+
+    function mockFetchForLinks(links) {
+      global.fetch.mockImplementation((url) => {
+        const urlStr = typeof url === 'string' ? url : url.toString();
+        if (urlStr.includes('/links')) {
+          return Promise.resolve({ ok: true, status: 200, json: async () => links });
+        }
+        // Default: spec content, progress, etc.
+        return Promise.resolve({
+          ok: true, status: 200,
+          json: async () => ({ content: '# Core', total_tasks: 0, completed_tasks: 0 }),
+        });
+      });
+    }
+
+    it('renders the inbound link in the inbound column and the outbound link in the outbound column', async () => {
+      mockFetchForLinks([inboundLink, outboundLink]);
+      const { container } = render(DetailPanel, { props: { entity: specEntityWithRepo } });
+      const linksTab = screen.getByRole('tab', { name: /links/i });
+      await fireEvent.click(linksTab);
+
+      await waitFor(() => {
+        expect(container.querySelector('.links-list')).toBeTruthy();
+      });
+
+      // Diagram: the inbound column shows the SOURCE spec of the inbound
+      // link; the outbound column shows the TARGET spec of the outbound link.
+      const inboundCol = container.querySelector('.link-column-inbound');
+      expect(inboundCol).toBeTruthy();
+      expect(inboundCol.textContent).toContain('auth.md');
+      expect(inboundCol.textContent).not.toContain('billing.md');
+
+      const outboundCol = container.querySelector('.link-column-outbound');
+      expect(outboundCol).toBeTruthy();
+      expect(outboundCol.textContent).toContain('billing.md');
+      expect(outboundCol.textContent).not.toContain('auth.md');
+    });
+
+    it("labels the inbound row '<- from' with the source spec and the outbound row '-> to'", async () => {
+      mockFetchForLinks([inboundLink, outboundLink]);
+      const { container } = render(DetailPanel, { props: { entity: specEntityWithRepo } });
+      const linksTab = screen.getByRole('tab', { name: /links/i });
+      await fireEvent.click(linksTab);
+
+      const rows = await waitFor(() => {
+        const items = container.querySelectorAll('.link-item');
+        expect(items.length).toBe(2);
+        return items;
+      });
+
+      const inboundRow = [...rows].find((r) => r.textContent.includes('system/auth.md'));
+      const outboundRow = [...rows].find((r) => r.textContent.includes('system/billing.md'));
+      expect(inboundRow).toBeTruthy();
+      expect(outboundRow).toBeTruthy();
+      expect(inboundRow.querySelector('.link-direction').textContent).toBe('<- from');
+      expect(outboundRow.querySelector('.link-direction').textContent).toBe('-> to');
+    });
+
+    it('shows the staleness badge on a stale inbound link', async () => {
+      mockFetchForLinks([inboundLink]);
+      const { container } = render(DetailPanel, { props: { entity: specEntityWithRepo } });
+      const linksTab = screen.getByRole('tab', { name: /links/i });
+      await fireEvent.click(linksTab);
+
+      const row = await waitFor(() => {
+        const item = container.querySelector('.link-item');
+        expect(item).toBeTruthy();
+        return item;
+      });
+      // Staleness still surfaces via the status badge on the link row.
+      expect(row.textContent).toContain('stale');
+    });
+  });
+
   describe('Editor Split pop-out', () => {
     const specEntityWithRepo = {
       type: 'spec',
