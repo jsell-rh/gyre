@@ -3680,7 +3680,7 @@
                 {#if inbound.length > 0}
                   <div class="link-column link-column-inbound">
                     {#each inbound as link}
-                      {@const target = typeof link === 'string' ? link : (link.target_path ?? link.target)}
+                      {@const target = typeof link === 'string' ? link : (link.source_path ?? link.target_path ?? link.target)}
                       {@const kind = typeof link === 'object' ? (link.kind ?? link.link_type ?? link.type) : null}
                       <button class="link-node link-node-inbound" onclick={() => navigateTo('spec', target, { path: target, repo_id: entity?.data?.repo_id })} title={target}>
                         <span class="link-node-name">{target?.split('/').pop()}</span>
@@ -3724,7 +3724,11 @@
               <span class="progress-section-label" style="margin-top: var(--space-4)">All Links ({linkArray.length})</span>
               <ul class="links-list">
                 {#each linkArray as link}
-                  {@const target = typeof link === 'string' ? link : (link.target_path ?? link.target ?? JSON.stringify(link))}
+                  {@const target = typeof link === 'string'
+                    ? link
+                    : link.direction === 'inbound'
+                      ? (link.source_path ?? link.target_path ?? link.target ?? JSON.stringify(link))
+                      : (link.target_path ?? link.target ?? JSON.stringify(link))}
                   {@const kind = typeof link === 'object' ? (link.kind ?? link.link_type ?? link.type) : null}
                   {@const direction = typeof link === 'object' ? link.direction : null}
                   {@const isConflict = kind === 'conflicts_with' || kind === 'conflicts'}
