@@ -2522,7 +2522,7 @@ impl gyre_ports::CascadeTestResultRepository for MemCascadeTestResultRepository 
             .filter(|r| r.dependent_repo_id.as_str() == repo_id.as_str())
             .cloned()
             .collect();
-        rows.sort_by(|a, b| b.recorded_at.cmp(&a.recorded_at));
+        rows.sort_by_key(|r| std::cmp::Reverse(r.recorded_at));
         Ok(rows)
     }
 
@@ -2538,7 +2538,7 @@ impl gyre_ports::CascadeTestResultRepository for MemCascadeTestResultRepository 
             .filter(|r| r.merged_repo_id.as_str() == repo_id.as_str())
             .cloned()
             .collect();
-        rows.sort_by(|a, b| b.recorded_at.cmp(&a.recorded_at));
+        rows.sort_by_key(|r| std::cmp::Reverse(r.recorded_at));
         Ok(rows)
     }
 }

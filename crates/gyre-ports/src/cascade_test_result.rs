@@ -22,6 +22,7 @@ use gyre_domain::CascadeTestResult;
 ///   if the task has no reported result.
 /// - List methods return results ordered newest-first (`recorded_at`
 ///   descending).
+#[allow(clippy::double_must_use)] // async_trait generates a must_use future for each method.
 #[async_trait]
 pub trait CascadeTestResultRepository: Send + Sync {
     /// Persist a result, replacing any existing row for the same
