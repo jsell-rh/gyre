@@ -699,9 +699,10 @@ pub(crate) async fn spawn_agent_core(
     }
 
     // M22.2 / agent-runtime.md §4: Budget enforcement — check workspace
-    // concurrent-agent and daily limits, then the repo-level budget
-    // override (inherits the workspace limit when unset).
-    super::budget::check_spawn_budget(state, &repo.workspace_id.to_string())
+    // concurrent-agent and daily limits (dependent-weighted when the repo
+    // inherits the workspace limit, see budget.rs), then the repo-level
+    // budget (override, or the weighted inherited limit).
+    super::budget::check_spawn_budget_for_repo(state, &repo)
         .await
         .map_err(ApiError::TooManyRequests)?;
     super::budget::check_repo_spawn_budget(state, &repo)

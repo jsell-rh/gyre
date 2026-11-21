@@ -496,9 +496,60 @@ pub async fn check_spawn_budget_for(
 ) -> Result<(), String> {
     let key = workspace_key(project_id);
     let config = effective_workspace_config(state, &key).await;
+    return enforce_workspace_spawn_caps(state, project_id, &key, &config, requested).await;
+}
+
+/// Check the workspace-level budget limits for a spawn into `repo` — the
+/// workspace half of the spawn-time budget check (the repo-level half is
+/// [`check_repo_spawn_budget`]).
+///
+/// Identical to [`check_spawn_budget`] except for the caps enforced when
+/// `repo` has NO budget override (it inherits the workspace limit): they
+/// are weighted by the repo's dependent count read from the live
+/// dependency graph (dependency-graph.md §Workspace Orchestrator
+/// Integration — Budget allocation: "repos with many dependents may
+/// warrant higher agent budgets"). Without this weighting the plain
+/// workspace check would reject at the unweighted limit and the
+/// dependent-weighted per-repo cap could never take effect. A repo WITH
+/// an override is checked against the plain workspace limits — the
+/// override always wins on the repo level and is never influenced by
+/// dependents.
+pub async fn check_spawn_budget_for_repo(
+    state: &AppState,
+    repo: &gyre_domain::Repository,
+) -> Result<(), String> {
+    let key = workspace_key(repo.workspace_id.as_str());
+    let config = effective_workspace_config(state, &key).await;
+    if repo.budget.is_some() {
+        return enforce_workspace_spawn_caps(state, repo.workspace_id.as_str(), &key, &config, 1)
+            .await;
+    }
+    let dependents = repo_dependent_count(state, &repo.id).await;
+    let weighted = weight_inherited_caps(&config, dependent_boost_factor(dependents));
+    return enforce_workspace_spawn_caps(state, repo.workspace_id.as_str(), &key, &weighted, 1)
+        .await;
+}
+
+/// Workspace-level spawn-cap enforcement body shared by the plain and the
+/// repo-aware entry points: evaluates the workspace's real-time usage
+/// against `config`'s caps. `config` is the caller-resolved effective
+/// config — the plain entry point passes the unweighted effective
+/// workspace limits; the repo-aware one passes the dependent-weighted
+/// limits when the spawn target inherits the workspace limit (no repo
+/// override). Usage is always the workspace aggregate: the dependent
+/// boost raises the aggregate ceiling to at most 2x the workspace limit
+/// (the boost cap), so a boosted repo can grow past the unweighted limit
+/// but never past a bounded multiple of it.
+async fn enforce_workspace_spawn_caps(
+    state: &AppState,
+    project_id: &str,
+    ws_key: &str,
+    config: &BudgetConfig,
+    requested: u32,
+) -> Result<(), String> {
     let usage = state
         .budget_usages
-        .get_usage(&key)
+        .get_usage(ws_key)
         .await
         .ok()
         .flatten()
@@ -549,19 +600,151 @@ pub async fn check_spawn_budget_for(
     Ok(())
 }
 
-/// Check a repo-level budget override (agent-runtime.md §4 Cascade: "When no
-/// repo-level budget is set, the repo inherits the workspace limit" — the
-/// workspace check in `check_spawn_budget` covers that case). Called at
-/// agent spawn time alongside the workspace check. Enforces every field of
-/// the override: the daily token/cost ceilings and the concurrent-agent cap
-/// (the lifetime ceiling is enforced continuously by
-/// `enforce_agent_lifetimes`).
+// ── Dependent-count budget weighting (dependency-graph.md §Workspace
+//    Orchestrator Integration — Budget allocation) ─────────────────────
+
+/// Boost per dependent: each dependent repo adds 25% of the inherited
+/// (workspace) limit to the enforced caps.
+const DEPENDENT_BOOST_PER_REPO: f64 = 0.25;
+/// Ceiling on the boost: a repo inheriting the workspace limit never
+/// enforces more than 2x that limit, however many dependents it has.
+const DEPENDENT_BOOST_CAP: f64 = 2.0;
+
+/// The dependent-count weighting factor applied to the caps a repo
+/// inherits from the workspace budget: `1 + 0.25 × dependents`, capped at
+/// 2.0. Monotonic in the dependent count and never below 1.0, so the
+/// weighting only ever raises the enforced caps above the unweighted
+/// inherited limit, never reduces them.
+pub(crate) fn dependent_boost_factor(dependents: usize) -> f64 {
+    (1.0 + DEPENDENT_BOOST_PER_REPO * dependents as f64).min(DEPENDENT_BOOST_CAP)
+}
+
+/// The repo's dependent count from the live dependency graph: the number
+/// of DependencyEdges whose target is this repo (repos that depend on
+/// it). A graph read failure logs and yields 0 — the unweighted inherited
+/// limit — which can only under-admit, never over-admit.
+async fn repo_dependent_count(state: &AppState, repo_id: &Id) -> usize {
+    match state.dependencies.list_dependents(repo_id).await {
+        Ok(edges) => edges.len(),
+        Err(e) => {
+            tracing::warn!(
+                %repo_id,
+                error = %e,
+                "dependent-count budget weighting: graph read failed, using unweighted limit"
+            );
+            0
+        }
+    }
+}
+
+/// Weight the token/cost/concurrent-agent caps of an inherited
+/// (workspace) budget config by the dependent-count boost factor. `None`
+/// caps stay `None` (no configured limit → nothing to weight).
+/// Fractional results round up so a partial boost still admits the
+/// resource it represents. The lifetime ceiling and the enforcement
+/// action are resource-safety / policy controls, not capacity, and stay
+/// unweighted.
+fn weight_inherited_caps(config: &BudgetConfig, factor: f64) -> BudgetConfig {
+    BudgetConfig {
+        max_tokens_per_day: config
+            .max_tokens_per_day
+            .map(|max| ((max as f64) * factor).ceil() as u64),
+        max_cost_per_day: config.max_cost_per_day.map(|max| (max * factor).ceil()),
+        max_concurrent_agents: config
+            .max_concurrent_agents
+            .map(|max| ((max as f64) * factor).ceil() as u32),
+        max_agent_lifetime_secs: config.max_agent_lifetime_secs,
+        enforcement_action: config.enforcement_action,
+    }
+}
+
+/// Check the repo-level budget at agent spawn time (agent-runtime.md §4
+/// Cascade). Two paths:
+///
+/// - **Override** (`repo.budget` set): enforces every field of the
+///   override — the daily token/cost ceilings and the concurrent-agent
+///   cap (the lifetime ceiling is enforced continuously by
+///   `enforce_agent_lifetimes`). An explicit override always wins exactly
+///   as configured, regardless of the repo's dependent count.
+/// - **Inheritance** (`repo.budget` None): the repo inherits the workspace
+///   limit, weighted by its dependent count (see below) and enforced
+///   per-repo against the repo's own usage.
+///
+/// ## Dependent-count weighting (the inheritance path)
+///
+/// dependency-graph.md §Workspace Orchestrator Integration — Budget
+/// allocation: "repos with many dependents may warrant higher agent
+/// budgets (their changes have higher impact)". When a repo has no
+/// override, the enforced caps are the effective workspace limits
+/// weighted by the repo's dependent count, read live from the dependency
+/// graph (`state.dependencies.list_dependents`):
+///
+/// ```text
+/// enforced cap = workspace cap × (1 + 25% per dependent), capped at 2x
+/// ```
+///
+/// The rule is monotonic in the dependent count, bounded at 2x the
+/// workspace limit, and never reduces a repo below the unweighted
+/// inherited limit (the factor is ≥ 1.0). Example: with workspace
+/// `max_concurrent_agents = 2`, a repo with 5 dependents enforces
+/// 2 × 2.0 = 4 concurrent agents while a 0-dependent repo stays capped
+/// at 2. The workspace-level aggregate check
+/// (`check_spawn_budget_for_repo`) applies the same weighted caps to the
+/// workspace totals, so the aggregate stays bounded by the same 2x ceiling.
 pub async fn check_repo_spawn_budget(
     state: &AppState,
     repo: &gyre_domain::Repository,
 ) -> Result<(), String> {
     let Some(budget) = repo.budget.as_ref() else {
-        return Ok(()); // inherit the workspace limit
+        // Inheritance path: dependent-count weighting (doc above).
+        let ws_key = workspace_key(repo.workspace_id.as_str());
+        let ws_config = effective_workspace_config(state, &ws_key).await;
+        let dependents = repo_dependent_count(state, &repo.id).await;
+        let caps = weight_inherited_caps(&ws_config, dependent_boost_factor(dependents));
+        let key = repo_key(repo.id.as_str());
+        let usage = state
+            .budget_usages
+            .get_usage(&key)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| BudgetUsage {
+                entity_type: "repo".into(),
+                entity_id: repo.id.clone(),
+                tokens_used_today: 0,
+                cost_today: 0.0,
+                active_agents: 0,
+                period_start: now_secs(),
+                compute_minutes: 0,
+            });
+        if let Some(max_tokens) = caps.max_tokens_per_day {
+            if usage.tokens_used_today >= max_tokens {
+                return Err(format!(
+                    "repo budget exceeded: dependent-weighted max_tokens_per_day={max_tokens} \
+                     (used {} today, {dependents} dependents)",
+                    usage.tokens_used_today
+                ));
+            }
+        }
+        if let Some(max_cost) = caps.max_cost_per_day {
+            if usage.cost_today >= max_cost {
+                return Err(format!(
+                    "repo budget exceeded: dependent-weighted max_cost_per_day=${max_cost:.4} \
+                     (spent ${:.4}, {dependents} dependents)",
+                    usage.cost_today
+                ));
+            }
+        }
+        if let Some(max_concurrent) = caps.max_concurrent_agents {
+            let active = count_active_agents_in_repo(state, repo).await;
+            if active >= max_concurrent as usize {
+                return Err(format!(
+                    "repo budget exceeded: dependent-weighted max_concurrent_agents={max_concurrent} \
+                     ({active} active in repo, {dependents} dependents)"
+                ));
+            }
+        }
+        return Ok(());
     };
     let key = repo_key(repo.id.as_str());
     let usage = state
@@ -4050,6 +4233,335 @@ mod tests {
         assert!(super::check_repo_spawn_budget(state.as_ref(), &repo)
             .await
             .is_ok());
+    }
+
+    // ── Dependent-count budget weighting (dependency-graph.md §Workspace
+    //    Orchestrator Integration — Budget allocation) ──────────────────
+
+    #[test]
+    fn dependent_boost_factor_is_monotonic_and_bounded() {
+        // +25% of the inherited limit per dependent, never below 1.0,
+        // capped at 2x.
+        assert_eq!(super::dependent_boost_factor(0), 1.0);
+        assert_eq!(super::dependent_boost_factor(1), 1.25);
+        assert_eq!(super::dependent_boost_factor(3), 1.75);
+        assert_eq!(super::dependent_boost_factor(4), 2.0);
+        // Capped at 2x however many dependents.
+        assert_eq!(super::dependent_boost_factor(5), 2.0);
+        assert_eq!(super::dependent_boost_factor(1000), 2.0);
+        // Monotonic across the whole range.
+        let mut prev = 0.0;
+        for n in 0..50 {
+            let f = super::dependent_boost_factor(n);
+            assert!(f >= prev, "factor must be monotonic at {n}");
+            prev = f;
+        }
+    }
+
+    /// Seed `count` dependency edges targeting `repo_id` (repos that
+    /// depend on it) in the live dependency graph.
+    async fn seed_dependents(state: &crate::AppState, repo_id: &gyre_common::Id, count: usize) {
+        for i in 0..count {
+            let edge = gyre_domain::DependencyEdge::new(
+                gyre_common::Id::new(format!("edge-{repo_id}-{i}")),
+                gyre_common::Id::new(format!("dep-repo-{repo_id}-{i}")),
+                repo_id.clone(),
+                gyre_domain::DependencyType::Code,
+                "Cargo.toml",
+                "target",
+                gyre_domain::DetectionMethod::CargoToml,
+                0,
+            );
+            state.dependencies.save(&edge).await.unwrap();
+        }
+    }
+
+    /// An Active agent bound to `repo_id` directly (the orchestrator
+    /// linkage path — count_active_agents_in_repo's first arm).
+    async fn seed_active_agent_in_repo(
+        state: &crate::AppState,
+        repo_id: &gyre_common::Id,
+        ws_id: &gyre_common::Id,
+        n: usize,
+    ) {
+        let mut agent = Agent::new(
+            gyre_common::Id::new(format!("agent-{repo_id}-{n}")),
+            "worker",
+            now_secs_static(),
+        );
+        agent.workspace_id = ws_id.clone();
+        agent.repo_id = Some(repo_id.clone());
+        agent.status = AgentStatus::Active;
+        state.agents.create(&agent).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn dependent_weighted_repo_budget_admits_more_concurrent_agents() {
+        // dependency-graph.md §Budget allocation: with workspace
+        // max_concurrent_agents=2 and the boost capped at 2x, a repo with
+        // 5 dependents and no override may run 4 concurrent agents.
+        // Pre-fix, nothing in the inheritance path read dependent counts
+        // and nothing was enforced per-repo — this test fails on that.
+        let state = crate::mem::test_state();
+        let ws_id = gyre_common::Id::new("ws-dweight");
+        state
+            .budget_configs
+            .set_config(
+                &super::workspace_key("ws-dweight"),
+                &gyre_domain::BudgetConfig {
+                    max_concurrent_agents: Some(2),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let repo_heavy = gyre_domain::Repository::new(
+            gyre_common::Id::new("repo-heavy"),
+            ws_id.clone(),
+            "heavy",
+            "/tmp/repo-heavy",
+            0,
+        );
+        // No override → inherits the workspace limit, weighted.
+        state.repos.create(&repo_heavy).await.unwrap();
+        seed_dependents(state.as_ref(), &repo_heavy.id, 5).await;
+
+        // 2 active agents in the repo — the unweighted inherited limit,
+        // where spawns previously stopped.
+        for n in 0..2 {
+            seed_active_agent_in_repo(state.as_ref(), &repo_heavy.id, &ws_id, n).await;
+        }
+        assert!(
+            super::check_repo_spawn_budget(state.as_ref(), &repo_heavy)
+                .await
+                .is_ok(),
+            "5 dependents × 2x cap = 4 concurrent agents; 2 active must admit a 3rd"
+        );
+
+        // 3 active: still under the weighted cap of 4.
+        seed_active_agent_in_repo(state.as_ref(), &repo_heavy.id, &ws_id, 2).await;
+        assert!(super::check_repo_spawn_budget(state.as_ref(), &repo_heavy)
+            .await
+            .is_ok());
+
+        // 4 active: at the weighted cap — the 5th spawn is rejected, with
+        // the dependent count visible in the enforcement decision.
+        seed_active_agent_in_repo(state.as_ref(), &repo_heavy.id, &ws_id, 3).await;
+        let err = super::check_repo_spawn_budget(state.as_ref(), &repo_heavy)
+            .await
+            .expect_err("weighted cap is 4: a 5th concurrent agent must be rejected");
+        assert!(
+            err.contains("max_concurrent_agents=4"),
+            "error names the weighted cap: {err}"
+        );
+        assert!(err.contains("dependents"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn dependent_weighted_workspace_check_admits_boosted_spawn_only_for_dependent_repo() {
+        // The workspace-level half of the spawn check: with workspace
+        // max_concurrent_agents=2 and 2 agents already active
+        // workspace-wide, a 3rd spawn into the 5-dependent repo is
+        // admitted (weighted aggregate cap 4) while the same spawn into a
+        // 0-dependent repo is still rejected at the unweighted limit.
+        let state = crate::mem::test_state();
+        let ws_id = gyre_common::Id::new("ws-dwws");
+        state
+            .budget_configs
+            .set_config(
+                &super::workspace_key("ws-dwws"),
+                &gyre_domain::BudgetConfig {
+                    max_concurrent_agents: Some(2),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let repo_heavy = gyre_domain::Repository::new(
+            gyre_common::Id::new("repo-dwws-heavy"),
+            ws_id.clone(),
+            "heavy",
+            "/tmp/repo-dwws-heavy",
+            0,
+        );
+        state.repos.create(&repo_heavy).await.unwrap();
+        seed_dependents(state.as_ref(), &repo_heavy.id, 5).await;
+
+        let repo_plain = gyre_domain::Repository::new(
+            gyre_common::Id::new("repo-dwws-plain"),
+            ws_id.clone(),
+            "plain",
+            "/tmp/repo-dwws-plain",
+            0,
+        );
+        state.repos.create(&repo_plain).await.unwrap();
+
+        // 2 active agents in the dependent-heavy repo — the workspace
+        // counter is at its unweighted limit.
+        for n in 0..2 {
+            seed_active_agent_in_repo(state.as_ref(), &repo_heavy.id, &ws_id, n).await;
+        }
+        super::increment_active_agents(state.as_ref(), "ws-dwws").await;
+        super::increment_active_agents(state.as_ref(), "ws-dwws").await;
+
+        assert!(
+            super::check_spawn_budget_for_repo(state.as_ref(), &repo_heavy)
+                .await
+                .is_ok(),
+            "3rd spawn into the 5-dependent repo must be admitted by the weighted cap"
+        );
+        let err = super::check_spawn_budget_for_repo(state.as_ref(), &repo_plain)
+            .await
+            .expect_err("0-dependent repo stays capped at the unweighted workspace limit");
+        assert!(
+            err.contains("max_concurrent_agents=2"),
+            "plain repo enforces the unweighted limit: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dependent_weighted_token_cap_raises_repo_limit() {
+        // The token dimension of the same weighting: ws limit 1000, repo
+        // with 2 dependents (factor 1.5 → 1500), repo usage 1200 tokens —
+        // over the unweighted inherited limit, under the weighted one.
+        let state = crate::mem::test_state();
+        state
+            .budget_configs
+            .set_config(
+                &super::workspace_key("ws-dtok"),
+                &gyre_domain::BudgetConfig {
+                    max_tokens_per_day: Some(1000),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let repo_heavy = gyre_domain::Repository::new(
+            gyre_common::Id::new("repo-dtok"),
+            gyre_common::Id::new("ws-dtok"),
+            "heavy",
+            "/tmp/repo-dtok",
+            0,
+        );
+        state.repos.create(&repo_heavy).await.unwrap();
+        seed_dependents(state.as_ref(), &repo_heavy.id, 2).await;
+        state
+            .budget_usages
+            .add_tokens_cost(
+                &super::repo_key("repo-dtok"),
+                "repo",
+                "repo-dtok",
+                0,
+                1200,
+                0.0,
+            )
+            .await
+            .unwrap();
+        assert!(
+            super::check_repo_spawn_budget(state.as_ref(), &repo_heavy)
+                .await
+                .is_ok(),
+            "1200 tokens < weighted 1500 cap: spawn must be admitted"
+        );
+
+        // Past the weighted cap → rejected with the weighted limit named.
+        state
+            .budget_usages
+            .add_tokens_cost(
+                &super::repo_key("repo-dtok"),
+                "repo",
+                "repo-dtok",
+                0,
+                310,
+                0.0,
+            )
+            .await
+            .unwrap();
+        let err = super::check_repo_spawn_budget(state.as_ref(), &repo_heavy)
+            .await
+            .expect_err("1510 tokens > weighted 1500 cap: spawn must be rejected");
+        assert!(
+            err.contains("max_tokens_per_day=1500"),
+            "error names the weighted token cap: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_repo_override_wins_over_dependent_weighting() {
+        // A repo with an explicit budget override keeps exactly that
+        // override regardless of dependent count — the weighting applies
+        // only on the inheritance path.
+        let state = crate::mem::test_state();
+        let ws_id = gyre_common::Id::new("ws-dovr");
+        state
+            .budget_configs
+            .set_config(
+                &super::workspace_key("ws-dovr"),
+                &gyre_domain::BudgetConfig {
+                    max_concurrent_agents: Some(2),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let mut repo_ovr = gyre_domain::Repository::new(
+            gyre_common::Id::new("repo-dovr"),
+            ws_id.clone(),
+            "ovr",
+            "/tmp/repo-dovr",
+            0,
+        );
+        repo_ovr.budget = Some(gyre_domain::BudgetConfig {
+            max_concurrent_agents: Some(1),
+            ..Default::default()
+        });
+        state.repos.create(&repo_ovr).await.unwrap();
+        seed_dependents(state.as_ref(), &repo_ovr.id, 5).await;
+
+        // One active agent: the override (cap 1) fires exactly as
+        // configured — had the dependents weighted it, the cap would be 2
+        // and the spawn admitted.
+        seed_active_agent_in_repo(state.as_ref(), &repo_ovr.id, &ws_id, 0).await;
+        let err = super::check_repo_spawn_budget(state.as_ref(), &repo_ovr)
+            .await
+            .expect_err("override max_concurrent_agents=1 must fire verbatim");
+        assert!(
+            err.contains("max_concurrent_agents=1"),
+            "override enforced exactly, not weighted: {err}"
+        );
+        assert!(
+            !err.contains("dependent-weighted"),
+            "override path must not report a weighted cap: {err}"
+        );
+
+        // Workspace-level half: an override repo is checked against the
+        // PLAIN workspace caps — no dependent weighting. Workspace
+        // counter at 2 (= the ws limit): the spawn into the override repo
+        // is rejected at 2; weighting would have raised the cap to 4.
+        let mut repo_ovr2 = gyre_domain::Repository::new(
+            gyre_common::Id::new("repo-dovr2"),
+            ws_id.clone(),
+            "ovr2",
+            "/tmp/repo-dovr2",
+            0,
+        );
+        repo_ovr2.budget = Some(gyre_domain::BudgetConfig {
+            max_concurrent_agents: Some(2),
+            ..Default::default()
+        });
+        state.repos.create(&repo_ovr2).await.unwrap();
+        super::increment_active_agents(state.as_ref(), "ws-dovr").await;
+        super::increment_active_agents(state.as_ref(), "ws-dovr").await;
+        let err = super::check_spawn_budget_for_repo(state.as_ref(), &repo_ovr2)
+            .await
+            .expect_err("override repo gets the plain workspace caps, never weighted");
+        assert!(
+            err.contains("max_concurrent_agents=2"),
+            "plain workspace cap enforced for override repos: {err}"
+        );
     }
 
     #[tokio::test]
