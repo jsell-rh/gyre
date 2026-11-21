@@ -22,6 +22,13 @@ pub struct ActivityQueryParams {
 /// Synthesizes activity events from notifications (which are populated for all
 /// key lifecycle events: agent completions, gate failures, spec approvals, MR
 /// merges, etc.). Returns a generic JSON array consumed by the dashboard.
+///
+/// `since` (epoch SECONDS) is the time-period query (activity-dashboard.md
+/// §"over any time period"): when present, only durable notifications with
+/// `created_at >= since` are returned, newest-first. The filter executes in
+/// the repository layer ([`NotificationRepository::list_since`]) — never as
+/// post-fetch truncation of a `list_recent` window, which would silently
+/// return the globally newest rows outside the requested period.
 pub async fn activity_handler(
     State(state): State<Arc<AppState>>,
     _auth: AuthenticatedAgent,
@@ -29,11 +36,11 @@ pub async fn activity_handler(
 ) -> Json<Vec<serde_json::Value>> {
     let lim = params.limit.unwrap_or(30);
 
-    let notifs = state
-        .notifications
-        .list_recent(lim)
-        .await
-        .unwrap_or_default();
+    let notifs = match params.since {
+        Some(since) => state.notifications.list_since(since as i64, lim).await,
+        None => state.notifications.list_recent(lim).await,
+    }
+    .unwrap_or_default();
 
     let events: Vec<serde_json::Value> = notifs
         .into_iter()
@@ -80,6 +87,25 @@ pub async fn activity_handler(
                 "task_id": body.get("task_id").and_then(|v| v.as_str()),
                 "spec_path": body.get("spec_path").and_then(|v| v.as_str()),
                 "repo_id": n.source.repo_id.as_ref().map(|r| r.as_str()),
+                // Artifact refs the notification body carries (activity-dashboard.md
+                // §"Each activity entry links to the relevant artifact"): surfaced so
+                // feed consumers can deep-link gate failures to the MR's gate output
+                // and commits/branches to their repo views. No feed entry with a
+                // resolvable artifact is a dead end.
+                "gate_name": body
+                    .get("gate_name")
+                    .or_else(|| body.get("gate"))
+                    .and_then(|v| v.as_str()),
+                "commit_sha": body
+                    .get("commit_sha")
+                    .or_else(|| body.get("merge_commit_sha"))
+                    .or_else(|| body.get("sha"))
+                    .and_then(|v| v.as_str()),
+                "branch": body
+                    .get("branch")
+                    .or_else(|| body.get("source_branch"))
+                    .and_then(|v| v.as_str()),
+                "workspace_id": n.workspace_id.as_str(),
             })
         })
         .collect();
@@ -184,7 +210,9 @@ mod tests {
     use axum::{body::Body, Router};
     use gyre_common::message::{Destination, Message, MessageKind, MessageOrigin};
     use gyre_common::Id;
-    use gyre_domain::{Agent, User, Workspace, WorkspaceMembership, WorkspaceRole};
+    use gyre_domain::{
+        Agent, Notification, NotificationType, User, Workspace, WorkspaceMembership, WorkspaceRole,
+    };
     use http::{Request, StatusCode};
     use tower::ServiceExt;
 
@@ -504,5 +532,59 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK, "body: {json}");
         assert_eq!(json.as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn unified_activity_honors_since_against_durable_notifications() {
+        // Time-period query (task AC, defect (b)): seed one durable
+        // notification older than T and two newer, then GET
+        // /api/v1/activity?since=T — the stale entry must be absent, the
+        // newer ones present, newest-first. The filter must run in the
+        // repository (list_since), not as post-fetch truncation of a
+        // recency window.
+        let state = test_state();
+        let make = |id: &str, created_at: i64| {
+            Notification::new(
+                Id::new(id),
+                Id::new("ws-since"),
+                Id::new("user-1"),
+                NotificationType::MrMerged,
+                format!("n {id}"),
+                "default",
+                created_at,
+            )
+        };
+        // Deliberately more rows than the request limit so a
+        // post-fetch-truncation implementation would ALSO fail by paging
+        // the globally newest rows into the window.
+        state.notifications.create(&make("old-1", 900)).await.unwrap();
+        state.notifications.create(&make("old-2", 950)).await.unwrap();
+        state.notifications.create(&make("new-1", 1_100)).await.unwrap();
+        state.notifications.create(&make("new-2", 1_200)).await.unwrap();
+
+        let app = app(state);
+
+        // since=T excludes created_at < T, newest first.
+        let (status, json) = get_activity(&app, "/api/v1/activity?since=1000", "test-token").await;
+        assert_eq!(status, StatusCode::OK, "body: {json}");
+        let arr = json.as_array().unwrap();
+        assert_eq!(arr.len(), 2, "stale entries must be absent: {json}");
+        assert_eq!(arr[0]["timestamp"], 1_200);
+        assert_eq!(arr[1]["timestamp"], 1_100);
+
+        // Without since: the plain recency window still works.
+        let (status, json) = get_activity(&app, "/api/v1/activity?limit=3", "test-token").await;
+        assert_eq!(status, StatusCode::OK, "body: {json}");
+        let arr = json.as_array().unwrap();
+        assert_eq!(arr.len(), 3);
+        assert_eq!(arr[0]["timestamp"], 1_200);
+
+        // since older than everything: all rows return, newest first.
+        let (status, json) = get_activity(&app, "/api/v1/activity?since=0", "test-token").await;
+        assert_eq!(status, StatusCode::OK, "body: {json}");
+        let arr = json.as_array().unwrap();
+        assert_eq!(arr.len(), 4);
+        assert_eq!(arr[0]["timestamp"], 1_200);
+        assert_eq!(arr[3]["timestamp"], 900);
     }
 }

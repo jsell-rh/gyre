@@ -16,6 +16,7 @@
   import Icon from '../lib/Icon.svelte';
   import Modal from '../lib/Modal.svelte';
   import { toastSuccess, toastError } from '../lib/toast.svelte.js';
+  import { activityStreamState, mergeFetchedActivity } from '../lib/activityStream.svelte.js';
 
   const openDetailPanel = getContext('openDetailPanel') ?? null;
   const goToEntityDetail = getContext('goToEntityDetail') ?? null;
@@ -242,8 +243,18 @@
 
   // ── Recent Activity state ───────────────────────────────────────────────
   let activityLoading = $state(true);
-  let activityEvents = $state([]);
   let showAllActivity = $state(false);
+  // Real-time (activity-dashboard.md §"Real-time activity feed"): the
+  // timeline renders the live stream — bus Messages pushed over the shared
+  // /ws connection (any subscribed workspace) plus the fetched page, merged
+  // into one deduped, newest-first list by activityStream.svelte.js.
+  let activityEvents = $derived.by(() => {
+    const buckets = Object.values(activityStreamState.byWorkspace);
+    const all = [];
+    for (const bucket of buckets) all.push(...bucket);
+    all.sort((a, b) => Number(b.timestamp ?? b.created_at ?? 0) - Number(a.timestamp ?? a.created_at ?? 0));
+    return all;
+  });
 
   // ── Per-workspace enrichment data ───────────────────────────────────────
   let allRepos = $state([]);
@@ -472,9 +483,20 @@
     activityLoading = true;
     try {
       const data = await api.activity(20);
-      activityEvents = Array.isArray(data) ? data : [];
+      const events = Array.isArray(data) ? data : [];
+      // Bucket each fetched entry under its own workspace so live pushes and
+      // fetches share one deduped list; entries without a workspace (legacy
+      // unified-feed rows) land in a synthetic bucket only this global
+      // timeline reads.
+      const byWs = new Map();
+      for (const e of events) {
+        const bucket = e.workspace_id ?? '_unified';
+        if (!byWs.has(bucket)) byWs.set(bucket, []);
+        byWs.get(bucket).push(e);
+      }
+      for (const [bucket, list] of byWs) mergeFetchedActivity(bucket, list);
     } catch {
-      activityEvents = [];
+      // Fetch failed — the live stream keeps whatever it already tracks.
     } finally {
       activityLoading = false;
     }

@@ -2,7 +2,7 @@
 title: "Activity Dashboard completion: real-time durable feed with time-period queries, artifact links, Try-it ephemeral preview environments, TTY attach, and trial analytics"
 spec_ref: "Spec gap spec-b128f93cd5d035d28c8bbf7f / activity-dashboard-completion / f0cbfae7cd02"
 depends_on: []
-progress: not-started
+progress: ready-for-review
 commits: []
 ---
 

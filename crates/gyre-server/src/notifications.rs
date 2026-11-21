@@ -954,6 +954,10 @@ impl NotificationRepository for BroadcastingNotificationRepo {
         self.inner.list_recent(limit).await
     }
 
+    async fn list_since(&self, since: i64, limit: usize) -> anyhow::Result<Vec<Notification>> {
+        self.inner.list_since(since, limit).await
+    }
+
     async fn list_by_workspace_type_since(
         &self,
         workspace_id: &Id,
