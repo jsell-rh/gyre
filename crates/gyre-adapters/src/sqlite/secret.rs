@@ -43,10 +43,11 @@ fn at_rest_format() -> AtRestFormat {
         .as_str()
     {
         "legacy" | "aesgcm" | "aes-gcm" => AtRestFormat::Legacy,
-        // Default: SOPS (admin-panel.md: "SOPS as default"). The `vault`
-        // value never reaches this adapter — build_state wires the Vault
-        // repository instead — but treating it like the default here keeps
-        // a misconfigured deployment readable.
+        // Default: SOPS (admin-panel.md: "SOPS as default"). Unrecognized
+        // values never get here in server deployments — build_state's
+        // build_secret_repository rejects them at startup — and `vault`
+        // selects the Vault repository instead of this adapter; treating
+        // those as the default keeps direct library use readable.
         _ => AtRestFormat::Sops,
     }
 }
@@ -309,24 +310,46 @@ fn decrypt_at_rest(
     let plaintext = decrypt_value(&key, encrypted_value, nonce)?;
 
     if at_rest_format() == AtRestFormat::Sops {
-        // First-access migration: re-encrypt as a SOPS document.
+        // First-access migration: re-encrypt as a SOPS document. The UPDATE
+        // is a compare-and-swap on the legacy bytes this read observed
+        // (`id` + `encrypted_value`): if a concurrent writer (e.g.
+        // POST /secrets/:id/rotate) committed between our SELECT and this
+        // UPDATE, zero rows match and the migration is skipped — an
+        // unguarded UPDATE would silently revert the rotation to the
+        // pre-rotation plaintext (lost update).
         let identity = load_sops_identity(conn)?;
         match sops::sops_encrypt(&plaintext, &identity, now_secs()) {
             Ok(doc) => {
-                let updated = diesel::update(secrets::table.filter(secrets::id.eq(row_id)))
-                    .set((
-                        secrets::encrypted_value.eq(doc),
-                        secrets::nonce.eq(Vec::<u8>::new()),
-                    ))
-                    .execute(conn);
-                if let Err(e) = updated {
+                let updated = diesel::update(
+                    secrets::table
+                        .filter(secrets::id.eq(row_id))
+                        .filter(secrets::encrypted_value.eq(encrypted_value)),
+                )
+                .set((
+                    secrets::encrypted_value.eq(doc),
+                    secrets::nonce.eq(Vec::<u8>::new()),
+                ))
+                .execute(conn);
+                match updated {
+                    // A concurrent write replaced the row (rotate or another
+                    // migration): the newer stored value stands; the row is
+                    // no longer legacy, so no retry is needed.
+                    Ok(0) => {
+                        tracing::debug!(
+                            secret_id = row_id,
+                            "legacy→SOPS migration skipped: secret changed concurrently"
+                        );
+                    }
                     // The value decrypted fine — a failed migration write
                     // must not fail the read; the row migrates on the next
                     // access.
-                    tracing::warn!(
-                        secret_id = row_id,
-                        "re-encrypting legacy secret to SOPS failed (will retry): {e}"
-                    );
+                    Err(e) => {
+                        tracing::warn!(
+                            secret_id = row_id,
+                            "re-encrypting legacy secret to SOPS failed (will retry): {e}"
+                        );
+                    }
+                    Ok(_) => {}
                 }
             }
             Err(e) => {
@@ -758,6 +781,70 @@ mod tests {
         assert!(resolved
             .iter()
             .any(|(n, v)| n == "LEGACY" && *v == b"legacy-plaintext".to_vec()));
+    }
+
+    #[tokio::test]
+    async fn legacy_migration_does_not_revert_concurrent_rotation() {
+        let _guard = ENV_LOCK.lock().await;
+        // Regression (review task-273, lost-update race): a first-access
+        // legacy→SOPS migration must never overwrite a rotation that
+        // committed between the read's SELECT of the legacy bytes and the
+        // migration UPDATE.
+        //
+        // Write in the legacy AES-GCM format (a pre-upgrade row).
+        std::env::set_var("GYRE_SECRET_BACKEND", "legacy");
+        std::env::remove_var("GYRE_SOPS_AGE_KEY");
+        std::env::remove_var("GYRE_SOPS_AGE_KEY_FILE");
+        let (_tmp, storage) = tmp_storage();
+        let secret = sample_secret("RACY", SecretScope::Workspace, "ws-1", "t1");
+        storage.create(&secret, b"old-plaintext").await.unwrap();
+        let (legacy_value, legacy_nonce) = decrypt_row(&storage, secret.id.as_str());
+        assert!(!sops::looks_like_sops(&legacy_value));
+
+        // Upgrade: default (SOPS) backend.
+        std::env::remove_var("GYRE_SECRET_BACKEND");
+
+        // A concurrent rotation commits between this read's SELECT of the
+        // legacy bytes and its migration UPDATE: simulate exactly what the
+        // rotate path stores (a fresh SOPS document of the NEW value).
+        {
+            let mut conn = storage.pool.get().unwrap();
+            let (rotated, rotated_nonce) =
+                encrypt_at_rest(&mut conn, b"rotated-plaintext").unwrap();
+            diesel::update(secrets::table.filter(secrets::id.eq(secret.id.as_str())))
+                .set((
+                    secrets::encrypted_value.eq(&rotated),
+                    secrets::nonce.eq(&rotated_nonce),
+                ))
+                .execute(&mut conn)
+                .unwrap();
+        }
+
+        // The racing read finishes: it decrypts the STALE legacy bytes and
+        // attempts the legacy→SOPS migration. The migration UPDATE is a
+        // compare-and-swap on the legacy bytes it read, so it must NOT
+        // overwrite the concurrently committed rotation with a SOPS
+        // re-encryption of the pre-rotation plaintext.
+        {
+            let mut conn = storage.pool.get().unwrap();
+            let stale_plaintext =
+                decrypt_at_rest(&mut conn, &legacy_value, &legacy_nonce, secret.id.as_str())
+                    .unwrap();
+            assert_eq!(stale_plaintext, b"old-plaintext".to_vec());
+        }
+
+        // The stored row still holds the rotated value — the stale
+        // plaintext the racing read observed was never written back over
+        // the committed rotation.
+        let value = storage
+            .get_value(&secret.id, "t1")
+            .await
+            .unwrap()
+            .expect("row remains resolvable");
+        assert_eq!(
+            value, b"rotated-plaintext".to_vec(),
+            "the concurrent rotation must not be silently reverted by the racing legacy→SOPS migration"
+        );
     }
 
     #[tokio::test]

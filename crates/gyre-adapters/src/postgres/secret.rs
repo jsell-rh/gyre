@@ -295,21 +295,46 @@ fn decrypt_at_rest(
     let plaintext = decrypt_value(&key, encrypted_value, nonce)?;
 
     if at_rest_format() == AtRestFormat::Sops {
-        // First-access migration: re-encrypt as a SOPS document.
+        // First-access migration: re-encrypt as a SOPS document. The UPDATE
+        // is a compare-and-swap on the legacy bytes this read observed
+        // (`id` + `encrypted_value`): if a concurrent writer (e.g.
+        // POST /secrets/:id/rotate) committed between our SELECT and this
+        // UPDATE, zero rows match and the migration is skipped — an
+        // unguarded UPDATE would silently revert the rotation to the
+        // pre-rotation plaintext (lost update).
         let identity = load_sops_identity(conn)?;
         match sops::sops_encrypt(&plaintext, &identity, now_secs()) {
             Ok(doc) => {
-                let updated = diesel::update(secrets::table.filter(secrets::id.eq(row_id)))
-                    .set((
-                        secrets::encrypted_value.eq(doc),
-                        secrets::nonce.eq(Vec::<u8>::new()),
-                    ))
-                    .execute(conn);
-                if let Err(e) = updated {
-                    tracing::warn!(
-                        secret_id = row_id,
-                        "re-encrypting legacy secret to SOPS failed (will retry): {e}"
-                    );
+                let updated = diesel::update(
+                    secrets::table
+                        .filter(secrets::id.eq(row_id))
+                        .filter(secrets::encrypted_value.eq(encrypted_value)),
+                )
+                .set((
+                    secrets::encrypted_value.eq(doc),
+                    secrets::nonce.eq(Vec::<u8>::new()),
+                ))
+                .execute(conn);
+                match updated {
+                    // A concurrent write replaced the row (rotate or another
+                    // migration): the newer stored value stands; the row is
+                    // no longer legacy, so no retry is needed.
+                    Ok(0) => {
+                        tracing::debug!(
+                            secret_id = row_id,
+                            "legacy→SOPS migration skipped: secret changed concurrently"
+                        );
+                    }
+                    // The value decrypted fine — a failed migration write
+                    // must not fail the read; the row migrates on the next
+                    // access.
+                    Err(e) => {
+                        tracing::warn!(
+                            secret_id = row_id,
+                            "re-encrypting legacy secret to SOPS failed (will retry): {e}"
+                        );
+                    }
+                    Ok(_) => {}
                 }
             }
             Err(e) => {

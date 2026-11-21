@@ -1744,9 +1744,14 @@ fn load_spiffe_service(
 ///   admin write path, agent-JWT login for agent resolution). Misconfiguration
 ///   fails startup — the server must not come up serving secrets from the
 ///   wrong store.
-/// - Otherwise: the durable database store (SQLite/PostgreSQL; SOPS is the
-///   default at-rest format inside the adapter) or the mem store in
-///   pure-mem mode.
+/// - `GYRE_SECRET_BACKEND` unset/`sops` (the default) or
+///   `legacy`/`aesgcm`/`aes-gcm` (the pre-SOPS ring format escape hatch):
+///   the durable database store (SQLite/PostgreSQL; the at-rest format is
+///   selected inside the adapter) or the mem store in pure-mem mode.
+/// - Any other value fails startup loudly: an unrecognized backend selector
+///   (e.g. a typo'd `vualt` while Vault is fully configured) must never
+///   silently fall back to the database store — the operator would believe
+///   secrets are Vault-scoped while they are not.
 fn build_secret_repository(
     pg_db: &Option<Arc<gyre_adapters::PgStorage>>,
     sqlite_db: &Option<Arc<gyre_adapters::SqliteStorage>>,
@@ -1767,11 +1772,32 @@ fn build_secret_repository(
         );
         return Arc::new(repo);
     }
+    if !(backend.is_empty()
+        || backend == "sops"
+        || backend == "legacy"
+        || backend == "aesgcm"
+        || backend == "aes-gcm")
+    {
+        panic!(
+            "GYRE_SECRET_BACKEND={backend:?} is not a recognized secret backend \
+             (expected one of: sops, legacy/aesgcm, vault; unset defaults to sops) — \
+             refusing to start rather than silently serving secrets from the database store"
+        );
+    }
     if let Some(d) = pg_db {
+        tracing::info!(
+            at_rest_format = %if backend.is_empty() || backend == "sops" { "sops" } else { "legacy" },
+            "secret backend: durable database store"
+        );
         Arc::clone(d) as Arc<dyn gyre_ports::SecretRepository>
     } else if let Some(d) = sqlite_db {
+        tracing::info!(
+            at_rest_format = %if backend.is_empty() || backend == "sops" { "sops" } else { "legacy" },
+            "secret backend: durable database store"
+        );
         Arc::clone(d) as Arc<dyn gyre_ports::SecretRepository>
     } else {
+        tracing::info!("secret backend: in-memory store (pure-mem mode)");
         Arc::new(mem::MemSecretRepository::default()) as Arc<dyn gyre_ports::SecretRepository>
     }
 }
@@ -3089,6 +3115,47 @@ mod tests {
             std::path::PathBuf::from("/srv/gyre/repos")
         );
         std::env::remove_var("GYRE_REPOS_PATH");
+    }
+
+    /// Serialize env-mutating tests: GYRE_SECRET_BACKEND is process-global
+    /// and parallel test threads race on it.
+    static SECRET_BACKEND_ENV_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
+    /// Review task-273 (fail-open selector): an unrecognized
+    /// GYRE_SECRET_BACKEND value (e.g. a typo'd "vualt" while Vault is
+    /// fully configured) must fail startup loudly — never silently fall
+    /// back to the database store while the operator believes a different
+    /// backend is serving agent secrets.
+    #[test]
+    fn build_secret_repository_rejects_unrecognized_backend() {
+        let _guard = SECRET_BACKEND_ENV_LOCK.lock();
+        std::env::set_var("GYRE_SECRET_BACKEND", "vualt");
+        let pg: Option<Arc<gyre_adapters::PgStorage>> = None;
+        let sqlite: Option<Arc<gyre_adapters::SqliteStorage>> = None;
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            build_secret_repository(&pg, &sqlite)
+        }));
+        std::env::remove_var("GYRE_SECRET_BACKEND");
+        assert!(
+            result.is_err(),
+            "an unrecognized GYRE_SECRET_BACKEND value must fail startup"
+        );
+    }
+
+    /// The documented selector values all boot (pure-mem mode: the mem
+    /// store is selected for every non-vault value).
+    #[test]
+    fn build_secret_repository_accepts_documented_backends() {
+        let _guard = SECRET_BACKEND_ENV_LOCK.lock();
+        for value in ["", "sops", "legacy", "aesgcm", "aes-gcm"] {
+            std::env::set_var("GYRE_SECRET_BACKEND", value);
+            let pg: Option<Arc<gyre_adapters::PgStorage>> = None;
+            let sqlite: Option<Arc<gyre_adapters::SqliteStorage>> = None;
+            // Must not panic — unwinding here fails the test.
+            let repo = build_secret_repository(&pg, &sqlite);
+            drop(repo);
+        }
+        std::env::remove_var("GYRE_SECRET_BACKEND");
     }
 
     /// platform-model.md §2: startup seeding creates the four built-in
