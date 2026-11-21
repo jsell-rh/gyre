@@ -640,8 +640,7 @@ pub async fn sync_spec_ledger(
                             repo_name,
                             path,
                         } => {
-                            let display =
-                                format!("@{}/{}/{}", workspace_slug, repo_name, path);
+                            let display = format!("@{}/{}/{}", workspace_slug, repo_name, path);
                             let (repo_id, status, denied) = validate_cross_workspace_target(
                                 workspaces,
                                 repos,
@@ -3410,6 +3409,7 @@ specs:
             None,
             None,
             None,
+            None,
         )
         .await;
 
@@ -3520,6 +3520,7 @@ specs:
             Some("ws-1"),
             Some(&ws_ctx),
             Some(&repos_ctx),
+            None,
             None,
             None,
             None,
@@ -3643,6 +3644,7 @@ specs:
             None,
             None,
             None,
+            None,
         )
         .await;
         sync_spec_ledger(
@@ -3656,6 +3658,7 @@ specs:
             Some("ws-1"),
             Some(&ws_ctx),
             Some(&repos_ctx),
+            None,
             None,
             None,
             None,
@@ -3775,6 +3778,7 @@ specs:
             None,
             None,
             None,
+            None,
         )
         .await;
         assert_eq!(links_store.lock().await.len(), 1);
@@ -3794,6 +3798,7 @@ specs:
             Some("ws-1"),
             Some(&ws_ctx),
             Some(&repos_ctx),
+            None,
             None,
             None,
             None,
@@ -3821,11 +3826,7 @@ specs:
     // (spec-links.md §Cross-Repo and Cross-Workspace Links)
     // -----------------------------------------------------------------------
 
-    fn make_workspace_in_tenant(
-        id: &str,
-        tenant: &str,
-        slug: &str,
-    ) -> gyre_domain::Workspace {
+    fn make_workspace_in_tenant(id: &str, tenant: &str, slug: &str) -> gyre_domain::Workspace {
         gyre_domain::Workspace {
             id: gyre_common::Id::new(id),
             tenant_id: gyre_common::Id::new(tenant),
@@ -3842,12 +3843,7 @@ specs:
         }
     }
 
-    fn make_repo_entity(
-        id: &str,
-        name: &str,
-        ws_id: &str,
-        path: &str,
-    ) -> gyre_domain::Repository {
+    fn make_repo_entity(id: &str, name: &str, ws_id: &str, path: &str) -> gyre_domain::Repository {
         gyre_domain::Repository {
             id: gyre_common::Id::new(id),
             name: name.to_string(),
@@ -3943,10 +3939,11 @@ specs:
         let link_repo: Arc<dyn gyre_ports::SpecLinkRepository> =
             Arc::new(crate::mem::MemSpecLinkRepository::default());
 
-        let ws_ctx: Arc<dyn gyre_ports::WorkspaceRepository> = MemWorkspaceRepository::default();
+        let ws_ctx: Arc<dyn gyre_ports::WorkspaceRepository> =
+            Arc::new(MemWorkspaceRepository::default());
         let ws = make_workspace_in_tenant("ws-1", "tenant-287", "ws-one");
         ws_ctx.create(&ws).await.unwrap();
-        let repos_ctx: Arc<dyn gyre_ports::RepoRepository> = MemRepoRepository::default();
+        let repos_ctx: Arc<dyn gyre_ports::RepoRepository> = Arc::new(MemRepoRepository::default());
         repos_ctx
             .create(&make_repo_entity(
                 "repo-a",
@@ -4012,7 +4009,10 @@ specs:
         assert_eq!(links.len(), 1, "A's depends_on link must be recorded");
         assert_eq!(links[0].target_repo_id.as_deref(), Some("repo-b"));
         assert_eq!(links[0].status, "active");
-        assert_eq!(links[0].target_display.as_deref(), Some("@B/system/auth.md"));
+        assert_eq!(
+            links[0].target_display.as_deref(),
+            Some("@B/system/auth.md")
+        );
 
         // Subsequent change to B's target spec: A's link must go stale via
         // push-time inbound staleness (sync step 6b).
@@ -4075,12 +4075,13 @@ specs:
         let links_store: SpecLinksStore = Arc::new(Mutex::new(Vec::new()));
         let link_repo: Arc<dyn gyre_ports::SpecLinkRepository> =
             Arc::new(crate::mem::MemSpecLinkRepository::default());
-        let ws_ctx: Arc<dyn gyre_ports::WorkspaceRepository> = MemWorkspaceRepository::default();
+        let ws_ctx: Arc<dyn gyre_ports::WorkspaceRepository> =
+            Arc::new(MemWorkspaceRepository::default());
         ws_ctx
             .create(&make_workspace_in_tenant("ws-1", "tenant-287", "ws-one"))
             .await
             .unwrap();
-        let repos_ctx: Arc<dyn gyre_ports::RepoRepository> = MemRepoRepository::default();
+        let repos_ctx: Arc<dyn gyre_ports::RepoRepository> = Arc::new(MemRepoRepository::default());
         repos_ctx
             .create(&make_repo_entity(
                 "repo-a",
@@ -4142,8 +4143,8 @@ specs:
     #[tokio::test]
     async fn cross_workspace_link_denied_without_read_access_stays_unresolved() {
         use crate::mem::{
-            MemKvStore, MemRepoRepository, MemSpecLedgerRepository, MemWorkspaceMembershipRepository,
-            MemWorkspaceRepository,
+            MemKvStore, MemRepoRepository, MemSpecLedgerRepository,
+            MemWorkspaceMembershipRepository, MemWorkspaceRepository,
         };
 
         // Target repo C in workspace ws-two (same tenant, different workspace).
@@ -4168,16 +4169,25 @@ specs:
         let link_repo: Arc<dyn gyre_ports::SpecLinkRepository> =
             Arc::new(crate::mem::MemSpecLinkRepository::default());
 
-        let ws_ctx: Arc<dyn gyre_ports::WorkspaceRepository> = MemWorkspaceRepository::default();
+        let ws_ctx: Arc<dyn gyre_ports::WorkspaceRepository> =
+            Arc::new(MemWorkspaceRepository::default());
         ws_ctx
-            .create(&make_workspace_in_tenant("ws-one-id", "tenant-287", "ws-one"))
+            .create(&make_workspace_in_tenant(
+                "ws-one-id",
+                "tenant-287",
+                "ws-one",
+            ))
             .await
             .unwrap();
         ws_ctx
-            .create(&make_workspace_in_tenant("ws-two-id", "tenant-287", "ws-two"))
+            .create(&make_workspace_in_tenant(
+                "ws-two-id",
+                "tenant-287",
+                "ws-two",
+            ))
             .await
             .unwrap();
-        let repos_ctx: Arc<dyn gyre_ports::RepoRepository> = MemRepoRepository::default();
+        let repos_ctx: Arc<dyn gyre_ports::RepoRepository> = Arc::new(MemRepoRepository::default());
         repos_ctx
             .create(&make_repo_entity(
                 "repo-a",
@@ -4200,7 +4210,7 @@ specs:
         // The pushing principal is a user with membership in the SOURCE
         // workspace only — no read access to ws-two.
         let memberships: Arc<dyn gyre_ports::WorkspaceMembershipRepository> =
-            MemWorkspaceMembershipRepository::default();
+            Arc::new(MemWorkspaceMembershipRepository::default());
         memberships
             .create(&make_membership_entity(
                 "u-1",
@@ -4209,7 +4219,7 @@ specs:
             ))
             .await
             .unwrap();
-        let kv: Arc<dyn gyre_ports::KvJsonStore> = MemKvStore::default();
+        let kv: Arc<dyn gyre_ports::KvJsonStore> = Arc::new(MemKvStore::default());
         let principal = LinkPrincipal {
             agent_id: "user-one".to_string(),
             user_id: Some(gyre_common::Id::new("u-1")),
@@ -4218,42 +4228,55 @@ specs:
         };
         let tenant = gyre_common::Id::new("tenant-287");
 
-        let sync_a = |principal: Option<&LinkPrincipal>| {
-            // Reborrow the Arcs for each call.
-            let ledger = ledger.clone();
-            let links_store = links_store.clone();
-            let link_repo = link_repo.clone();
-            let ws_ctx = ws_ctx.clone();
-            let repos_ctx = repos_ctx.clone();
-            let memberships = memberships.clone();
-            let kv = kv.clone();
-            let tenant = tenant.clone();
-            let dir_a = dir_a.path().to_str().unwrap().to_string();
-            async move {
-                sync_spec_ledger(
-                    &ledger,
-                    &links_store,
-                    &link_repo,
-                    &dir_a,
-                    &sha_a,
-                    1_700_000_000,
-                    Some("repo-a"),
-                    Some("ws-one-id"),
-                    Some(&ws_ctx),
-                    Some(&repos_ctx),
-                    Some(&tenant),
-                    principal,
-                    Some(&memberships),
-                    Some(&kv),
-                    None,
-                )
-                .await
-            }
-        };
+        async fn sync_a(
+            principal: Option<&LinkPrincipal>,
+            ledger: &Arc<dyn gyre_ports::SpecLedgerRepository>,
+            links_store: &SpecLinksStore,
+            link_repo: &Arc<dyn gyre_ports::SpecLinkRepository>,
+            ws_ctx: &Arc<dyn gyre_ports::WorkspaceRepository>,
+            repos_ctx: &Arc<dyn gyre_ports::RepoRepository>,
+            memberships: &Arc<dyn gyre_ports::WorkspaceMembershipRepository>,
+            kv: &Arc<dyn gyre_ports::KvJsonStore>,
+            tenant: &gyre_common::Id,
+            dir_a: &str,
+            sha_a: &str,
+        ) {
+            sync_spec_ledger(
+                ledger,
+                links_store,
+                link_repo,
+                dir_a,
+                sha_a,
+                1_700_000_000,
+                Some("repo-a"),
+                Some("ws-one-id"),
+                Some(ws_ctx),
+                Some(repos_ctx),
+                Some(tenant),
+                principal,
+                Some(memberships),
+                Some(kv),
+                None,
+            )
+            .await
+        }
 
         // Push by the principal WITHOUT read access to ws-two: the link
         // must be stored unresolved with target_repo_id NULL.
-        sync_a(Some(&principal)).await;
+        sync_a(
+            Some(&principal),
+            &ledger,
+            &links_store,
+            &link_repo,
+            &ws_ctx,
+            &repos_ctx,
+            &memberships,
+            &kv,
+            &tenant,
+            dir_a.path().to_str().unwrap(),
+            &sha_a,
+        )
+        .await;
         let links: Vec<SpecLinkEntry> = links_store.lock().await.clone();
         assert_eq!(links.len(), 1);
         assert_eq!(
@@ -4281,7 +4304,20 @@ specs:
             ))
             .await
             .unwrap();
-        sync_a(Some(&principal)).await;
+        sync_a(
+            Some(&principal),
+            &ledger,
+            &links_store,
+            &link_repo,
+            &ws_ctx,
+            &repos_ctx,
+            &memberships,
+            &kv,
+            &tenant,
+            dir_a.path().to_str().unwrap(),
+            &sha_a,
+        )
+        .await;
         let links: Vec<SpecLinkEntry> = links_store.lock().await.clone();
         assert_eq!(links.len(), 1);
         assert_eq!(

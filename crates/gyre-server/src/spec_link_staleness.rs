@@ -936,7 +936,13 @@ mod tests {
         target_path: &str,
         target_display: &str,
     ) -> SpecLinkEntry {
-        let mut link = make_link(id, "system/a.md", target_path, SpecLinkType::DependsOn, None);
+        let mut link = make_link(
+            id,
+            "system/a.md",
+            target_path,
+            SpecLinkType::DependsOn,
+            None,
+        );
         link.source_repo_id = Some(source_repo.to_string());
         link.target_display = Some(target_display.to_string());
         link.status = "unresolved".to_string();
@@ -965,12 +971,7 @@ mod tests {
 
         // Target repo in ws-y really declares the target path.
         let dir_y = make_target_git_repo();
-        let repo_y = make_named_repo(
-            "repo-y",
-            "repo-y",
-            "ws-y",
-            dir_y.path().to_str().unwrap(),
-        );
+        let repo_y = make_named_repo("repo-y", "repo-y", "ws-y", dir_y.path().to_str().unwrap());
         state.repos.create(&repo_y).await.unwrap();
 
         // Unresolved cross-workspace link from repo-a (in ws-x) to
@@ -1021,12 +1022,7 @@ mod tests {
         let state_repo_a = make_named_repo("repo-a", "A", "ws-x", "/repos/repo-a");
         state.repos.create(&state_repo_a).await.unwrap();
         let dir_y = make_target_git_repo();
-        let repo_y = make_named_repo(
-            "repo-y",
-            "repo-y",
-            "ws-x",
-            dir_y.path().to_str().unwrap(),
-        );
+        let repo_y = make_named_repo("repo-y", "repo-y", "ws-x", dir_y.path().to_str().unwrap());
         state.repos.create(&repo_y).await.unwrap();
 
         // One resolvable link (path declared in repo-y's manifest) and one
@@ -1084,12 +1080,7 @@ mod tests {
         let state_repo_a = make_named_repo("repo-a", "A", "ws-x", "/repos/repo-a");
         state.repos.create(&state_repo_a).await.unwrap();
         let dir_y = make_target_git_repo();
-        let repo_y = make_named_repo(
-            "repo-y",
-            "repo-y",
-            "ws-y",
-            dir_y.path().to_str().unwrap(),
-        );
+        let repo_y = make_named_repo("repo-y", "repo-y", "ws-y", dir_y.path().to_str().unwrap());
         state.repos.create(&repo_y).await.unwrap();
 
         let link = make_unresolved_link(
