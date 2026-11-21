@@ -3,7 +3,7 @@ title: "Spec Links — cycle detection over the tenant-wide forge graph, not jus
 spec_ref: "Spec gap spec-10bdced21a063f819b1baabd / spec-links-tenant-cycle-detection / 5a915155d9bc"
 depends_on: [task-287]
 progress: not-started
-commits: []
+commits: ["092db23015876d452327beab9f04f5c6961edd77"]
 ---
 
 ## Required behavior
