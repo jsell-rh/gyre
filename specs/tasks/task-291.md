@@ -2,8 +2,8 @@
 title: "Spec Links — spec-detail link direction: API emits it, UI renders inbound vs outbound with staleness indicators"
 spec_ref: "Spec gap spec-10bdced21a063f819b1baabd / spec-links-ui-link-direction / 5a915155d9bc"
 depends_on: []
-progress: ready-for-review
-commits: ["9fda212d4aa1473b06c1dfe59f6a95f55e53dc3e", "b3ab4778a2f12a37d1214fe197062629b864ca43"]
+progress: not-started
+commits: []
 ---
 
 ## Required behavior
@@ -56,54 +56,3 @@ Canonical spec: `specs/system/spec-links.md`. Source: `678a8ac3e3bfeafeb66cdb47e
     ]
   }
 ]
-
-## Shipped
-
-Implemented in b3ab4778a2f12a37d1214fe197062629b864ca43; verification of that
-candidate failed only on rustfmt for changed lines (specs.rs:4984), repaired
-formatting-only in 9fda212d4aa1473b06c1dfe59f6a95f55e53dc3e (no behavior
-change).
-
-### Behavior
-
-- `SpecLinkResponse` (crates/gyre-server/src/api/specs.rs) gained a `direction`
-  field (`Option<String>`, skipped when unset): `"outbound"` when the queried
-  path equals the link's `source_path`, `"inbound"` when it equals
-  `target_path`; a self-link is outbound. Computed via a
-  `with_direction_relative_to` helper applied in `get_spec_links` (relative to
-  the requested path), `get_spec_dependents` (inbound), and
-  `get_spec_dependencies` (outbound). Tenant-wide stale-links/conflicts
-  listings omit the field (no queried path applies).
-- `web/src/lib/DetailPanel.svelte` links tab: the existing direction-based
-  filtering and '<- from'/'-> to' labels now receive real data. Inbound links
-  additionally render their counterpart spec (`source_path`) in the diagram's
-  inbound column and list rows — previously `target_path` was shown, which for
-  an inbound link is the queried spec itself. Staleness still surfaces via the
-  existing status badge (`link.approval_status ?? link.status`), unchanged.
-
-### Test evidence
-
-- Rust (gyre-server, api/specs.rs tests): extended
-  `get_spec_links_returns_outbound_and_inbound` (spec b with one inbound a→b
-  and one outbound b→c link; asserts `direction == "inbound"`/`"outbound"` on
-  the corresponding objects — fails on base where the key is absent) and added
-  `get_spec_links_self_link_is_outbound` and
-  `get_spec_dependents_and_dependencies_populate_direction`. Not executed in
-  this sandbox (server test compilation exceeds the assignment's build
-  budget); recorded for the independent verifier in
-  /tmp/stage/review-evidence/README.md. `cargo check -p gyre-server` and
-  `cargo check -p gyre-cli` passed on the candidate (d688a1eb); the
-  formatting-only repair does not affect types.
-- Web: `npm ci` then `npx vitest run src/__tests__/DetailPanel.test.js` —
-  exit 0, 41/41 passed (this repair attempt), including the 3 "Link direction
-  in spec Links tab" tests covering the inbound/outbound column split,
-  '<- from'/'-> to' row labels, and the stale badge on a stale inbound link.
-  Evidence: /tmp/stage/review-evidence/.
-- rustfmt: `rustfmt --edition 2021 --check crates/gyre-server/src/api/specs.rs`
-  exits 0 after the repair (the prior verification failure).
-
-### Coverage
-
-specs/coverage/system/spec-links.md rows 13 (API) and 15 (UI) updated with
-the direction-field evidence in b3ab4778; the pre-existing graph ?repo=
-filter gap noted in rows 12/13 is untouched (task-290 scope).
