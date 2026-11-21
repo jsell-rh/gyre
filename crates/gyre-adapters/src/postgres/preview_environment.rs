@@ -150,10 +150,12 @@ impl PreviewEnvironmentRepository for PgStorage {
     async fn find_by_id(&self, id: &Id) -> Result<Option<PreviewEnvironment>> {
         let pool = Arc::clone(&self.pool);
         let id = id.clone();
+        let tenant = self.tenant_id.clone();
         tokio::task::spawn_blocking(move || -> Result<Option<PreviewEnvironment>> {
             let mut conn = pool.get().context("get db connection")?;
             let row = preview_environments::table
                 .find(id.as_str())
+                .filter(preview_environments::tenant_id.eq(&tenant))
                 .first::<PreviewEnvironmentRow>(&mut *conn)
                 .optional()
                 .context("find preview_environment by id")?;
@@ -165,9 +167,11 @@ impl PreviewEnvironmentRepository for PgStorage {
     async fn find_by_mr(&self, mr_id: &Id) -> Result<Vec<PreviewEnvironment>> {
         let pool = Arc::clone(&self.pool);
         let mr_id = mr_id.clone();
+        let tenant = self.tenant_id.clone();
         tokio::task::spawn_blocking(move || -> Result<Vec<PreviewEnvironment>> {
             let mut conn = pool.get().context("get db connection")?;
             let rows = preview_environments::table
+                .filter(preview_environments::tenant_id.eq(&tenant))
                 .filter(preview_environments::mr_id.eq(mr_id.as_str()))
                 .order(preview_environments::created_at.desc())
                 .load::<PreviewEnvironmentRow>(&mut *conn)
@@ -180,9 +184,11 @@ impl PreviewEnvironmentRepository for PgStorage {
     async fn find_by_workspace(&self, workspace_id: &Id) -> Result<Vec<PreviewEnvironment>> {
         let pool = Arc::clone(&self.pool);
         let ws_id = workspace_id.clone();
+        let tenant = self.tenant_id.clone();
         tokio::task::spawn_blocking(move || -> Result<Vec<PreviewEnvironment>> {
             let mut conn = pool.get().context("get db connection")?;
             let rows = preview_environments::table
+                .filter(preview_environments::tenant_id.eq(&tenant))
                 .filter(preview_environments::workspace_id.eq(ws_id.as_str()))
                 .order(preview_environments::created_at.desc())
                 .load::<PreviewEnvironmentRow>(&mut *conn)
@@ -194,9 +200,11 @@ impl PreviewEnvironmentRepository for PgStorage {
 
     async fn find_live_expired_before(&self, now: u64) -> Result<Vec<PreviewEnvironment>> {
         let pool = Arc::clone(&self.pool);
+        let tenant = self.tenant_id.clone();
         tokio::task::spawn_blocking(move || -> Result<Vec<PreviewEnvironment>> {
             let mut conn = pool.get().context("get db connection")?;
             let rows = preview_environments::table
+                .filter(preview_environments::tenant_id.eq(&tenant))
                 .filter(preview_environments::expires_at.le(now as i64))
                 .filter(
                     preview_environments::status

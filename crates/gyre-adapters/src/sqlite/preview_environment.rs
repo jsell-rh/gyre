@@ -150,10 +150,12 @@ impl PreviewEnvironmentRepository for SqliteStorage {
     async fn find_by_id(&self, id: &Id) -> Result<Option<PreviewEnvironment>> {
         let pool = Arc::clone(&self.pool);
         let id = id.clone();
+        let tenant = self.tenant_id.clone();
         tokio::task::spawn_blocking(move || -> Result<Option<PreviewEnvironment>> {
             let mut conn = pool.get().context("get db connection")?;
             let row = preview_environments::table
                 .find(id.as_str())
+                .filter(preview_environments::tenant_id.eq(&tenant))
                 .first::<PreviewEnvironmentRow>(&mut *conn)
                 .optional()
                 .context("find preview_environment by id")?;
@@ -165,9 +167,11 @@ impl PreviewEnvironmentRepository for SqliteStorage {
     async fn find_by_mr(&self, mr_id: &Id) -> Result<Vec<PreviewEnvironment>> {
         let pool = Arc::clone(&self.pool);
         let mr_id = mr_id.clone();
+        let tenant = self.tenant_id.clone();
         tokio::task::spawn_blocking(move || -> Result<Vec<PreviewEnvironment>> {
             let mut conn = pool.get().context("get db connection")?;
             let rows = preview_environments::table
+                .filter(preview_environments::tenant_id.eq(&tenant))
                 .filter(preview_environments::mr_id.eq(mr_id.as_str()))
                 .order(preview_environments::created_at.desc())
                 .load::<PreviewEnvironmentRow>(&mut *conn)
@@ -180,9 +184,11 @@ impl PreviewEnvironmentRepository for SqliteStorage {
     async fn find_by_workspace(&self, workspace_id: &Id) -> Result<Vec<PreviewEnvironment>> {
         let pool = Arc::clone(&self.pool);
         let ws_id = workspace_id.clone();
+        let tenant = self.tenant_id.clone();
         tokio::task::spawn_blocking(move || -> Result<Vec<PreviewEnvironment>> {
             let mut conn = pool.get().context("get db connection")?;
             let rows = preview_environments::table
+                .filter(preview_environments::tenant_id.eq(&tenant))
                 .filter(preview_environments::workspace_id.eq(ws_id.as_str()))
                 .order(preview_environments::created_at.desc())
                 .load::<PreviewEnvironmentRow>(&mut *conn)
@@ -194,9 +200,11 @@ impl PreviewEnvironmentRepository for SqliteStorage {
 
     async fn find_live_expired_before(&self, now: u64) -> Result<Vec<PreviewEnvironment>> {
         let pool = Arc::clone(&self.pool);
+        let tenant = self.tenant_id.clone();
         tokio::task::spawn_blocking(move || -> Result<Vec<PreviewEnvironment>> {
             let mut conn = pool.get().context("get db connection")?;
             let rows = preview_environments::table
+                .filter(preview_environments::tenant_id.eq(&tenant))
                 .filter(preview_environments::expires_at.le(now as i64))
                 .filter(
                     preview_environments::status
@@ -349,6 +357,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reads_are_tenant_scoped() {
+        // Spec hierarchy-enforcement.md §3: every read filters by tenant_id.
+        // A row visible to tenant-1 must be invisible to a different tenant's
+        // handle over the same database, on every read surface.
+        let (tmp, s) = setup();
+        let mut e = env("pe-1", "mr-1", 1000, 4600);
+        e.status = PreviewEnvironmentStatus::Active;
+        s.create(&e).await.unwrap();
+
+        let other =
+            SqliteStorage::new_for_tenant(tmp.path().to_str().unwrap(), "tenant-2").unwrap();
+        assert!(other.find_by_id(&Id::new("pe-1")).await.unwrap().is_none());
+        assert!(other.find_by_mr(&Id::new("mr-1")).await.unwrap().is_empty());
+        assert!(other
+            .find_by_workspace(&Id::new("ws-1"))
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(other
+            .find_live_expired_before(9900)
+            .await
+            .unwrap()
+            .is_empty());
+
+        // Same tenant still sees the row.
+        assert!(s.find_by_id(&Id::new("pe-1")).await.unwrap().is_some());
+    }
+
+    #[tokio::test]
     async fn durability_across_reopen() {
         // The durable-state invariant: a row written before a "restart"
         // (fresh storage handle over the same database file) is still
@@ -357,11 +394,13 @@ mod tests {
         let db_path = dir.path().join("preview.sqlite3");
 
         {
-            let s = SqliteStorage::new(db_path.to_str().unwrap()).unwrap();
+            let s = SqliteStorage::new_for_tenant(db_path.to_str().unwrap(), "tenant-1").unwrap();
             s.create(&env("pe-1", "mr-1", 1000, 4600)).await.unwrap();
         }
         {
-            let s = SqliteStorage::new(db_path.to_str().unwrap()).unwrap();
+            // Fresh handle over the same file, same tenant scope: the row
+            // must still be there after the "restart".
+            let s = SqliteStorage::new_for_tenant(db_path.to_str().unwrap(), "tenant-1").unwrap();
             let loaded = s.find_by_id(&Id::new("pe-1")).await.unwrap();
             assert!(loaded.is_some(), "preview row must survive a restart");
         }
