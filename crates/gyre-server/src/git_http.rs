@@ -9102,11 +9102,7 @@ specs:
             gyre_domain::DetectionMethod::CargoToml
         );
         // Orphaned, never deleted: the edge is still present.
-        let edges = state
-            .dependencies
-            .list_by_repo(&source_id)
-            .await
-            .unwrap();
+        let edges = state.dependencies.list_by_repo(&source_id).await.unwrap();
         assert_eq!(edges.len(), 1);
     }
 
@@ -9136,21 +9132,6 @@ specs:
             .unwrap();
         assert!(status.success(), "git init --bare failed");
         let repo_path_str = repo_path.to_str().unwrap().to_string();
-
-        let git = |args: &[&str]| -> String {
-            let out = std::process::Command::new("git")
-                .arg("-C")
-                .arg(&repo_path_str)
-                .args(args)
-                .output()
-                .unwrap();
-            assert!(
-                out.status.success(),
-                "git {args:?} failed: {}",
-                String::from_utf8_lossy(&out.stderr)
-            );
-            String::from_utf8_lossy(&out.stdout).trim().to_string()
-        };
 
         // Known tenant repos the references point at. repo-c does NOT exist
         // yet — created after the first detection pass.
@@ -9210,11 +9191,7 @@ specs:
 
         detect_dependencies_on_push(&state, source_id.as_str(), &repo_path_str, &sha1).await;
 
-        let edges = state
-            .dependencies
-            .list_by_repo(&source_id)
-            .await
-            .unwrap();
+        let edges = state.dependencies.list_by_repo(&source_id).await.unwrap();
 
         // Workspace-member manifest: detected with the manifest's tree path
         // as source_artifact.
@@ -9280,18 +9257,10 @@ specs:
         );
         state.repos.create(&repo_c).await.unwrap();
 
-        let sha2 = make_commit(
-            &repo_path_str,
-            &[("README.md", "# repo-a\n".to_string())],
-        )
-        .await;
+        let sha2 = make_commit(&repo_path_str, &[("README.md", "# repo-a\n".to_string())]).await;
         detect_dependencies_on_push(&state, source_id.as_str(), &repo_path_str, &sha2).await;
 
-        let edges = state
-            .dependencies
-            .list_by_repo(&source_id)
-            .await
-            .unwrap();
+        let edges = state.dependencies.list_by_repo(&source_id).await.unwrap();
         let repo_c_edge = edges
             .iter()
             .find(|e| e.target_repo_id.as_str() == "repo-c-id")
