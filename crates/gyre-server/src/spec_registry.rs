@@ -1764,8 +1764,7 @@ async fn build_tenant_cycle_graph(
                     continue;
                 }
                 let link_repo_key = link.source_repo_id.as_deref().unwrap_or("");
-                if link_repo_key == repo_scope
-                    && manifest_paths.contains(link.source_path.as_str())
+                if link_repo_key == repo_scope && manifest_paths.contains(link.source_path.as_str())
                 {
                     continue; // replaced by the pushed manifest's edges below
                 }
@@ -4986,7 +4985,7 @@ specs:
             .create(&make_workspace_in_tenant("ws-1", "tenant-293", "ws-one"))
             .await
             .unwrap();
-        let repos_ctx: Arc<dyn gyre_ports::RepoRepository> = MemRepoRepository::default();
+        let repos_ctx: Arc<dyn gyre_ports::RepoRepository> = Arc::new(MemRepoRepository::default());
         repos_ctx
             .create(&make_repo_entity(
                 "repo-a",

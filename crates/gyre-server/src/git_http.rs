@@ -12097,6 +12097,304 @@ specs:
         assert!(accepted.is_empty());
     }
 
+    /// task-293 e2e fixture: ONE workspace with TWO repos ("spec-a",
+    /// "spec-b") so a spec-link cycle can be pushed ACROSS repos — the
+    /// enterprise case spec-links.md §Problem exists for. Same shape as
+    /// [`git_app_with_repo`], duplicated because that fixture hard-codes a
+    /// single repo ("repo-1"/`my-repo`).
+    async fn git_app_two_repos() -> (
+        Router,
+        Arc<crate::AppState>,
+        TempDir,
+        String, // repo A name ("spec-a")
+        String, // repo A bare-repo path
+        String, // repo B name ("spec-b")
+        String, // repo B bare-repo path
+    ) {
+        let tmp = TempDir::new().unwrap();
+        let repo_a_path = tmp.path().join("proj").join("spec-a.git");
+        let repo_b_path = tmp.path().join("proj").join("spec-b.git");
+        for p in [&repo_a_path, &repo_b_path] {
+            std::fs::create_dir_all(p).unwrap();
+            let status = std::process::Command::new("git")
+                .arg("init")
+                .arg("--bare")
+                .arg(p)
+                .status()
+                .unwrap();
+            assert!(status.success(), "git init --bare failed");
+        }
+
+        let state = test_state();
+
+        let ws = Workspace {
+            id: Id::new("ws-test"),
+            tenant_id: Id::new("default"),
+            name: "Test Workspace".to_string(),
+            slug: TEST_WS_SLUG.to_string(),
+            description: None,
+            budget: None,
+            max_repos: None,
+            max_agents_per_repo: None,
+            trust_level: gyre_domain::TrustLevel::Guided,
+            llm_model: None,
+            created_at: 0,
+            compute_target_id: None,
+        };
+        state.workspaces.create(&ws).await.unwrap();
+
+        let repo_a = Repository::new(
+            Id::new("repo-a"),
+            Id::new("ws-test"),
+            "spec-a",
+            repo_a_path.to_str().unwrap(),
+            0,
+        );
+        state.repos.create(&repo_a).await.unwrap();
+        let repo_b = Repository::new(
+            Id::new("repo-b"),
+            Id::new("ws-test"),
+            "spec-b",
+            repo_b_path.to_str().unwrap(),
+            0,
+        );
+        state.repos.create(&repo_b).await.unwrap();
+
+        let app = Router::new()
+            .route(
+                "/git/:workspace_slug/:repo_name/info/refs",
+                get(git_info_refs),
+            )
+            .route(
+                "/git/:workspace_slug/:repo_name/git-upload-pack",
+                post(git_upload_pack),
+            )
+            .route(
+                "/git/:workspace_slug/:repo_name/git-receive-pack",
+                post(git_receive_pack),
+            )
+            .with_state(state.clone());
+
+        (
+            app,
+            state,
+            tmp,
+            "spec-a".to_string(),
+            repo_a_path.to_str().unwrap().to_string(),
+            "spec-b".to_string(),
+            repo_b_path.to_str().unwrap().to_string(),
+        )
+    }
+
+    /// Poll the durable spec_links table until a stored row matches the
+    /// given source (repo, path) and target repo attribution. The
+    /// post-receive ledger sync runs in a spawned task, so the row appears
+    /// shortly after the push response (bounded wait, same pattern as
+    /// [`wait_for_audit_event`]).
+    async fn wait_for_stored_link(
+        state: &crate::AppState,
+        source_repo: &str,
+        source_path: &str,
+        target_repo: Option<&str>,
+    ) -> gyre_domain::spec_links::SpecLinkEntry {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            let stored = state.spec_link_repo.list_all().await.unwrap();
+            if let Some(found) = stored.iter().find(|l| {
+                l.source_repo_id.as_deref() == Some(source_repo)
+                    && l.source_path == source_path
+                    && l.target_repo_id.as_deref() == target_repo
+            }) {
+                return found.clone();
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no stored link {source_repo}:{source_path} -> {target_repo:?} appeared within 30s"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
+
+    /// task-293 AC1, end to end through git-receive-pack: pushing manifest
+    /// edge A→B (depends_on) in repo 1 succeeds; then pushing manifest edge
+    /// B→A (depends_on) in repo 2 is rejected with the cycle named, the ref
+    /// update undone, and a PushRejected event emitted. Against the
+    /// pre-task-293 detection (single-manifest adjacency only) both pushes
+    /// landed cleanly and the A→B→A cycle lived permanently in the
+    /// forge-maintained graph.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cross_repo_spec_link_cycle_second_push_rejected_e2e() {
+        let (app, state, _tmp, repo_a, repo_a_path, repo_b, repo_b_path) =
+            git_app_two_repos().await;
+
+        // Push 0 (repo B): manifest declaring system/b.md. Repo A's edge
+        // targets it, so the target repo must declare the path before push
+        // 1 can resolve (cross-repo resolution reads the target repo's
+        // default-branch manifest).
+        let sha_b0 = make_commit(
+            &repo_b_path,
+            &[
+                (
+                    "specs/manifest.yaml",
+                    "version: 1\nspecs:\n  - path: system/b.md\n    title: B\n    owner: user:test\n"
+                        .to_string(),
+                ),
+                ("specs/system/b.md", "# B\n".to_string()),
+            ],
+        )
+        .await;
+        let resp = push_ref_as(
+            app.clone(),
+            TEST_WS_SLUG,
+            &repo_b,
+            "Bearer test-token",
+            &sha_b0,
+            "refs/heads/main",
+            &repo_b_path,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(ref_exists(&repo_b_path, "refs/heads/main"));
+
+        // Push 1 (repo A): system/a.md depends_on @spec-b/system/b.md —
+        // accepted (no back-edge exists anywhere in the tenant graph yet).
+        let sha_a1 = make_commit(
+            &repo_a_path,
+            &[
+                (
+                    "specs/manifest.yaml",
+                    "version: 1\nspecs:\n  - path: system/a.md\n    title: A\n    owner: user:test\n    links:\n      - type: depends_on\n        target: \"@spec-b/system/b.md\"\n"
+                        .to_string(),
+                ),
+                ("specs/system/a.md", "# A\n".to_string()),
+            ],
+        )
+        .await;
+        let resp = push_ref_as(
+            app.clone(),
+            TEST_WS_SLUG,
+            &repo_a,
+            "Bearer test-token",
+            &sha_a1,
+            "refs/heads/main",
+            &repo_a_path,
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "first push (A depends_on @spec-b/b) must be accepted"
+        );
+        assert!(ref_exists(&repo_a_path, "refs/heads/main"));
+
+        // The accepted push landed: the post-receive sync stores A's edge
+        // in the durable spec_links table with the target attributed to
+        // repo B (the stored half of the tenant-wide graph push 2 is
+        // checked against).
+        let stored = wait_for_stored_link(&state, "repo-a", "system/a.md", Some("repo-b")).await;
+        assert_eq!(stored.target_path, "system/b.md");
+
+        // Push 2 (repo B): the manifest now adds B depends_on
+        // @spec-a/system/a.md. The ref already exists, so the command line
+        // carries the real old SHA (and the undo on rejection restores it).
+        let old_b = git_with_input(&repo_b_path, &["rev-parse", "refs/heads/main"], "");
+        let sha_b2 = make_commit(
+            &repo_b_path,
+            &[
+                (
+                    "specs/manifest.yaml",
+                    "version: 1\nspecs:\n  - path: system/b.md\n    title: B\n    owner: user:test\n    links:\n      - type: depends_on\n        target: \"@spec-a/system/a.md\"\n"
+                        .to_string(),
+                ),
+                ("specs/system/b.md", "# B\n".to_string()),
+            ],
+        )
+        .await;
+        let mut body = super::pkt_line(&format!("{old_b} {sha_b2} refs/heads/main"));
+        body.extend_from_slice(b"0000");
+        body.extend_from_slice(&pack_objects_for(&repo_b_path, &sha_b2));
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/git/{TEST_WS_SLUG}/{repo_b}/git-receive-pack"))
+                    .header("Authorization", "Bearer test-token")
+                    .header("content-type", "application/x-git-receive-pack-request")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "second push (B depends_on @spec-a/a) must be rejected: the cycle A→B→A now exists across two repos"
+        );
+        // The rejection names the cycle with both cross-repo nodes.
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let rejection = String::from_utf8_lossy(&body).to_string();
+        assert!(
+            rejection.contains("spec link cycle detected"),
+            "rejection must name the cycle: {rejection}"
+        );
+        assert!(
+            rejection.contains("repo-a:system/a.md") && rejection.contains("repo-b:system/b.md"),
+            "cycle message must name both cross-repo nodes with repo attribution: {rejection}"
+        );
+        // The ref update was undone: repo B's main still points at the
+        // pre-push SHA.
+        assert_eq!(
+            git_with_input(&repo_b_path, &["rev-parse", "refs/heads/main"], ""),
+            old_b,
+            "rejected push must leave the default branch at its pre-push SHA"
+        );
+        // PushRejected audit event from the spec-link cycle gate.
+        let events = wait_for_audit_event(&state, "git_push_rejected").await;
+        let e = events
+            .iter()
+            .find(|e| e.detail["gate_name"] == "spec-link-cycles")
+            .expect("git_push_rejected audit event from the spec-link cycle gate");
+        assert_eq!(e.detail["repo_id"], "repo-b");
+        let reason = e.detail["reason"].as_str().unwrap();
+        assert!(
+            reason.contains("spec link cycle detected")
+                && reason.contains("repo-a:system/a.md")
+                && reason.contains("repo-b:system/b.md"),
+            "audit reason must name the cycle: {reason}"
+        );
+        // PushRejected event on the workspace message bus.
+        let msgs = state
+            .messages
+            .list_by_workspace(
+                &Id::new("ws-test"),
+                Some("push_rejected"),
+                None,
+                None,
+                None,
+                Some(20),
+            )
+            .await
+            .unwrap();
+        assert!(
+            msgs.iter().any(|m| {
+                m.payload
+                    .as_ref()
+                    .and_then(|p| p.get("repo_id"))
+                    .and_then(|v| v.as_str())
+                    == Some("repo-b")
+                    && m.payload
+                        .as_ref()
+                        .and_then(|p| p.get("reason"))
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|r| r.contains("spec link cycle detected"))
+            }),
+            "a push_rejected message for repo-b naming the cycle must be on the workspace bus"
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn push_spec_change_records_spec_changed_audit_event() {
         let (app, state, _tmp, ws_slug, repo_name, repo_path) = git_app_with_repo().await;
