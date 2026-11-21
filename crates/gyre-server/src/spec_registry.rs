@@ -4228,51 +4228,62 @@ specs:
         };
         let tenant = gyre_common::Id::new("tenant-287");
 
+        /// Shared port context for the `sync_a` helper; bundling the
+        /// references keeps the helper under clippy's `too_many_arguments`
+        /// threshold.
+        struct SyncCtx<'a> {
+            ledger: &'a Arc<dyn gyre_ports::SpecLedgerRepository>,
+            links_store: &'a SpecLinksStore,
+            link_repo: &'a Arc<dyn gyre_ports::SpecLinkRepository>,
+            ws_ctx: &'a Arc<dyn gyre_ports::WorkspaceRepository>,
+            repos_ctx: &'a Arc<dyn gyre_ports::RepoRepository>,
+            memberships: &'a Arc<dyn gyre_ports::WorkspaceMembershipRepository>,
+            kv: &'a Arc<dyn gyre_ports::KvJsonStore>,
+            tenant: &'a gyre_common::Id,
+        }
+
         async fn sync_a(
+            ctx: &SyncCtx<'_>,
             principal: Option<&LinkPrincipal>,
-            ledger: &Arc<dyn gyre_ports::SpecLedgerRepository>,
-            links_store: &SpecLinksStore,
-            link_repo: &Arc<dyn gyre_ports::SpecLinkRepository>,
-            ws_ctx: &Arc<dyn gyre_ports::WorkspaceRepository>,
-            repos_ctx: &Arc<dyn gyre_ports::RepoRepository>,
-            memberships: &Arc<dyn gyre_ports::WorkspaceMembershipRepository>,
-            kv: &Arc<dyn gyre_ports::KvJsonStore>,
-            tenant: &gyre_common::Id,
             dir_a: &str,
             sha_a: &str,
         ) {
             sync_spec_ledger(
-                ledger,
-                links_store,
-                link_repo,
+                ctx.ledger,
+                ctx.links_store,
+                ctx.link_repo,
                 dir_a,
                 sha_a,
                 1_700_000_000,
                 Some("repo-a"),
                 Some("ws-one-id"),
-                Some(ws_ctx),
-                Some(repos_ctx),
-                Some(tenant),
+                Some(ctx.ws_ctx),
+                Some(ctx.repos_ctx),
+                Some(ctx.tenant),
                 principal,
-                Some(memberships),
-                Some(kv),
+                Some(ctx.memberships),
+                Some(ctx.kv),
                 None,
             )
             .await
         }
 
+        let ctx = SyncCtx {
+            ledger: &ledger,
+            links_store: &links_store,
+            link_repo: &link_repo,
+            ws_ctx: &ws_ctx,
+            repos_ctx: &repos_ctx,
+            memberships: &memberships,
+            kv: &kv,
+            tenant: &tenant,
+        };
+
         // Push by the principal WITHOUT read access to ws-two: the link
         // must be stored unresolved with target_repo_id NULL.
         sync_a(
+            &ctx,
             Some(&principal),
-            &ledger,
-            &links_store,
-            &link_repo,
-            &ws_ctx,
-            &repos_ctx,
-            &memberships,
-            &kv,
-            &tenant,
             dir_a.path().to_str().unwrap(),
             &sha_a,
         )
@@ -4305,15 +4316,8 @@ specs:
             .await
             .unwrap();
         sync_a(
+            &ctx,
             Some(&principal),
-            &ledger,
-            &links_store,
-            &link_repo,
-            &ws_ctx,
-            &repos_ctx,
-            &memberships,
-            &kv,
-            &tenant,
             dir_a.path().to_str().unwrap(),
             &sha_a,
         )
