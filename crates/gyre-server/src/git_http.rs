@@ -3890,7 +3890,7 @@ fn extract_toml_string_value(line: &str, key: &str) -> Option<String> {
 pub(crate) fn repo_name_from_reference(reference: &str) -> &str {
     let base = reference.split('#').next().unwrap_or(reference);
     let base = base.split('?').next().unwrap_or(base);
-    let last_segment = base.rsplit(|c| c == '/' || c == ':').next().unwrap_or(base);
+    let last_segment = base.rsplit(['/', ':']).next().unwrap_or(base);
     last_segment.strip_suffix(".git").unwrap_or(last_segment)
 }
 
@@ -4112,10 +4112,10 @@ pub fn detect_pyproject_deps(content: &str) -> Vec<(String, Option<String>)> {
             if let Some(at_pos) = trimmed.find(" @ ") {
                 let pkg_name = trimmed[..at_pos]
                     .trim()
-                    .trim_matches(|c: char| c == '"' || c == '\'' || c == ',')
+                    .trim_matches(['"', '\'', ','])
                     .to_string();
                 let rest = trimmed[at_pos + 3..].trim();
-                let rest = rest.trim_end_matches(|c: char| c == '"' || c == '\'' || c == ',');
+                let rest = rest.trim_end_matches(['"', '\'', ',']);
                 if rest.starts_with("file:") || is_git_reference(rest) {
                     let reference = rest.strip_prefix("file:").unwrap_or(rest);
                     if !pkg_name.is_empty() {
@@ -4216,7 +4216,7 @@ pub fn detect_openapi_refs(content: &str, known_repos: &[&str]) -> Vec<String> {
 /// `payment-service`, `https://gyre.example.com/<ws>/repo-b.git` matches
 /// `repo-b`, while `https://xrepo-b.example.com` does not match `repo-b`.
 fn repo_name_in_url(url: &str, repo_name: &str) -> bool {
-    url.split(|c: char| matches!(c, '/' | ':' | '.' | '?' | '=' | '&'))
+    url.split(['/', ':', '.', '?', '=', '&'])
         .any(|label| label == repo_name)
 }
 
@@ -4234,7 +4234,7 @@ pub fn detect_proto_imports(content: &str, known_repos: &[&str]) -> Vec<String> 
             let path = rest
                 .trim()
                 .trim_start_matches('"')
-                .trim_end_matches(|c: char| c == '"' || c == ';');
+                .trim_end_matches(['"', ';']);
             // First path segment is typically the package/repo name.
             if let Some(first_seg) = path.split('/').next() {
                 if known_repos.contains(&first_seg) {
