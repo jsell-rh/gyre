@@ -986,8 +986,8 @@ mod tests {
     async fn spec_links_patrol_job_registered_runs_patrol_and_notifies() {
         use gyre_common::{Id, NotificationType};
         use gyre_domain::{
-            ApprovalStatus, RepoStatus, Repository, TrustLevel, Workspace,
-            WorkspaceMembership, WorkspaceRole,
+            ApprovalStatus, RepoStatus, Repository, TrustLevel, Workspace, WorkspaceMembership,
+            WorkspaceRole,
         };
 
         let state = test_state();

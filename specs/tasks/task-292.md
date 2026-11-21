@@ -2,7 +2,7 @@
 title: "Spec Links — accountability integration: scheduled patrol job, ABAC-gated endpoint (exemption shrink), persona patrol inputs, and a strictly read-only MCP patrol tool"
 spec_ref: "Spec gap spec-10bdced21a063f819b1baabd / spec-links-accountability-patrol / 5a915155d9bc"
 depends_on: []
-progress: not-started
+progress: ready-for-review
 commits: ["d710d60a20fa7ccba16c208232588de4cfb65e74"]
 ---
 
@@ -22,6 +22,42 @@ spec-links.md §Accountability Agent Integration: the five patrol checks are gen
 As a ReadOnly-role principal, call the MCP patrol tool against state containing a stale link beyond threshold: the tool must return the finding AND leave the durable notification row count unchanged (before/after counts equal). If the handler were wired to the HTTP endpoint's fan-out — the exact hazard the review feedback flags, an ungated durable write invisible to check-mcp-write-tools.sh because the write happens inside create_notifications_for_error_findings — the row-count assertion fails while CI stays green. Second probe: a principal without spec access in another tenant calling POST /api/v1/patrol/spec-links receives a policy-denied response; on current code the route is exempt from ABAC and the handler has no auth extractor, so the call succeeds and returns cross-tenant findings.
 
 Update the relevant coverage rows only after implementing the behavior, with concrete source evidence. Do not mark unrelated rows complete or claim independent verification before it occurs.
+
+## Shipped
+
+All four integration surfaces from the required behavior are implemented in production code. Source checkpoint `d710d60a` (retained from the prior assignment) carried the implementation; this finalization round applied `cargo fmt` to the newly added Rust code (whitespace only, no behavior change), extended the coverage row, and recorded attribution.
+
+### Scheduled patrol job
+
+`jobs.rs:497` registers `spec_links_patrol` (daily interval, enabled, mirrors the staleness job's registration) whose handler runs `spec_patrol::run_job_once` (`spec_patrol.rs:89`): the full five-check `run_patrol` with the shared `DEFAULT_STALE_THRESHOLD_SECS` (7 days) plus the `create_notifications_for_error_findings` fan-out — so error findings (unresolved conflicts, dangling implementations) reach Admin/Developer members on the accountability cycle with no manual invocation. Test `jobs.rs::spec_links_patrol_job_registered_runs_patrol_and_notifies` seeds a dangling `implements` link with resolvable workspace context, triggers the job through the registry's own run path, and asserts the Admin member received the error finding as a durable notification row.
+
+### ABAC-gated endpoint (exemption shrink)
+
+`/api/v1/patrol/spec-links` is registered in the ABAC policy resolver (`abac_middleware.rs:448`, `"spec"` resource — POST derives the `write` action), mirroring the spec-lifecycle patrol at `:439`, and removed from `scripts/abac-route-registry-exemptions.txt` (file 42→41 entries; `FROZEN_EXEMPTION_COUNT` tightened 46→41 to match — shrink only, no new exemptions, no duplicate resolver entries). A principal without spec write access is now policy-denied instead of receiving forge-wide findings plus notification fan-out. Test `abac_middleware.rs::spec_links_patrol_route_gets_policy_evaluation`: foreign-tenant ReadOnly principal → FORBIDDEN (policy decision), Admin → OK (not a blanket deny).
+
+### Read-only MCP tool `gyre_spec_patrol`
+
+Tool definition (`mcp.rs:373`), dispatch (`:5298`), handler `handle_spec_patrol` wraps ONLY the pure `run_patrol` computation — it never calls `create_notifications_for_error_findings` and creates no notifications, tasks, or durable rows; because it performs no repository writes it is legitimately outside the `needs_write` RBAC gate, so ReadOnly-role principals may invoke it. The side-effect boundary is asserted by test `mcp.rs::spec_patrol_tool_readonly_returns_findings_without_durable_writes`: a ReadOnly JWT calls the tool against state holding a stale link beyond threshold plus a dangling implementation with a seeded Admin fan-out recipient; the test asserts the tool returns exactly `run_patrol`'s findings for that state, that notification and task row counts are identical before/after, and that the Admin recipient received zero rows (the exact hazard `check-mcp-write-tools.sh` cannot see). `mcp_tools_list_includes_spec_patrol` asserts discovery via `tools/list`.
+
+### Persona patrol inputs and docs
+
+`specs/personas/accountability.md` "What You Scan" item 6 lists the five spec-graph surfaces (stale links, orphaned supersessions, unresolved conflicts, dangling implementations, deep `depends_on` chains) and their delivery surfaces. `docs/api-reference.md` updated for the ABAC-gated endpoint + scheduled job and the new MCP tool. Coverage row 16 in `specs/coverage/system/spec-links.md` updated with the integration source evidence.
+
+### Verification evidence and deferred tests
+
+Probes run in this sandbox via the build wrapper (`/tmp/stage/bin/cargo`), log at `/tmp/stage/review-evidence/probe-log.md`:
+
+- `cargo fmt --check -p gyre-server` — failed on the newly added test code, fixed with `cargo fmt -p gyre-server` (whitespace only), re-check exit 0.
+- `cargo check -p gyre-server` — exit 0 (no warnings in new code).
+- `cargo check -p gyre-server --tests` — exit 0 (new test modules type-check).
+- `scripts/check-abac-route-registry.sh` — exit 0; `scripts/check-abac-exempt-handlers.sh` — exit 0 (89 handlers); `scripts/check-mcp-write-tools.sh` — exit 0 (7 write tools gated; `gyre_spec_patrol` correctly absent).
+
+Deferred to the independent verifier (hard 4 GiB budget — gyre-server test-binary builds must not run in this sandbox):
+
+    cargo test -p gyre-server spec_links_patrol_route_gets_policy_evaluation -- --nocapture
+    cargo test -p gyre-server spec_links_patrol_job_registered_runs_patrol_and_notifies -- --nocapture
+    cargo test -p gyre-server spec_patrol_tool_readonly_returns_findings_without_durable_writes -- --nocapture
+    cargo test -p gyre-server mcp_tools_list_includes_spec_patrol -- --nocapture
 
 ## Discovery evidence
 

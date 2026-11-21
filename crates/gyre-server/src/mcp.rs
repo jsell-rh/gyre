@@ -7144,8 +7144,8 @@ mod tests {
     /// check-mcp-write-tools.sh's direct-call scan).
     async fn seed_spec_patrol_state(state: &crate::AppState) {
         use gyre_domain::{
-            ApprovalStatus, RepoStatus, Repository, TrustLevel, Workspace,
-            WorkspaceMembership, WorkspaceRole,
+            ApprovalStatus, RepoStatus, Repository, TrustLevel, Workspace, WorkspaceMembership,
+            WorkspaceRole,
         };
 
         state
@@ -7285,7 +7285,11 @@ mod tests {
         .await;
         assert_eq!(expected.len(), 2, "stale link + dangling implementation");
         let key = |f: &crate::spec_patrol::PatrolFinding| {
-            (f.finding_type.clone(), f.spec_path.clone(), f.severity.clone())
+            (
+                f.finding_type.clone(),
+                f.spec_path.clone(),
+                f.severity.clone(),
+            )
         };
         let mut expected_keys: Vec<_> = expected.iter().map(key).collect();
         expected_keys.sort();
@@ -7401,9 +7405,7 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         let tools = json["result"]["tools"].as_array().unwrap();
         assert!(
-            tools
-                .iter()
-                .any(|t| t["name"] == "gyre_spec_patrol"),
+            tools.iter().any(|t| t["name"] == "gyre_spec_patrol"),
             "must list gyre_spec_patrol tool"
         );
     }
