@@ -3111,6 +3111,39 @@ pub async fn spawn_agent(
     auth: AuthenticatedAgent,
     Json(req): Json<SpawnAgentRequest>,
 ) -> Result<(StatusCode, Json<SpawnAgentResponse>), ApiError> {
+    // agent-runtime.md §1 The Signal Chain — direct-spawn gate: spec
+    // approval is the single trigger for implementation work, so the REST
+    // spawn surface must not create task-bound implementation worker
+    // agents for external callers. The endpoint remains for Phase-8
+    // system-initiated kinds (interrogation via `agent_type`, and
+    // equivalent system-initiated spawns: the in-process scheduler and
+    // the system principal). A request that would bind a worker to an
+    // Implementation task is rejected 403 for human/agent principals —
+    // the scheduler (Phase 4) is the only worker-spawn path, and it
+    // verifies the spec approval itself.
+    if req.agent_type.as_deref() != Some("interrogation") && !auth.is_system_principal() {
+        match state.tasks.find_by_id(&Id::new(&req.task_id)).await {
+            Ok(Some(task)) if task.task_type == Some(gyre_domain::TaskType::Implementation) => {
+                return Err(ApiError::Forbidden(
+                    "spec approval is the single trigger for implementation work \
+                     (agent-runtime.md §1): POST /api/v1/agents/spawn may not create a \
+                     worker bound to an Implementation task — the Phase-4 scheduler spawns \
+                     implementation workers after a spec is approved"
+                        .to_string(),
+                ));
+            }
+            // Missing task / lookup failure: the existence check inside
+            // the spawn core rejects the spawn with its normal error — no
+            // scope decision needed here. Non-implementation task types
+            // keep the spawn core's existing task-type checks.
+            Ok(_) => {}
+            Err(e) => {
+                return Err(ApiError::Internal(anyhow::anyhow!(
+                    "task lookup for spawn gate failed: {e}"
+                )));
+            }
+        }
+    }
     let resp = spawn_agent_core(&state, req, &auth, "POST /api/v1/agents/spawn").await?;
     Ok((StatusCode::CREATED, Json(resp)))
 }

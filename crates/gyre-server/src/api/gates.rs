@@ -850,6 +850,59 @@ pub async fn verify_spec_ref(state: &AppState, spec_ref: &str) -> Result<(), Str
     }
 }
 
+/// agent-runtime.md §1 The Signal Chain — "There is no other trigger. The
+/// `SpecApproved` event is the universal starting signal." Gate for
+/// implementation work: a task may only carry `task_type: implementation`
+/// when its `spec_ref` ("path@sha") resolves to a spec that is CURRENTLY
+/// Approved at exactly the pinned version.
+///
+/// Two independent ledger checks, both fail-closed:
+/// 1. The durable per-SHA approval row — the same agent-gates.md §Spec
+///    Approval Ledger query (`verify_spec_ref`) the merge gates use, so a
+///    task cannot reference a version the merge gate would later reject.
+/// 2. The registry entry for the path: still `Approved`, and its
+///    `current_sha` is exactly the pinned SHA — an approval invalidated by
+///    a later push (the registry sync resets the status to Pending and
+///    moves `current_sha` onto the new blob) fails here even if a row
+///    revocation was ever missed.
+pub async fn verify_implementation_spec_ref(
+    state: &AppState,
+    spec_ref: &str,
+) -> Result<(), String> {
+    // 1. Durable per-SHA approval row (also validates the "path@sha" form
+    // and the 40-char hex SHA).
+    verify_spec_ref(state, spec_ref).await?;
+
+    // 2. Current registry state at the pinned version. verify_spec_ref's
+    // success guarantees the rsplit_once below resolves.
+    let (path, sha) = spec_ref.rsplit_once('@').expect("parsed by verify_spec_ref");
+    match state.spec_ledger.find_by_path(path).await {
+        Ok(Some(entry)) => {
+            if entry.current_sha != sha {
+                Err(format!(
+                    "spec '{path}' is currently at version {}; the pinned SHA {sha} is no \
+                     longer the current approved version (the spec changed after approval)",
+                    entry.current_sha
+                ))
+            } else if entry.approval_status != gyre_domain::ApprovalStatus::Approved {
+                Err(format!(
+                    "spec '{path}' approval status is {} — only an Approved spec may \
+                     trigger implementation work",
+                    entry.approval_status
+                ))
+            } else {
+                Ok(())
+            }
+        }
+        Ok(None) => Err(format!(
+            "spec '{path}' is not in the spec registry — no approved version exists"
+        )),
+        Err(e) => Err(format!(
+            "spec registry lookup for '{path}' failed: {e}"
+        )),
+    }
+}
+
 /// agent-gates.md §Forge Enforcement Policies, `require_signed_approval`:
 /// "Spec approvals must include Sigstore signature."
 ///

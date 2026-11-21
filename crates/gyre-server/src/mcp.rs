@@ -1491,6 +1491,26 @@ async fn handle_create_task(state: &AppState, args: &Value, auth: &Authenticated
             }
         }
     }
+    // agent-runtime.md §1 The Signal Chain — spec approval is the single
+    // trigger for implementation work: reject an implementation task
+    // whose spec_ref does not resolve to a currently-Approved spec version
+    // at exactly the pinned SHA (the same gate the REST task-create
+    // handler enforces). Delegation/Coordination tasks are unaffected.
+    if task.task_type == Some(gyre_domain::TaskType::Implementation) {
+        let gate = match task.spec_ref.as_deref() {
+            Some(spec_ref) => {
+                crate::api::gates::verify_implementation_spec_ref(state, spec_ref).await
+            }
+            None => Err("the task carries no spec_ref (path@sha)".to_string()),
+        };
+        if let Err(reason) = gate {
+            return tool_error(format!(
+                "SPEC_APPROVAL_REQUIRED: spec approval is the single trigger for \
+                 implementation work (agent-runtime.md §1): {reason} — approve the spec \
+                 first via POST /api/v1/specs/:path/approve"
+            ));
+        }
+    }
     match state.tasks.create(&task).await {
         Ok(()) => tool_result(format!("Created task {} (id: {})", task.title, task.id)),
         Err(e) => tool_error(format!("Failed to create task: {e}")),
@@ -1661,6 +1681,14 @@ async fn handle_decompose_spec(state: &AppState, args: &Value, auth: &Authentica
         task.task_type = Some(gyre_domain::TaskType::Implementation);
         task.repo_id = Id::new(&repo_id);
         task.workspace_id = Id::new(&caller_ws);
+        // Pin the sub-task to the parent's spec version (the same
+        // propagation the in-process decomposition in signal_chain.rs
+        // applies): the Phase-4 scheduler only spawns Implementation
+        // tasks whose spec_ref resolves to a currently-Approved ledger
+        // entry at the pinned SHA (agent-runtime.md §1), so a sub-task
+        // without the pinned spec_ref would never spawn.
+        task.spec_path = parent.spec_path.clone();
+        task.spec_ref = parent.spec_ref.clone();
         if let Err(e) = state.tasks.create(&task).await {
             return tool_error(format!("Failed to create subtask: {e}"));
         }
