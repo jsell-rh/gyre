@@ -1,0 +1,51 @@
+# Review — task-283 (Graph-driven auto-created MR dependencies + dependent-count budget weighting)
+
+Spec: `specs/system/dependency-graph.md` §Workspace Orchestrator Integration — Merge ordering + Budget allocation bullets (the priority-decisions and cross-repo-task-creation bullets were already real via the breaking-change cascade and are unchanged).
+Candidate under review: `b8f0f40f6bcf5f8f4d999b5b128d9b7e355f5501` (branch `pipeline/task-283/b8b105b8794646078a5719a8dbb35794-1`, base `8e2e7458a7adeadd887c7dbc413c49d5cc4de47a`; product commits `b0b7dc10` + `08b78429` (implementation), `701cb6f0` (inert-enforcement repair, round 1), `97bbefe9` (relpath comment repair, round 2); remaining commits are `process:`-labeled).
+Verdict: **approved** — no findings. Both previously cited mechanical-gate false-positives (inert-enforcement tail-call shape, relpath comment regex) are repaired with no behavior change and no exemption entries; all gates now exit 0 on the exact candidate, and the full implementation satisfies the task contract by inspection, type check, and fresh domain tests.
+
+## Round 3 probes (checkout at candidate `b8f0f40f`; working tree carries only the executor's staged task-file frontmatter reset, not part of the product diff)
+
+- `bash scripts/check-inert-enforcement.sh` → **exit 0** (round-1 finding repaired: both `enforce_workspace_spawn_caps` tail calls now `return ...;` — budget.rs:499/529 region).
+- `bash scripts/check-relative-path-defaults.sh` → **exit 0** (round-2 finding repaired: the `detect_graph_deps` normalization comment no longer contains a double-quoted `./...` sequence; the actual `strip_prefix("./")` call was never flagged).
+- `bash scripts/check-arch.sh`, `check-mcp-write-tools.sh`, `check-fail-open-ref-resolution.sh`, `check-lossy-secret-conversion.sh`, `check-in-memory-state-stores.sh`, `check-scope-literal-defaults.sh`, `check-fabricated-scope-defaults.sh`, `check-unbounded-external-http.sh`, `check-dead-message-kinds.sh`, `check-migration-versions.sh`, `check-forwarded-header-trust.sh` → all **exit 0**.
+- `/tmp/stage/bin/cargo fmt -p gyre-server -p gyre-domain --check` → exit 0.
+- `/tmp/stage/bin/cargo check -p gyre-server` → **exit 0** (cold, 7m42s; build.rs also ran `npm ci` + web build successfully).
+- `/tmp/stage/bin/cargo check -p gyre-server --tests` → **exit 0** (4m01s incremental — the new test modules type-check).
+- `/tmp/stage/bin/cargo test -p gyre-domain` → 580 + 8 passed, 0 failed.
+- Delta from the round-2-reviewed checkpoint `3a46b777` is comment-only in code (`merge_requests.rs` comment reword) plus process/task-file commits — the runtime behavior verified by inspection below is the code that type-checks.
+- All logs under `/tmp/stage/review-evidence/` (`*-r3.log`, `fmt-r3.log`).
+
+## Verified working (no findings)
+
+**Merge ordering (spec bullet 3):**
+
+- `detect_graph_deps` (merge_requests.rs:678) is a real graph-driven detector alongside `detect_lineage_deps`: lists the MR repo's outgoing `DependencyEdge`s via `state.dependencies.list_by_repo` (port semantics verified in gyre-ports/src/dependency.rs + mem/SQLite/PG adapters: `source_repo_id == repo_id`), computes the MR's real diff (`git diff --name-only refs/heads/<default> refs/heads/<source>` — real on-disk git, no mocks, same no-flag-injection branch-safety rule as the lineage detector), and when the diff touches an edge's `source_artifact` while the target repo has an Open MR, returns a `MergeRequestDependency` with the NEW `DependencySource::DependencyGraph` variant (gyre-domain/src/merge_request.rs; serialized `dependency-graph` in both merge_deps.rs response surfaces). Most-recently-updated target MR selected with a deterministic tie-break (highest `updated_at`, then greatest MR id) documented at the detector; one link per target repo.
+- Integration follows the lineage pattern exactly: REST `create_mr` and MCP `handle_create_mr` merge explicit + lineage + graph deps via the new `merge_explicit_and_auto_deps` (explicit precedence, per-target dedup, nothing dropped); the shared `reevaluate_lineage_deps` reconciliation now detects graph deps too — stale graph-sourced deps drop, newly detected ones re-add, explicit/agent-declared deps are never touched, duplicates skipped, and the existing `would_create_cycle` guard runs on the full new dep set before persisting. Wired from the push post-receive path (pre-existing `mrs_needing_lineage_reeval`, git_http.rs:1581), the MR close hook (`transition_mr_status` → `mrs_with_graph_deps_on` → re-evaluate dependents), and the reverse direction on MR creation (`reevaluate_graph_deps_of_dependent_repos`, fire-and-forget like the post-receive path).
+- Merge ordering is real, not asserted: `merge_processor.rs` `dependencies_satisfied` (line 862) iterates `mr.depends_on` source-agnostically and blocks until every target is `Merged`; the queue graph builds edges from `depends_on` the same way. A stored `DependencyGraph` edge therefore orders A's merge after B's with zero additional wiring.
+- Tests are hard and pre-fix-failing: `graph_dep_created_when_mr_updates_dependency_declaration` drives two REAL on-disk git repos through the REST MR surface (real `git diff` signal, real port stores) and asserts the auto-created dep in storage with source `dependency-graph` — pre-fix no writer existed, so the `deps.len() == 1` assertion fails. Negative control (docs-only diff → no dep), no-pending-target-MR, close-drops-dep (through the production `transition_mr_status` close hook), diff-no-longer-touches-declaration drop, explicit-preserved/no-duplicates across two reconciliation passes, and most-recently-updated tie-break are all covered. Each kills a real regression class (removal of the detector, of the close hook, of the stale-drop filter, or of the duplicate skip breaks a specific assertion).
+
+**Budget allocation (spec bullet 4):**
+
+- `check_repo_spawn_budget` (budget.rs) inheritance path (`repo.budget` None) now enforces dependent-weighted caps: factor `1 + 0.25 × dependents` capped at 2.0 (`dependent_boost_factor`, monotonic, ≥ 1.0 so never below the unweighted inherited limit), applied to token/cost/concurrent-agent caps (`None` stays `None`, fractional results ceil), with the dependent count read live from the graph (`state.dependencies.list_dependents` — port semantics verified: `target_repo_id == repo_id`, i.e. repos that depend on this one). Graph read failure logs and yields 0 dependents (under-admit only). The rule is documented at the enforcement site. Production records repo-keyed usage (budget.rs:1051 charges agent usage to `repo_key`), so the per-repo token/cost checks evaluate real state; the concurrent-agent check counts real Active agent records.
+- The workspace-aggregate half (`check_spawn_budget_for_repo`) applies the same weighted caps for inherit repos (plain caps for override repos — the override always wins and is never influenced by dependents), and both spawn call sites are wired: `spawn_agent_core` (spawn.rs) and `spawn_implementation_workers` (signal_chain.rs). Plain `check_spawn_budget` remains for non-repo-scoped surfaces (meta-spec previews, orchestrator spawns, dead-orchestrator restart) — unchanged base behavior, outside the task's required call sites.
+- Explicit overrides are enforced verbatim (untouched code path) — test asserts the override cap fires exactly as configured with 5 dependents present.
+- Tests kill the pre-fix behavior: `dependent_weighted_repo_budget_admits_more_concurrent_agents` ends in `expect_err` on the 5th concurrent agent — pre-fix the inheritance path returned `Ok(())` unconditionally, so this test FAILS on the base (that is the verification intent's probe, inverted). Companion workspace-half test proves the 3rd spawn into the 5-dependent repo is admitted while the same spawn into a 0-dependent repo is rejected at the unweighted limit; token-dimension and monotonicity/boundedness covered; override-wins covered on both halves.
+
+**Process/honesty checks:**
+
+- Coverage row 18 (dependency-graph.md) updated only for this task's bullets, with concrete source evidence, status `implemented` (not `verified`) with server-test execution explicitly deferred to the independent verifier — no fake verification claim, no unrelated rows touched.
+- Task frontmatter lists all four product commits; the repair rounds added no exemption entries and no behavior changes (both verified by diff inspection: `return` prefixing on returned tail expressions; comment reword).
+- No production code outside the task's surfaces was modified (mcp.rs change is confined to `handle_create_mr`'s dep merge; signal_chain.rs/spawn.rs changes are the two spawn-call-site rewirings).
+
+## Non-blocking observations (recorded, no action required)
+
+- Orchestrator spawn paths (api/orchestrator.rs:847, :1094) and the dead-orchestrator restart (stale_agents.rs:307) still use the plain unweighted `check_spawn_budget`. This matches base behavior and the task scopes the weighting to agent spawns (`check_repo_spawn_budget` at spawn); if the spec's "agent budgets" is later read to cover orchestrator tiers, that is a follow-up, not a defect here.
+- A push to B's branch that bumps a B MR's `updated_at` past a sibling's does not re-target an already-linked graph dep to the newly-most-recent B MR (the existing dep stays valid — not stale — since B still has an Open MR and A's diff still touches the declaration). The acceptance criteria (create, close-drop, stale-drop, no-duplicate) are all covered; re-targeting on recency change alone is outside them.
+- `repo_dependent_count` counts incoming edges (`list_dependents().len()`), not distinct source repos — the natural reading of the task text ("dependent count read from the live dependency graph (state.dependencies.list_dependents)"); monotonic and bounded either way.
+
+## Verifier must run (deferred from this review — gyre-server test execution exceeds the review build budget)
+
+- `cargo test -p gyre-server graph_dep` — the six graph-driven MR-dependency tests (real git repos, REST surface).
+- `cargo test -p gyre-server dependent_` — the five dependent-count budget tests.
+- The full workspace suite and mechanical gates per the standard verifier contract (all gates already exit 0 on this checkout).
