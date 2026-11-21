@@ -3,7 +3,7 @@ title: "Dependency auto-detection: full extraction forms (git refs, structured c
 spec_ref: "Spec gap spec-cab97078efffe0fbfb7339be / dep-detection-extraction-forms / ed9f34316476"
 depends_on: []
 progress: not-started
-commits: []
+commits: ["423769ddb227634b5b5fb30909fcaac22b47e159"]
 ---
 
 ## Required behavior

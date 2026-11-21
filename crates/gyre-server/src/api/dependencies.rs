@@ -888,7 +888,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_cargo_toml_path_dep_detection() {
+    async fn test_cargo_toml_dep_detection_path_and_git_forms() {
         let toml_content = r#"
 [package]
 name = "my-crate"
@@ -897,11 +897,66 @@ version = "0.1.0"
 [dependencies]
 serde = "1.0"
 other-crate = { path = "../other-repo" }
+repo-b = { git = "https://gyre.example.com/ws/repo-b.git", tag = "v1.2.0" }
 gyre-client = { git = "https://github.com/example/gyre-client" }
 "#;
-        let path_deps = crate::git_http::detect_cargo_path_deps(toml_content);
-        assert_eq!(path_deps.len(), 1);
-        assert_eq!(path_deps[0], "../other-repo");
+        let deps = crate::git_http::detect_cargo_deps(toml_content);
+        assert_eq!(deps.len(), 3);
+        assert_eq!(deps[0].reference, "../other-repo");
+        assert_eq!(deps[0].version, None);
+        assert_eq!(deps[1].reference, "https://gyre.example.com/ws/repo-b.git");
+        assert_eq!(deps[1].version, Some("v1.2.0".to_string()));
+        // Extraction is form-based; matching against known tenant repos (so
+        // external hosts like github.com create no edge) happens at the
+        // detection call site, not in the parser.
+        assert_eq!(deps[2].reference, "https://github.com/example/gyre-client");
+    }
+
+    #[test]
+    fn test_cargo_deps_version_tag_rev_keys() {
+        let toml = r#"
+[dependencies]
+a = { git = "https://gyre.example.com/ws/a.git", version = "1.0.0" }
+b = { git = "https://gyre.example.com/ws/b.git", tag = "v2.0" }
+c = { git = "https://gyre.example.com/ws/c.git", rev = "abc123" }
+d = { path = "../d" }
+"#;
+        let deps = crate::git_http::detect_cargo_deps(toml);
+        assert_eq!(deps.len(), 4);
+        assert_eq!(deps[0].version, Some("1.0.0".to_string()));
+        assert_eq!(deps[1].version, Some("v2.0".to_string()));
+        assert_eq!(deps[2].version, Some("abc123".to_string()));
+        assert_eq!(deps[3].version, None);
+    }
+
+    #[test]
+    fn test_cargo_deps_key_must_be_word_boundary() {
+        // `path`/`git` must not match inside a dependency NAME — only as
+        // inline-table keys.
+        let toml = r#"
+[dependencies]
+some-path-crate = "1.0"
+legit = "2.0"
+"#;
+        let deps = crate::git_http::detect_cargo_deps(toml);
+        assert!(deps.is_empty());
+    }
+
+    #[test]
+    fn test_repo_name_from_reference() {
+        use crate::git_http::repo_name_from_reference;
+        assert_eq!(repo_name_from_reference("../repo-b"), "repo-b");
+        assert_eq!(repo_name_from_reference("./repo-b"), "repo-b");
+        assert_eq!(repo_name_from_reference("repo-b"), "repo-b");
+        assert_eq!(
+            repo_name_from_reference("https://gyre.example.com/ws/repo-b.git"),
+            "repo-b"
+        );
+        assert_eq!(
+            repo_name_from_reference("git+ssh://git@gyre.example.com/ws/repo-b.git#v1.2"),
+            "repo-b"
+        );
+        assert_eq!(repo_name_from_reference("git@host:ws/repo-b.git"), "repo-b");
     }
 
     // ── Breaking change detection tests ────────────────────────────────
@@ -1673,44 +1728,6 @@ serde = "1.0"
         assert_eq!(crate::git_http::extract_cargo_version(toml), None);
     }
 
-    #[test]
-    fn test_extract_dep_version_simple() {
-        let toml = r#"
-[dependencies]
-serde = "1.0.200"
-other-crate = "2.3.4"
-"#;
-        assert_eq!(
-            crate::git_http::extract_dep_version(toml, "serde"),
-            Some("1.0.200".to_string())
-        );
-        assert_eq!(
-            crate::git_http::extract_dep_version(toml, "other-crate"),
-            Some("2.3.4".to_string())
-        );
-    }
-
-    #[test]
-    fn test_extract_dep_version_inline_table() {
-        let toml = r#"
-[dependencies]
-serde = { version = "1.0.200", features = ["derive"] }
-"#;
-        assert_eq!(
-            crate::git_http::extract_dep_version(toml, "serde"),
-            Some("1.0.200".to_string())
-        );
-    }
-
-    #[test]
-    fn test_extract_dep_version_not_found() {
-        let toml = r#"
-[dependencies]
-serde = "1.0"
-"#;
-        assert_eq!(crate::git_http::extract_dep_version(toml, "tokio"), None);
-    }
-
     // ── TASK-048: Package manager parser tests ────────────────────────
 
     #[test]
@@ -1767,6 +1784,26 @@ serde = "1.0"
     fn test_detect_package_json_invalid_json() {
         let deps = crate::git_http::detect_package_json_deps("not valid json {{{");
         assert!(deps.is_empty());
+    }
+
+    #[test]
+    fn test_detect_package_json_git_ref() {
+        // dependency-graph.md §1: "dependencies pointing to Gyre-hosted
+        // packages" — git URL forms, matched by URL last segment.
+        let json = r#"{
+            "name": "my-app",
+            "dependencies": {
+                "repo-b": "git+https://gyre.example.com/ws/repo-b.git#v1.2",
+                "repo-c": "git+ssh://git@gyre.example.com/ws/repo-c.git",
+                "left-pad": "^1.3.0"
+            }
+        }"#;
+        let deps = crate::git_http::detect_package_json_deps(json);
+        assert_eq!(deps.len(), 2);
+        assert_eq!(deps[0].0, "https://gyre.example.com/ws/repo-b.git");
+        assert_eq!(deps[0].1, Some("v1.2".to_string()));
+        assert_eq!(deps[1].0, "git+ssh://git@gyre.example.com/ws/repo-c.git");
+        assert_eq!(deps[1].1, None);
     }
 
     #[test]
@@ -1950,6 +1987,22 @@ flask = "^2.3"
         assert!(deps.is_empty());
     }
 
+    #[test]
+    fn test_detect_pyproject_pep508_git_ref() {
+        // PEP 508 direct git reference to a Gyre-hosted package.
+        let content = r#"
+[project]
+dependencies = [
+    "repo-b @ git+https://gyre.example.com/ws/repo-b.git",
+    "requests >= 2.28",
+]
+"#;
+        let deps = crate::git_http::detect_pyproject_deps(content);
+        assert_eq!(deps.len(), 1);
+        assert_eq!(deps[0].0, "git+https://gyre.example.com/ws/repo-b.git");
+        assert_eq!(deps[0].1, Some("repo-b".to_string()));
+    }
+
     // ── Spec manifest link tests ──────────────────────────────────────
 
     #[test]
@@ -2057,6 +2110,72 @@ info:
     }
 
     #[test]
+    fn test_detect_openapi_server_url_path_segment_match() {
+        // Gyre URL form: https://host/<workspace>/<repo> — the repo name is a
+        // whole path segment of servers[].url.
+        let content = r#"
+openapi: "3.0.0"
+servers:
+  - url: https://gyre.example.com/ws/repo-b/api/v1
+"#;
+        let repos = vec!["repo-b", "repo-c"];
+        let refs = crate::git_http::detect_openapi_refs(content, &repos);
+        assert_eq!(refs, vec!["repo-b".to_string()]);
+    }
+
+    #[test]
+    fn test_detect_openapi_description_mention_no_edge() {
+        // Over-match guard: a repo name appearing only in a description (not
+        // in servers[].url) must create NO edge — the pre-fix whole-document
+        // substring scan created one.
+        let content = r#"
+openapi: "3.0.0"
+info:
+  title: My API
+  description: Integrates with repo-b for billing
+servers:
+  - url: https://api.example.com/v1
+paths:
+  /orders:
+    get:
+      summary: Create order
+"#;
+        let repos = vec!["repo-b"];
+        let refs = crate::git_http::detect_openapi_refs(content, &repos);
+        assert!(refs.is_empty());
+    }
+
+    #[test]
+    fn test_detect_openapi_swagger2_host_base_path() {
+        let content = r#"
+swagger: "2.0"
+info:
+  title: Legacy API
+host: payment-service.internal
+basePath: /v1
+"#;
+        let repos = vec!["payment-service"];
+        let refs = crate::git_http::detect_openapi_refs(content, &repos);
+        assert_eq!(refs, vec!["payment-service".to_string()]);
+    }
+
+    #[test]
+    fn test_detect_openapi_json_document() {
+        // swagger.json is JSON — JSON is valid YAML, so the same structured
+        // extraction covers both serializations.
+        let content = r#"{"openapi": "3.0.0", "servers": [{"url": "https://gyre.example.com/ws/repo-b/api"}]}"#;
+        let repos = vec!["repo-b"];
+        let refs = crate::git_http::detect_openapi_refs(content, &repos);
+        assert_eq!(refs, vec!["repo-b".to_string()]);
+    }
+
+    #[test]
+    fn test_detect_openapi_invalid_document() {
+        let refs = crate::git_http::detect_openapi_refs("not: valid: yaml: ][", &["repo-b"]);
+        assert!(refs.is_empty());
+    }
+
+    #[test]
     fn test_detect_proto_imports() {
         let content = r#"
 syntax = "proto3";
@@ -2096,6 +2215,43 @@ import "google/protobuf/empty.proto";
         assert_eq!(refs.len(), 2);
         assert!(refs.contains(&"auth-service".to_string()));
         assert!(refs.contains(&"search-service".to_string()));
+    }
+
+    #[test]
+    fn test_detect_mcp_refs_mcp_servers_url() {
+        // Canonical MCP config shape: mcpServers.<name>.url.
+        let content = r#"{
+            "mcpServers": {
+                "billing": {"url": "https://gyre.example.com/ws/repo-b/mcp"},
+                "local": {"command": "npx", "args": ["-y", "some-server"]}
+            }
+        }"#;
+        let repos = vec!["repo-b", "repo-c"];
+        let refs = crate::git_http::detect_mcp_refs(content, &repos);
+        assert_eq!(refs, vec!["repo-b".to_string()]);
+    }
+
+    #[test]
+    fn test_detect_mcp_refs_unrelated_field_no_edge() {
+        // A repo name appearing only in an unrelated string field creates no
+        // edge — the pre-fix whole-document substring scan created one.
+        let content = r#"{
+            "mcpServers": {
+                "billing": {
+                    "url": "https://api.example.com/mcp",
+                    "description": "talks to repo-b"
+                }
+            }
+        }"#;
+        let repos = vec!["repo-b"];
+        let refs = crate::git_http::detect_mcp_refs(content, &repos);
+        assert!(refs.is_empty());
+    }
+
+    #[test]
+    fn test_detect_mcp_refs_invalid_json() {
+        let refs = crate::git_http::detect_mcp_refs("not valid json {{{", &["repo-b"]);
+        assert!(refs.is_empty());
     }
 
     // ── Reconciliation tests ──────────────────────────────────────────
