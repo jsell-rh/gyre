@@ -3,7 +3,7 @@ title: "Orchestrator integration: graph-driven auto-created MR dependencies (mer
 spec_ref: "Spec gap spec-cab97078efffe0fbfb7339be / orchestrator-merge-ordering-budget / ed9f34316476"
 depends_on: []
 progress: ready-for-review
-commits: ["08b784294c97cd650a675fbee9235f5c7bc17348", "b0b7dc10b0511dc352aebf0cdebc0c298f18b857"]
+commits: ["b0b7dc10b0511dc352aebf0cdebc0c298f18b857", "08b784294c97cd650a675fbee9235f5c7bc17348", "701cb6f088549882d115b8df1558ae6b1f35e9d6"]
 ---
 
 ## Required behavior
@@ -33,28 +33,33 @@ Both open bullets of dependency-graph.md §Workspace Orchestrator Integration ar
 
 Integration points, exactly the lineage pattern:
 
-- REST `create_mr` and MCP `handle_create_mr` merge explicit + lineage + graph deps via the new `merge_explicit_and_auto_deps` (explicit precedence, nothing duplicated); a cycle through a freshly created MR is impossible by construction (fresh id), the same reasoning the lineage path relies on.
+- REST `create_mr` and MCP `handle_create_mr` merge explicit + lineage + graph deps via `merge_explicit_and_auto_deps` (explicit precedence, nothing duplicated); a cycle through a freshly created MR is impossible by construction (fresh id), the same reasoning the lineage path relies on.
 - The shared `reevaluate_lineage_deps` reconciliation now also detects graph deps: stale graph-sourced deps (the diff no longer touches the declaration, or the target repo has no open MR) are dropped, newly detected ones re-added, explicit/agent-declared/lineage deps never touched, duplicates skipped, and the existing cycle check guards creation. It is called from the push post-receive path (git_http.rs `mrs_needing_lineage_reeval`) — so re-pushing A's branch reconciles its graph deps — and from the MR close hook (`transition_mr_status` → `mrs_with_graph_deps_on`): closing B's MR re-evaluates every open MR holding a graph edge to it, so the stale edge drops instead of blocking the dependent forever.
 - Reverse direction: creating an MR in a repo fire-and-forget-spawns `reevaluate_graph_deps_of_dependent_repos` (like the post-receive lineage re-eval) so the open MRs of dependent repos pick the new pending MR up.
 - Merge ordering itself is the existing merge-queue dependency semantics: the stored `DependencyGraph` dep makes `dependencies_satisfied` require B's MR Merged and the queue's topological sort orders A after B — no new wiring.
 
 ### Budget allocation — dependent-count weighting
 
-`check_repo_spawn_budget` (crates/gyre-server/src/api/budget.rs) inheritance path (`repo.budget` None): the enforced token/cost/concurrent-agent caps are the effective workspace limits weighted by the repo's dependent count read live from the graph (`state.dependencies.list_dependents`): factor = 1 + 25% of the workspace limit per dependent, capped at 2.0 — with workspace `max_concurrent_agents=2` a 5-dependent repo enforces 4 concurrent agents while a 0-dependent repo stays capped at 2. The factor is monotonic in the dependent count and ≥ 1.0, so the weighting never reduces a repo below the unweighted inherited limit; `None` caps stay `None`; fractional results round up; a graph read failure logs and yields the unweighted limit (under-admit only, never over-admit). The rule is documented at the enforcement site. The new `check_spawn_budget_for_repo` applies the same weighted caps to the workspace-aggregate half of the spawn check (plain unweighted caps for repos WITH an override), and both spawn call sites — `spawn_agent_core` (crates/gyre-server/src/api/spawn.rs) and `spawn_implementation_workers` (crates/gyre-server/src/signal_chain.rs) — use it. Explicit repo overrides are enforced verbatim, never weighted.
+`check_repo_spawn_budget` (crates/gyre-server/src/api/budget.rs) inheritance path (`repo.budget` None): the enforced token/cost/concurrent-agent caps are the effective workspace limits weighted by the repo's dependent count read live from the graph (`state.dependencies.list_dependents`): factor = 1 + 25% of the workspace limit per dependent, capped at 2.0 — with workspace `max_concurrent_agents=2` a 5-dependent repo enforces 4 concurrent agents while a 0-dependent repo stays capped at 2. The factor is monotonic in the dependent count and ≥ 1.0, so the weighting never reduces a repo below the unweighted inherited limit; `None` caps stay `None`; fractional results round up; a graph read failure logs and yields the unweighted limit (under-admit only, never over-admit). The rule is documented at the enforcement site. `check_spawn_budget_for_repo` applies the same weighted caps to the workspace-aggregate half of the spawn check (plain unweighted caps for repos WITH an override), and both spawn call sites — `spawn_agent_core` (crates/gyre-server/src/api/spawn.rs) and `spawn_implementation_workers` (crates/gyre-server/src/signal_chain.rs) — use it. Explicit repo overrides are enforced verbatim, never weighted.
+
+### Review-repair round (this checkpoint)
+
+The independent review flagged that the two function-tail `enforce_workspace_spawn_caps(...).await` expressions in `check_spawn_budget_for` and `check_spawn_budget_for_repo` tripped the mechanical inert-enforcement gate (`scripts/check-inert-enforcement.sh` exit 1; both results were in fact returned — a line-start regex shape false-positive). Fixed with no behavior change by prefixing both tail calls with an explicit `return` and terminating with `;` (commit 701cb6f0). No exemption entries added — the exemption file stays empty.
 
 ### Test evidence
 
-- `cargo check -p gyre-server --tests`: exit 0, 0 errors, 9m07s (log: /tmp/stage/review-evidence/cargo-check-gyre-server-tests.log) — the exact probe the previous assignment was terminated mid-run of.
-- rustfmt clean on all touched Rust files (log: /tmp/stage/review-evidence/rustfmt-check.log).
-- `cargo test -p gyre-domain`: 580 + 8 tests pass, 0 failed (log: /tmp/stage/review-evidence/gyre-domain-tests.log) — the crate owning the new `DependencySource::DependencyGraph` variant.
-- New gyre-server tests (compiled by the check above; execution deferred to the independent verifier per the 4 GiB build budget — the verifier should run them):
-  - merge_requests.rs — real on-disk git repos A→B with a DependencyEdge whose source artifact is A's Cargo.toml, driven through the REST MR surface, no git mocks: `graph_dep_created_when_mr_updates_dependency_declaration` (asserts the auto-created dep reaches storage with source `DependencyGraph`, reason naming the declaration artifact — the exact record the merge queue consumes — plus the negative control that a docs-only diff creates no dep), `graph_dep_not_created_without_pending_target_mr`, `graph_dep_dropped_when_target_mr_closed`, `graph_dep_dropped_when_diff_no_longer_touches_declaration`, `graph_dep_reconciliation_preserves_explicit_and_skips_duplicates`, `graph_dep_links_most_recently_updated_target_mr`. Suggested filter: `cargo test -p gyre-server graph_dep`.
-  - budget.rs: `dependent_boost_factor_is_monotonic_and_bounded`, `dependent_weighted_repo_budget_admits_more_concurrent_agents` (5 dependents, ws cap 2: 3rd and 4th spawns admitted, 5th rejected naming the weighted cap and the dependent count), `dependent_weighted_workspace_check_admits_boosted_spawn_only_for_dependent_repo` (3rd spawn on the 5-dependent repo admitted while the same spawn on the 0-dependent repo is rejected at the unweighted limit), `dependent_weighted_token_cap_raises_repo_limit`, `explicit_repo_override_wins_over_dependent_weighting` (override cap 1 fires verbatim with 5 dependents; override repos get plain workspace caps). Suggested filter: `cargo test -p gyre-server dependent_`.
+- `bash scripts/check-inert-enforcement.sh`: exit 0 (was exit 1 with 2 errors at budget.rs:499/529 before the repair; log: /tmp/stage/review-evidence/check-inert-repair.log).
+- `cargo check -p gyre-server`: exit 0, 0 errors, 7m54s on the repaired head including the merge of 8e2e7458 (log: /tmp/stage/review-evidence/cargo-check-gyre-server-repair.log).
+- `cargo fmt -p gyre-server --check`: clean (log: /tmp/stage/review-evidence/rustfmt-check-repair.log).
+- Prior-round evidence (candidate b8cc5c62, same code paths): `cargo check -p gyre-server --tests` exit 0; `cargo test -p gyre-domain` 580 + 8 tests pass, 0 failed.
+- gyre-server test execution remains deferred to the independent verifier per the 4 GiB build budget; the verifier should run:
+  - `cargo test -p gyre-server graph_dep` — real on-disk git repos A→B with a DependencyEdge whose source artifact is A's Cargo.toml, driven through the REST MR surface, no git mocks: `graph_dep_created_when_mr_updates_dependency_declaration` (auto-created dep reaches storage with source `DependencyGraph`, reason naming the declaration artifact, plus the docs-only-diff negative control), `graph_dep_not_created_without_pending_target_mr`, `graph_dep_dropped_when_target_mr_closed`, `graph_dep_dropped_when_diff_no_longer_touches_declaration`, `graph_dep_reconciliation_preserves_explicit_and_skips_duplicates`, `graph_dep_links_most_recently_updated_target_mr`.
+  - `cargo test -p gyre-server dependent_` — `dependent_boost_factor_is_monotonic_and_bounded`, `dependent_weighted_repo_budget_admits_more_concurrent_agents` (5 dependents, ws cap 2: 3rd and 4th spawns admitted, 5th rejected naming the weighted cap and the dependent count), `dependent_weighted_workspace_check_admits_boosted_spawn_only_for_dependent_repo`, `dependent_weighted_token_cap_raises_repo_limit`, `explicit_repo_override_wins_over_dependent_weighting`.
 
 ### Notes
 
-- Coverage row 18 (Workspace Orchestrator Integration) in specs/coverage/system/dependency-graph.md updated with concrete source evidence for both bullets; status stays `implemented` pending independent verification of the deferred gyre-server tests.
-- Source attribution: implementation checkpoints b0b7dc10 + 08b78429 (prior run, terminated during verification); this run re-verified formatting, completed the interrupted `cargo check --tests` probe (exit 0), re-ran the gyre-domain suite, and finalized docs. Web/dist untouched.
+- Coverage row 18 (Workspace Orchestrator Integration) in specs/coverage/system/dependency-graph.md carries concrete source evidence for both bullets; status stays `implemented` pending independent verification of the deferred gyre-server tests.
+- Source attribution: b0b7dc10 + 08b78429 (implementation checkpoints), 701cb6f0 (inert-enforcement repair). Web/dist untouched.
 
 ## Discovery evidence
 
