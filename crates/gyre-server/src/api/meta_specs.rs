@@ -3350,12 +3350,24 @@ mod tests {
     /// Write a fake agent-entrypoint script that dumps the environment it was
     /// handed (the injection contract) to `env_out` and then sleeps, so the
     /// process stays alive until the test kills it. Returns the script path.
+    ///
+    /// The dump must appear ATOMICALLY: `env`'s stdout is block-buffered when
+    /// redirected to a file, so a bare `env > out` flushes in 4096-byte chunks
+    /// and a poller that treats "file has content" as "file is complete"
+    /// reads a torn dump (CI observed exactly the first stdio block, with
+    /// GYRE_PREVIEW_ID/GYRE_AUTH_TOKEN/GYRE_SVID_* still unflushed). Two
+    /// preview agents also run this script concurrently against the same
+    /// `env_out`, so a bare redirect additionally interleaves two writers.
+    /// Writing to a per-PID temp file and renaming it into place makes the
+    /// dump observable only in its complete state; the last rename wins,
+    /// which is fine — every agent of a preview shares the injected
+    /// contract vars the assertions check.
     fn env_dump_script(dir: &std::path::Path, env_out: &std::path::Path) -> std::path::PathBuf {
         let script = dir.join("agent-entrypoint.sh");
         std::fs::write(
             &script,
             format!(
-                "#!/bin/sh\nenv > {out}\nexec sleep 300\n",
+                "#!/bin/sh\nenv > {out}.tmp.$$\nmv {out}.tmp.$$ {out}\nexec sleep 300\n",
                 out = env_out.display()
             ),
         )
@@ -3486,7 +3498,8 @@ mod tests {
             }
 
             // The draft actually reached the agent process environment. The
-            // shell creates the redirect target before `env` writes it, so
+            // dump is renamed into place atomically by the entrypoint script
+            // (see `env_dump_script`), so once it exists it is complete —
             // poll until the dump has content, not merely exists.
             let env = soon(|| {
                 std::fs::read_to_string(&env_out)
