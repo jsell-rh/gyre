@@ -3,7 +3,7 @@ title: "Dependency auto-detection: full extraction forms (git refs, structured c
 spec_ref: "Spec gap spec-cab97078efffe0fbfb7339be / dep-detection-extraction-forms / ed9f34316476"
 depends_on: []
 progress: ready-for-review
-commits: ["08f3082ae98e67172f75986d158e2253ed32f15d", "05ba66134f77df6cffd99aa4720fd5d92764fe5a", "dcdb28f1eb469d2ab0cf694d975a90deaec628ad"]
+commits: ["05ba66134f77df6cffd99aa4720fd5d92764fe5a", "dcdb28f1eb469d2ab0cf694d975a90deaec628ad", "08f3082ae98e67172f75986d158e2253ed32f15d", "78bc6dacc4ca62bc2c05a164fda6cafc69011c3c"]
 ---
 
 ## Required behavior
@@ -28,30 +28,25 @@ Update the relevant coverage rows only after implementing the behavior, with con
 
 ## Shipped
 
-All three gap areas are implemented in `crates/gyre-server/src/git_http.rs`, scoped strictly to the detection helpers and the post-receive call site (no changes to `process_spec_lifecycle` or gates). Coverage rows 5/6/8 in `specs/coverage/system/dependency-graph.md` re-evidenced with current function names and line numbers; no other rows touched. This repair round (08f3082a) fixes the two failing committed tests from the de008f67 review without changing production behavior.
+All three gap areas are implemented in `crates/gyre-server/src/git_http.rs`, scoped strictly to the detection helpers and the post-receive call site (no changes to `process_spec_lifecycle` or gates). Coverage rows 5/6/8 in `specs/coverage/system/dependency-graph.md` are re-evidenced with current function names and line numbers; no other rows touched.
 
 ### Behavior
 
-- **Every-push trigger (gap 12ff1c4b):** the `detect_dependencies_on_push` call moved out of the `filter(|u| u.refname == default_ref)` loop — it now runs for every applied (non-delete) ref update on any branch (`git_http.rs` post-receive, `for update in applied_updates.iter()`). The changed-dependency-file early return is gone: `detect_dependencies_on_push` no longer takes a changed-file list; all eight detectors always run against the tree at the pushed tip, `ran_methods` covers every method each push, and reconcile orphans (never deletes) edges whose declarations vanish from the tip while leaving Manual edges untouched. A target repo created after the manifest was committed is matched by the next push, even one whose changed-file set contains no dependency file.
-- **Cargo.toml (gap e07d32e2):** `detect_cargo_deps` replaces `detect_cargo_path_deps`/`extract_path_value`/`extract_dep_version` — parses `[dependencies]`/`[dev-dependencies]`/`[build-dependencies]` inline-table entries with word-boundary key matching for BOTH `path = "…"` and `git = "<url>"`, with `version`/`tag`/`rev` captured as the pinned version. `repo_name_from_reference` extracts the repo name from a reference (URL last path segment, `#fragment`/`?query` stripped, `.git` suffix removed, `git@host:` forms handled). ALL `Cargo.toml` files in the tree at the pushed SHA are enumerated via `git ls-tree` (`list_files_by_names`), with the manifest's tree path as `source_artifact`.
-- **package.json / pyproject.toml:** `detect_package_json_deps` additionally extracts git URL values (`git+https://…`, `git+ssh://…`, stored verbatim; `#fragment` as version); `detect_pyproject_deps` additionally extracts PEP 508 direct references `pkg @ git+https://…`. go.mod unchanged. External registry deps still ignored — only references matching a known tenant repo (`state.repos.list()`, excluding self) create edges.
+- **Every-push trigger (gap 12ff1c4b):** the `detect_dependencies_on_push` call runs for every applied (non-delete) ref update on any branch. The changed-dependency-file early return is gone: all eight detectors always run against the tree at the pushed tip, `ran_methods` covers every method each push, and reconcile orphans (never deletes) edges whose declarations vanish from the tip while leaving Manual edges untouched. A target repo created after the manifest was committed is matched by the next push, even one whose changed-file set contains no dependency file.
+- **Cargo.toml (gap e07d32e2):** `detect_cargo_deps` parses `[dependencies]`/`[dev-dependencies]`/`[build-dependencies]` inline-table entries with word-boundary key matching for BOTH `path = "…"` and `git = "<url>"`, with `version`/`tag`/`rev` captured as the pinned version. `repo_name_from_reference` extracts the repo name from a reference (URL last path segment, `#fragment`/`?query` stripped, `.git` suffix removed, `git@host:` forms handled). ALL `Cargo.toml` files in the tree at the pushed SHA are enumerated via `git ls-tree`, with the manifest's tree path as `source_artifact`.
+- **package.json / pyproject.toml:** `detect_package_json_deps` additionally extracts git URL values (`git+https://…`, `git+ssh://…`, stored verbatim; `#fragment` as version); `detect_pyproject_deps` additionally extracts PEP 508 direct references `pkg @ git+https://…`. go.mod unchanged. External registry deps still ignored — only references matching a known tenant repo (excluding self) create edges.
 - **API contracts (gap 8244b7d9):** `detect_openapi_refs` parses the document (serde_yaml; JSON is valid YAML) and extracts server URLs only — OpenAPI 3.x `servers[].url`, Swagger 2.0 `host`+`basePath` — matching known repo names as whole URL labels (`repo_name_in_url`). `detect_mcp_refs` parses the mcp.json structure for `mcpServers.<name>.url`/`.server` and `tools[].url`/`.server` fields only. A repo name appearing only in a description/title/unrelated field creates NO edge. Contract files are enumerated tree-wide (`api/openapi.yaml` carries its tree path as `source_artifact`). Proto import detection unchanged.
 
-### Repair round (08f3082a)
+### This repair round (78bc6dac)
 
-Fixed the two failing committed tests from the de008f67 review (checkpoint 45609831), no production behavior change:
-
-- `test_detect_package_json_git_ref`: the https assertion expected the `git+` scheme stripped, while references are stored verbatim (the convention the passing git+ssh and pyproject assertions already follow; `repo_name_from_reference` strips scheme/`.git` at match time either way). Assertion corrected to the verbatim form. Empirically confirmed by a standalone probe compiling the verbatim production functions — all four assertions hold (`/tmp/stage/review-evidence/pkg-json-probe/`).
-- `detect_dependencies_on_push_full_extraction_forms`: tip 2 was built with only README.md, but `make_commit` builds each tree from only the files passed (scratch index, parentless commit-tree), so the manifests vanished from the pushed tip. Tip 2 now re-commits the same manifest blobs plus README.md — identical blob SHAs, so the push's changed-file set is still README.md only, preserving the AC-6 no-dependency-file-change semantics. Confirmed by a standalone git probe replicating `make_commit` exactly: ls-tree at tip 2 lists all manifests, `diff --name-only` is README.md only (`/tmp/stage/review-evidence/task-278-tip2-tree-probe.txt`).
+Formatting-only fix for the verification finding (`check-clippy-diff` exit 1): the five dependency-detection pattern closures flagged as `clippy::manual_pattern_char_comparison` (`repo_name_from_reference` rsplit, `detect_pyproject_deps` trim_matches/trim_end_matches, `repo_name_in_url` split, `detect_proto_imports` trim_end_matches) were converted to char-array patterns — behavior-identical, matching the repo's existing style (`email.rs`). No production behavior change.
 
 ### Test evidence
 
-`cargo check -p gyre-server --tests` passes via the build wrapper (exit 0, no warnings). Full gyre-server test execution is deferred to the independent verifier (model-phase 4 GiB budget; the cargo wrapper blocks server test builds mechanically) — the exact test list, including the two repaired tests, is recorded in `/tmp/stage/review-evidence/task-278-evidence.md`.
-
-### Source checkpoints
-
-- `05ba66134f77df6cffd99aa4720fd5d92764fe5a` — implementation (recovered verbatim as `dcdb28f1eb469d2ab0cf694d975a90deaec628ad`).
-- `08f3082ae98e67172f75986d158e2253ed32f15d` — this repair round: the two test fixes above. Recorded in `commits:` frontmatter.
+- `cargo check -p gyre-server` passes via the build wrapper (exit 0, 7m07s cold; log: `task-278-cargo-check.log` in review evidence).
+- Standalone probe compiling the exact post-fix functions (`/tmp/stage/review-evidence/task-278-clippy-probe/`): `cargo clippy --all-targets --all-features -W clippy::all -D clippy::manual_pattern_char_comparison` exits 0, and 4/4 behavior tests (git-URL reference extraction, URL whole-label matching, PEP 508 direct refs, proto import trimming) pass via `cargo test -p task-278-clippy-probe`.
+- rustfmt changed-lines check clean (edition 2021, `skip_children=true`) on the edited lines.
+- Full gyre-server test execution remains deferred to the independent verifier (model-phase 4 GiB budget; the cargo wrapper blocks server test builds mechanically). Required verifier probes: `cargo test -p gyre-server` — in particular `git_http::tests::detect_dependencies_on_push_full_extraction_forms` and `git_http::tests::push_to_non_default_branch_detects_git_dependency_then_orphans`, plus the detector unit tests in `api::dependencies::tests` (`test_cargo_toml_dep_detection_path_and_git_forms`, `test_repo_name_from_reference`, `test_detect_package_json_git_ref`, `test_detect_pyproject_pep508_git_ref`, `test_detect_openapi_description_mention_no_edge`, `test_detect_mcp_refs_unrelated_field_no_edge`, and the reconcile suite); plus the workspace clippy gate (`check-clippy-diff.py`) that this round repairs.
 
 ## Discovery evidence
 
