@@ -9972,6 +9972,10 @@ specs:
                 .arg("-C")
                 .arg(&repo_path)
                 .args(args)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@t")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@t")
                 .output()
                 .unwrap();
             assert!(
