@@ -3,7 +3,7 @@ title: "Spec Links — cross-repo link validation: same-workspace format resolut
 spec_ref: "Spec gap spec-10bdced21a063f819b1baabd / spec-links-cross-repo-resolution / 5a915155d9bc"
 depends_on: []
 progress: ready-for-review
-commits: ["5afb12e079b522701b1e24a263634a5500d8b205"]
+commits: ["5afb12e079b522701b1e24a263634a5500d8b205", "e3270d27296641cbcff6f3d1a0d27ad81ac5dc3c"]
 ---
 
 ## Required behavior
