@@ -1,0 +1,46 @@
+# Review — task-287 (Spec Links: cross-repo link validation)
+
+Spec: `specs/system/spec-links.md` §Cross-Repo and Cross-Workspace Links (gap `ff74a147e0ca35a407836447`).
+Candidate under review: `50146a20cf8dfc7037c0ac4abe96bc89383c98e9` (branch `pipeline/task-287/1c546994fab54f31b1fcdfffd1f88de5-1`, base `3ee882f1`; product commits `e3270d27`/`5afb12e0`/`16d08a2b`/`f3234b35`, all confirmed ancestors of the candidate).
+Verdict: **approved** — all four specced validation requirements are delivered in production code shared by every sync entry point, with real (non-self-confirming) tests. Test-target *execution* is deferred to the independent verifier by the enforced build wrapper (see "Verifier must run"); this approval rests on full-diff inspection, check-mode compilation of lib **and** test targets, and a kill-the-bug trace of each test against the pre-fix code.
+
+## Probes run (checkout at candidate `50146a20`, working tree clean)
+
+- `/tmp/stage/bin/cargo check -p gyre-server --lib` → **exit 0** (8m24s; evidence `task-287-cargo-check-lib.txt`).
+- `/tmp/stage/bin/cargo check -p gyre-server --lib --tests` → **exit 0** (4m21s; check mode only — no codegen/link; evidence `task-287-check-tests.txt`). This type-checks the six new tests and all their helpers.
+- `/tmp/stage/bin/cargo test -p gyre-server --lib spec_registry::tests::cross_repo` → **rejected by the build wrapper** (gyre-server codegen + model exceeds 4 GiB; evidence `task-287-wrapper-reject.txt`). Execution deferred, not skipped.
+- Full diff read of all 7 changed files (5 Rust + 2 specs); grep sweeps for fabricated `"default"` tenant literals (none remain in production code — evidence `task-287-tenant-scope-grep.txt`), missed `sync_spec_ledger` call sites (none — all four production call sites updated), and adapter coverage of `find_by_name_and_workspace` (mem + SQLite + Postgres all implement it).
+- Commit-attribution check: all four frontmatter commits are ancestors of the candidate; the full base→candidate diff touches only the five expected source files plus task/coverage docs.
+
+## Requirement-by-requirement verification
+
+1. **Same-workspace `@{repo}/{path}` resolution.** `parse_cross_workspace_target` yields the cross-workspace interpretation for three-segment targets (syntactically ambiguous with `@{repo}/{slashed path}`), so both resolution sites disambiguate by existence: push-time (`sync_spec_ledger` step 6) checks `workspaces.find_by_slug(tenant, seg1)` and, on a definitive `Ok(None)`, calls `validate_cross_repo_target` which resolves the repo via `find_by_name_and_workspace(source_workspace_id, seg1)` — the source workspace id is threaded from every entry point (git_http passes `repo_workspace_id_str`; api/repos.rs and mirror_sync pass the repo's workspace). The staleness pass (`resolve_unresolved_cross_workspace_links`) mirrors this exactly, deriving the source workspace from `link.source_repo_id → repo → workspace`. The pre-fix bugs (None workspace passed to the repo lookup; staleness pass refusing CrossRepo links) are both gone. Verified `changed_spec_paths` uses manifest-relative paths matching `link.target_path`, so AC 1's staleness half fires via push-time inbound detection (step 6b).
+2. **Linking-user read access.** `LinkPrincipal::from_auth` (reusing `AuthenticatedAgent::is_system_principal` — the task-099 discriminator, not an agent_id string match) is threaded from the git_http `git_receive_pack` spawned sync and the api/repos.rs `sync_specs` handler; mirror fetches pass `None` (no linking user). `principal_has_read_access`: user principals → workspace-membership lookup requiring `accepted`; agent principals → validated token workspace scope must equal the target workspace; system principals and server-originated syncs exempt; **fail-closed** on lookup error or missing membership handle. A denial stores the link `unresolved` with `target_repo_id` NULL, a `warn!` naming principal and target workspace, and a durable KV marker (`LINK_DENIAL_NAMESPACE`, keyed by the deterministic `spec_link_id`) that the staleness pass consults first — a denied link is never flipped `active`. Non-denied outcomes clear the marker, so a re-push by an authorized principal recovers (positive control in the test).
+3. **Target-manifest existence.** `target_manifest_declares_path` reads the target repo's `specs/manifest.yaml` via `read_manifest`/`read_git_file` (git-show on `refs/heads/{default_branch}` — the same mechanism sync uses) and requires the path (normalized via `normalize_spec_rel_path`) to be declared. Enforced at push time for both cross-repo and cross-workspace targets, **and** at staleness re-resolution. Missing/unparseable manifest declares nothing (fail-closed). A missing path stores `unresolved` with the path named in the warning.
+4. **Tenant-scoped re-resolution.** `resolve_unresolved_cross_workspace_links` derives the tenant as source repo → workspace → tenant (`find_by_slug(&source_ws.tenant_id, ...)`); the fabricated literal `"default"` tenant is gone. Unresolvable hops (no source repo, repo/workspace lookup failure) skip with a log — never fabricate.
+
+## Test-quality check (no inflation found)
+
+All six new tests drive the production `sync_spec_ledger` / `spec_link_staleness::run_once` with real on-disk git repos (`make_test_repo`/`add_commit`/`make_target_git_repo` run real `git init/commit/rev-parse`) and real mem port adapters; assertions are on stored link state. Kill-the-bug trace against the base code:
+
+- `cross_repo_same_workspace_link_resolves_active_then_stale_on_target_change` fails on base at the first assertion (`@B/system/auth.md` parsed cross-workspace, slug "B" unresolvable → stored `unresolved`/NULL forever). AC 1 + AC 4 scenario.
+- `cross_repo_link_unresolved_when_target_path_not_in_target_manifest` fails on base (link marked `active` on repo existence alone). AC 3.
+- `cross_workspace_link_denied_without_read_access_stays_unresolved` fails on base (no principal in scope → active); includes the positive control (Viewer membership in the target workspace → active, marker cleared) so it also kills an over-broad denial. AC 2.
+- `staleness_pass_resolves_cross_workspace_link_under_source_tenant` fails on base (fabricated `"default"` tenant → `ws-y` never resolves); uses tenant `tenant-287` ≠ "default" and asserts both the hot cache and the durable `spec_link_repo` write-through. AC 4.
+- `staleness_pass_resolves_cross_repo_same_workspace_link` fails on base (CrossRepo re-resolution explicitly refused); pairs a resolvable link with a missing-path link that must stay unresolved. AC 3 (staleness half).
+- `staleness_does_not_flip_access_denied_link_active` records the denial via the production `record_link_denial` helper and proves the pass cannot flip it while every resolution input exists. AC 2 (staleness half).
+
+Round 967b021c reportedly failed tests 1/2/5 on the workspace-only parse; the f3234b35 disambiguation addresses exactly that defect at both resolution sites, and I verified the disambiguation logic statically at both sites.
+
+## Minor (non-blocking, recorded for completeness)
+
+- `link_denial()` treats a KV read error as "no marker" (`.ok()??`) and `record_link_denial` only logs write failures: under a storage failure a denied link could later be flipped `active` by the staleness pass. Push-time denial itself (the specced enforcement) is unaffected and fail-closed; the marker is the secondary guard prescribed by the task. Low probability; acceptable.
+- Staleness re-resolution cannot re-check read access for links that were unresolved for *non-access* reasons (e.g. target workspace did not exist at push time and is created later), because the spec_links schema carries no principal — inherent to the task-prescribed KV-marker design, acknowledged in the shipped notes.
+- Pre-existing interplay: `run_once` marks unresolved links with pinned SHAs `broken` when the target is absent from the ledger, and re-resolution only handles `unresolved`; the re-resolution snapshot also predates loop-1 mutations. Pre-existing patterns, not introduced or worsened by this diff.
+- Process note: the Shipped section references evidence at `/tmp/stage/review-evidence/task-2....md` from the implementation environment; that path is not part of this stage. No code impact.
+
+## Verifier must run (gyre-server codegen is wrapper-blocked in this stage)
+
+- `cargo test -p gyre-server --lib spec_registry::tests::cross_repo_same_workspace_link_resolves_active_then_stale_on_target_change spec_registry::tests::cross_repo_link_unresolved_when_target_path_not_in_target_manifest spec_registry::tests::cross_workspace_link_denied_without_read_access_stays_unresolved`
+- `cargo test -p gyre-server --lib spec_link_staleness::tests::staleness_pass_resolves_cross_workspace_link_under_source_tenant spec_link_staleness::tests::staleness_pass_resolves_cross_repo_same_workspace_link spec_link_staleness::tests::staleness_does_not_flip_access_denied_link_active`
+- Pre-existing suites in `spec_registry` and `spec_link_staleness` (all prior link/staleness behavior must stay green), plus the standard full workspace suite, rustfmt/Clippy changed-line checks, and `scripts/check-fabricated-scope-defaults.sh` (already green in the pre-review check run).
