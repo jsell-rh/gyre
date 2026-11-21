@@ -2218,6 +2218,27 @@
         "Version Drift Tracking"
       ]
     },
+    "backlog/df78f83918d8549c48c15ea5": {
+      "file": "specs/development/architecture.md",
+      "heading": [
+        "Architecture & Engineering Standards",
+        "Storage"
+      ]
+    },
+    "backlog/2a696c7f5c2ffc02e88742ae": {
+      "file": "specs/development/architecture.md",
+      "heading": [
+        "Architecture & Engineering Standards",
+        "Tech Stack"
+      ]
+    },
+    "backlog/5e7a44c5f15c34d70101b959": {
+      "file": "specs/development/architecture.md",
+      "heading": [
+        "Architecture & Engineering Standards",
+        "API"
+      ]
+    },
     "backlog/c3a39b320325eff390c4b56c": {
       "file": "specs/system/explorer-canvas.md",
       "heading": [
@@ -3057,6 +3078,15 @@
     ],
     "Spec gap spec-cab97078efffe0fbfb7339be / aibom-stale-dependency-flags / ed9f34316476": [
       "backlog/551185c9c05657eddf50405e"
+    ],
+    "Spec gap spec-f907eda3bd014fe546b838e2 / sqlite-default-storage / 4156114b8040": [
+      "backlog/df78f83918d8549c48c15ea5"
+    ],
+    "Spec gap spec-f907eda3bd014fe546b838e2 / shadcn-svelte-ui-stack / 4156114b8040": [
+      "backlog/2a696c7f5c2ffc02e88742ae"
+    ],
+    "Spec gap spec-f907eda3bd014fe546b838e2 / websocket-agent-transport / 4156114b8040": [
+      "backlog/5e7a44c5f15c34d70101b959"
     ],
     "Spec gap spec-82658b0b4e08c1502a5f0793 / structural-metrics-verification / b3cd47ade570": [
       "backlog/c3a39b320325eff390c4b56c"
