@@ -5041,8 +5041,7 @@ pub(crate) async fn detect_api_contract_changes(
     let contract_files: Vec<(char, String, Option<String>)> = parse_name_status(&diff)
         .into_iter()
         .filter(|(_, new_path, old_path)| {
-            is_api_contract_file(new_path)
-                || old_path.as_deref().is_some_and(is_api_contract_file)
+            is_api_contract_file(new_path) || old_path.as_deref().is_some_and(is_api_contract_file)
         })
         .collect();
     if contract_files.is_empty() {
@@ -5361,8 +5360,7 @@ pub(crate) async fn detect_breaking_changes_on_push(
     // contract is a breaking change even without a conventional-commit
     // marker. Both detection routes feed the same cascade below, gated on
     // existing dependents exactly alike.
-    let contract_changes =
-        detect_api_contract_changes(&git_bin, repo_path, old_sha, new_sha).await;
+    let contract_changes = detect_api_contract_changes(&git_bin, repo_path, old_sha, new_sha).await;
     breaking_commits.extend(contract_changes);
 
     if breaking_commits.is_empty() {
@@ -8119,7 +8117,10 @@ paths:
         String,
     ) {
         let (tmp, repo_path, shas) = git_repo_with_commits_and_messages(&[
-            ("chore: add contract", vec![("openapi.yaml", CONTRACT_YAML_V1.to_string())]),
+            (
+                "chore: add contract",
+                vec![("openapi.yaml", CONTRACT_YAML_V1.to_string())],
+            ),
             (second_msg, vec![("openapi.yaml", v2)]),
         ]);
         let old_sha = shas[0].clone();
@@ -8170,7 +8171,8 @@ paths:
             orch.workspace_id = Id::new("ws-contract");
             orch.repo_id = Some(repo_a.id.clone());
             orch.orchestrator_type = gyre_domain::OrchestratorType::RepoOrchestrator;
-            orch.transition_status(gyre_domain::AgentStatus::Active).unwrap();
+            orch.transition_status(gyre_domain::AgentStatus::Active)
+                .unwrap();
             state.agents.create(&orch).await.unwrap();
         }
 
@@ -8183,7 +8185,11 @@ paths:
             Id::new("inviter-contract"),
             0,
         );
-        state.workspace_memberships.create(&membership).await.unwrap();
+        state
+            .workspace_memberships
+            .create(&membership)
+            .await
+            .unwrap();
 
         (tmp, state, repo_a.id, repo_b.id, edge, old_sha, new_sha)
     }
@@ -8238,7 +8244,10 @@ paths:
         // A plain `fix:` commit (no `!`, no BREAKING CHANGE footer) removes
         // DELETE /widgets — the contract route must flag it.
         let (_tmp, repo_path, shas) = git_repo_with_commits_and_messages(&[
-            ("chore: add contract", vec![("openapi.yaml", CONTRACT_YAML_V1.to_string())]),
+            (
+                "chore: add contract",
+                vec![("openapi.yaml", CONTRACT_YAML_V1.to_string())],
+            ),
             (
                 "fix: tidy contract",
                 vec![("openapi.yaml", CONTRACT_YAML_V2_REMOVED_DELETE.to_string())],
@@ -8293,8 +8302,14 @@ paths:
     #[tokio::test]
     async fn detect_api_contract_changes_additive_only_not_breaking() {
         let (_tmp, repo_path, shas) = git_repo_with_commits_and_messages(&[
-            ("chore: add contract", vec![("openapi.yaml", CONTRACT_YAML_V1.to_string())]),
-            ("fix: tidy contract", vec![("openapi.yaml", CONTRACT_YAML_V2_ADDITIVE.to_string())]),
+            (
+                "chore: add contract",
+                vec![("openapi.yaml", CONTRACT_YAML_V1.to_string())],
+            ),
+            (
+                "fix: tidy contract",
+                vec![("openapi.yaml", CONTRACT_YAML_V2_ADDITIVE.to_string())],
+            ),
         ]);
         let changes = detect_api_contract_changes("git", &repo_path, &shas[0], &shas[1]).await;
         assert!(
@@ -8309,8 +8324,14 @@ paths:
         // push (empty result, no panic) — the removal is NOT evaluated
         // against a fabricated empty operation set.
         let (_tmp, repo_path, shas) = git_repo_with_commits_and_messages(&[
-            ("chore: add contract", vec![("openapi.yaml", CONTRACT_YAML_V1.to_string())]),
-            ("fix: tidy contract", vec![("openapi.yaml", "not: [a: contract".to_string())]),
+            (
+                "chore: add contract",
+                vec![("openapi.yaml", CONTRACT_YAML_V1.to_string())],
+            ),
+            (
+                "fix: tidy contract",
+                vec![("openapi.yaml", "not: [a: contract".to_string())],
+            ),
         ]);
         let changes = detect_api_contract_changes("git", &repo_path, &shas[0], &shas[1]).await;
         assert!(changes.is_empty());
@@ -8331,13 +8352,7 @@ paths:
             true,
         )
         .await;
-        let repo_path = state
-            .repos
-            .find_by_id(&repo_b)
-            .await
-            .unwrap()
-            .unwrap()
-            .path;
+        let repo_path = state.repos.find_by_id(&repo_b).await.unwrap().unwrap().path;
 
         detect_breaking_changes_on_push(
             &state,
@@ -8414,19 +8429,37 @@ paths:
         );
         assert_eq!(payload["source_repo_name"].as_str().unwrap(), "repo-b");
         assert_eq!(payload["source_repo_id"].as_str().unwrap(), repo_b.as_str());
-        assert_eq!(payload["breaking_change_id"].as_str().unwrap(), bcs[0].id.as_str());
-        assert_eq!(payload["dependent_repo_id"].as_str().unwrap(), repo_a.as_str());
+        assert_eq!(
+            payload["breaking_change_id"].as_str().unwrap(),
+            bcs[0].id.as_str()
+        );
+        assert_eq!(
+            payload["dependent_repo_id"].as_str().unwrap(),
+            repo_a.as_str()
+        );
         assert_eq!(payload["commit_sha"].as_str().unwrap(), new_sha);
 
         // The existing channels remain: the member notification fired.
         let notifs = state
             .notifications
-            .list_for_user(&Id::new("user-contract"), None, None, None, None, None, &[], 50, 0)
+            .list_for_user(
+                &Id::new("user-contract"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                &[],
+                50,
+                0,
+            )
             .await
             .unwrap();
         assert!(
-            notifs.iter().any(|n| n.notification_type
-                == gyre_common::NotificationType::BreakingChangeDetected),
+            notifs
+                .iter()
+                .any(|n| n.notification_type
+                    == gyre_common::NotificationType::BreakingChangeDetected),
             "member notifications must still fire alongside the MCP arm"
         );
     }
@@ -8441,13 +8474,7 @@ paths:
             true,
         )
         .await;
-        let repo_path = state
-            .repos
-            .find_by_id(&repo_b)
-            .await
-            .unwrap()
-            .unwrap()
-            .path;
+        let repo_path = state.repos.find_by_id(&repo_b).await.unwrap().unwrap().path;
 
         detect_breaking_changes_on_push(
             &state,
@@ -8460,14 +8487,12 @@ paths:
         )
         .await;
 
-        assert!(
-            state
-                .breaking_changes
-                .list_by_source_repo(&repo_b)
-                .await
-                .unwrap()
-                .is_empty()
-        );
+        assert!(state
+            .breaking_changes
+            .list_by_source_repo(&repo_b)
+            .await
+            .unwrap()
+            .is_empty());
         assert!(state.tasks.list_by_repo(&repo_a).await.unwrap().is_empty());
         let updated_edge = state
             .dependencies
@@ -8477,14 +8502,12 @@ paths:
             .unwrap();
         assert_ne!(updated_edge.status, gyre_domain::DependencyStatus::Breaking);
         // No MCP message either.
-        assert!(
-            state
-                .messages
-                .list_unacked(&Id::new("orch-contract"), 10)
-                .await
-                .unwrap()
-                .is_empty()
-        );
+        assert!(state
+            .messages
+            .list_unacked(&Id::new("orch-contract"), 10)
+            .await
+            .unwrap()
+            .is_empty());
     }
 
     #[tokio::test]
@@ -8498,13 +8521,7 @@ paths:
             false,
         )
         .await;
-        let repo_path = state
-            .repos
-            .find_by_id(&repo_b)
-            .await
-            .unwrap()
-            .unwrap()
-            .path;
+        let repo_path = state.repos.find_by_id(&repo_b).await.unwrap().unwrap().path;
 
         detect_breaking_changes_on_push(
             &state,
@@ -8529,16 +8546,33 @@ paths:
         );
         // ... but no agent-directed breaking-change message was persisted
         // (there is no orchestrator to address).
-        assert!(state.messages.list_unacked(&Id::new("orch-contract"), 10).await.unwrap().is_empty());
+        assert!(state
+            .messages
+            .list_unacked(&Id::new("orch-contract"), 10)
+            .await
+            .unwrap()
+            .is_empty());
         // Member notifications still fired.
         let notifs = state
             .notifications
-            .list_for_user(&Id::new("user-contract"), None, None, None, None, None, &[], 50, 0)
+            .list_for_user(
+                &Id::new("user-contract"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                &[],
+                50,
+                0,
+            )
             .await
             .unwrap();
         assert!(
-            notifs.iter().any(|n| n.notification_type
-                == gyre_common::NotificationType::BreakingChangeDetected),
+            notifs
+                .iter()
+                .any(|n| n.notification_type
+                    == gyre_common::NotificationType::BreakingChangeDetected),
             "member notifications must fire when no orchestrator exists"
         );
     }
@@ -8554,13 +8588,7 @@ paths:
             false,
         )
         .await;
-        let repo_path = state
-            .repos
-            .find_by_id(&repo_b)
-            .await
-            .unwrap()
-            .unwrap()
-            .path;
+        let repo_path = state.repos.find_by_id(&repo_b).await.unwrap().unwrap().path;
 
         detect_breaking_changes_on_push(
             &state,
@@ -8612,13 +8640,11 @@ paths:
             .unwrap()
             .unwrap();
         assert_eq!(updated.status, gyre_domain::MergeQueueEntryStatus::Failed);
-        assert!(
-            updated
-                .error_message
-                .as_ref()
-                .unwrap()
-                .contains("unacknowledged breaking change")
-        );
+        assert!(updated
+            .error_message
+            .as_ref()
+            .unwrap()
+            .contains("unacknowledged breaking change"));
 
         // Acknowledge the breaking change the contract route created.
         let bcs = state
@@ -8627,13 +8653,11 @@ paths:
             .await
             .unwrap();
         assert_eq!(bcs.len(), 1);
-        assert!(
-            state
-                .breaking_changes
-                .acknowledge(&bcs[0].id, "user-contract", 4000)
-                .await
-                .unwrap()
-        );
+        assert!(state
+            .breaking_changes
+            .acknowledge(&bcs[0].id, "user-contract", 4000)
+            .await
+            .unwrap());
 
         // A new queue entry for the same MR is no longer blocked by the
         // (now acknowledged) contract-route breaking change.

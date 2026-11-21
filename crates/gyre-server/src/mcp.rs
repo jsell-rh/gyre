@@ -8941,7 +8941,8 @@ mod tests {
         orch.workspace_id = Id::new("ws-bcmcp");
         orch.repo_id = Some(repo_a.id.clone());
         orch.orchestrator_type = gyre_domain::OrchestratorType::RepoOrchestrator;
-        orch.transition_status(gyre_domain::AgentStatus::Active).unwrap();
+        orch.transition_status(gyre_domain::AgentStatus::Active)
+            .unwrap();
         state.agents.create(&orch).await.unwrap();
 
         // Orchestrator JWT so the poll authenticates AS the orchestrator.
@@ -9023,7 +9024,7 @@ mod tests {
         // Carries the breaking-change id and the dependent repo.
         let bcs = state
             .breaking_changes
-            .list_by_source_repo(&repo_b)
+            .list_by_source_repo(&repo_b.id)
             .await
             .unwrap();
         assert_eq!(bcs.len(), 1);
