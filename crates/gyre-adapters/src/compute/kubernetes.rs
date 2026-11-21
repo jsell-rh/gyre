@@ -3,6 +3,18 @@ use async_trait::async_trait;
 use gyre_ports::{ComputeTarget, ProcessHandle, SpawnConfig};
 use tokio::process::Command;
 
+/// Total wall-clock bound on one `kubectl delete pod` invocation. Must
+/// exceed `--grace-period=30` so a slow-but-successful graceful shutdown
+/// still completes; a hung kubectl / API server must not stall the
+/// sequential remote_agent_cleanup / admin-kill paths that run these
+/// kills one after another (review task-273: only LocalTarget bounded
+/// its kill wait). Shortened under test so the timeout path is
+/// assertable without sleeping.
+#[cfg(not(test))]
+const KUBECTL_DELETE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+#[cfg(test)]
+const KUBECTL_DELETE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(750);
+
 /// Spawns agents as Pods on a Kubernetes cluster via the `kubectl` CLI
 /// (agent-runtime.md §3 Supported Backends — Kubernetes).
 ///
@@ -321,15 +333,25 @@ impl ComputeTarget for KubernetesTarget {
     }
 
     async fn kill_process(&self, handle: &ProcessHandle) -> Result<()> {
-        let output = self
-            .kubectl()
-            .arg("delete")
-            .arg("pod")
-            .arg(&handle.id)
-            .arg("--grace-period=30")
-            .output()
-            .await
-            .with_context(|| format!("kubectl delete pod {} failed", handle.id))?;
+        let output = tokio::time::timeout(
+            KUBECTL_DELETE_TIMEOUT,
+            self.kubectl()
+                .kill_on_drop(true)
+                .arg("delete")
+                .arg("pod")
+                .arg(&handle.id)
+                .arg("--grace-period=30")
+                .output(),
+        )
+        .await
+        .map_err(|_| {
+            anyhow!(
+                "kubectl delete pod {} timed out after {:?} — cluster unreachable or stalled",
+                handle.id,
+                KUBECTL_DELETE_TIMEOUT
+            )
+        })?
+        .with_context(|| format!("kubectl delete pod {} failed", handle.id))?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             // A pod that does not exist is already gone — a successful
@@ -631,6 +653,26 @@ mod tests {
         assert!(
             invoked.contains("delete pod agent-pod-7"),
             "the kill must delete the recorded pod, invoked: {invoked}"
+        );
+    }
+
+    /// review task-273: a hung kubectl / API server must fail the kill
+    /// BOUNDED, not stall the sequential remote_agent_cleanup /
+    /// admin-kill sweep forever.
+    #[tokio::test]
+    async fn kill_hung_kubectl_times_out() {
+        let stub = write_stub_kubectl("sleep 30");
+        let target = KubernetesTarget::new("gyre-agent:test").with_kubectl_path(&stub);
+        let handle = ProcessHandle {
+            id: "hung-pod".to_string(),
+            target_type: "kubernetes".to_string(),
+            pid: None,
+            options: Default::default(),
+        };
+        let err = target.kill_process(&handle).await.unwrap_err();
+        assert!(
+            err.to_string().contains("timed out"),
+            "a hung kubectl must fail the kill bounded, got: {err:#}"
         );
     }
 

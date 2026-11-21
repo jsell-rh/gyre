@@ -2,7 +2,28 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use gyre_ports::{ComputeTarget, ProcessHandle, SpawnConfig};
 use std::collections::HashMap;
+use std::time::Duration;
 use tokio::process::Command;
+
+/// Total wall-clock bound on a single ssh-invoked kill round trip.
+/// `ConnectTimeout` bounds only connection *setup*; a packet-dropped
+/// established session or a stalled remote would otherwise stall the
+/// caller indefinitely — and the sequential remote_agent_cleanup /
+/// admin-kill paths run these kills one after another, so one hung
+/// target freezes the whole sweep (review task-273: only LocalTarget
+/// bounded its kill wait). Shortened under test so timeout paths are
+/// assertable without sleeping for the production bound.
+#[cfg(not(test))]
+const SSH_KILL_TIMEOUT: Duration = Duration::from_secs(30);
+#[cfg(test)]
+const SSH_KILL_TIMEOUT: Duration = Duration::from_millis(750);
+
+/// How long `kill_process` waits for the remote process to exit after a
+/// signal before escalating / failing — mirrors LocalTarget's 10 s.
+#[cfg(not(test))]
+const REMOTE_EXIT_WAIT: Duration = Duration::from_secs(10);
+#[cfg(test)]
+const REMOTE_EXIT_WAIT: Duration = Duration::from_millis(400);
 
 /// Spawns processes on remote hosts via SSH.
 pub struct SshTarget {
@@ -83,6 +104,81 @@ impl SshTarget {
 
     fn destination(&self) -> String {
         format!("{}@{}", self.user, self.host)
+    }
+
+    /// Run `kill <args>` on the remote host and classify the outcome.
+    ///
+    /// SSH transport failures and unexpected remote failures are ERRORS:
+    /// callers (`kill_and_mark`, shared by remote_agent_cleanup and the
+    /// admin kill path) mark an instance terminated only after a verified
+    /// kill, so a swallowed failure here would permanently hide a live
+    /// orphan behind a "reaped" record (review task-273). Only the
+    /// remote's "No such process" is an already-gone success. Bounded by
+    /// [`SSH_KILL_TIMEOUT`].
+    async fn remote_kill(&self, args: &str) -> Result<RemoteSignal> {
+        let remote_cmd = format!("kill {args}");
+        let mut ssh_args = self.base_ssh_args();
+        ssh_args.push(self.destination());
+        ssh_args.push(remote_cmd);
+
+        let output = tokio::time::timeout(
+            SSH_KILL_TIMEOUT,
+            Command::new(self.ssh_bin())
+                .kill_on_drop(true)
+                .args(&ssh_args)
+                .output(),
+        )
+        .await
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "ssh kill to {} timed out after {:?} — remote unreachable or stalled",
+                self.destination(),
+                SSH_KILL_TIMEOUT
+            )
+        })?
+        .context("ssh kill failed")?;
+
+        if output.status.success() {
+            return Ok(RemoteSignal::Signalled);
+        }
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if ssh_transport_failed(&stderr) {
+            return Err(anyhow::anyhow!(
+                "ssh kill to {} failed: {}",
+                self.destination(),
+                stderr.trim()
+            ));
+        }
+        // Every remote `kill` implementation (bash/dash builtins,
+        // util-linux, busybox) words a missing target this way — a
+        // confirmed exit, not a failure.
+        if stderr.contains("No such process") {
+            return Ok(RemoteSignal::Gone);
+        }
+        Err(anyhow::anyhow!(
+            "remote kill on {} failed: {}",
+            self.destination(),
+            stderr.trim()
+        ))
+    }
+
+    /// Poll `kill -0 <pid>` on the remote host until the process is gone
+    /// or `timeout` elapses (the ssh twin of LocalTarget's
+    /// `wait_for_exit`). Returns `true` when the process exited.
+    async fn wait_remote_exit(&self, pid: u32, timeout: Duration) -> Result<bool> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            if matches!(
+                self.remote_kill(&format!("-0 {pid}")).await?,
+                RemoteSignal::Gone
+            ) {
+                return Ok(true);
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Ok(false);
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
     }
 
     fn base_ssh_args(&self) -> Vec<String> {
@@ -303,23 +399,43 @@ impl ComputeTarget for SshTarget {
     }
 
     async fn kill_process(&self, handle: &ProcessHandle) -> Result<()> {
-        if let Some(pid) = handle.pid {
-            let remote_cmd = format!("kill -TERM {}", pid);
-            let mut ssh_args = self.base_ssh_args();
-            ssh_args.push(self.destination());
-            ssh_args.push(remote_cmd);
-
-            let status = Command::new(self.ssh_bin())
-                .args(&ssh_args)
-                .status()
-                .await
-                .context("ssh kill failed")?;
-
-            if !status.success() {
-                tracing::debug!(pid, host = %self.host, "remote kill returned non-zero");
-            }
+        let Some(pid) = handle.pid else {
+            return Ok(());
+        };
+        // SIGTERM first; a racing exit shows up in the poll below. "No
+        // such process" on the FIRST signal means the process was
+        // already gone — an idempotent success. Every other failure
+        // (ssh transport error, permission denied) PROPAGATES: callers
+        // mark the instance terminated only after a verified kill, and
+        // returning Ok here would permanently hide a still-running
+        // orphan behind a "reaped" record (review task-273 — this path
+        // previously debug-logged non-zero exits and returned Ok).
+        if matches!(
+            self.remote_kill(&format!("-TERM {pid}")).await?,
+            RemoteSignal::Gone
+        ) {
+            return Ok(());
         }
-        Ok(())
+        if self.wait_remote_exit(pid, REMOTE_EXIT_WAIT).await? {
+            return Ok(());
+        }
+        // Escalate to SIGKILL and VERIFY — the kill's success is the
+        // process actually being gone, mirroring LocalTarget::kill_process
+        // (a remote process that traps SIGTERM must not be recorded as
+        // successfully killed while it keeps running).
+        if matches!(
+            self.remote_kill(&format!("-KILL {pid}")).await?,
+            RemoteSignal::Gone
+        ) {
+            return Ok(());
+        }
+        if self.wait_remote_exit(pid, REMOTE_EXIT_WAIT).await? {
+            return Ok(());
+        }
+        anyhow::bail!(
+            "remote process {pid} on {} survived SIGTERM and SIGKILL — kill did not take effect",
+            self.destination()
+        );
     }
 
     async fn is_alive(&self, handle: &ProcessHandle) -> Result<bool> {
@@ -362,6 +478,15 @@ impl ComputeTarget for SshTarget {
 /// Minimal shell quoting: wrap in single quotes, escape embedded single quotes.
 fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
+}
+
+/// Classified outcome of a remote `kill` invocation (see
+/// [`SshTarget::remote_kill`]).
+enum RemoteSignal {
+    /// The remote kill command ran and signalled (or probed) the process.
+    Signalled,
+    /// The remote reported the process does not exist — already gone.
+    Gone,
 }
 
 /// True when non-zero-exit ssh stderr shows an ssh CLIENT failure ("ssh: ..."
@@ -479,6 +604,7 @@ impl SshDockerTarget {
         ssh_args.push(self.ssh.destination());
         ssh_args.push(remote_cmd);
         let output = Command::new(self.ssh.ssh_bin())
+            .kill_on_drop(true)
             .args(&ssh_args)
             .output()
             .await
@@ -568,11 +694,36 @@ impl ComputeTarget for SshDockerTarget {
     }
 
     async fn kill_process(&self, handle: &ProcessHandle) -> Result<()> {
-        let _ = self
-            .remote_docker(&["rm".to_string(), "--force".to_string(), handle.id.clone()])
-            .await;
-        // Already-gone containers are a successful kill.
-        Ok(())
+        // A failed remote `docker rm --force` (ssh transport failure,
+        // daemon down, permission denial) is a REAL failure that must
+        // surface: callers mark the instance terminated only after a
+        // verified kill, and swallowing the error here (as this path
+        // previously did with `let _ =`) would permanently hide a live
+        // remote container behind a "reaped" record (review task-273).
+        // Only "No such object" is a success — the container is already
+        // gone, mirroring `container_already_gone` on the local
+        // container target. Bounded: one hung remote must not stall the
+        // sequential cleanup sweep.
+        let killed = tokio::time::timeout(
+            SSH_KILL_TIMEOUT,
+            self.remote_docker(&["rm".to_string(), "--force".to_string(), handle.id.clone()]),
+        )
+        .await
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "docker rm --force on {} timed out after {:?} — remote unreachable or stalled",
+                self.ssh.destination(),
+                SSH_KILL_TIMEOUT
+            )
+        })?;
+        match killed {
+            Ok(_) => Ok(()),
+            Err(e) if remote_container_is_missing(&e) => {
+                tracing::info!(container_id = %handle.id, "remote container already gone");
+                Ok(())
+            }
+            Err(e) => Err(e),
+        }
     }
 
     async fn is_alive(&self, handle: &ProcessHandle) -> Result<bool> {
@@ -950,6 +1101,188 @@ mod tests {
         std::env::var_os("PATH")
             .map(|paths| std::env::split_paths(&paths).any(|dir| dir.join(bin).exists()))
             .unwrap_or(false)
+    }
+
+    /// Write an executable stub `ssh` running `script`. The stub receives
+    /// the same argv a real ssh would; the remote command is the LAST
+    /// argument (mirrors the spawn stub above).
+    fn write_stub_ssh(script: &str) -> String {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ssh-stub");
+        std::fs::write(&path, format!("#!/bin/sh\n{script}\n")).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        // Leak the tempdir: the stub must outlive this function (the
+        // target invokes it asynchronously afterwards).
+        std::mem::forget(dir);
+        path.to_str().unwrap().to_string()
+    }
+
+    fn ssh_kill_handle(pid: u32) -> ProcessHandle {
+        ProcessHandle {
+            id: format!("user@host:{pid}"),
+            target_type: "ssh".to_string(),
+            pid: Some(pid),
+            options: HashMap::new(),
+        }
+    }
+
+    fn ssh_container_handle(id: &str) -> ProcessHandle {
+        ProcessHandle {
+            id: id.to_string(),
+            target_type: "ssh".to_string(),
+            pid: None,
+            options: HashMap::new(),
+        }
+    }
+
+    /// review task-273: a bare-ssh kill whose transport fails must Err —
+    /// kill_and_mark (shared by remote_agent_cleanup and the admin kill
+    /// path) marks the durable record terminated only after a verified
+    /// kill, and the old implementation logged the non-zero exit and
+    /// returned Ok, permanently hiding the live process behind a
+    /// "reaped" record.
+    #[tokio::test]
+    async fn ssh_kill_transport_failure_is_err() {
+        let stub = write_stub_ssh(
+            "echo 'ssh: connect to host host port 22: Connection refused' >&2\nexit 255",
+        );
+        let target = SshTarget::new("user", "host").with_ssh_path(&stub);
+        let err = target
+            .kill_process(&ssh_kill_handle(4242))
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("Connection refused"),
+            "the transport failure must surface, got: {err:#}"
+        );
+    }
+
+    /// review task-273: a non-zero remote kill that is NOT a transport
+    /// failure is a REAL failure (permission denial, bad signal) and
+    /// must Err too.
+    #[tokio::test]
+    async fn ssh_kill_remote_failure_is_err() {
+        let stub = write_stub_ssh(
+            "cmd=\"\"\nfor arg in \"$@\"; do cmd=$arg; done\ncase \"$cmd\" in\n  'kill -TERM 4242') echo 'kill: (4242) - Operation not permitted' >&2; exit 1 ;;\n  *) echo \"stub ssh: unhandled: $cmd\" >&2; exit 1 ;;\nesac",
+        );
+        let target = SshTarget::new("user", "host").with_ssh_path(&stub);
+        let err = target
+            .kill_process(&ssh_kill_handle(4242))
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("Operation not permitted"),
+            "the remote kill failure must surface, got: {err:#}"
+        );
+    }
+
+    /// "No such process" on the first signal is the already-gone signal —
+    /// an idempotent success, never an error.
+    #[tokio::test]
+    async fn ssh_kill_already_gone_is_ok() {
+        let stub = write_stub_ssh(
+            "cmd=\"\"\nfor arg in \"$@\"; do cmd=$arg; done\ncase \"$cmd\" in\n  'kill -TERM 4242') echo 'kill: (4242) - No such process' >&2; exit 1 ;;\n  *) echo \"stub ssh: unhandled: $cmd\" >&2; exit 1 ;;\nesac",
+        );
+        let target = SshTarget::new("user", "host").with_ssh_path(&stub);
+        target.kill_process(&ssh_kill_handle(4242)).await.unwrap();
+    }
+
+    /// SIGTERM accepted, process exits before the escalation deadline —
+    /// a normal successful kill.
+    #[tokio::test]
+    async fn ssh_kill_term_then_exit_is_ok() {
+        let stub = write_stub_ssh(
+            "cmd=\"\"\nfor arg in \"$@\"; do cmd=$arg; done\ncase \"$cmd\" in\n  'kill -TERM 4242') exit 0 ;;\n  'kill -0 4242') echo 'kill: (4242) - No such process' >&2; exit 1 ;;\n  *) echo \"stub ssh: unhandled: $cmd\" >&2; exit 1 ;;\nesac",
+        );
+        let target = SshTarget::new("user", "host").with_ssh_path(&stub);
+        target.kill_process(&ssh_kill_handle(4242)).await.unwrap();
+    }
+
+    /// A remote process that survives SIGTERM and SIGKILL must NOT be
+    /// reported as killed — mirroring LocalTarget, the kill's success is
+    /// the process actually being gone.
+    #[tokio::test]
+    async fn ssh_kill_surviving_sigterm_and_sigkill_is_err() {
+        let stub = write_stub_ssh(
+            "cmd=\"\"\nfor arg in \"$@\"; do cmd=$arg; done\ncase \"$cmd\" in\n  'kill -TERM '*|'kill -KILL '*|'kill -0 '*) exit 0 ;;\n  *) echo \"stub ssh: unhandled: $cmd\" >&2; exit 1 ;;\nesac",
+        );
+        let target = SshTarget::new("user", "host").with_ssh_path(&stub);
+        let err = target
+            .kill_process(&ssh_kill_handle(4242))
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("survived SIGTERM and SIGKILL"),
+            "a surviving process must not be recorded as killed, got: {err:#}"
+        );
+    }
+
+    /// review task-273: a hung remote (packet-dropped session past
+    /// ConnectTimeout) must fail the kill BOUNDED, not stall the
+    /// sequential remote_agent_cleanup / admin-kill sweep forever.
+    #[tokio::test]
+    async fn ssh_kill_hung_remote_times_out() {
+        let stub = write_stub_ssh("sleep 30");
+        let target = SshTarget::new("user", "host").with_ssh_path(&stub);
+        let err = target
+            .kill_process(&ssh_kill_handle(4242))
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("timed out"),
+            "a hung remote must fail bounded, got: {err:#}"
+        );
+    }
+
+    /// review task-273: a remote-docker kill failure (daemon down, ssh
+    /// transport failure) must Err — the old `let _ =` swallowed it, so
+    /// kill_and_mark marked the still-running remote container
+    /// terminated. "No such object" is the already-gone success.
+    #[tokio::test]
+    async fn ssh_docker_kill_failure_surfaces_already_gone_is_ok() {
+        let stub = write_stub_ssh(
+            "cmd=\"\"\nfor arg in \"$@\"; do cmd=$arg; done\ncmd=$(printf '%s' \"$cmd\" | tr -d \"'\")\ncase \"$cmd\" in\n  'docker rm --force gone123') echo 'Error: No such object: gone123' >&2; exit 1 ;;\n  'docker rm --force live123') echo 'Cannot connect to the Docker daemon at unix:///var/run/docker.sock' >&2; exit 1 ;;\n  *) echo \"stub ssh: unhandled: $cmd\" >&2; exit 1 ;;\nesac",
+        );
+        let t = SshDockerTarget::new(
+            SshTarget::new("user", "host").with_ssh_path(&stub),
+            "gyre-agent:latest",
+        );
+
+        let gone = t.kill_process(&ssh_container_handle("gone123")).await;
+        gone.unwrap();
+
+        let err = t
+            .kill_process(&ssh_container_handle("live123"))
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Cannot connect to the Docker daemon"),
+            "the remote docker failure must surface, got: {err:#}"
+        );
+    }
+
+    /// review task-273: a hung remote docker (or stalled ssh session)
+    /// must fail the remote-container kill BOUNDED.
+    #[tokio::test]
+    async fn ssh_docker_kill_hung_remote_times_out() {
+        let stub = write_stub_ssh("sleep 30");
+        let t = SshDockerTarget::new(
+            SshTarget::new("user", "host").with_ssh_path(&stub),
+            "gyre-agent:latest",
+        );
+        let err = t
+            .kill_process(&ssh_container_handle("hung123"))
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("timed out"),
+            "a hung remote must fail bounded, got: {err:#}"
+        );
     }
 
     #[test]

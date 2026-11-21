@@ -1792,4 +1792,72 @@ mod tests {
              not mark it terminated"
         );
     }
+
+    /// review task-273 (ssh backends): the SSH kill implementations
+    /// previously swallowed failures (`let _ =` in SshDockerTarget,
+    /// debug-log in SshTarget), so a failed kill was durably recorded as
+    /// a successful termination and the still-running remote
+    /// container/process became invisible to every future sweep. Drives
+    /// the REAL SshDockerTarget through a stub ssh whose remote docker is
+    /// unreachable: the failure must surface through kill_and_mark and
+    /// the durable record must stay running (retryable).
+    #[tokio::test]
+    async fn kill_and_mark_ssh_docker_failure_leaves_record_running() {
+        let dir = tempfile::tempdir().unwrap();
+        let stub = dir.path().join("ssh-stub");
+        std::fs::write(
+            &stub,
+            "#!/bin/sh\necho 'Cannot connect to the Docker daemon at unix:///var/run/docker.sock' >&2\nexit 1\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let target = gyre_adapters::compute::SshDockerTarget::new(
+            gyre_adapters::compute::SshTarget::new("user", "host")
+                .with_ssh_path(stub.to_str().unwrap()),
+            "gyre-agent:latest",
+        );
+
+        let state = crate::mem::test_state();
+        let instance = AgentInstanceRecord {
+            agent_id: "agent-ssh-docker-fail".to_string(),
+            backend: "ssh".to_string(),
+            target_type: "ssh".to_string(),
+            handle_id: "abc123".to_string(),
+            pid: None,
+            spawned_at: now_secs(),
+            backend_config: None,
+            terminated_at: None,
+            terminated_reason: None,
+        };
+        state
+            .agent_instances
+            .record_spawned(&instance)
+            .await
+            .unwrap();
+
+        let result = kill_and_mark(&state, &target, &instance, "remote_agent_cleanup").await;
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Cannot connect to the Docker daemon"),
+            "the ssh-docker kill failure must surface, got: {err:#}"
+        );
+
+        let record = state
+            .agent_instances
+            .find_by_agent("agent-ssh-docker-fail")
+            .await
+            .unwrap()
+            .expect("record must survive");
+        assert!(
+            record.terminated_at.is_none(),
+            "a failed ssh-docker kill must leave the record running (retryable), \
+             not mark it terminated while the remote container keeps running"
+        );
+    }
 }

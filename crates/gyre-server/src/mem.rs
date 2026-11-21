@@ -2571,6 +2571,7 @@ mod mem_audit_tenant_tests {
     }
 }
 
+#[cfg(test)]
 mod mem_audit_search_tests {
     //! TASK-273 review (mem parity): the free-text `q` filter must match
     //! rows whose detail payload was moved to `detail_zstd` by the

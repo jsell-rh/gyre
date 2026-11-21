@@ -6,6 +6,16 @@ use tokio::process::Command;
 
 use super::container_already_gone;
 
+/// Total wall-clock bound on one `<runtime> rm --force` invocation — a
+/// hung daemon must not stall the sequential remote_agent_cleanup /
+/// admin-kill paths that run these kills one after another (review
+/// task-273: only LocalTarget bounded its kill wait). Shortened under
+/// test so the timeout path is assertable without sleeping.
+#[cfg(not(test))]
+const CONTAINER_KILL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+#[cfg(test)]
+const CONTAINER_KILL_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(750);
+
 /// Container runtime to use for spawning agents.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Runtime {
@@ -271,13 +281,25 @@ impl ComputeTarget for ContainerTarget {
         let runtime = self.resolve_runtime().await?;
         let bin = runtime.binary();
 
-        let output = Command::new(bin)
-            .arg("rm")
-            .arg("--force")
-            .arg(&handle.id)
-            .output()
-            .await
-            .with_context(|| format!("{} rm --force failed", bin))?;
+        let output = tokio::time::timeout(
+            CONTAINER_KILL_TIMEOUT,
+            Command::new(bin)
+                .kill_on_drop(true)
+                .arg("rm")
+                .arg("--force")
+                .arg(&handle.id)
+                .output(),
+        )
+        .await
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "{} rm --force {} timed out after {:?} — daemon hung?",
+                bin,
+                handle.id,
+                CONTAINER_KILL_TIMEOUT
+            )
+        })?
+        .with_context(|| format!("{} rm --force failed", bin))?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -549,6 +571,37 @@ mod tests {
         };
         assert_eq!(handle.target_type, "container");
         assert!(handle.pid.is_none());
+    }
+
+    /// review task-273: a hung runtime daemon must fail the kill BOUNDED,
+    /// not stall the sequential remote_agent_cleanup / admin-kill sweep
+    /// forever (only LocalTarget previously bounded its kill wait).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn kill_hung_runtime_times_out() {
+        let _guard = PATH_LOCK.lock().await;
+        let dir = tempfile::TempDir::new().unwrap();
+        let stub = dir.path().join("docker");
+        std::fs::write(&stub, "#!/bin/sh\nsleep 30\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let old_path = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var("PATH", format!("{}:{}", dir.path().display(), old_path));
+        let target = ContainerTarget::new("gyre-agent:latest").with_runtime(Runtime::Docker);
+        let handle = ProcessHandle {
+            id: "hung-container".to_string(),
+            target_type: "container".to_string(),
+            pid: None,
+            options: HashMap::new(),
+        };
+        let killed = target.kill_process(&handle).await;
+        std::env::set_var("PATH", &old_path);
+        let err = killed.unwrap_err();
+        assert!(
+            err.to_string().contains("timed out"),
+            "a hung daemon must fail the kill bounded, got: {err:#}"
+        );
     }
 
     /// Full integration test — requires Docker or Podman daemon.
