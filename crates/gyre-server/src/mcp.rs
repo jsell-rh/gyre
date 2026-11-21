@@ -700,6 +700,33 @@ fn is_agent_jwt(auth: &AuthenticatedAgent) -> bool {
     auth.is_gyre_agent_jwt()
 }
 
+/// True for worker-tier principals — the task-scoped agent identities whose
+/// Phase-5 knowledge boundary (agent-runtime.md §1 Phase 5: "The agent has
+/// no knowledge of other agents, the merge queue, or the broader system
+/// state. It sees its task, its spec, and its repo.") excludes the
+/// `agents://` and `queue://` MCP resources entirely. The boundary is
+/// mechanical, not prompt-level: `resources/list` omits both resources for
+/// these principals and `resources/read` returns an error result.
+///
+/// Covered principal classes:
+/// - Task-scoped Gyre agent JWTs — worker tokens (`task_id` = the spawn's
+///   task, no `orchestrator_type` claim) and gate-agent capability tokens
+///   (`task_id` = the gate id, read-only contract). `agent_task_claim()` is
+///   `Some` for exactly these; orchestrator JWTs are excluded because they
+///   carry `orchestrator_type` (their `task_id` names their own agent id).
+/// - Legacy UUID per-agent tokens — pre-§1 spawned worker agents whose
+///   tokens carry no JWT claims at all. Same worker tier, and there is no
+///   scope list to enforce, so the resource layer is the only gate.
+fn is_worker_tier(auth: &AuthenticatedAgent) -> bool {
+    if auth.agent_task_claim().is_some() {
+        return true;
+    }
+    matches!(
+        auth.auth_mechanism,
+        crate::auth::AuthMechanism::AgentToken
+    ) && auth.jwt_claims.is_none()
+}
+
 /// True when the caller's token carries at least one `repo:{name}:{right}`
 /// scope entry (worker / repo-orchestrator tier).
 fn has_repo_scopes(auth: &AuthenticatedAgent) -> bool {
@@ -4225,8 +4252,8 @@ async fn resource_permissions_check(
     })
 }
 
-fn resource_definitions() -> Value {
-    json!({
+fn resource_definitions(auth: &AuthenticatedAgent) -> Value {
+    let mut definitions = json!({
         "resources": [
             {
                 "uri": "spec://",
@@ -4238,14 +4265,14 @@ fn resource_definitions() -> Value {
             {
                 "uri": "agents://",
                 "name": "Workspace Agents",
-                "description": "List active agents in a workspace. URI: agents://{workspace_id} or agents:// for all.",
+                "description": "List active agents in a workspace. URI: agents://{workspace_id}; an unscoped read resolves against the caller's accessible workspaces only.",
                 "mimeType": "application/json",
                 "uriTemplate": "agents://{workspace_id}"
             },
             {
                 "uri": "queue://",
                 "name": "Merge Queue",
-                "description": "List merge queue entries for a repository. URI: queue://{repo_id}",
+                "description": "List merge queue entries for a repository. URI: queue://{repo_id} (the caller must have access to the repo's workspace)",
                 "mimeType": "application/json",
                 "uriTemplate": "queue://{repo_id}"
             },
@@ -4302,7 +4329,20 @@ fn resource_definitions() -> Value {
                 "uriTemplate": "permissions://check?action={action}&resource={type}"
             }
         ]
-    })
+    });
+    // Phase-5 knowledge boundary (agent-runtime.md §1, task-299):
+    // worker-tier principals must not even be offered the agents:// and
+    // queue:// resources — the advertisement itself would leak the
+    // existence of other agents and the merge queue.
+    if is_worker_tier(auth) {
+        if let Some(resources) = definitions["resources"].as_array_mut() {
+            resources.retain(|r| {
+                let uri = r["uri"].as_str().unwrap_or("");
+                uri != "agents://" && uri != "queue://"
+            });
+        }
+    }
+    definitions
 }
 
 // ── MCP Prompts (agent-runtime.md §5 / platform-model.md §4) ──────────────────
@@ -4617,6 +4657,159 @@ async fn handle_prompt_get(state: &AppState, auth: &AuthenticatedAgent, name: &s
     }
 }
 
+/// Resolve the set of workspaces whose agents the caller may enumerate
+/// (task-299: MCP `agents://` caller-scope enforcement — an unscoped read
+/// must resolve against the caller's accessible workspaces, never the
+/// unfiltered store).
+///
+/// Returns `Ok(None)` for unrestricted callers (the system principal —
+/// the global dev/system token). Every other principal gets a concrete
+/// workspace set:
+/// - Gyre agent JWTs (orchestrators here — workers are rejected at the
+///   dispatch): the signed `workspace_id` claim, id-precise.
+/// - User principals (Keycloak JWT, API key, impersonation): their
+///   workspace memberships; Admin-role users administer every workspace
+///   of their tenant (the same tenant-admin rule `authorize_repo_access`
+///   applies on the git surface).
+/// - Other agent principals (federated JWTs): the signed `workspace_id`
+///   claim, or fail closed — a caller whose scope cannot be resolved must
+///   not fall back to the unfiltered listing.
+async fn caller_agent_workspaces(
+    state: &AppState,
+    auth: &AuthenticatedAgent,
+) -> Result<Option<Vec<Id>>, String> {
+    if auth.is_system_principal() {
+        return Ok(None);
+    }
+    if is_agent_jwt(auth) {
+        return match &auth.workspace_id {
+            Some(ws) => Ok(Some(vec![Id::new(ws.as_str())])),
+            None => Err(
+                "forbidden: agent token carries no workspace scope; refusing agents:// read"
+                    .to_string(),
+            ),
+        };
+    }
+    if let Some(user_id) = &auth.user_id {
+        if auth.roles.contains(&UserRole::Admin) {
+            let workspaces = state
+                .workspaces
+                .list_by_tenant(&Id::new(auth.tenant_id.as_str()))
+                .await
+                .map_err(|e| format!("failed to list tenant workspaces: {e}"))?;
+            return Ok(Some(workspaces.into_iter().map(|ws| ws.id).collect()));
+        }
+        let memberships = state
+            .workspace_memberships
+            .list_by_user(user_id)
+            .await
+            .map_err(|e| format!("failed to list workspace memberships: {e}"))?;
+        return Ok(Some(
+            memberships.into_iter().map(|m| m.workspace_id).collect(),
+        ));
+    }
+    match &auth.workspace_id {
+        Some(ws) => Ok(Some(vec![Id::new(ws.as_str())])),
+        None => Err(
+            "forbidden: caller scope cannot be resolved; refusing agents:// read".to_string(),
+        ),
+    }
+}
+
+/// Does the caller have access to workspace `workspace_id`? Per-handler
+/// authorization for `agents://{workspace_id}` reads (task-299): the
+/// exempt-handler rule — load the scoped entity, compare it against the
+/// caller's scope, deny on mismatch. Denials are `Err("forbidden: ...")`
+/// strings the resource layer surfaces as an error result.
+async fn caller_can_read_workspace(
+    state: &AppState,
+    auth: &AuthenticatedAgent,
+    workspace_id: &str,
+) -> Result<(), String> {
+    if auth.is_system_principal() {
+        return Ok(());
+    }
+    if is_agent_jwt(auth) {
+        // Orchestrator confinement: the signed `workspace_id` claim is the
+        // boundary (repo orchestrators carry it alongside their repo_id).
+        return match &auth.workspace_id {
+            Some(ws) if ws == workspace_id => Ok(()),
+            _ => Err(format!(
+                "forbidden: agent token scope does not cover workspace {workspace_id}"
+            )),
+        };
+    }
+    if let Some(user_id) = &auth.user_id {
+        let membership = state
+            .workspace_memberships
+            .find_by_user_and_workspace(user_id, &Id::new(workspace_id))
+            .await
+            .map_err(|e| format!("failed to look up workspace membership: {e}"))?;
+        if membership.is_some() {
+            return Ok(());
+        }
+        // Tenant admins administer every workspace of their tenant — the
+        // same rule `authorize_repo_access` applies on the git surface.
+        if auth.roles.contains(&UserRole::Admin) {
+            let ws = state
+                .workspaces
+                .find_by_id(&Id::new(workspace_id))
+                .await
+                .map_err(|e| format!("failed to look up workspace: {e}"))?;
+            if let Some(ws) = ws {
+                if ws.tenant_id.as_str() == auth.tenant_id {
+                    return Ok(());
+                }
+            }
+        }
+        return Err(format!(
+            "forbidden: caller is not a member of workspace {workspace_id}"
+        ));
+    }
+    // Other agent principals (federated JWTs): signed workspace claim or
+    // fail closed.
+    match &auth.workspace_id {
+        Some(ws) if ws == workspace_id => Ok(()),
+        _ => Err(format!(
+            "forbidden: caller scope does not cover workspace {workspace_id}; refusing agents:// read"
+        )),
+    }
+}
+
+/// Does the caller have access to repo `repo_id`'s merge queue?
+/// Per-handler authorization for `queue://{repo_id}` reads (task-299):
+/// load the repo, compare its real workspace against the caller's scope,
+/// deny on mismatch. Agent-JWT principals (orchestrators — workers are
+/// rejected at the dispatch) go through the id-precise token-scope check
+/// (`check_repo_read_target`): a repo-tier token may only read its own
+/// repo's queue, a workspace-tier token any repo of its signed workspace.
+async fn caller_can_read_queue(
+    state: &AppState,
+    auth: &AuthenticatedAgent,
+    repo_id: &str,
+) -> Result<(), String> {
+    if auth.is_system_principal() {
+        return Ok(());
+    }
+    if is_agent_jwt(auth) {
+        return check_repo_read_target(state, auth, repo_id, "queue:// read").await;
+    }
+    // Load the repo and compare its real workspace against the caller's
+    // scope. An unresolvable repo fails closed: there is no scope the
+    // caller could be verified against.
+    let repo = state
+        .repos
+        .find_by_id(&Id::new(repo_id))
+        .await
+        .map_err(|e| format!("failed to look up repo: {e}"))?
+        .ok_or_else(|| {
+            format!(
+                "forbidden: cannot verify repo {repo_id} belongs to the caller's scope; refusing queue:// read"
+            )
+        })?;
+    caller_can_read_workspace(state, auth, repo.workspace_id.as_str()).await
+}
+
 async fn handle_resource_read(state: &AppState, auth: &AuthenticatedAgent, uri: &str) -> Value {
     if uri == "conversation://context" {
         // HSI §4: Serve the original agent's conversation to the interrogation agent.
@@ -4661,11 +4854,53 @@ async fn handle_resource_read(state: &AppState, auth: &AuthenticatedAgent, uri: 
             Err(e) => json!({"error": format!("cannot read {file_path}: {e}")}),
         }
     } else if let Some(workspace_id) = uri.strip_prefix("agents://") {
-        let agents_result = if workspace_id.is_empty() || workspace_id == "*" {
-            state.agents.list().await
-        } else {
-            state.agents.list_by_workspace(&Id::new(workspace_id)).await
-        };
+        // Phase-5 knowledge boundary (agent-runtime.md §1): a worker-tier
+        // principal must not learn about other agents at all — the gate is
+        // mechanical, at the resource layer, not in the prompt.
+        if is_worker_tier(auth) {
+            return json!({
+                "error": "forbidden: worker-tier principals cannot read agents:// \
+                          (agent-runtime.md §1 Phase 5 knowledge boundary)"
+            });
+        }
+        // Caller-scope enforcement (task-299): an unscoped (or `*`) read
+        // resolves against the caller's accessible workspaces — never the
+        // unfiltered cross-workspace store; an explicit workspace requires
+        // access to it.
+        let agents_result: Result<Vec<gyre_domain::Agent>, String> =
+            if workspace_id.is_empty() || workspace_id == "*" {
+                match caller_agent_workspaces(state, auth).await {
+                    Err(e) => Err(e),
+                    Ok(None) => state
+                        .agents
+                        .list()
+                        .await
+                        .map_err(|e| format!("failed to list agents: {e}")),
+                    Ok(Some(workspaces)) => {
+                        let mut all = Vec::new();
+                        for ws in &workspaces {
+                            match state.agents.list_by_workspace(ws).await {
+                                Ok(mut list) => all.append(&mut list),
+                                Err(e) => {
+                                    return json!({
+                                        "error": format!("failed to list agents: {e}")
+                                    })
+                                }
+                            }
+                        }
+                        Ok(all)
+                    }
+                }
+            } else {
+                if let Err(e) = caller_can_read_workspace(state, auth, workspace_id).await {
+                    return json!({"error": e});
+                }
+                state
+                    .agents
+                    .list_by_workspace(&Id::new(workspace_id))
+                    .await
+                    .map_err(|e| format!("failed to list agents: {e}"))
+            };
         match agents_result {
             Ok(list) => {
                 let active: Vec<Value> = list
@@ -4693,9 +4928,22 @@ async fn handle_resource_read(state: &AppState, auth: &AuthenticatedAgent, uri: 
                     }]
                 })
             }
-            Err(e) => json!({"error": format!("failed to list agents: {e}")}),
+            Err(e) => json!({"error": e}),
         }
     } else if let Some(repo_id) = uri.strip_prefix("queue://") {
+        // Phase-5 knowledge boundary (agent-runtime.md §1): a worker-tier
+        // principal must not learn the merge-queue state — mechanical gate.
+        if is_worker_tier(auth) {
+            return json!({
+                "error": "forbidden: worker-tier principals cannot read queue:// \
+                          (agent-runtime.md §1 Phase 5 knowledge boundary)"
+            });
+        }
+        // Caller-scope enforcement (task-299): load the repo, compare its
+        // workspace against the caller's scope, deny on mismatch.
+        if let Err(e) = caller_can_read_queue(state, auth, repo_id).await {
+            return json!({"error": e});
+        }
         match state.merge_queue.list_queue().await {
             Ok(entries) => {
                 let mut results = Vec::new();
@@ -5041,7 +5289,7 @@ pub async fn mcp_handler(
                 JsonRpcResponse::ok(id, result)
             }
         }
-        "resources/list" => JsonRpcResponse::ok(id, resource_definitions()),
+        "resources/list" => JsonRpcResponse::ok(id, resource_definitions(&auth)),
         "resources/read" => {
             let params = req.params.unwrap_or(json!({}));
             let uri = params.get("uri").and_then(|v| v.as_str()).unwrap_or("");
@@ -7579,6 +7827,327 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         assert!(json["result"]["contents"].as_array().is_some());
+    }
+
+    // ── task-299: Phase-5 knowledge boundary on agents:// and queue:// ────────
+
+    /// Seed an Active agent in workspace `wid` (visible to agents:// reads,
+    /// which list Active/Idle agents only).
+    async fn seed_active_agent(state: &std::sync::Arc<crate::AppState>, name: &str, wid: &str) {
+        let mut agent = gyre_domain::Agent::new(Id::new(name), name, 0);
+        agent.workspace_id = Id::new(wid);
+        agent
+            .transition_status(gyre_domain::AgentStatus::Active)
+            .unwrap();
+        state.agents.create(&agent).await.unwrap();
+    }
+
+    /// A worker agent JWT (task-scoped, repo-scoped) must not be able to
+    /// read agents:// or queue:// at all, and its resources/list must not
+    /// even advertise them — the Phase-5 boundary is mechanical
+    /// (agent-runtime.md §1 Phase 5), not prompt-level.
+    #[tokio::test]
+    async fn mcp_worker_jwt_cannot_read_agents_or_queue_resources() {
+        let state = orch_state().await;
+        // Active agents in BOTH workspaces, so any leak is visible.
+        seed_active_agent(&state, "kb-w1", "ws-1").await;
+        seed_active_agent(&state, "kb-w2", "ws-2").await;
+        let (_id, token) = register_worker(&state, "kb", "r-1").await;
+        let app = crate::build_router(state);
+
+        // resources/list omits both resources for the worker tier.
+        let (status, json) = mcp_post_with_token(
+            app.clone(),
+            json!({ "jsonrpc": "2.0", "id": 90, "method": "resources/list" }),
+            &token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let uris: Vec<&str> = json["result"]["resources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["uri"].as_str().unwrap())
+            .collect();
+        assert!(
+            !uris.contains(&"agents://"),
+            "worker resources/list must omit agents://, got: {uris:?}"
+        );
+        assert!(
+            !uris.contains(&"queue://"),
+            "worker resources/list must omit queue://, got: {uris:?}"
+        );
+        assert!(
+            uris.contains(&"spec://"),
+            "unrelated resources must stay advertised, got: {uris:?}"
+        );
+
+        // resources/read returns an error result for every spelling.
+        for (id, uri) in [
+            (91, "agents://"),
+            (92, "agents://ws-1"),
+            (93, "agents://*"),
+            (94, "queue://r-1"),
+            (95, "queue://r-x"),
+        ] {
+            let (status, json) = mcp_post_with_token(
+                app.clone(),
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "method": "resources/read",
+                    "params": { "uri": uri }
+                }),
+                &token,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            let err = json["result"]["error"]
+                .as_str()
+                .unwrap_or_else(|| panic!("expected error result for {uri}, got: {json}"));
+            assert!(err.contains("forbidden"), "got: {err}");
+        }
+    }
+
+    /// A user who is a member of only workspace A must never receive
+    /// workspace B agents from an unscoped agents:// read (no
+    /// cross-workspace enumeration), and reading workspace B's merge
+    /// queue must be Forbidden.
+    #[tokio::test]
+    async fn mcp_agents_resource_scoped_to_member_workspaces() {
+        use crate::auth::test_helpers::{make_test_state_with_jwt, sign_test_jwt};
+
+        let state = make_test_state_with_jwt();
+        for wid in ["ws-a", "ws-b"] {
+            let ws = gyre_domain::Workspace::new(
+                Id::new(wid),
+                Id::new("default"),
+                wid,
+                wid,
+                0,
+            );
+            state.workspaces.create(&ws).await.unwrap();
+        }
+        // Active agents in BOTH workspaces — workspace B's agent must not
+        // leak to a workspace-A member.
+        seed_active_agent(&state, "kb-agent-a1", "ws-a").await;
+        seed_active_agent(&state, "kb-agent-b1", "ws-b").await;
+        // A repo in workspace B for the queue:// probe.
+        let repo = gyre_domain::Repository::new(
+            Id::new("kb-repo-b"),
+            Id::new("ws-b"),
+            "kb-repo-b",
+            "/tmp/kb-repo-b".to_string(),
+            0,
+        );
+        state.repos.create(&repo).await.unwrap();
+
+        // Plain member (no realm roles → not Admin) of workspace A only.
+        let token = sign_test_jwt(
+            &json!({
+                "sub": "mcp-kb-sub",
+                "preferred_username": "mcp-kb-user",
+                "realm_access": { "roles": [] }
+            }),
+            3600,
+        );
+        let app = crate::build_router(state.clone());
+        // First authenticated call auto-provisions the user (UserJwt path).
+        let (status, _json) = mcp_post_with_token(
+            app.clone(),
+            json!({ "jsonrpc": "2.0", "id": 96, "method": "initialize", "params": {} }),
+            &token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let user = state
+            .users
+            .find_by_username("mcp-kb-user")
+            .await
+            .unwrap()
+            .expect("user must be provisioned by the first authenticated call");
+        let membership = gyre_domain::WorkspaceMembership::new(
+            Id::new("kb-membership-a"),
+            user.id.clone(),
+            Id::new("ws-a"),
+            gyre_domain::WorkspaceRole::Developer,
+            Id::new("system"),
+            0,
+        );
+        state
+            .workspace_memberships
+            .create(&membership)
+            .await
+            .unwrap();
+
+        // Unscoped agents:// read: workspace A agents only.
+        let (status, json) = mcp_post_with_token(
+            app.clone(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 97,
+                "method": "resources/read",
+                "params": { "uri": "agents://" }
+            }),
+            &token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let text = json["result"]["contents"][0]["text"]
+            .as_str()
+            .expect("member agents:// read must return contents");
+        let agents: Vec<Value> = serde_json::from_str(text).unwrap();
+        let ids: Vec<&str> = agents.iter().map(|a| a["id"].as_str().unwrap()).collect();
+        assert!(
+            ids.contains(&"kb-agent-a1"),
+            "own-workspace agent must be listed, got: {ids:?}"
+        );
+        assert!(
+            !ids.contains(&"kb-agent-b1"),
+            "cross-workspace enumeration leak: workspace B agent in {ids:?}"
+        );
+
+        // Explicit agents://ws-b: not a member → forbidden.
+        let (status, json) = mcp_post_with_token(
+            app.clone(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 98,
+                "method": "resources/read",
+                "params": { "uri": "agents://ws-b" }
+            }),
+            &token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let err = json["result"]["error"].as_str().unwrap();
+        assert!(err.contains("forbidden"), "got: {err}");
+
+        // queue:// of workspace B's repo: Forbidden for the workspace-A member.
+        let (status, json) = mcp_post_with_token(
+            app.clone(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 99,
+                "method": "resources/read",
+                "params": { "uri": "queue://kb-repo-b" }
+            }),
+            &token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let err = json["result"]["error"].as_str().unwrap();
+        assert!(
+            err.contains("forbidden"),
+            "queue:// of a foreign workspace must be forbidden, got: {err}"
+        );
+    }
+
+    /// A workspace-scoped orchestrator reading agents:// sees only its own
+    /// workspace's agents; a repo orchestrator is additionally confined to
+    /// its own repo's merge queue.
+    #[tokio::test]
+    async fn mcp_agents_and_queue_scoped_to_orchestrator_token() {
+        let state = orch_state().await;
+        seed_active_agent(&state, "kb-orch-w1", "ws-1").await;
+        seed_active_agent(&state, "kb-orch-w2", "ws-2").await;
+        let (_id, ws_token) =
+            register_orchestrator(&state, "kbwo", "ws-1", None, "workspace_orchestrator").await;
+        let app = crate::build_router(state.clone());
+
+        // Unscoped agents:// read: only ws-1 agents (the signed workspace
+        // claim is the boundary).
+        let (status, json) = mcp_post_with_token(
+            app.clone(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 100,
+                "method": "resources/read",
+                "params": { "uri": "agents://" }
+            }),
+            &ws_token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let text = json["result"]["contents"][0]["text"].as_str().unwrap();
+        let agents: Vec<Value> = serde_json::from_str(text).unwrap();
+        let ids: Vec<&str> = agents.iter().map(|a| a["id"].as_str().unwrap()).collect();
+        assert!(ids.contains(&"kb-orch-w1"), "own-workspace agent missing: {ids:?}");
+        assert!(
+            !ids.contains(&"kb-orch-w2"),
+            "orchestrator must not see other-workspace agents: {ids:?}"
+        );
+
+        // Workspace orchestrator: own-workspace repo queue readable,
+        // foreign-workspace repo queue forbidden.
+        let (status, json) = mcp_post_with_token(
+            app.clone(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 101,
+                "method": "resources/read",
+                "params": { "uri": "queue://r-1" }
+            }),
+            &ws_token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            json["result"]["contents"].as_array().is_some(),
+            "own-workspace queue must be readable, got: {json}"
+        );
+        let (status, json) = mcp_post_with_token(
+            app.clone(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 102,
+                "method": "resources/read",
+                "params": { "uri": "queue://r-x" }
+            }),
+            &ws_token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let err = json["result"]["error"].as_str().unwrap();
+        assert!(err.contains("PERMISSION_DENIED"), "got: {err}");
+
+        // Repo orchestrator: confined to its own repo's queue even within
+        // its own workspace.
+        let (_id, repo_token) =
+            register_orchestrator(&state, "kbro", "ws-1", Some("r-1"), "repo_orchestrator").await;
+        let (status, json) = mcp_post_with_token(
+            app.clone(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 103,
+                "method": "resources/read",
+                "params": { "uri": "queue://r-2" }
+            }),
+            &repo_token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let err = json["result"]["error"].as_str().unwrap();
+        assert!(
+            err.contains("PERMISSION_DENIED"),
+            "repo orchestrator must not read another repo's queue, got: {err}"
+        );
+        let (status, json) = mcp_post_with_token(
+            app.clone(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 104,
+                "method": "resources/read",
+                "params": { "uri": "queue://r-1" }
+            }),
+            &repo_token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            json["result"]["contents"].as_array().is_some(),
+            "own-repo queue must be readable, got: {json}"
+        );
     }
 
     // ── initialize advertises resources capability ─────────────────────────────
