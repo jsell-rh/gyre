@@ -2,8 +2,8 @@
 title: "Spec Links — repo-scoped graph (?repo= filter) and authorization for the four registry-exempt query endpoints"
 spec_ref: "Spec gap spec-10bdced21a063f819b1baabd / spec-links-graph-repo-filter / 5a915155d9bc"
 depends_on: []
-progress: not-started
-commits: []
+progress: complete
+commits: ["8cced7f4dbee6f4adf043625ebb2c58858c3a7f2", "b675ee0a9a52376f8c02ebcf46eee511f68a59e2", "f96b5a402e5f52ebf1f69775a5d3d139c591551a"]
 ---
 
 ## Required behavior
@@ -78,3 +78,73 @@ Canonical spec: `specs/system/spec-links.md`. Source: `678a8ac3e3bfeafeb66cdb47e
     ]
   }
 ]
+
+## Shipped
+
+Both halves of the spec-links.md §Querying the Graph gap are implemented and
+retained through this round's merge reconciliation; this round resolved the
+DIRTY merge against the new base 077d9421 (task-291's link-direction work
+landing in the same files), preserving the task-290 implementation intact.
+
+### Behavior (retained from checkpoints f96b5a40/b675ee0a/8cced7f4)
+
+(A) Repo-scoped graph — GET /api/v1/specs/graph takes
+Query<SpecGraphQuery> (api/specs.rs get_spec_graph): with no repo parameter
+the response is the unchanged full tenant-wide graph. With ?repo={id}: nodes
+are the ledger entries whose repo_id equals the repo, edges are all stored
+links with source_repo_id == repo or target_repo_id == repo — the repo's
+specs with all outbound, same-repo inbound, and cross-repo inbound links.
+The repo is resolved and validated first: unknown id → 404, empty value →
+400, a repo in another tenant → 403 (the route addresses no path entity, so
+the handler enforces tenant containment for non-system principals;
+unresolvable workspace fails closed).
+
+(B) Authorization — the four query endpoints (GET /specs/stale-links,
+/specs/conflicts, /specs/{path}/dependents, /specs/{path}/dependencies) are
+resolver-mapped as RouteResourceMapping::api(..., "spec", None) in
+abac_middleware.rs and removed from scripts/abac-route-registry-exemptions.txt
+(42 → 38 entries; FROZEN_EXEMPTION_COUNT lowered to 38).
+/api/v1/specs/:path/reject is untouched (out of scope). Each of the four
+handlers consults auth.tenant_id and passes it to links_visible_to, which
+scopes the store read to rows declared by repos in the caller's tenant
+(system principal excepted — it legitimately spans tenants); rows with no
+source_repo_id are withheld rather than given a fabricated scope.
+
+### This round (merge reconciliation)
+
+The published candidate 11253ce3 conflicted with its new target (merge base
+077d9421, task-291). Resolved the single conflicted file
+specs/coverage/system/spec-links.md rows 12/13: kept task-290's
+implementation status for the repo filter + endpoint authorization and
+merged in task-291's direction-field notes, refreshing all line citations
+to the merged file (direction impl at specs.rs:1682; handlers at
+:1781/:1921/:1960/:1995/:2018; links_visible_to at :1895; resolver mappings
+at abac_middleware.rs:435-438; tests at specs.rs:5402-5722). Code and web
+sources auto-merged cleanly; web/dist assets are restored by the executor
+from the assignment base.
+
+### Test evidence
+
+- `cargo check -p gyre-server` — clean (evidence:
+  /tmp/stage/review-evidence/cargo-check-gyre-server.txt).
+- `cargo fmt -p gyre-server --check` — clean.
+- `bash scripts/check-abac-route-registry.sh` — OK (38 exemption entries,
+  frozen baseline 38).
+- `bash scripts/check-abac-exempt-handlers.sh` — OK (86 handlers checked).
+- `npx vitest run src/__tests__/DetailPanel.test.js` (web, locked npm ci) —
+  41/41 pass, confirming task-291's direction tests survive the merge
+  (evidence: /tmp/stage/review-evidence/vitest-DetailPanel.txt).
+
+### Server tests for the independent verifier
+
+Large gyre-server test compilation is deferred to the verifier (4 GiB
+budget). Execute each as its own `cargo test -p gyre-server <name>`
+invocation:
+
+- specs::tests::get_spec_graph_returns_nodes_and_edges
+- specs::tests::get_spec_graph_repo_filter_returns_repo_nodes_and_inbound_edges
+- specs::tests::get_spec_graph_unknown_or_empty_repo_is_an_explicit_error
+- specs::tests::get_spec_graph_repo_filter_denies_cross_tenant_repo
+- specs::tests::spec_graph_query_endpoints_do_not_leak_other_tenants_links
+- specs::tests::get_spec_links_self_link_is_outbound
+- specs::tests::get_spec_dependents_and_dependencies_populate_direction
