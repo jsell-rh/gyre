@@ -3,7 +3,7 @@ title: "AIBOM: dependency-graph snapshot and stale-dependency flags in release r
 spec_ref: "Spec gap spec-cab97078efffe0fbfb7339be / aibom-stale-dependency-flags / ed9f34316476"
 depends_on: []
 progress: ready-for-review
-commits: ["a5d42c8b37367d71247c6ea15397b449604875b6", "f7a475ee8d98a206266ad239828300f97598c46f", "0ffd039d0a0f3e85e32690c670f5928a95bdc642"]
+commits: ["a5d42c8b37367d71247c6ea15397b449604875b6", "f7a475ee8d98a206266ad239828300f97598c46f", "0ffd039d0a0f3e85e32690c670f5928a95bdc642", "4328b0611db0a3f5ab0d8986c6531438eb26965b"]
 ---
 
 ## Required behavior
@@ -114,6 +114,13 @@ Canonical spec: `specs/system/dependency-graph.md`. Source: `678a8ac3e3bfeafeb66
   place — `rename(2)` is atomic, so the dump is observable only in its
   complete state. All 16 users of the helper share the fix; only one test
   reads the dump; no assertion was weakened or changed.
+- The same defect class existed in the gate_executor manifest-gate test
+  (poll for `GYRE_AUTH_TOKEN=` in an early stdio block, then assert on
+  `GYRE_PERSONA`/`GYRE_MR_ID`/`GYRE_GATE_ID`/
+  `GYRE_MIN_ATTESTATION_LEVEL`, which can sit in later blocks) — fixed
+  identically in 4328b061. The spawn.rs kubectl-stub env capture was
+  assessed and left alone: it is a single `cat` write, not a multi-block
+  `env` dump, so its content assertions cannot tear.
 - Evidence (`/tmp/stage/review-evidence/`): a size-trace of the old
   pattern shows the dump observable at `[0, 4096, 8192, ... 37630]`
   bytes; a `soon()`-mimicking probe at CI env scale shows torn reads
@@ -123,20 +130,20 @@ Canonical spec: `specs/system/dependency-graph.md`. Source: `678a8ac3e3bfeafeb66
 ### Verification
 
 - `SKIP_WEB_BUILD=1 cargo check -p gyre-server --tests` at the branch
-  head with the fix: exit 0 (18m34s; evidence in
+  head with both fixes: exit 0 (evidence in
   /tmp/stage/review-evidence/task-284-cargo-check.txt).
-- rustfmt clean on the touched file (`cargo fmt -p gyre-server` produced
-  no changes beyond the edit itself).
+- rustfmt clean on both touched files (`cargo fmt -p gyre-server` produced
+  no changes beyond the edits themselves).
 - gyre-server test-binary compilation is deferred to the independent
   verifier per the assignment's 4 GiB budget constraint. Verifier must
   run: `cargo test -p gyre-server preview_spawns_real_agents` (repaired
   flake; selects all preview_spawns_real_agents_* variants including the
   CI-failed one), `cargo test -p gyre-server --lib aibom` (this task's
   probe tests plus pre-existing aibom regression), and
-  `cargo test -p gyre-server --lib env_dump` if additional confidence in
-  the helper's users is wanted. The aibom probe tests passed in earlier
-  full-suite CI rounds of PR 903; the round-14 failure was solely the
-  env-dump flake repaired here.
+  `cargo test -p gyre-server trigger_gates_launches_gate_agent_runtime_with_token`
+  (the gate_executor test whose dump was made atomic in 4328b061). The
+  aibom probe tests passed in earlier full-suite CI rounds of PR 903; the
+  round-14 failure was solely the env-dump flake repaired here.
 - The implementation survived the base merge to 58affdc6 intact: the
   merge commit 7d8a516c brought in task-279's git_http/mcp changes
   without touching api/aibom.rs, and coverage rows 10/18 (task-279) and
