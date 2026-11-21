@@ -80,13 +80,12 @@ impl CascadeTestResultRepository for SqliteStorage {
                 .on_conflict(cascade_test_results::cascade_task_id)
                 .do_update()
                 .set((
-                    cascade_test_results::dependent_repo_id
-                        .eq(row.dependent_repo_id.to_string()),
+                    cascade_test_results::dependent_repo_id.eq(row.dependent_repo_id.to_string()),
                     cascade_test_results::merged_repo_id.eq(row.merged_repo_id.to_string()),
-                    cascade_test_results::merge_commit_sha
-                        .eq(row.merge_commit_sha.to_string()),
+                    cascade_test_results::merge_commit_sha.eq(row.merge_commit_sha.to_string()),
                     cascade_test_results::passed.eq(row.passed),
-                    cascade_test_results::failure_details.eq(row.failure_details.map(|d| d.to_string())),
+                    cascade_test_results::failure_details
+                        .eq(row.failure_details.map(|d| d.to_string())),
                     cascade_test_results::recorded_at.eq(row.recorded_at),
                 ))
                 .execute(&mut *conn)
@@ -229,7 +228,9 @@ mod tests {
         let mut retry = sample("task-1", true);
         retry.id = Id::new("ctr-2");
         retry.recorded_at = 2000;
-        CascadeTestResultRepository::record(&s, &retry).await.unwrap();
+        CascadeTestResultRepository::record(&s, &retry)
+            .await
+            .unwrap();
 
         let found = CascadeTestResultRepository::find_by_task(&s, &Id::new("task-1"))
             .await
@@ -258,8 +259,12 @@ mod tests {
         let mut second = sample("task-2", false);
         second.id = Id::new("ctr-2");
         second.recorded_at = 2000;
-        CascadeTestResultRepository::record(&s, &first).await.unwrap();
-        CascadeTestResultRepository::record(&s, &second).await.unwrap();
+        CascadeTestResultRepository::record(&s, &first)
+            .await
+            .unwrap();
+        CascadeTestResultRepository::record(&s, &second)
+            .await
+            .unwrap();
 
         // Dependent repo: newest first.
         let deps = CascadeTestResultRepository::list_by_dependent_repo(&s, &Id::new("repo-a"))

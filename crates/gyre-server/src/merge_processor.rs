@@ -4973,10 +4973,16 @@ mod tests {
         // into its system://context prompt): full context — dependent
         // repo, merged repo, merge SHA — plus the test-run procedure.
         let desc = tasks[0].description.as_deref().expect("description set");
-        assert!(desc.contains(repo_b.id.as_str()), "merged repo id in prompt");
+        assert!(
+            desc.contains(repo_b.id.as_str()),
+            "merged repo id in prompt"
+        );
         assert!(desc.contains("abc123def456"), "merge SHA in prompt");
         assert!(desc.contains("repo-a"), "dependent repo name in prompt");
-        assert!(desc.contains("test suite"), "run-tests instruction in prompt");
+        assert!(
+            desc.contains("test suite"),
+            "run-tests instruction in prompt"
+        );
         assert!(
             desc.contains("Update the dependency reference"),
             "dependency-update instruction in prompt"

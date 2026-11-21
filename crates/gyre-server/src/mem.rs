@@ -6028,6 +6028,7 @@ fn test_state_inner(
         dependencies: Arc::new(MemDependencyRepository::default()),
         breaking_changes: Arc::new(MemBreakingChangeRepository::default()),
         dependency_policies: Arc::new(MemDependencyPolicyRepository::default()),
+        cascade_test_results: Arc::new(MemCascadeTestResultRepository::default()),
         rate_limiter: crate::rate_limit::RateLimiter::new(1000),
         process_registry: Arc::new(Mutex::new(HashMap::new())),
         spawned_backends: Arc::new(Mutex::new(HashMap::new())),

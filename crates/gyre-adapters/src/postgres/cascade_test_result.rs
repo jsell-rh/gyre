@@ -84,13 +84,12 @@ impl CascadeTestResultRepository for PgStorage {
                 .on_conflict(cascade_test_results::cascade_task_id)
                 .do_update()
                 .set((
-                    cascade_test_results::dependent_repo_id
-                        .eq(row.dependent_repo_id.to_string()),
+                    cascade_test_results::dependent_repo_id.eq(row.dependent_repo_id.to_string()),
                     cascade_test_results::merged_repo_id.eq(row.merged_repo_id.to_string()),
-                    cascade_test_results::merge_commit_sha
-                        .eq(row.merge_commit_sha.to_string()),
+                    cascade_test_results::merge_commit_sha.eq(row.merge_commit_sha.to_string()),
                     cascade_test_results::passed.eq(row.passed),
-                    cascade_test_results::failure_details.eq(row.failure_details.map(|d| d.to_string())),
+                    cascade_test_results::failure_details
+                        .eq(row.failure_details.map(|d| d.to_string())),
                     cascade_test_results::recorded_at.eq(row.recorded_at),
                 ))
                 .execute(&mut *conn)

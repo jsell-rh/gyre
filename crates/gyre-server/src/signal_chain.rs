@@ -2862,8 +2862,7 @@ mod tests {
         // worktree — the repo whose tests it must run.
         let wts = state.worktrees.find_by_agent(&worker.id).await.unwrap();
         assert!(
-            wts.iter()
-                .any(|wt| wt.repository_id == Id::new("r-1")),
+            wts.iter().any(|wt| wt.repository_id == Id::new("r-1")),
             "cascade test agent works in the dependent repo"
         );
     }
