@@ -2,8 +2,8 @@
 title: "Activity Dashboard completion: real-time durable feed with time-period queries, artifact links, Try-it ephemeral preview environments, TTY attach, and trial analytics"
 spec_ref: "Spec gap spec-b128f93cd5d035d28c8bbf7f / activity-dashboard-completion / f0cbfae7cd02"
 depends_on: []
-progress: not-started
-commits: []
+progress: complete
+commits: ["012714900a30a81a8401fb600cfac72e7835180c", "8f720877e6eadee1e2bf4bcbe13ab294c6c910d7", "7410c32759cff9c8930fbcc759e89046cc5c6184", "e4f941a12e393bdf00aedca3755f92a934c5b36f", "4986339d71637c9161f7c09f367b2ca691f64f4c"]
 ---
 
 ## Required behavior
@@ -90,3 +90,27 @@ Canonical spec: `specs/system/activity-dashboard.md`. Source: `678a8ac3e3bfeafeb
     ]
   }
 ]
+
+## Shipped
+
+All five spec bullets of specs/system/activity-dashboard.md are closed in production code (implementation 4986339d, rustfmt e4f941a1, review repair 7410c327, clippy-gate repair 8f720877, analytics-filter repair 01271490). This repair round fixed the single failing test in the retained `cargo test --all` verification run; every other test in that run (2653) passed.
+
+### This repair round (verification failure: try-it analytics count probe)
+
+The failing assertion was `count_preview_events(&state, "preview.started") == 1` reading 0 in `try_it_member_provisions_durable_environment` (api/preview_envs.rs:1130). Root cause: the test helper built `gyre_ports::AnalyticsQueryFilter` with `..Default::default()`, and the filter's derived Default set `limit: usize = 0`; every adapter's `query_filtered` truncates to `filter.limit`, so a Default-constructed filter silently matched nothing. The handler had recorded the event correctly (the test's earlier assertions — durable row, mesh peer, peer linkage — all pass after `record_preview_analytics` runs); only the counting query was blind. Production code was unaffected: every production filter construction sets `limit` explicitly (REST default 100, capped at 10_000); the only raw-Default users were three `#[cfg(test)]` sites (the try-it count helper plus two assert-empty search-scope tests, which were thereby vacuous). Fix 01271490 replaces the derived Default with a manual impl whose `limit` is 100 — identical to `AnalyticsQueryFilter::new()` and the `query_events` handler default — making `new()` delegate to `default()`, and adds the port-level regression test `default_filter_keeps_a_nonzero_result_cap`. This also un-vacuums the two sibling assert-empty tests (they now query with a real cap; correct forged-scope rejection still yields 0). In-sandbox probes: `cargo test -p gyre-ports` exits 0 (regression test passes), `cargo check -p gyre-server` exits 0, `cargo fmt -p gyre-ports -- --check` clean. Evidence: /tmp/stage/review-evidence/analytics-filter-default-repair.txt.
+
+### Standing implementation (prior rounds, unchanged)
+
+- Time-period feed: `NotificationRepository::list_since(since, limit)` (created_at >= since, newest-first) implemented by every adapter (mem, SQLite, PostgreSQL, broadcasting wrapper); GET /api/v1/activity executes the filter in the repository; web/src/lib/api.js `activity(limit, since)` forwards the parameter. Killed by `unified_activity_honors_since_against_durable_notifications` (api/activity.rs).
+- Real-time sidebars: web/src/lib/activityStream.svelte.js rides the single shared /ws connection, maps bus Messages to the /activity entry shape, live-prepends per workspace, dedupes by id, re-syncs on reconnect via `GET /api/v1/activity?since=`; WorkspaceHome/CrossWorkspaceHome derive their sidebars from it. Killed by activityStream.test.js and WorkspaceHomeActivityStream.test.js.
+- Try-it preview environments: durable PreviewEnvironment (gyre-domain) + PreviewEnvironmentRepository port + SQLite migration 000070 + PostgreSQL/mem adapters wired with store!; POST /api/v1/merge-requests/:id/try-it (+ /mrs/:id alias), GET /api/v1/preview-environments[/:id], DELETE teardown; provisioning resolves the merged commit (fail-closed), requires workspace access before any side effect, dispatches via the compute-target machinery (NixOS flake-built image or isolated detached-worktree scratch on local), registers a real X25519 WireGuard mesh peer; TTL GC job (preview_env_gc on the jobs.rs scheduler) terminates and removes peers; all routes have ABAC RouteResourceMapping entries and per-handler tenant/membership scoping. Adapter durability killed by `durability_across_reopen` (gyre-adapters); handler enforcement (non-member 403 with zero rows/no peer, 4xx on unresolvable, teardown + analytics) covered by the in-file `try_it_*` tests.
+- Trial analytics: `preview.started` / `preview.ended` / `preview.expired` / `preview.failed` AnalyticsEvents via state.analytics.record, queryable through the analytics query API; the approve/reject half is untouched.
+- TTY attach: web/src/lib/AgentTty.svelte consumes api.agentTtyUrl (no longer dead code) to open /ws/agents/:id/tty, mounted in DetailPanel; killed by AgentTty.test.js.
+- Artifact deep links: entries surface mr_id/repo_id/agent_id/task_id/spec_path/gate_name/commit_sha/branch; gate-failure/test-result entries land on the MR's gates tab on both dashboard surfaces; merged-MR entries render TryItButton. Killed by CrossWorkspaceHomeActivityLinks.test.js and TryItButton.test.js.
+
+### Honest limits
+
+- The TTL GC job (preview_env_gc) has no direct unit test; its teardown outcome shares `teardown_preview_environment` with the tested DELETE path, and the port query it uses (`find_live_expired_before`) is adapter-tested.
+- The PostgreSQL adapters carry no test module (repo-wide state; the SQLite adapters and port contracts are tested).
+- Local-mode provisioning status is asserted honestly (active or failed) in tests because it spawns a real process.
+- Server test execution for the verifier (not run in-sandbox under the 4 GiB budget; type state verified via `cargo check -p gyre-server` this round): `cargo test -p gyre-server --lib try_it_` (all five try-it tests, including the previously failing `try_it_member_provisions_durable_environment`), `cargo test -p gyre-server --lib api::search::tests::search_workspace_scope_validated_against_caller_tenant`, `cargo test -p gyre-server --lib mcp::tests::gyre_search_records_search_query_analytics_event`, `cargo test -p gyre-server --lib api::activity::tests::unified_activity_honors_since_against_durable_notifications`, and `cargo test -p gyre-ports`.

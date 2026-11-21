@@ -38,6 +38,7 @@ pub mod network;
 pub mod orchestrator;
 pub mod personas;
 pub mod policies;
+pub mod preview_envs;
 pub mod prompts;
 pub mod provenance;
 pub mod push_gates;
@@ -471,6 +472,27 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route(
             "/api/v1/merge-requests/:id/trace",
             get(traces::get_trace_for_mr),
+        )
+        // Try-it ephemeral preview environments (activity-dashboard.md
+        // §"Try it" links): POST provisions for the merged MR's commit, GET
+        // lists the MR's environments. `/api/v1/mrs/:id/try-it` is an alias
+        // for the same handlers (same ABAC resource, same per-handler
+        // membership enforcement).
+        .route(
+            "/api/v1/merge-requests/:id/try-it",
+            post(preview_envs::try_it_handler).get(preview_envs::list_mr_environments),
+        )
+        .route(
+            "/api/v1/mrs/:id/try-it",
+            post(preview_envs::try_it_handler).get(preview_envs::list_mr_environments),
+        )
+        .route(
+            "/api/v1/preview-environments",
+            get(preview_envs::list_environments),
+        )
+        .route(
+            "/api/v1/preview-environments/:id",
+            get(preview_envs::get_environment).delete(preview_envs::teardown_environment_handler),
         )
         .route(
             "/api/v1/trace-spans/:span_id/payload",
