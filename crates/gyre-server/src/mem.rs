@@ -2480,6 +2480,69 @@ impl gyre_ports::DependencyPolicyRepository for MemDependencyPolicyRepository {
     }
 }
 
+/// In-memory cascade test result store (task-280).
+///
+/// Enforces the port contract in code (the mem adapter has no schema):
+/// `record` REPLACES any existing row for the same `cascade_task_id` —
+/// one result per cascade test task, last report wins — exactly like the
+/// SQLite/PostgreSQL adapters' `ON CONFLICT (cascade_task_id) DO UPDATE`.
+#[derive(Default)]
+pub struct MemCascadeTestResultRepository {
+    store: Arc<Mutex<Vec<gyre_domain::CascadeTestResult>>>,
+}
+
+#[async_trait]
+impl gyre_ports::CascadeTestResultRepository for MemCascadeTestResultRepository {
+    async fn record(&self, result: &gyre_domain::CascadeTestResult) -> Result<()> {
+        let mut store = self.store.lock().await;
+        store.retain(|r| r.cascade_task_id.as_str() != result.cascade_task_id.as_str());
+        store.push(result.clone());
+        Ok(())
+    }
+
+    async fn find_by_task(&self, task_id: &Id) -> Result<Option<gyre_domain::CascadeTestResult>> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .iter()
+            .find(|r| r.cascade_task_id.as_str() == task_id.as_str())
+            .cloned())
+    }
+
+    async fn list_by_dependent_repo(
+        &self,
+        repo_id: &Id,
+    ) -> Result<Vec<gyre_domain::CascadeTestResult>> {
+        let mut rows: Vec<gyre_domain::CascadeTestResult> = self
+            .store
+            .lock()
+            .await
+            .iter()
+            .filter(|r| r.dependent_repo_id.as_str() == repo_id.as_str())
+            .cloned()
+            .collect();
+        rows.sort_by(|a, b| b.recorded_at.cmp(&a.recorded_at));
+        Ok(rows)
+    }
+
+    async fn list_by_merged_repo(
+        &self,
+        repo_id: &Id,
+    ) -> Result<Vec<gyre_domain::CascadeTestResult>> {
+        let mut rows: Vec<gyre_domain::CascadeTestResult> = self
+            .store
+            .lock()
+            .await
+            .iter()
+            .filter(|r| r.merged_repo_id.as_str() == repo_id.as_str())
+            .cloned()
+            .collect();
+        rows.sort_by(|a, b| b.recorded_at.cmp(&a.recorded_at));
+        Ok(rows)
+    }
+}
+
 /// In-memory spawn log + revoked tokens store (M13.7).
 #[derive(Default)]
 pub struct MemSpawnLogRepository {

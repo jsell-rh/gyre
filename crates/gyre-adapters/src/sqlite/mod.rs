@@ -13,6 +13,7 @@ pub mod analytics;
 pub mod attestation;
 pub mod audit;
 pub mod breaking_change;
+pub mod cascade_test_result;
 pub mod budget;
 pub mod budget_call;
 pub mod chain_attestation;
