@@ -2,7 +2,7 @@
 title: "Verify structural-lens complexity/churn indicators end-to-end on the live graph renderer (backend implementation owned by the realized-model plan's graph-node-metrics task)"
 spec_ref: "Spec gap spec-82658b0b4e08c1502a5f0793 / structural-metrics-verification / b3cd47ade570"
 depends_on: []
-progress: not-started
+progress: blocked-on-external-implementation
 commits: []
 ---
 
@@ -90,3 +90,117 @@ Canonical spec: `specs/system/explorer-canvas.md`. Source: `678a8ac3e3bfeafeb66c
     ]
   }
 ]
+
+## Shipped
+
+**Status: blocked-on-external-implementation.** The realized-model.md plan's
+'graph-node-metrics' task (plan_id
+b26f707c1c6ea89a961ab82e824808bf1625a3e2b3a0c2312981a90a99f3fef3) has NOT
+landed at this task's base (edf3ed9010f3a461308d3604988d5e511b8d9725), so
+per the ordering guard the section stays open and no closure work was
+performed. This round ships only this blocked report and the conflict
+escalation record below — zero changes to the extractors, the graph
+store/adapters, the upsert path, the layout registry, any renderer, any
+coverage row, and zero committed tests.
+
+### Blocked-state evidence (base edf3ed90)
+
+- All four language extractors still hardcode the metric defaults in their
+  production node constructors: rust_extractor.rs:160-161,
+  go_extractor.rs:135-136, python_extractor.rs:136-137,
+  typescript_extractor.rs:129-130 (`complexity: None,` / `churn_count_30d: 0,`).
+- The extraction pipeline still hardcodes `churn_count_30d: 0` for its
+  synthetic node constructors (graph_extraction.rs:1658, :2083, :2208) and its
+  doc comment (:811) still documents complexity/churn as unextracted; no
+  cyclomatic computation exists anywhere in gyre-domain
+  (`grep -rn cyclomatic crates/gyre-domain/src/` — no matches) and no churn
+  accumulation from ArchitecturalDelta history exists in gyre-server.
+- The SQLite upsert still writes the extractor-produced values back on
+  conflict (sqlite/graph.rs:366-367) — the no-overwrite fix is not applied.
+- `git log --all --grep="graph-node-metrics" -i` returns no implementing
+  commits.
+- Runtime probe (temporary integration test, run and deleted — source and
+  output preserved at /tmp/stage/review-evidence/task-306/): seeded a temp
+  Cargo project with a straight-line `plain` function and a nested-branch
+  `branchy` function (if/else-if/else + for + if + while + match), ran
+  `RustExtractor.extract(...)`, asserted non-null branching-sensitive
+  complexity. Result: FAILED (exit 101) — "plain function complexity is None
+  — extractor does not populate complexity". This is the expected
+  verification-intent failure at an unlanded base; per the ownership guard it
+  leaves this task open rather than triggering any local backend
+  implementation.
+- The churn half (ArchitecturalDelta 30-day window filtering) is not probeable
+  at the domain layer and is covered by the static evidence above; the full
+  end-to-end probe (GET /repos/:id/graph + live renderer) requires a
+  gyre-server build, which this sandbox must not run (4 GiB budget — server
+  builds belong to the independent verifier) and would fail for the same
+  unlanded-backend reason on any renderer.
+
+### Live renderer state at this base (resolved, not assumed)
+
+`getLayout('graph')` resolves to ExplorerCanvas (Canvas 2D) —
+web/src/lib/layoutRegistry.js:46-47 (`name: 'graph', component:
+ExplorerCanvas`); ExplorerView defaults `activeLayout = $state('graph')`
+(ExplorerView.svelte:455) and resolves the active renderer via
+`getLayout(activeLayout)?.component` (:2292). The ui-layout.md plan's
+explorer-surface-gaps d3-force rerouting has NOT landed ('graph' does not
+resolve to SvgGraphCanvas), so interaction case (3) did not trigger. The
+Canvas-2D indicator formulas are present and unchanged
+(ExplorerCanvas.svelte:1814 nodeWeight; :3717 churnThickness). The
+renderer-verification half of acceptance criterion 3 was NOT executed:
+running it now would only re-demonstrate uniform nodeWeight=1 /
+borderWidth=1 on inert data, and the criterion requires the populated metric
+payload served through the graph API path.
+
+### Spec-vs-spec conflict (escalation record — acceptance criterion 5)
+
+Genuine unresolved conflict between two canonical specs over the rendering
+technology for the same layouts:
+
+- specs/system/explorer-canvas.md §Component Architecture (:157-158):
+  "ExplorerCanvas (layout dispatcher — Canvas 2D graph for graph/timeline
+  views; delegates layout:\"flow\" views)".
+- specs/system/ui-layout.md §10 Rendering Technology (:802-803): "The
+  Explorer canvas uses **SVG** for graph/hierarchical/layered layouts";
+  Layout Engines table (:815+): `graph` → d3-force (Svelte wrapper);
+  `timeline` → d3-scale (time axis) + Svelte.
+
+Mutually incompatible canonical requirements: 'graph' — Canvas 2D vs SVG
+d3-force; 'timeline' — Canvas 2D vs d3-scale + Svelte. This must be settled
+by a human through the spec lifecycle (spec amendment on one side or an
+explicit supersession record), not by landing order or unilateral registry
+changes. Note: the Component Architecture section's 'satisfied' disposition
+(79dcb4bb8b305568aa2d80f1) is valid only while ExplorerCanvas actually serves
+the 'graph' layout, which it does at this base; the ui-layout
+explorer-surface-gaps rerouting would invalidate it if it lands.
+
+### Coverage
+
+Section c3a39b320325eff390c4b56c (heading path Explorer Canvas > Design >
+Lens Definitions > Structural (default)) remains open — specs/coverage/
+system/explorer-canvas.md row 4 (Lens Definitions) stays task-assigned. No
+coverage row was modified: the row may only move to verified after the
+end-to-end probe passes against the landed backend on the live graph
+renderer.
+
+### Remaining work to unblock
+
+1. Land the realized-model.md plan's graph-node-metrics task: per-extractor
+   cyclomatic complexity from parsed source bodies, churn_count_30d
+   accumulated from persisted ArchitecturalDelta history inside the 30-day
+   window, and the sqlite/graph.rs:366-367 upsert no-overwrite fix.
+2. Re-run this task: re-execute the backend probe (source preserved at
+   /tmp/stage/review-evidence/task-306/task306_backend_probe.rs — expect
+   pass), then the full end-to-end probe per the verification intent (seed
+   branchy+plain functions and two ArchitecturalDelta modifications at 10 and
+   60 days ago for one node; assert complexity(branchy) >
+   complexity(straight-line) and churn_count_30d == 1 via GET
+   /repos/:id/graph; then assert on the renderer that getLayout('graph')
+   resolves at run time, that the branchy node renders above the size
+   minimum and the churned node above the border baseline).
+3. Re-check interaction case (3) at that time: if the ui-layout
+   explorer-surface-gaps d3-force rerouting has landed and SvgGraphCanvas
+   still lacks complexity/churn encoding, add the narrow SVG-path indicator
+   encoding (size-by-complexity, stroke-width-by-churn) or report
+   blocked-on-conflict pending the spec-lifecycle decision on the conflict
+   recorded above.
