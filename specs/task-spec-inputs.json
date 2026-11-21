@@ -2217,6 +2217,100 @@
         "Cross-Repo Dependency Graph",
         "Version Drift Tracking"
       ]
+    },
+    "backlog/1bd201625dc5fbe0164ced05": {
+      "file": "specs/system/agent-runtime.md",
+      "heading": [
+        "Agent Runtime",
+        "1. Agent Lifecycle",
+        "The Signal Chain"
+      ]
+    },
+    "backlog/15aec83b58b3494602d31ce8": {
+      "file": "specs/system/agent-runtime.md",
+      "heading": [
+        "Agent Runtime",
+        "1. Agent Lifecycle",
+        "Phase 3: Repo Orchestrator — Task Decomposition"
+      ]
+    },
+    "backlog/a40446f46dbb0536f3c30ed0": {
+      "file": "specs/system/agent-runtime.md",
+      "heading": [
+        "Agent Runtime",
+        "Relationship to Existing Specs"
+      ]
+    },
+    "backlog/de73e06638559fcca67b3c5d": {
+      "file": "specs/system/agent-runtime.md",
+      "heading": [
+        "Agent Runtime",
+        "1. Agent Lifecycle",
+        "Phase 5: Implementation"
+      ]
+    },
+    "backlog/e60f62cd06826e5e4de9decf": {
+      "file": "specs/system/agent-runtime.md",
+      "heading": [
+        "Agent Runtime",
+        "1. Agent Lifecycle",
+        "Phase 7: Ralph Loop"
+      ]
+    },
+    "backlog/917eb99ea432ee472c349487": {
+      "file": "specs/system/agent-runtime.md",
+      "heading": [
+        "Agent Runtime",
+        "2. Meta-Spec Prompt Assembly",
+        "API"
+      ]
+    },
+    "backlog/54a514da8df9bf4d236e09ff": {
+      "file": "specs/system/agent-runtime.md",
+      "heading": [
+        "Agent Runtime",
+        "2. Meta-Spec Prompt Assembly",
+        "Required vs Optional"
+      ]
+    },
+    "backlog/e97ea9a092758dc93c245e6e": {
+      "file": "specs/system/agent-runtime.md",
+      "heading": [
+        "Agent Runtime",
+        "2. Meta-Spec Prompt Assembly",
+        "Spec-Level Binding"
+      ]
+    },
+    "backlog/9f95c49cf209205750a0177a": {
+      "file": "specs/system/agent-runtime.md",
+      "heading": [
+        "Agent Runtime",
+        "2. Meta-Spec Prompt Assembly",
+        "Stale Pin Detection"
+      ]
+    },
+    "backlog/47d309e09aac1e2e04d334d0": {
+      "file": "specs/system/agent-runtime.md",
+      "heading": [
+        "Agent Runtime",
+        "5. Agent Prompt Structure"
+      ]
+    },
+    "backlog/3ee23b90e9236c59b010822f": {
+      "file": "specs/system/agent-runtime.md",
+      "heading": [
+        "Agent Runtime",
+        "3. Compute Target Model",
+        "Nix-Based Image Build"
+      ]
+    },
+    "backlog/ebd16b0ebf8506b9c84eef25": {
+      "file": "specs/system/agent-runtime.md",
+      "heading": [
+        "Agent Runtime",
+        "3. Compute Target Model",
+        "Supported Backends"
+      ]
     }
   },
   "bindings": {
@@ -3048,6 +3142,34 @@
     ],
     "Spec gap spec-cab97078efffe0fbfb7339be / aibom-stale-dependency-flags / ed9f34316476": [
       "backlog/551185c9c05657eddf50405e"
+    ],
+    "Spec gap spec-41a92c20354c6a108e6074e3 / approval-single-trigger / 4a3f940495a8": [
+      "backlog/1bd201625dc5fbe0164ced05"
+    ],
+    "Spec gap spec-41a92c20354c6a108e6074e3 / orchestrator-boundary-amendments / 4a3f940495a8": [
+      "backlog/15aec83b58b3494602d31ce8",
+      "backlog/a40446f46dbb0536f3c30ed0"
+    ],
+    "Spec gap spec-41a92c20354c6a108e6074e3 / mcp-resource-knowledge-boundary / 4a3f940495a8": [
+      "backlog/de73e06638559fcca67b3c5d"
+    ],
+    "Spec gap spec-41a92c20354c6a108e6074e3 / spec-rejection-grace-and-iteration-tier / 4a3f940495a8": [
+      "backlog/e60f62cd06826e5e4de9decf"
+    ],
+    "Spec gap spec-41a92c20354c6a108e6074e3 / meta-spec-api-contract / 4a3f940495a8": [
+      "backlog/917eb99ea432ee472c349487",
+      "backlog/54a514da8df9bf4d236e09ff"
+    ],
+    "Spec gap spec-41a92c20354c6a108e6074e3 / bindings-registry-cascade / 4a3f940495a8": [
+      "backlog/e97ea9a092758dc93c245e6e",
+      "backlog/9f95c49cf209205750a0177a"
+    ],
+    "Spec gap spec-41a92c20354c6a108e6074e3 / persona-constraints-delivery / 4a3f940495a8": [
+      "backlog/47d309e09aac1e2e04d334d0"
+    ],
+    "Spec gap spec-41a92c20354c6a108e6074e3 / agent-image-single-definition / 4a3f940495a8": [
+      "backlog/3ee23b90e9236c59b010822f",
+      "backlog/ebd16b0ebf8506b9c84eef25"
     ]
   }
 }
