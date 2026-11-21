@@ -3,7 +3,7 @@ title: "Spec Links — cross-repo link validation: same-workspace format resolut
 spec_ref: "Spec gap spec-10bdced21a063f819b1baabd / spec-links-cross-repo-resolution / 5a915155d9bc"
 depends_on: []
 progress: ready-for-review
-commits: ["16d08a2bcdbe32aacc49407aff2663d2e32601cf", "e3270d273935b77b6b1c71df894320b232bde919", "5afb12e079b522701b1e24a263634a5500d8b205"]
+commits: ["e3270d273935b77b6b1c71df894320b232bde919", "16d08a2bcdbe32aacc49407aff2663d2e32601cf", "5afb12e079b522701b1e24a263634a5500d8b205", "f3234b354d86e84d618043429da5a0178728f140"]
 ---
 
 ## Required behavior
@@ -72,68 +72,44 @@ api/repos.rs sync_specs + sync_mirror, mirror_sync) via `sync_spec_ledger`:
 
 1. **Same-workspace `@{repo}/{path}` resolution** — `validate_cross_repo_target`
    (spec_registry.rs) resolves the repo via `find_by_name_and_workspace` on the
-   SOURCE workspace id (previously `None`, which never resolved); the staleness
-   pass (`resolve_unresolved_cross_workspace_links`) re-resolves unresolved
-   CrossRepo links via the source link's repo → workspace (previously it
-   explicitly refused).
+   SOURCE workspace id; the staleness pass re-resolves unresolved links of
+   this form via the source link's repo → workspace. Because a three-segment
+   target (`@B/system/auth.md`) is syntactically ambiguous between
+   `@{ws}/{repo}/{path}` and `@{repo}/{slashed path}`, both resolution sites
+   disambiguate by existence: the workspace form takes precedence, and when
+   the tenant-scoped `find_by_slug` definitively returns `Ok(None)` the first
+   segment is a repo name resolved within the source workspace (commit
+   f3234b35 — repairs verification round 967b021c, where the three cross-repo
+   tests failed on the workspace-only parse).
 2. **Linking-user read access** — `LinkPrincipal::from_auth` threads the
    authenticated pusher into `sync_spec_ledger`; `validate_cross_workspace_target`
-   checks `principal_has_read_access` (workspace-membership lookup; system
-   principals exempt; fail-closed on lookup error) before resolving a
-   cross-workspace target. A denial stores the link `unresolved` with
-   `target_repo_id` NULL, logs a warning naming principal and target, and records
-   a durable KV marker (`spec_link_denials` namespace) that the staleness pass
-   consults so a denied link is never silently flipped `active`. Mirror fetches
-   pass `None` (no linking user) — exempt per the sync-origin distinction.
+   checks workspace membership (system principals and server-originated syncs
+   exempt, fail-closed on lookup error); a denial stores the link
+   "unresolved" with target_repo_id NULL, a warning naming principal and
+   target, and a durable KV marker the staleness pass consults so a denied
+   link is never flipped "active".
 3. **Target-manifest existence** — `target_manifest_declares_path` reads the
    target repo's current `specs/manifest.yaml` (git-show on
-   `refs/heads/{default_branch}`) and requires the declared path at push time and
-   at staleness re-resolution; a missing path stores `unresolved` with the path
-   named in the warning.
-4. **Tenant-scoped re-resolution** — cross-workspace re-resolution derives the
-   tenant from the source link (source repo → workspace → tenant); the fabricated
-   literal `"default"` tenant lookup is removed. Unresolvable scopes skip and
-   log.
-
-### Repair of the retained verification finding
-
-The retained verification run (`bash /tmp/stage/checks.sh`, candidate
-aa58cd59) failed its clippy gate on exactly one task-introduced lint:
-`spec_registry.rs:4231: clippy::too_many_arguments (11/7)` on the
-`cross_workspace_link_denied_without_read_access_stays_unresolved` test helper
-`async fn sync_a`. Fixed in 16d08a2b by bundling the helper's shared port
-references into a local `SyncCtx` struct (behavior-preserving mechanical
-refactor; same `sync_spec_ledger` call with the same arguments at both call
-sites). The web-build warnings in that log tail are pre-existing baseline
-noise; the failing lint was the clippy error line above them.
+   refs/heads/{default_branch}) at push time AND at staleness re-resolution;
+   a missing path stores "unresolved" with the path named in the warning.
+4. **Tenant-scoped re-resolution** — `resolve_unresolved_cross_workspace_links`
+   derives the tenant from source repo → workspace → tenant (the fabricated
+   literal "default" tenant is gone) and skips with a log when the scope
+   cannot be derived.
 
 ### Test evidence
 
-Six tests cover the acceptance criteria (all exercise real git repos and real
-mem-backed port adapters; none stub the validators):
-
-- `spec_registry::tests::cross_repo_same_workspace_link_resolves_active_then_stale_on_target_change`
-  (AC 1: resolves to B's repo id, active, then stale on target change)
-- `spec_registry::tests::cross_repo_link_unresolved_when_target_path_not_in_target_manifest` (AC 3)
-- `spec_registry::tests::cross_workspace_link_denied_without_read_access_stays_unresolved`
-  (AC 2, incl. durable denial marker + authorized re-push positive control)
-- `spec_link_staleness::tests::staleness_pass_resolves_cross_workspace_link_under_source_tenant` (AC 4)
-- `spec_link_staleness::tests::staleness_pass_resolves_cross_repo_same_workspace_link`
-  (AC 1 staleness half + missing-path stays unresolved)
-- `spec_link_staleness::tests::staleness_does_not_flip_access_denied_link_active` (AC 2 staleness half)
-
-Focused probes run in this assignment (evidence under
-/tmp/stage/review-evidence): `cargo check -p gyre-server --tests` clean
-(cargo-check-gyre-server-tests.log, exit 0); `cargo clippy -p gyre-server
---all-targets` exit 0 with no `too_many_arguments` remaining in
-spec_registry.rs — every remaining warning in the log is pre-existing at base
-f6115241 and outside every hunk this task changed (verified per hunk range:
-audit.rs:187, constraint_check.rs, git_http.rs:5098 `process_breaking_changes`
-exists at base, merge_processor.rs:1723, otlp_receiver.rs:615,
-explorer_ws.rs:2697, spec_registry.rs:739/745/2682/2748 unchanged lines).
-
-Local execution of the gyre-server test binary is blocked by the 4 GiB build
-wrapper; the independent verifier must run:
-
-- `cargo test -p gyre-server --lib spec_registry::tests::cross`
-- `cargo test -p gyre-server --lib spec_link_staleness::tests::staleness`
+Local probes (build wrapper enforced): `cargo check -p gyre-server --lib`
+exit 0; `check-rustfmt-diff.py` and `check-clippy-diff.py` vs base
+3ee882f clean on changed lines. gyre-server test compilation is deferred to
+the independent verifier (4 GiB budget); required probes:
+`cargo test --all --quiet`, or focused —
+`spec_registry::tests::cross_repo_same_workspace_link_resolves_active_then_stale_on_target_change`,
+`spec_registry::tests::cross_repo_link_unresolved_when_target_path_not_in_target_manifest`,
+`spec_registry::tests::cross_workspace_link_denied_without_read_access_stays_unresolved`,
+`spec_link_staleness::tests::staleness_pass_resolves_cross_workspace_link_under_source_tenant`,
+`spec_link_staleness::tests::staleness_pass_resolves_cross_repo_same_workspace_link`,
+`spec_link_staleness::tests::staleness_does_not_flip_access_denied_link_active`.
+Round 967b021c failed the first, second, and fifth on the ambiguity bug
+fixed by f3234b35; the other three passed and must stay green. Evidence
+retained in /tmp/stage/review-evidence/task-287-disambiguation-repair.md.
