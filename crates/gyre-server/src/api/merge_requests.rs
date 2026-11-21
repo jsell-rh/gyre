@@ -430,7 +430,8 @@ pub async fn create_mr(
     {
         mr.has_conflicts = Some(!can_merge);
     }
-    // Auto-detect branch lineage dependencies (P4).
+    // Auto-detect branch lineage dependencies (P4) and graph-driven
+    // cross-repo dependencies (dependency-graph.md §Merge ordering).
     let lineage_deps = detect_lineage_deps(
         &state,
         &repo_id,
@@ -439,26 +440,12 @@ pub async fn create_mr(
         &repo.default_branch,
     )
     .await;
-    if !lineage_deps.is_empty() {
-        mr.depends_on = lineage_deps;
-    }
+    let graph_deps = detect_graph_deps(&state, &repo, &req.source_branch).await;
+    mr.depends_on = merge_explicit_and_auto_deps(explicit_deps, lineage_deps, graph_deps);
 
-    // Merge explicit deps with lineage deps: explicit takes precedence,
-    // lineage adds to the set for deps not already declared.
-    if !explicit_deps.is_empty() {
-        let explicit_ids: std::collections::HashSet<String> = explicit_deps
-            .iter()
-            .map(|d| d.target_mr_id.to_string())
-            .collect();
-        // Keep lineage deps that aren't already in explicit set.
-        let additional_lineage: Vec<_> = mr
-            .depends_on
-            .drain(..)
-            .filter(|d| !explicit_ids.contains(&d.target_mr_id.to_string()))
-            .collect();
-        mr.depends_on = explicit_deps;
-        mr.depends_on.extend(additional_lineage);
-    }
+    // A cycle through the new MR is impossible by construction here: the
+    // MR id is fresh (`new_id` above), so no stored MR can reference it —
+    // the same reasoning the lineage path relies on.
 
     state.merge_requests.create(&mr).await?;
     // Index for search (search.md §Searchable Entities: mr facets
@@ -472,6 +459,18 @@ pub async fn create_mr(
             Some(serde_json::json!({"mr_id": mr.id.to_string()})),
         )
         .await;
+    // dependency-graph.md §Merge ordering, reverse direction: a newly
+    // opened MR in this repo can be the pending MR a dependent repo's
+    // declaration update targets. Re-evaluate the open MRs of every repo
+    // that depends on this one so their graph-sourced dependencies pick
+    // the new MR up. Fire-and-forget, exactly like the post-receive
+    // lineage re-evaluation in git_http.rs: MR creation must not block on
+    // other repos' git diffs.
+    let state_for_graph = Arc::clone(&state);
+    let repo_id_for_graph = repo.id.clone();
+    tokio::spawn(async move {
+        reevaluate_graph_deps_of_dependent_repos(&state_for_graph, &repo_id_for_graph).await;
+    });
     Ok((StatusCode::CREATED, Json(MrResponse::from(mr))))
 }
 
@@ -637,6 +636,226 @@ async fn is_contained_in(
     )
 }
 
+/// Merge creation-time explicit dependencies with the auto-detected sets
+/// (branch lineage + dependency graph): explicit deps take precedence, and
+/// each auto-detected dep is added only when no dep on the same target MR
+/// is already declared — nothing is duplicated and an explicit declaration
+/// is never shadowed or dropped.
+pub(crate) fn merge_explicit_and_auto_deps(
+    explicit_deps: Vec<MergeRequestDependency>,
+    lineage_deps: Vec<MergeRequestDependency>,
+    graph_deps: Vec<MergeRequestDependency>,
+) -> Vec<MergeRequestDependency> {
+    let mut merged = explicit_deps;
+    for dep in lineage_deps.into_iter().chain(graph_deps) {
+        if merged.iter().any(|d| d.target_mr_id == dep.target_mr_id) {
+            continue;
+        }
+        merged.push(dep);
+    }
+    merged
+}
+
+/// Auto-detect MR dependencies from the cross-repo dependency graph
+/// (dependency-graph.md §Workspace Orchestrator Integration — Merge
+/// ordering: "If Repo A's MR updates its dependency on Repo B, and Repo B
+/// has a pending MR with the new version, the forge creates the MR
+/// dependency automatically").
+///
+/// For an open MR in repo A: list A's outgoing DependencyEdges
+/// (`state.dependencies.list_by_repo`); when the MR's diff (source branch
+/// vs default branch, `git diff --name-only`) touches an edge's
+/// `source_artifact` — the file in A that declares A's dependency on the
+/// target repo B, e.g. the Cargo.toml line pinning repo-b — and B has an
+/// open (pending) MR, a `MergeRequestDependency` from A's MR to B's MR is
+/// recorded with the new `DependencySource::DependencyGraph` variant, so
+/// it is distinguishable from Explicit/BranchLineage/AgentDeclared edges.
+/// The existing merge-queue dependency semantics then order the merges
+/// (A's MR waits for B's via `dependencies_satisfied` and the queue's
+/// topological sort), and the shared cycle check guards creation.
+///
+/// When B has multiple open MRs, the most recently updated one is linked —
+/// deterministic tie-break: highest `updated_at`, then lexicographically
+/// greatest MR id. The freshest MR is the one most likely to carry the new
+/// version the declaration update targets.
+pub(crate) async fn detect_graph_deps(
+    state: &AppState,
+    repo: &gyre_domain::Repository,
+    source_branch: &str,
+) -> Vec<MergeRequestDependency> {
+    let edges = match state.dependencies.list_by_repo(&repo.id).await {
+        Ok(edges) => edges,
+        Err(e) => {
+            tracing::warn!(
+                repo_id = %repo.id,
+                error = %e,
+                "graph dep detection: dependency edge list failed"
+            );
+            return vec![];
+        }
+    };
+    if edges.is_empty() {
+        return vec![];
+    }
+    let changed = diff_name_only(&repo.path, &repo.default_branch, source_branch).await;
+    if changed.is_empty() {
+        return vec![];
+    }
+
+    let mut deps: Vec<MergeRequestDependency> = Vec::new();
+    let mut linked_repos: Vec<Id> = Vec::new();
+    for edge in &edges {
+        // Normalize "./Cargo.toml" and "Cargo.toml" to the same artifact
+        // path git reports.
+        let artifact = edge
+            .source_artifact
+            .strip_prefix("./")
+            .unwrap_or(&edge.source_artifact);
+        if !changed.iter().any(|f| f == artifact) {
+            continue;
+        }
+        // One link per target repo, even when several artifacts (edges)
+        // toward it changed in this diff.
+        if linked_repos.contains(&edge.target_repo_id) {
+            continue;
+        }
+        linked_repos.push(edge.target_repo_id.clone());
+        // B's pending MR: the most recently updated open MR in B.
+        let target_mrs = match state.merge_requests.list_by_repo(&edge.target_repo_id).await {
+            Ok(mrs) => mrs,
+            Err(e) => {
+                tracing::warn!(
+                    target_repo_id = %edge.target_repo_id,
+                    error = %e,
+                    "graph dep detection: target MR list failed"
+                );
+                continue;
+            }
+        };
+        let Some(target_mr) = target_mrs
+            .into_iter()
+            .filter(|m| m.status == MrStatus::Open)
+            .max_by_key(|m| (m.updated_at, m.id.to_string()))
+        else {
+            continue;
+        };
+        info!(
+            source_repo = %repo.id,
+            target_repo = %edge.target_repo_id,
+            artifact = %artifact,
+            target_mr_id = %target_mr.id,
+            "auto-detected graph-driven MR dependency"
+        );
+        deps.push(
+            MergeRequestDependency::new(target_mr.id, DependencySource::DependencyGraph).with_reason(
+                format!(
+                    "dependency-graph: {artifact} updates the dependency on repo {}",
+                    edge.target_repo_id
+                ),
+            ),
+        );
+    }
+    deps
+}
+
+/// Files that differ between the repo's default branch and `source_branch`
+/// (`git diff --name-only <default> <source>`) — the files the MR's branch
+/// changes relative to the default branch, i.e. the files whose content
+/// the MR updates. Empty when git fails or a branch name is unsafe to pass
+/// to git (same no-flag-injection rule as `detect_lineage_deps`).
+async fn diff_name_only(
+    repo_path: &str,
+    default_branch: &str,
+    source_branch: &str,
+) -> Vec<String> {
+    let is_safe_branch = |b: &str| !b.starts_with('-') && !b.contains("..");
+    if !is_safe_branch(default_branch) || !is_safe_branch(source_branch) {
+        return vec![];
+    }
+    let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
+    let out = tokio::process::Command::new(&git_bin)
+        .arg("-C")
+        .arg(repo_path)
+        .arg("diff")
+        .arg("--name-only")
+        .arg(format!("refs/heads/{default_branch}"))
+        .arg(format!("refs/heads/{source_branch}"))
+        .output()
+        .await;
+    match out {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+            .lines()
+            .map(str::to_string)
+            .collect(),
+        _ => vec![],
+    }
+}
+
+/// Open MRs holding a `DependencyGraph` dependency on `mr_id` — the MRs
+/// whose graph-sourced edges must be re-evaluated when `mr_id` closes (a
+/// closed MR can never satisfy the dependency that orders the dependent's
+/// merge, so the stale edge must drop rather than block the dependent
+/// forever).
+pub(crate) async fn mrs_with_graph_deps_on(state: &AppState, mr_id: &Id) -> Vec<Id> {
+    let all_mrs = match state.merge_requests.list().await {
+        Ok(mrs) => mrs,
+        Err(e) => {
+            tracing::warn!(%mr_id, error = %e, "graph dep re-eval: MR list failed");
+            return vec![];
+        }
+    };
+    all_mrs
+        .into_iter()
+        .filter(|m| m.status == MrStatus::Open)
+        .filter(|m| {
+            m.depends_on.iter().any(|d| {
+                d.source == DependencySource::DependencyGraph && d.target_mr_id == *mr_id
+            })
+        })
+        .map(|m| m.id)
+        .collect()
+}
+
+/// Re-evaluate the open MRs of every repo that depends on `repo_id`: a
+/// pending MR in `repo_id` (just created, or closed — see the close hook
+/// in `transition_mr_status`) changes what the graph-driven detector
+/// links for those MRs, so their `DependencyGraph` edges must be
+/// reconciled. Runs the same `reevaluate_lineage_deps` reconciliation the
+/// post-receive hook uses — it reconciles graph-sourced deps alongside
+/// lineage ones, with the same stale-drop / duplicate-skip / cycle-guard
+/// semantics.
+pub(crate) async fn reevaluate_graph_deps_of_dependent_repos(state: &AppState, repo_id: &Id) {
+    let edges = match state.dependencies.list_dependents(repo_id).await {
+        Ok(edges) => edges,
+        Err(e) => {
+            tracing::warn!(%repo_id, error = %e, "graph dep re-eval: dependents list failed");
+            return;
+        }
+    };
+    // One pass per distinct dependent repo (several edges may target the
+    // same repo through different artifacts).
+    let mut dependent_repos: Vec<Id> = Vec::new();
+    for edge in edges {
+        if !dependent_repos.contains(&edge.source_repo_id) {
+            dependent_repos.push(edge.source_repo_id);
+        }
+    }
+    for dep_repo_id in dependent_repos {
+        let mrs = match state.merge_requests.list_by_repo(&dep_repo_id).await {
+            Ok(mrs) => mrs,
+            Err(e) => {
+                tracing::warn!(%dep_repo_id, error = %e, "graph dep re-eval: MR list failed");
+                continue;
+            }
+        };
+        for mr in mrs {
+            if mr.status == MrStatus::Open {
+                reevaluate_lineage_deps(state, &mr.id).await;
+            }
+        }
+    }
+}
+
 /// Re-evaluate branch lineage dependencies for an existing MR after its
 /// source branch was pushed (rebased or updated).
 ///
@@ -649,14 +868,22 @@ async fn is_contained_in(
 /// them by declaring an explicit dependency (which takes precedence and is
 /// preserved here).
 ///
-/// New lineage edges are added only if they cannot create a cycle in the
-/// repo's dependency graph.
+/// The same reconciliation governs `DependencyGraph` edges
+/// (dependency-graph.md §Merge ordering): graph-sourced deps that are no
+/// longer detected (the MR's diff no longer touches the declaration, or
+/// the target repo has no open MR anymore — e.g. it was closed) are
+/// dropped; newly detected ones are added; explicit, agent-declared and
+/// lineage deps are never touched; duplicates are skipped — exactly the
+/// lineage pattern.
+///
+/// New auto-detected edges are added only if they cannot create a cycle
+/// in the repo's dependency graph.
 pub(crate) async fn reevaluate_lineage_deps(state: &AppState, mr_id: &Id) {
     let mr = match state.merge_requests.find_by_id(mr_id).await {
         Ok(Some(m)) => m,
         _ => return,
     };
-    // Only open MRs participate in lineage tracking.
+    // Only open MRs participate in auto-dependency tracking.
     if mr.status != MrStatus::Open {
         return;
     }
@@ -665,7 +892,7 @@ pub(crate) async fn reevaluate_lineage_deps(state: &AppState, mr_id: &Id) {
         _ => return,
     };
 
-    let detected = detect_lineage_deps(
+    let detected_lineage = detect_lineage_deps(
         state,
         &mr.repository_id,
         &repo.path,
@@ -673,21 +900,26 @@ pub(crate) async fn reevaluate_lineage_deps(state: &AppState, mr_id: &Id) {
         &repo.default_branch,
     )
     .await;
-    let detected_ids: std::collections::HashSet<String> = detected
+    let detected_graph = detect_graph_deps(state, &repo, &mr.source_branch).await;
+    let detected_ids: std::collections::HashSet<String> = detected_lineage
         .iter()
+        .chain(detected_graph.iter())
         .map(|d| d.target_mr_id.to_string())
         .collect();
 
-    // Keep every non-lineage dependency; drop lineage edges that are no
-    // longer detected (stale); re-add the current detection result.
+    // Keep every non-auto dependency; drop lineage and graph edges that
+    // are no longer detected (stale); re-add the current detection result.
     let mut new_deps: Vec<MergeRequestDependency> = mr
         .depends_on
         .iter()
-        .filter(|d| d.source != DependencySource::BranchLineage)
+        .filter(|d| {
+            d.source != DependencySource::BranchLineage
+                && d.source != DependencySource::DependencyGraph
+        })
         .cloned()
         .collect();
-    for dep in detected {
-        // Skip lineage edges that duplicate an explicit/agent-declared dep.
+    for dep in detected_lineage.into_iter().chain(detected_graph) {
+        // Skip auto edges that duplicate an explicit/agent-declared dep.
         if new_deps.iter().any(|d| d.target_mr_id == dep.target_mr_id) {
             continue;
         }
@@ -733,7 +965,12 @@ pub(crate) async fn reevaluate_lineage_deps(state: &AppState, mr_id: &Id) {
     let removed: Vec<String> = mr
         .depends_on
         .iter()
-        .filter(|d| d.source == DependencySource::BranchLineage)
+        .filter(|d| {
+            matches!(
+                d.source,
+                DependencySource::BranchLineage | DependencySource::DependencyGraph
+            )
+        })
         .filter(|d| !detected_ids.contains(&d.target_mr_id.to_string()))
         .map(|d| d.target_mr_id.to_string())
         .collect();
@@ -742,7 +979,7 @@ pub(crate) async fn reevaluate_lineage_deps(state: &AppState, mr_id: &Id) {
         mr_id = %mr_id,
         ?removed,
         ?added,
-        "re-evaluated branch lineage dependencies"
+        "re-evaluated branch lineage and graph-driven dependencies"
     );
 
     let mut updated = mr;
@@ -1040,6 +1277,17 @@ pub async fn transition_mr_status(
     } else if is_close {
         if let Err(e) = state.traces.delete_by_mr(&mr.id).await {
             tracing::warn!(mr_id = %mr.id, error = %e, "failed to delete gate trace on MR close");
+        }
+    }
+
+    // dependency-graph.md §Merge ordering: a closed MR can never satisfy a
+    // graph-sourced dependency (it will never merge), so re-evaluate every
+    // open MR holding a `DependencyGraph` edge to this MR — the stale edge
+    // drops instead of blocking the dependent MR forever. Explicit and
+    // agent-declared deps are never touched by the reconciliation.
+    if is_close {
+        for dependent_id in mrs_with_graph_deps_on(&state, &mr.id).await {
+            reevaluate_lineage_deps(&state, &dependent_id).await;
         }
     }
 
@@ -3801,6 +4049,492 @@ mod tests {
             deps.is_empty(),
             "candidate contained in default branch must be skipped: {deps:?}"
         );
+    }
+
+    // ── Graph-driven MR dependency tests (dependency-graph.md §Merge
+    //    ordering) ──────────────────────────────────────────────────
+    //
+    // Two REAL on-disk git working repos — A depends on B through a
+    // DependencyEdge whose source artifact is A's Cargo.toml — driven
+    // through the REST MR surface. The branches carry real file content
+    // so `git diff --name-only` between the branch tips and main is a
+    // real signal. No git mocks.
+    struct GraphDepRepos {
+        state: Arc<crate::AppState>,
+        _tmp: tempfile::TempDir,
+        repo_a: std::path::PathBuf,
+        repo_b: std::path::PathBuf,
+        repo_a_id: Id,
+        repo_b_id: Id,
+    }
+
+    impl GraphDepRepos {
+        async fn new() -> Self {
+            let tmp = tempfile::TempDir::new().unwrap();
+            let state = test_state();
+            let ws_id = Id::new("ws-graph");
+
+            let mut dirs = Vec::new();
+            let mut ids = Vec::new();
+            for name in ["repo-a", "repo-b"] {
+                let dir = tmp.path().join(name);
+                std::fs::create_dir_all(&dir).unwrap();
+                let git = |args: &[&str]| {
+                    let out = std::process::Command::new("git")
+                        .args(args)
+                        .current_dir(&dir)
+                        .output()
+                        .unwrap();
+                    assert!(
+                        out.status.success(),
+                        "git {:?} failed: {}",
+                        args,
+                        String::from_utf8_lossy(&out.stderr)
+                    );
+                };
+                git(&["init", "-b", "main"]);
+                git(&["config", "user.email", "t@t"]);
+                git(&["config", "user.name", "t"]);
+                // Initial main: a Cargo.toml declaring the cross-repo
+                // dependency (A) / an ordinary source file (B).
+                let initial = if name == "repo-a" {
+                    "repo-b = \"1.0\"\n"
+                } else {
+                    "pub fn lib() {}\n"
+                };
+                std::fs::write(dir.join("Cargo.toml"), initial).unwrap();
+                git(&["add", "-A"]);
+                git(&["commit", "-m", "initial"]);
+
+                let repo_id = Id::new(name);
+                let repo = gyre_domain::Repository::new(
+                    repo_id.clone(),
+                    ws_id.clone(),
+                    name,
+                    dir.to_str().unwrap(),
+                    0,
+                );
+                state.repos.create(&repo).await.unwrap();
+                dirs.push(dir);
+                ids.push(repo_id);
+            }
+
+            // The dependency edge: A depends on B, declared in A's
+            // Cargo.toml (the edge's source artifact).
+            let edge = gyre_domain::DependencyEdge::new(
+                Id::new("edge-a-b"),
+                ids[0].clone(),
+                ids[1].clone(),
+                gyre_domain::DependencyType::Code,
+                "Cargo.toml",
+                "repo-b",
+                gyre_domain::DetectionMethod::CargoToml,
+                0,
+            );
+            state.dependencies.save(&edge).await.unwrap();
+
+            Self {
+                state,
+                _tmp: tmp,
+                repo_a: dirs[0].clone(),
+                repo_b: dirs[1].clone(),
+                repo_a_id: ids[0].clone(),
+                repo_b_id: ids[1].clone(),
+            }
+        }
+
+        fn git(dir: &std::path::Path, args: &[&str]) -> String {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        }
+
+        /// Point `branch` at `start` (creating/resetting it), write
+        /// `files`, and commit — simulating a push of `branch`.
+        fn commit_on(
+            dir: &std::path::Path,
+            branch: &str,
+            start: &str,
+            files: &[(&str, &str)],
+            msg: &str,
+        ) {
+            Self::git(dir, &["checkout", "-q", "-B", branch, start]);
+            for (path, content) in files {
+                let full = dir.join(path);
+                if let Some(parent) = full.parent() {
+                    std::fs::create_dir_all(parent).unwrap();
+                }
+                std::fs::write(full, content).unwrap();
+            }
+            Self::git(dir, &["add", "-A"]);
+            Self::git(dir, &["commit", "-q", "-m", msg]);
+        }
+
+        async fn create_mr(&self, repo_id: &Id, source: &str, title: &str) -> String {
+            let app = crate::api::api_router().with_state(self.state.clone());
+            let body = serde_json::json!({
+                "repository_id": repo_id.to_string(),
+                "title": title,
+                "source_branch": source,
+                "target_branch": "main",
+            });
+            let resp = app
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/merge-requests")
+                        .header("content-type", "application/json")
+                        .header("authorization", "Bearer test-token")
+                        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::CREATED, "create_mr {title}");
+            let json = body_json(resp).await;
+            json["id"].as_str().unwrap().to_string()
+        }
+
+        async fn deps_of(&self, mr_id: &str) -> Vec<serde_json::Value> {
+            let app = crate::api::api_router().with_state(self.state.clone());
+            let resp = app
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/api/v1/merge-requests/{mr_id}/dependencies"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let json = body_json(resp).await;
+            json["depends_on"].as_array().unwrap().clone()
+        }
+
+        async fn close_mr(&self, mr_id: &str) {
+            let app = crate::api::api_router().with_state(self.state.clone());
+            let body = serde_json::json!({ "status": "closed" });
+            let resp = app
+                .oneshot(
+                    Request::builder()
+                        .method("PUT")
+                        .uri(format!("/api/v1/merge-requests/{mr_id}/status"))
+                        .header("content-type", "application/json")
+                        .header("authorization", "Bearer test-token")
+                        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK, "close_mr {mr_id}");
+        }
+
+        async fn set_explicit_dep(&self, mr_id: &str, dep_mr_id: &str) {
+            let app = crate::api::api_router().with_state(self.state.clone());
+            let body = serde_json::json!({
+                "depends_on": [dep_mr_id],
+                "reason": "orchestrator override"
+            });
+            let resp = app
+                .oneshot(
+                    Request::builder()
+                        .method("PUT")
+                        .uri(format!("/api/v1/merge-requests/{mr_id}/dependencies"))
+                        .header("content-type", "application/json")
+                        .header("authorization", "Bearer test-token")
+                        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK, "set_explicit_dep {mr_id}");
+        }
+    }
+
+    #[tokio::test]
+    async fn graph_dep_created_when_mr_updates_dependency_declaration() {
+        let repos = GraphDepRepos::new().await;
+
+        // B has a pending MR.
+        GraphDepRepos::commit_on(
+            &repos.repo_b,
+            "feat/b",
+            "main",
+            &[("src/lib.rs", "pub fn new_version() {}\n")],
+            "B work",
+        );
+        let mr_b = repos.create_mr(&repos.repo_b_id, "feat/b", "B: new version").await;
+
+        // A's MR updates the dependency declaration — the repo-b line in
+        // A's Cargo.toml (the edge's source artifact).
+        GraphDepRepos::commit_on(
+            &repos.repo_a,
+            "feat/a",
+            "main",
+            &[("Cargo.toml", "repo-b = \"2.0\"\n")],
+            "bump repo-b to 2.0",
+        );
+        let mr_a = repos.create_mr(&repos.repo_a_id, "feat/a", "A: bump repo-b").await;
+
+        let deps = repos.deps_of(&mr_a).await;
+        assert_eq!(
+            deps.len(),
+            1,
+            "declaration update + pending B MR must auto-create the graph dep: {deps:?}"
+        );
+        assert_eq!(deps[0]["mr_id"], mr_b);
+        assert_eq!(deps[0]["source"], "dependency-graph");
+        assert!(
+            deps[0]["reason"].as_str().unwrap().contains("Cargo.toml"),
+            "reason names the declaration artifact: {deps:?}"
+        );
+
+        // The stored dep is exactly what the merge queue's dependency
+        // semantics consume (`dependencies_satisfied` requires every dep
+        // Merged, the queue's topological sort orders A after B) — so
+        // A's merge is ordered after B's without further wiring.
+        let mr = repos
+            .state
+            .merge_requests
+            .find_by_id(&Id::new(&mr_a))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(mr.depends_on[0].target_mr_id, Id::new(&mr_b));
+        assert_eq!(
+            mr.depends_on[0].source,
+            gyre_domain::DependencySource::DependencyGraph
+        );
+
+        // Negative control: an A MR that does NOT touch the declaration
+        // carries no graph dep, even while B's MR is open.
+        GraphDepRepos::commit_on(
+            &repos.repo_a,
+            "feat/other",
+            "main",
+            &[("README.md", "docs only\n")],
+            "docs",
+        );
+        let mr_other = repos
+            .create_mr(&repos.repo_a_id, "feat/other", "A: docs")
+            .await;
+        let deps = repos.deps_of(&mr_other).await;
+        assert!(
+            deps.is_empty(),
+            "diff not touching the declaration must not create a graph dep: {deps:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn graph_dep_not_created_without_pending_target_mr() {
+        let repos = GraphDepRepos::new().await;
+
+        // B has NO open MR.
+        GraphDepRepos::commit_on(
+            &repos.repo_a,
+            "feat/a",
+            "main",
+            &[("Cargo.toml", "repo-b = \"2.0\"\n")],
+            "bump repo-b to 2.0",
+        );
+        let mr_a = repos.create_mr(&repos.repo_a_id, "feat/a", "A: bump repo-b").await;
+
+        let deps = repos.deps_of(&mr_a).await;
+        assert!(
+            deps.is_empty(),
+            "no pending MR in B → no graph dep: {deps:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn graph_dep_dropped_when_target_mr_closed() {
+        let repos = GraphDepRepos::new().await;
+
+        GraphDepRepos::commit_on(
+            &repos.repo_b,
+            "feat/b",
+            "main",
+            &[("src/lib.rs", "pub fn new_version() {}\n")],
+            "B work",
+        );
+        let mr_b = repos.create_mr(&repos.repo_b_id, "feat/b", "B: new version").await;
+        GraphDepRepos::commit_on(
+            &repos.repo_a,
+            "feat/a",
+            "main",
+            &[("Cargo.toml", "repo-b = \"2.0\"\n")],
+            "bump repo-b to 2.0",
+        );
+        let mr_a = repos.create_mr(&repos.repo_a_id, "feat/a", "A: bump repo-b").await;
+        assert_eq!(repos.deps_of(&mr_a).await.len(), 1, "pre-close");
+
+        // Closing B's MR must drop the graph-sourced dep on
+        // re-evaluation — a closed MR can never satisfy it.
+        repos.close_mr(&mr_b).await;
+
+        let deps = repos.deps_of(&mr_a).await;
+        assert!(
+            deps.is_empty(),
+            "closing the target MR must drop the graph-sourced dep: {deps:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn graph_dep_dropped_when_diff_no_longer_touches_declaration() {
+        let repos = GraphDepRepos::new().await;
+
+        GraphDepRepos::commit_on(
+            &repos.repo_b,
+            "feat/b",
+            "main",
+            &[("src/lib.rs", "pub fn new_version() {}\n")],
+            "B work",
+        );
+        let _mr_b = repos.create_mr(&repos.repo_b_id, "feat/b", "B: new version").await;
+        GraphDepRepos::commit_on(
+            &repos.repo_a,
+            "feat/a",
+            "main",
+            &[("Cargo.toml", "repo-b = \"2.0\"\n")],
+            "bump repo-b to 2.0",
+        );
+        let mr_a = repos.create_mr(&repos.repo_a_id, "feat/a", "A: bump repo-b").await;
+        assert_eq!(repos.deps_of(&mr_a).await.len(), 1, "pre-update");
+
+        // A's MR is updated (re-pushed) so its diff no longer touches
+        // the declaration: the branch is rewritten to only change docs.
+        GraphDepRepos::commit_on(
+            &repos.repo_a,
+            "feat/a",
+            "main",
+            &[("README.md", "docs now\n")],
+            "no declaration change anymore",
+        );
+
+        // Re-evaluate as the post-receive hook would (A's branch moved).
+        super::reevaluate_lineage_deps(&repos.state, &Id::new(&mr_a)).await;
+
+        let deps = repos.deps_of(&mr_a).await;
+        assert!(
+            deps.is_empty(),
+            "diff no longer touching the declaration must drop the graph dep: {deps:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn graph_dep_reconciliation_preserves_explicit_and_skips_duplicates() {
+        let repos = GraphDepRepos::new().await;
+
+        GraphDepRepos::commit_on(
+            &repos.repo_b,
+            "feat/b",
+            "main",
+            &[("src/lib.rs", "pub fn new_version() {}\n")],
+            "B work",
+        );
+        let mr_b = repos.create_mr(&repos.repo_b_id, "feat/b", "B: new version").await;
+        GraphDepRepos::commit_on(
+            &repos.repo_a,
+            "feat/a",
+            "main",
+            &[("Cargo.toml", "repo-b = \"2.0\"\n")],
+            "bump repo-b to 2.0",
+        );
+        let mr_a = repos.create_mr(&repos.repo_a_id, "feat/a", "A: bump repo-b").await;
+
+        // An explicit orchestrator-declared dep on another MR in A.
+        GraphDepRepos::commit_on(
+            &repos.repo_a,
+            "feat/other",
+            "main",
+            &[("README.md", "other work\n")],
+            "other",
+        );
+        let mr_other = repos
+            .create_mr(&repos.repo_a_id, "feat/other", "A: other")
+            .await;
+        // set_dependencies REPLACES the dep set with the explicit one.
+        repos.set_explicit_dep(&mr_a, &mr_other).await;
+
+        // Re-evaluate twice — the graph dep must be re-added once (no
+        // duplicate) and the explicit dep must survive every pass.
+        super::reevaluate_lineage_deps(&repos.state, &Id::new(&mr_a)).await;
+        super::reevaluate_lineage_deps(&repos.state, &Id::new(&mr_a)).await;
+
+        let deps = repos.deps_of(&mr_a).await;
+        assert_eq!(
+            deps.len(),
+            2,
+            "explicit + re-detected graph dep, nothing duplicated: {deps:?}"
+        );
+        let mut by_mr: std::collections::HashMap<&str, &str> = deps
+            .iter()
+            .map(|d| (d["mr_id"].as_str().unwrap(), d["source"].as_str().unwrap()))
+            .collect();
+        assert_eq!(by_mr.remove(mr_other.as_str()), Some("explicit"));
+        assert_eq!(by_mr.remove(mr_b.as_str()), Some("dependency-graph"));
+        assert!(by_mr.is_empty(), "no extra deps: {deps:?}");
+    }
+
+    #[tokio::test]
+    async fn graph_dep_links_most_recently_updated_target_mr() {
+        let repos = GraphDepRepos::new().await;
+
+        // Two pending MRs in B.
+        GraphDepRepos::commit_on(
+            &repos.repo_b,
+            "feat/b1",
+            "main",
+            &[("src/lib.rs", "pub fn v1() {}\n")],
+            "B work 1",
+        );
+        let mr_b1 = repos.create_mr(&repos.repo_b_id, "feat/b1", "B: v1").await;
+        GraphDepRepos::commit_on(
+            &repos.repo_b,
+            "feat/b2",
+            "main",
+            &[("src/lib.rs", "pub fn v2() {}\n")],
+            "B work 2",
+        );
+        let mr_b2 = repos.create_mr(&repos.repo_b_id, "feat/b2", "B: v2").await;
+
+        // b1 becomes the most recently updated MR (deterministic — same-
+        // second creation timestamps would fall to the id tie-break).
+        let mut b1 = repos
+            .state
+            .merge_requests
+            .find_by_id(&Id::new(&mr_b1))
+            .await
+            .unwrap()
+            .unwrap();
+        b1.updated_at += 100;
+        repos.state.merge_requests.update(&b1).await.unwrap();
+
+        GraphDepRepos::commit_on(
+            &repos.repo_a,
+            "feat/a",
+            "main",
+            &[("Cargo.toml", "repo-b = \"2.0\"\n")],
+            "bump repo-b to 2.0",
+        );
+        let mr_a = repos.create_mr(&repos.repo_a_id, "feat/a", "A: bump repo-b").await;
+
+        let deps = repos.deps_of(&mr_a).await;
+        assert_eq!(deps.len(), 1, "one link per target repo: {deps:?}");
+        assert_eq!(
+            deps[0]["mr_id"], mr_b1,
+            "the most recently updated open MR in B must be linked"
+        );
+        assert_ne!(deps[0]["mr_id"].as_str().unwrap(), mr_b2);
     }
 
     #[tokio::test]

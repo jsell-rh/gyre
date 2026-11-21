@@ -1976,7 +1976,8 @@ async fn handle_create_mr(state: &AppState, args: &Value) -> Value {
     );
     mr.author_agent_id = get_str(args, "author_agent_id").map(Id::new);
 
-    // Auto-detect branch lineage dependencies (mirrors REST create_mr).
+    // Auto-detect branch lineage and graph-driven cross-repo dependencies
+    // (mirrors REST create_mr).
     let lineage_deps = crate::api::merge_requests::detect_lineage_deps(
         state,
         &rid,
@@ -1985,25 +1986,13 @@ async fn handle_create_mr(state: &AppState, args: &Value) -> Value {
         &repo.default_branch,
     )
     .await;
-    if !lineage_deps.is_empty() {
-        mr.depends_on = lineage_deps;
-    }
-
-    // Merge explicit deps with lineage deps: explicit takes precedence,
-    // lineage adds to the set for deps not already declared.
-    if !explicit_deps.is_empty() {
-        let explicit_ids: std::collections::HashSet<String> = explicit_deps
-            .iter()
-            .map(|d| d.target_mr_id.to_string())
-            .collect();
-        let additional_lineage: Vec<_> = mr
-            .depends_on
-            .drain(..)
-            .filter(|d| !explicit_ids.contains(&d.target_mr_id.to_string()))
-            .collect();
-        mr.depends_on = explicit_deps;
-        mr.depends_on.extend(additional_lineage);
-    }
+    let graph_deps =
+        crate::api::merge_requests::detect_graph_deps(state, &repo, &source).await;
+    mr.depends_on = crate::api::merge_requests::merge_explicit_and_auto_deps(
+        explicit_deps,
+        lineage_deps,
+        graph_deps,
+    );
 
     match state.merge_requests.create(&mr).await {
         Ok(()) => tool_result(format!("Created MR '{}' (id: {})", title, mr.id)),
