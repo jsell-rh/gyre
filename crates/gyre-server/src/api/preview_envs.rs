@@ -611,8 +611,7 @@ pub async fn try_it_handler(
     // cloned the target branch to /workspace/repo; on a local dispatch the
     // checkout is a detached worktree of the exact commit in the scratch
     // dir (never the production repo's working tree).
-    let script = format!(
-        "set -e\n\
+    let script = "set -e\n\
          if [ -d /workspace/repo ]; then\n\
          \x20 cd /workspace/repo\n\
          \x20 git checkout --detach \"$GYRE_COMMIT_SHA\"\n\
@@ -623,7 +622,7 @@ pub async fn try_it_handler(
          \x20 cd \"$GYRE_PREVIEW_DATA_DIR/repo\"\n\
          \x20 exec node \"$GYRE_PREVIEW_DATA_DIR/preview-serve.mjs\"\n\
          fi\n"
-    );
+        .to_string();
 
     let agent_key = agent_id.to_string();
     let launched;
@@ -1199,7 +1198,7 @@ mod tests {
             .unwrap();
         let env_id = envs[0].id.to_string();
         for uri in [
-            format!("/api/v1/preview-environments?workspace_id=ws-try"),
+            "/api/v1/preview-environments?workspace_id=ws-try".to_string(),
             format!("/api/v1/preview-environments/{env_id}"),
         ] {
             let resp = app(state.clone())

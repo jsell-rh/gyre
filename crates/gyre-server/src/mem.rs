@@ -2305,7 +2305,7 @@ impl PreviewEnvironmentRepository for MemPreviewEnvironmentRepository {
             .filter(|e| e.mr_id == *mr_id)
             .cloned()
             .collect();
-        items.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        items.sort_by_key(|e| std::cmp::Reverse(e.created_at));
         Ok(items)
     }
 
@@ -2318,7 +2318,7 @@ impl PreviewEnvironmentRepository for MemPreviewEnvironmentRepository {
             .filter(|e| e.workspace_id == *workspace_id)
             .cloned()
             .collect();
-        items.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        items.sort_by_key(|e| std::cmp::Reverse(e.created_at));
         Ok(items)
     }
 
@@ -2331,7 +2331,7 @@ impl PreviewEnvironmentRepository for MemPreviewEnvironmentRepository {
             .filter(|e| e.expires_at <= now && e.status.is_live())
             .cloned()
             .collect();
-        items.sort_by(|a, b| a.expires_at.cmp(&b.expires_at));
+        items.sort_by_key(|e| e.expires_at);
         Ok(items)
     }
 
@@ -3847,7 +3847,7 @@ impl NotificationRepository for MemNotificationRepository {
             .filter(|n| n.created_at >= since)
             .cloned()
             .collect();
-        items.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        items.sort_by_key(|n| std::cmp::Reverse(n.created_at));
         items.truncate(limit);
         Ok(items)
     }
