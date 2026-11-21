@@ -2,8 +2,8 @@
 title: "AIBOM: dependency-graph snapshot and stale-dependency flags in release reports"
 spec_ref: "Spec gap spec-cab97078efffe0fbfb7339be / aibom-stale-dependency-flags / ed9f34316476"
 depends_on: []
-progress: not-started
-commits: []
+progress: complete
+commits: ["a5d42c8b37367d71247c6ea15397b449604875b6", "f7a475ee8d98a206266ad239828300f97598c46f"]
 ---
 
 ## Required behavior
@@ -52,3 +52,82 @@ Canonical spec: `specs/system/dependency-graph.md`. Source: `678a8ac3e3bfeafeb66
     ]
   }
 ]
+
+## Shipped
+
+### Dependency-graph snapshot and stale-dependency flags (both AIBOM shapes)
+
+- `build_dependencies_section` (`crates/gyre-server/src/api/aibom.rs:572`)
+  reads the REAL dependency store at AIBOM build time:
+  `state.dependencies.list_by_repo` for the repo's outgoing edges and
+  `list_dependents` for its incoming count, using the stored status/drift
+  values the push-time detection pass and the daily `dep_staleness_check`
+  job already maintain. The AIBOM never re-derives drift, so the
+  dependency graph and the AIBOM cannot disagree. Storage errors
+  propagate — a compliance artifact never silently under-reports the
+  dependency surface.
+- The section is built once per request in `get_aibom` and embedded in
+  BOTH output shapes — `AibomResponse.dependencies` (working summary,
+  default format) and `AibomReleaseResponse.dependencies`
+  (`format=release`) — so the two shapes always agree.
+- Section contents (`AibomDependencies`, aibom.rs:145): `edges` — one
+  entry per outgoing edge with target repo, dependency type, detection
+  method, pinned version, target current version, version drift, status,
+  and an explicit `stale` flag; `dependent_count`; `stale_dependencies` —
+  the supply-chain risk list naming each stale edge with its drift and
+  both versions (e.g. "stale dependency: pinned 1.2.0, target current
+  1.5.0, drift 3"); `stale_count`; and a `note` stating the empty
+  snapshot when the repo has no outgoing edges. An all-current dependency
+  set shows the edges with empty flags — the section is present, never
+  omitted.
+- No release-MR/tag/publish machinery was added (owned by the staged
+  `release-artifacts-aibom-sbom` task); the new fields compose with that
+  task's per-release artifact generation.
+
+### Tests
+
+Two probe tests at the end of the aibom tests module exercise the HTTP
+router against the real store (edges saved via
+`state.dependencies.save`, repos created via the API):
+
+- `aibom_release_format_flags_stale_dependency` (aibom.rs:2141): stale
+  edge A→B (pins 1.2.0, B current 1.5.0, drift 3, status Stale), current
+  edge A→C, dependent D→A. GET `format=release&release=v1.2.3` →
+  dependencies section lists both edges with full stored state, flags the
+  stale edge, names it in the risk list with drift and versions,
+  `stale_count` 1, `dependent_count` 1; then resolves B's drift in the
+  store and re-GETs the SAME release inputs → empty risk list, section
+  still present, resolved edge unflagged (flags track the live store; the
+  second GET is also the all-current case).
+- `aibom_summary_carries_stale_dependency_flags` (aibom.rs:2288): default
+  summary format carries the stale list/count for repo A; a repo with no
+  edges shows an empty snapshot with a stating `note`.
+
+### Verification
+
+- Repair round (verification finding: `git diff --check` flagged
+  trailing whitespace at specs/tasks/task-284.md:101 in the previous
+  Shipped notes; checks.sh exited 1 on that line while every other gate
+  passed — rustfmt/clippy changed lines, architecture lint, and all
+  mechanical repo checks were clean). Fixed by rewriting the Shipped
+  notes without trailing whitespace; behavior untouched.
+- `SKIP_WEB_BUILD=1 cargo check -p gyre-server --tests` at the current
+  branch head: exit 0 (type-checks handler + both tests; evidence in
+  /tmp/stage/review-evidence/task-284-cargo-check.md).
+- `SKIP_WEB_BUILD=1 cargo fmt --check -p gyre-server`: exit 0 — the
+  newly added Rust code is rustfmt-clean (evidence in
+  /tmp/stage/review-evidence/task-284-repair.md).
+- `git diff --check bacba2b29a43014b1f150787d37f159beefe919a..HEAD` is
+  clean after this round (evidence in
+  /tmp/stage/review-evidence/task-284-repair.md).
+- gyre-server test-binary compilation is deferred to the independent
+  verifier per the assignment's 4 GiB budget constraint. Verifier must
+  run: `cargo test -p gyre-server --lib aibom` (selects both new tests
+  plus the pre-existing aibom tests for regression). Adapter semantics
+  the tests rely on were source-verified for both adapters (upsert-on-id
+  save; `list_by_repo` filters outgoing, `list_dependents` incoming;
+  snake_case enum serialization) — see
+  /tmp/stage/review-evidence/task-284-verifier-tests.md.
+- Coverage row 13 (Version Drift Tracking) in
+  specs/coverage/system/dependency-graph.md updated with the
+  third-bullet source evidence; no other rows touched.
