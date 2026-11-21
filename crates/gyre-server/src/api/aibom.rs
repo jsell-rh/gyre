@@ -358,7 +358,8 @@ pub async fn get_aibom(
     // stack policy compliance, drift/violation history, and the spec
     // registry manifest state.
     if params.format.as_deref() == Some("release") {
-        let release = build_release_aibom(&state, &repo, &params, spec_registry, dependencies).await?;
+        let release =
+            build_release_aibom(&state, &repo, &params, spec_registry, dependencies).await?;
         let value = serde_json::to_value(release).map_err(|e| ApiError::Internal(e.into()))?;
         return Ok(Json(value));
     }
@@ -615,16 +616,16 @@ async fn build_dependencies_section(
                     "stale dependency: pinned {}, target current {}, drift {}",
                     pinned.as_deref().unwrap_or("unknown"),
                     current.as_deref().unwrap_or("unknown"),
-                    drift.map(|d| d.to_string()).unwrap_or_else(|| "unknown".to_string()),
+                    drift
+                        .map(|d| d.to_string())
+                        .unwrap_or_else(|| "unknown".to_string()),
                 ),
             }
         })
         .collect();
 
     let note = if edges.is_empty() {
-        Some(
-            "repo has no outgoing dependency edges; empty dependency-graph snapshot".to_string(),
-        )
+        Some("repo has no outgoing dependency edges; empty dependency-graph snapshot".to_string())
     } else {
         None
     };
@@ -2130,12 +2131,7 @@ mod tests {
     async fn get_aibom_json(app: &Router, uri: String) -> serde_json::Value {
         let resp = app
             .clone()
-            .oneshot(
-                Request::builder()
-                    .uri(uri)
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
             .await
             .unwrap();
         expect_ok(resp).await
@@ -2157,9 +2153,12 @@ mod tests {
         // at 1.5.0, drift 3 over the workspace policy — the state the
         // dep_staleness pass leaves behind) and on C (current). Repo D
         // depends on A → dependent_count 1.
-        let (app, repo_b) = create_repo_named(app, &format!("dep-b-{}", uuid::Uuid::new_v4().simple())).await;
-        let (app, repo_c) = create_repo_named(app, &format!("dep-c-{}", uuid::Uuid::new_v4().simple())).await;
-        let (app, repo_d) = create_repo_named(app, &format!("dep-d-{}", uuid::Uuid::new_v4().simple())).await;
+        let (app, repo_b) =
+            create_repo_named(app, &format!("dep-b-{}", uuid::Uuid::new_v4().simple())).await;
+        let (app, repo_c) =
+            create_repo_named(app, &format!("dep-c-{}", uuid::Uuid::new_v4().simple())).await;
+        let (app, repo_d) =
+            create_repo_named(app, &format!("dep-d-{}", uuid::Uuid::new_v4().simple())).await;
         let _ = repo_d;
         state
             .dependencies
@@ -2242,7 +2241,10 @@ mod tests {
         assert_eq!(stale_list[0]["version_drift"], 3);
         let risk = stale_list[0]["supply_chain_risk"].as_str().unwrap();
         assert!(risk.contains("stale"), "risk statement: {risk}");
-        assert!(risk.contains("1.2.0") && risk.contains("1.5.0"), "risk names both versions: {risk}");
+        assert!(
+            risk.contains("1.2.0") && risk.contains("1.5.0"),
+            "risk names both versions: {risk}"
+        );
         assert_eq!(deps["stale_count"], 1);
         // The repo has edges → no empty-snapshot note.
         assert!(deps.get("note").is_none() || deps["note"].is_null());
@@ -2261,19 +2263,12 @@ mod tests {
             DependencyStatus::Active,
         );
         resolved.last_verified_at = 1_700_001_000;
-        state
-            .dependencies
-            .save(&resolved)
-            .await
-            .unwrap();
+        state.dependencies.save(&resolved).await.unwrap();
 
         let json = get_aibom_json(&app, uri).await;
         let deps = &json["dependencies"];
         assert_eq!(
-            deps["stale_dependencies"]
-                .as_array()
-                .unwrap()
-                .len(),
+            deps["stale_dependencies"].as_array().unwrap().len(),
             0,
             "resolved drift → empty risk list, not an omitted section"
         );
@@ -2295,11 +2290,8 @@ mod tests {
         let app = crate::api::api_router().with_state(state.clone());
         let repo_name = format!("dep-sum-{}", uuid::Uuid::new_v4().simple());
         let (app, repo_a) = create_repo_named(app, &repo_name).await;
-        let (app, repo_b) = create_repo_named(
-            app,
-            &format!("dep-sum-b-{}", uuid::Uuid::new_v4().simple()),
-        )
-        .await;
+        let (app, repo_b) =
+            create_repo_named(app, &format!("dep-sum-b-{}", uuid::Uuid::new_v4().simple())).await;
 
         state
             .dependencies
@@ -2333,11 +2325,8 @@ mod tests {
 
         // A repo with no edges shows an EMPTY snapshot with that stated —
         // the section is never omitted.
-        let (app, repo_e) = create_repo_named(
-            app,
-            &format!("dep-sum-e-{}", uuid::Uuid::new_v4().simple()),
-        )
-        .await;
+        let (app, repo_e) =
+            create_repo_named(app, &format!("dep-sum-e-{}", uuid::Uuid::new_v4().simple())).await;
         let _ = repo_e;
         let json = get_aibom_json(&app, format!("/api/v1/repos/{repo_e}/aibom")).await;
         let deps = &json["dependencies"];
