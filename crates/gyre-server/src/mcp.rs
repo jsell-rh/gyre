@@ -1976,7 +1976,8 @@ async fn handle_create_mr(state: &AppState, args: &Value) -> Value {
     );
     mr.author_agent_id = get_str(args, "author_agent_id").map(Id::new);
 
-    // Auto-detect branch lineage dependencies (mirrors REST create_mr).
+    // Auto-detect branch lineage and graph-driven cross-repo dependencies
+    // (mirrors REST create_mr).
     let lineage_deps = crate::api::merge_requests::detect_lineage_deps(
         state,
         &rid,
@@ -1985,25 +1986,12 @@ async fn handle_create_mr(state: &AppState, args: &Value) -> Value {
         &repo.default_branch,
     )
     .await;
-    if !lineage_deps.is_empty() {
-        mr.depends_on = lineage_deps;
-    }
-
-    // Merge explicit deps with lineage deps: explicit takes precedence,
-    // lineage adds to the set for deps not already declared.
-    if !explicit_deps.is_empty() {
-        let explicit_ids: std::collections::HashSet<String> = explicit_deps
-            .iter()
-            .map(|d| d.target_mr_id.to_string())
-            .collect();
-        let additional_lineage: Vec<_> = mr
-            .depends_on
-            .drain(..)
-            .filter(|d| !explicit_ids.contains(&d.target_mr_id.to_string()))
-            .collect();
-        mr.depends_on = explicit_deps;
-        mr.depends_on.extend(additional_lineage);
-    }
+    let graph_deps = crate::api::merge_requests::detect_graph_deps(state, &repo, &source).await;
+    mr.depends_on = crate::api::merge_requests::merge_explicit_and_auto_deps(
+        explicit_deps,
+        lineage_deps,
+        graph_deps,
+    );
 
     match state.merge_requests.create(&mr).await {
         Ok(()) => tool_result(format!("Created MR '{}' (id: {})", title, mr.id)),
@@ -8887,6 +8875,155 @@ mod tests {
         assert!(!json["result"]["isError"].as_bool().unwrap());
         let text = json["result"]["content"][0]["text"].as_str().unwrap();
         assert!(text.contains("1 message(s)"));
+    }
+
+    /// dependency-graph.md §Breaking Change Detection step 3b ("Notify the
+    /// dependent repo's orchestrator via MCP"): the breaking-change cascade
+    /// (`process_breaking_changes`, fed by both the conventional-commit and
+    /// the API-contract detection routes) persists a Directed
+    /// breaking-change message in the dependent repo's live orchestrator
+    /// inbox — the inbox `gyre_message_poll` serves — carrying the payload
+    /// (repo, description, breaking-change id, dependent repo).
+    #[tokio::test]
+    async fn mcp_message_poll_returns_breaking_change_orchestrator_notification() {
+        let state = test_state();
+        let ws = gyre_domain::Workspace::new(
+            Id::new("ws-bcmcp"),
+            Id::new("t-bcmcp"),
+            "bcmcp",
+            "bcmcp",
+            0,
+        );
+        state.workspaces.create(&ws).await.unwrap();
+        let repo_a = gyre_domain::Repository::new(
+            Id::new("repo-a-bcmcp"),
+            Id::new("ws-bcmcp"),
+            "repo-a",
+            "/tmp/repo-a-bcmcp.git",
+            0,
+        );
+        state.repos.create(&repo_a).await.unwrap();
+        let repo_b = gyre_domain::Repository::new(
+            Id::new("repo-b-bcmcp"),
+            Id::new("ws-bcmcp"),
+            "repo-b",
+            "/tmp/repo-b-bcmcp.git",
+            0,
+        );
+        state.repos.create(&repo_b).await.unwrap();
+
+        let edge = gyre_domain::DependencyEdge::new(
+            Id::new("edge-bcmcp"),
+            repo_a.id.clone(),
+            repo_b.id.clone(),
+            gyre_domain::DependencyType::Code,
+            "Cargo.toml",
+            "crate-b",
+            gyre_domain::DetectionMethod::CargoToml,
+            1000,
+        );
+        state.dependencies.save(&edge).await.unwrap();
+
+        // Live repo orchestrator for the DEPENDENT repo (repo-a).
+        let mut orch = gyre_domain::Agent::new(Id::new("orch-bcmcp"), "repo-a orchestrator", 0);
+        orch.workspace_id = Id::new("ws-bcmcp");
+        orch.repo_id = Some(repo_a.id.clone());
+        orch.orchestrator_type = gyre_domain::OrchestratorType::RepoOrchestrator;
+        orch.transition_status(gyre_domain::AgentStatus::Active)
+            .unwrap();
+        state.agents.create(&orch).await.unwrap();
+
+        // Orchestrator JWT so the poll authenticates AS the orchestrator.
+        let token = state
+            .agent_signing_key
+            .mint_orchestrator(
+                "orch-bcmcp",
+                "system",
+                &state.base_url,
+                state.agent_jwt_ttl_secs,
+                "t-bcmcp",
+                "ws-bcmcp",
+                Some(repo_a.id.as_str()),
+                Some("repo-a"),
+                "repo_orchestrator",
+                "repo-orchestrator",
+            )
+            .unwrap();
+        state
+            .kv_store
+            .kv_set("agent_tokens", "orch-bcmcp", token.clone())
+            .await
+            .unwrap();
+
+        // The production cascade — the same function both breaking-change
+        // detection routes feed.
+        let breaking = vec![(
+            "sha-bcmcp".to_string(),
+            "API contract change: removed DELETE /widgets from openapi.yaml".to_string(),
+        )];
+        let dependents = vec![edge.clone()];
+        crate::git_http::process_breaking_changes(
+            &state,
+            &breaking,
+            &dependents,
+            repo_b.id.as_str(),
+            "repo-b",
+            "ws-bcmcp",
+            "t-bcmcp",
+            &gyre_domain::DependencyPolicy::default(),
+            2000,
+        )
+        .await;
+
+        // gyre_message_poll as the orchestrator: the Directed message must
+        // come back, carrying the breaking-change payload.
+        let app = crate::build_router(state.clone());
+        let (status, json) = mcp_post_with_token(
+            app,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 78,
+                "method": "tools/call",
+                "params": {
+                    "name": "gyre_message_poll",
+                    "arguments": { "unacked_only": true }
+                }
+            }),
+            &token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            !json["result"]["isError"].as_bool().unwrap(),
+            "poll should succeed: {json}"
+        );
+        let text = json["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("1 message(s)"), "poll text: {text}");
+        assert!(
+            text.contains("breaking_change_detected"),
+            "poll text: {text}"
+        );
+        assert!(
+            text.contains("API contract change: removed DELETE /widgets from openapi.yaml"),
+            "poll text: {text}"
+        );
+        // Directed at the orchestrator agent.
+        assert!(text.contains("orch-bcmcp"), "poll text: {text}");
+        // Carries the breaking-change id and the dependent repo.
+        let bcs = state
+            .breaking_changes
+            .list_by_source_repo(&repo_b.id)
+            .await
+            .unwrap();
+        assert_eq!(bcs.len(), 1);
+        assert!(
+            text.contains(bcs[0].id.as_str()),
+            "poll text must carry the breaking-change id: {text}"
+        );
+        assert!(
+            text.contains(repo_a.id.as_str()),
+            "poll text must carry the dependent repo id: {text}"
+        );
     }
 
     #[tokio::test]
