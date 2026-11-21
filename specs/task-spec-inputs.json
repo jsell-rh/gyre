@@ -2217,6 +2217,15 @@
         "Cross-Repo Dependency Graph",
         "Version Drift Tracking"
       ]
+    },
+    "backlog/c3a39b320325eff390c4b56c": {
+      "file": "specs/system/explorer-canvas.md",
+      "heading": [
+        "Explorer Canvas",
+        "Design",
+        "Lens Definitions",
+        "Structural (default)"
+      ]
     }
   },
   "bindings": {
@@ -3048,6 +3057,9 @@
     ],
     "Spec gap spec-cab97078efffe0fbfb7339be / aibom-stale-dependency-flags / ed9f34316476": [
       "backlog/551185c9c05657eddf50405e"
+    ],
+    "Spec gap spec-82658b0b4e08c1502a5f0793 / structural-metrics-verification / b3cd47ade570": [
+      "backlog/c3a39b320325eff390c4b56c"
     ]
   }
 }
