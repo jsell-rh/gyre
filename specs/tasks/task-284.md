@@ -98,16 +98,28 @@ router against the real store (edges saved via
   `stale_count` 1, `dependent_count` 1; then resolves B's drift in the
   store and re-GETs the SAME release inputs → empty risk list, section
   still present, resolved edge unflagged (flags track the live store; the
-  second GET is also the all-current case). 
+  second GET is also the all-current case).
 - `aibom_summary_carries_stale_dependency_flags` (aibom.rs:2288): default
   summary format carries the stale list/count for repo A; a repo with no
   edges shows an empty snapshot with a stating `note`.
 
 ### Verification
 
-- `SKIP_WEB_BUILD=1 cargo check -p gyre-server --tests`: exit 0
-  (type-checks handler + both tests; evidence in
+- Repair round (verification finding: `git diff --check` flagged
+  trailing whitespace at specs/tasks/task-284.md:101 in the previous
+  Shipped notes; checks.sh exited 1 on that line while every other gate
+  passed — rustfmt/clippy changed lines, architecture lint, and all
+  mechanical repo checks were clean). Fixed by rewriting the Shipped
+  notes without trailing whitespace; behavior untouched.
+- `SKIP_WEB_BUILD=1 cargo check -p gyre-server --tests` at the current
+  branch head: exit 0 (type-checks handler + both tests; evidence in
   /tmp/stage/review-evidence/task-284-cargo-check.md).
+- `SKIP_WEB_BUILD=1 cargo fmt --check -p gyre-server`: exit 0 — the
+  newly added Rust code is rustfmt-clean (evidence in
+  /tmp/stage/review-evidence/task-284-repair.md).
+- `git diff --check bacba2b29a43014b1f150787d37f159beefe919a..HEAD` is
+  clean after this round (evidence in
+  /tmp/stage/review-evidence/task-284-repair.md).
 - gyre-server test-binary compilation is deferred to the independent
   verifier per the assignment's 4 GiB budget constraint. Verifier must
   run: `cargo test -p gyre-server --lib aibom` (selects both new tests
