@@ -3,7 +3,7 @@ title: "Spec Links — spec-detail link direction: API emits it, UI renders inbo
 spec_ref: "Spec gap spec-10bdced21a063f819b1baabd / spec-links-ui-link-direction / 5a915155d9bc"
 depends_on: []
 progress: complete
-commits: ["9fda212d4aa1473b06c1dfe59f6a95f55e53dc3e", "b3ab4778a2f12a37d1214fe197062629b864ca43"]
+commits: ["9fda212d4aa1473b06c1dfe59f6a95f55e53dc3e", "b3ab4778a2f12a37d1214fe197062629b864ca43", "06c133a03be658a7d3a37f9726dbe5b0df517c6b"]
 ---
 
 ## Required behavior
