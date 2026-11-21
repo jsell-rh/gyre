@@ -370,6 +370,19 @@ fn tool_definitions() -> Value {
                 }
             },
             {
+                "name": "gyre_spec_patrol",
+                "description": "Run the spec-graph accountability patrol (spec-links.md §Accountability Agent Integration): stale links beyond a threshold, orphaned supersessions (links targeting deprecated specs), unresolved conflicts (both specs of a conflicts_with link approved), dangling implementations (implements links pointing at deleted specs), and deep depends_on chains (>5 levels). STRICTLY READ-ONLY: returns the findings of the pure patrol computation and creates no notifications, tasks, or any other durable rows — notification fan-out belongs to the scheduled spec_links_patrol job and the ABAC-gated patrol endpoint.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "stale_threshold_secs": {
+                            "type": "integer",
+                            "description": "Stale-link threshold in seconds (default: 7 days)"
+                        }
+                    }
+                }
+            },
+            {
                 "name": "gyre_message_send",
                 "description": "Send a Directed or Custom message to an agent or workspace in the same workspace. Wraps POST /api/v1/workspaces/:workspace_id/messages.",
                 "inputSchema": {
@@ -985,10 +998,12 @@ async fn validate_tool_scope(
             Ok(())
         }
         // Remaining read-only platform tools (analytics query, messaging,
-        // conversation upload): scoped callers may read within their tier —
-        // analytics query returns aggregate counters with no
+        // conversation upload, spec patrol): scoped callers may read within
+        // their tier — analytics query returns aggregate counters with no
         // scope-addressable args, messaging is agent-identity routed and
-        // validated per tool, conversation upload is caller-bound (see the
+        // validated per tool, conversation upload is caller-bound, and the
+        // spec patrol wraps the pure run_patrol computation with no
+        // scope-addressable args (see the
         // platform-model.md §Token Scoping coverage row for the per-tool
         // read-surface justification).
         _ => Ok(()),
@@ -2969,6 +2984,37 @@ async fn handle_search(state: &AppState, args: &Value, auth: &AuthenticatedAgent
             tool_result(text)
         }
         Err(e) => tool_error(format!("Search failed: {e}")),
+    }
+}
+
+// ── Spec-graph patrol MCP tool (task-292) ─────────────────────────────────
+
+/// `gyre_spec_patrol`: run the spec-graph accountability patrol and return
+/// its findings — STRICTLY read-only.
+///
+/// Side-effect boundary (pinned by task-292 after controller review): this
+/// handler wraps the pure `run_patrol` computation ONLY. `run_patrol`
+/// snapshots the links store and spec ledger and computes findings; it never
+/// writes. The notification fan-out (`create_notifications_for_error_findings`
+/// → durable notification rows) lives exclusively in the scheduled
+/// `spec_links_patrol` job (jobs.rs) and the ABAC-gated HTTP handler
+/// (`api::specs::patrol_spec_links`) — NEVER here. Note
+/// check-mcp-write-tools.sh cannot catch a violation of this boundary (it
+/// scans only direct `state.<repo>.<write>` calls, and the fan-out writes
+/// happen inside the helper), so the boundary is asserted by test:
+/// read-only callers may invoke the tool and a tool call must leave
+/// notification/task row counts unchanged.
+async fn handle_spec_patrol(state: &AppState, args: &Value) -> Value {
+    let threshold = args
+        .get("stale_threshold_secs")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(crate::spec_patrol::DEFAULT_STALE_THRESHOLD_SECS);
+
+    let findings = crate::spec_patrol::run_patrol(state, now_secs(), threshold).await;
+
+    match serde_json::to_string(&findings) {
+        Ok(text) => tool_result(text),
+        Err(e) => tool_error(format!("Failed to serialize patrol findings: {e}")),
     }
 }
 
@@ -5249,6 +5295,7 @@ pub async fn mcp_handler(
                 "gyre_analytics_query" => handle_analytics_query(&state, &args).await,
                 "gyre_analytics_decide" => handle_analytics_decide(&state, &args, &auth).await,
                 "gyre_search" => handle_search(&state, &args, &auth).await,
+                "gyre_spec_patrol" => handle_spec_patrol(&state, &args).await,
                 "conversation_upload" => handle_conversation_upload(&state, &args, &auth).await,
                 "gyre_message_send" => handle_message_send(&state, &args, &auth).await,
                 "gyre_message_poll" => handle_message_poll(&state, &args, &auth).await,
@@ -7082,6 +7129,283 @@ mod tests {
         assert!(has_role_at_least(&[UserRole::Agent], UserRole::Agent));
         assert!(has_role_at_least(&[UserRole::Developer], UserRole::Agent));
         assert!(has_role_at_least(&[UserRole::Admin], UserRole::Agent));
+    }
+
+    // ── gyre_spec_patrol (task-292, spec-links.md §Accountability Agent
+    // Integration) ──────────────────────────────────────────────────────
+
+    /// Seed the spec-graph state the patrol asserts against: a stale link
+    /// far beyond the threshold (warning finding) AND a dangling implements
+    /// link (error finding) whose workspace context resolves to a workspace
+    /// with an Admin member — so if the tool handler were wired to the HTTP
+    /// endpoint's fan-out (create_notifications_for_error_findings), the
+    /// row-count assertions below would fail while CI stays green (the
+    /// write happens inside the helper, invisible to
+    /// check-mcp-write-tools.sh's direct-call scan).
+    async fn seed_spec_patrol_state(state: &crate::AppState) {
+        use gyre_domain::{
+            ApprovalStatus, RepoStatus, Repository, TrustLevel, Workspace,
+            WorkspaceMembership, WorkspaceRole,
+        };
+
+        state
+            .workspaces
+            .create(&Workspace {
+                id: Id::new("ws1"),
+                tenant_id: Id::new("default"),
+                name: "ws-ws1".to_string(),
+                slug: "ws-ws1".to_string(),
+                description: None,
+                budget: None,
+                max_repos: None,
+                max_agents_per_repo: None,
+                trust_level: TrustLevel::Guided,
+                llm_model: None,
+                created_at: 1_000_000,
+                compute_target_id: None,
+            })
+            .await
+            .unwrap();
+        state
+            .repos
+            .create(&Repository {
+                id: Id::new("repo1"),
+                name: "repo-repo1".to_string(),
+                path: "/repos/repo1".to_string(),
+                workspace_id: Id::new("ws1"),
+                default_branch: "main".to_string(),
+                is_mirror: false,
+                mirror_url: None,
+                mirror_interval_secs: None,
+                last_mirror_sync: None,
+                description: None,
+                status: RepoStatus::Active,
+                created_at: 1_000_000,
+                updated_at: 1_000_000,
+                max_agents: None,
+                max_agent_iterations: None,
+                budget: None,
+            })
+            .await
+            .unwrap();
+        state
+            .workspace_memberships
+            .create(&WorkspaceMembership {
+                id: Id::new(uuid::Uuid::new_v4().to_string()),
+                user_id: Id::new("admin1"),
+                workspace_id: Id::new("ws1"),
+                role: WorkspaceRole::Admin,
+                invited_by: Id::new("admin"),
+                accepted: true,
+                accepted_at: Some(1_000_000),
+                created_at: 1_000_000,
+            })
+            .await
+            .unwrap();
+        for path in ["system/impl.md", "system/stale.md"] {
+            state
+                .spec_ledger
+                .save(&crate::spec_registry::SpecLedgerEntry {
+                    path: path.to_string(),
+                    title: format!("Spec {path}"),
+                    owner: "user:test".to_string(),
+                    kind: None,
+                    current_sha: "sha1".to_string(),
+                    approval_mode: "human_only".to_string(),
+                    approval_status: ApprovalStatus::Pending,
+                    linked_tasks: vec![],
+                    linked_mrs: vec![],
+                    drift_status: "clean".to_string(),
+                    created_at: 1_000_000,
+                    updated_at: 1_000_000,
+                    repo_id: Some("repo1".to_string()),
+                    workspace_id: Some("ws1".to_string()),
+                })
+                .await
+                .unwrap();
+        }
+        let mut store = state.spec_links_store.lock().await;
+        // Dangling implements link — target absent from the ledger → error.
+        store.push(crate::spec_registry::SpecLinkEntry {
+            id: "mcp-dangling".to_string(),
+            source_path: "system/impl.md".to_string(),
+            source_repo_id: Some("repo1".to_string()),
+            source_sha: "src-sha".to_string(),
+            link_type: crate::spec_registry::SpecLinkType::Implements,
+            target_path: "system/deleted.md".to_string(),
+            target_repo_id: None,
+            target_display: None,
+            target_sha: Some("sha123".to_string()),
+            reason: None,
+            status: "active".to_string(),
+            created_at: 1_000_000,
+            stale_since: None,
+        });
+        // Stale link far beyond the 7-day threshold → warning finding.
+        store.push(crate::spec_registry::SpecLinkEntry {
+            id: "mcp-stale".to_string(),
+            source_path: "system/stale.md".to_string(),
+            source_repo_id: Some("repo1".to_string()),
+            source_sha: "src-sha".to_string(),
+            link_type: crate::spec_registry::SpecLinkType::DependsOn,
+            target_path: "system/impl.md".to_string(),
+            target_repo_id: None,
+            target_display: None,
+            target_sha: Some("sha123".to_string()),
+            reason: None,
+            status: "stale".to_string(),
+            created_at: 1_000_000,
+            stale_since: Some(1),
+        });
+    }
+
+    /// The patrol tool is strictly read-only: a ReadOnly-role principal
+    /// calls it against state holding a stale link beyond threshold and a
+    /// dangling implementation, receives the same findings `run_patrol`
+    /// returns for that state, and the call leaves notification and task
+    /// row counts identical (before/after). If the handler were wired to
+    /// the HTTP endpoint's fan-out, admin1 would gain a notification row
+    /// and the count assertion would fail.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn spec_patrol_tool_readonly_returns_findings_without_durable_writes() {
+        use crate::auth::test_helpers::{make_test_state_with_jwt, sign_test_jwt};
+
+        let state = make_test_state_with_jwt();
+        seed_spec_patrol_state(&state).await;
+
+        // Expected findings: the pure computation the tool must wrap. The
+        // tool picks its own `now`; comparing (type, spec_path, severity)
+        // triples keeps the comparison exact where the findings are
+        // deterministic and immune to clock drift between the two calls.
+        let expected = crate::spec_patrol::run_patrol(
+            &state,
+            now_secs(),
+            crate::spec_patrol::DEFAULT_STALE_THRESHOLD_SECS,
+        )
+        .await;
+        assert_eq!(expected.len(), 2, "stale link + dangling implementation");
+        let key = |f: &crate::spec_patrol::PatrolFinding| {
+            (f.finding_type.clone(), f.spec_path.clone(), f.severity.clone())
+        };
+        let mut expected_keys: Vec<_> = expected.iter().map(key).collect();
+        expected_keys.sort();
+
+        // Durable row counts before the call.
+        let notifs_before = state.notifications.list_recent(1000).await.unwrap().len();
+        let tasks_before = state.tasks.list().await.unwrap().len();
+
+        // ReadOnly-role principal (readonly Keycloak JWT — below the Agent
+        // tier the needs_write gate requires, so only a read-only tool
+        // dispatches for it).
+        let token = sign_test_jwt(
+            &json!({
+                "sub": "ro-sub",
+                "preferred_username": "readonly-user",
+                "realm_access": { "roles": ["readonly"] }
+            }),
+            3600,
+        );
+        let app = crate::build_router(state.clone());
+        let (status, json) = mcp_post_with_token(
+            app,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 71,
+                "method": "tools/call",
+                "params": { "name": "gyre_spec_patrol", "arguments": {} }
+            }),
+            &token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            json.get("error").map_or(true, |e| e.is_null()),
+            "no JSON-RPC error for a read-only caller: {json}"
+        );
+        assert_eq!(json["result"]["isError"], false, "result: {json}");
+
+        let text = json["result"]["content"][0]["text"]
+            .as_str()
+            .expect("tool result text");
+        let findings: Vec<crate::spec_patrol::PatrolFinding> =
+            serde_json::from_str(text).expect("findings deserialize");
+
+        // Same findings run_patrol returns for the same state.
+        let mut got_keys: Vec<_> = findings.iter().map(key).collect();
+        got_keys.sort();
+        assert_eq!(
+            got_keys, expected_keys,
+            "the tool must return run_patrol's findings for the same state"
+        );
+        let stale = findings
+            .iter()
+            .find(|f| f.finding_type == "stale_link")
+            .expect("stale link beyond threshold must be reported");
+        assert_eq!(stale.severity, "warning");
+        assert_eq!(stale.spec_path, "system/stale.md");
+        let dangling = findings
+            .iter()
+            .find(|f| f.finding_type == "dangling_implementation")
+            .expect("dangling implementation must be reported");
+        assert_eq!(dangling.severity, "error");
+
+        // Zero durable rows: notification and task row counts identical
+        // before/after — the fan-out hazard the row counts pin.
+        let notifs_after = state.notifications.list_recent(1000).await.unwrap().len();
+        assert_eq!(
+            notifs_before, notifs_after,
+            "a tool call must create zero notification rows"
+        );
+        let tasks_after = state.tasks.list().await.unwrap().len();
+        assert_eq!(
+            tasks_before, tasks_after,
+            "a tool call must create zero task rows"
+        );
+        // And specifically: the seeded Admin member received nothing (the
+        // exact recipient create_notifications_for_error_findings would
+        // have written to for the error finding).
+        let admin_notifs = state
+            .notifications
+            .list_for_user(
+                &Id::new("admin1"),
+                Some(&Id::new("ws1")),
+                None,
+                None,
+                None,
+                None,
+                &[],
+                10,
+                0,
+            )
+            .await
+            .unwrap();
+        assert!(
+            admin_notifs.is_empty(),
+            "the MCP tool must not perform notification fan-out"
+        );
+    }
+
+    /// tools/list advertises the patrol tool so the accountability agent
+    /// can discover it.
+    #[tokio::test]
+    async fn mcp_tools_list_includes_spec_patrol() {
+        let (status, json) = mcp_post(
+            app(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 151,
+                "method": "tools/list"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let tools = json["result"]["tools"].as_array().unwrap();
+        assert!(
+            tools
+                .iter()
+                .any(|t| t["name"] == "gyre_spec_patrol"),
+            "must list gyre_spec_patrol tool"
+        );
     }
 
     #[tokio::test]

@@ -1907,7 +1907,9 @@ pub async fn patrol_spec_links(
     Json(req): Json<crate::spec_patrol::PatrolRequest>,
 ) -> Json<crate::spec_patrol::PatrolResponse> {
     let now = now_secs();
-    let threshold = req.stale_threshold_secs.unwrap_or(7 * 24 * 60 * 60);
+    let threshold = req
+        .stale_threshold_secs
+        .unwrap_or(crate::spec_patrol::DEFAULT_STALE_THRESHOLD_SECS);
 
     let findings = crate::spec_patrol::run_patrol(&state, now, threshold).await;
 

@@ -28,7 +28,7 @@
 # 088e7048, converting a hard CI failure into a silent grandfather. The
 # count must never rise; it must shrink as routes are moved into the
 # resolver (delete the entry when you register a route).
-FROZEN_EXEMPTION_COUNT=46
+FROZEN_EXEMPTION_COUNT=41
 # Baseline is the REAL resolver duplicate count in the non-test region of
 # abac_middleware.rs (task-171 review: the whole-file grep counted test
 # route fixtures as resolver duplicates, tripping this guard on every run

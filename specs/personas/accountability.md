@@ -25,6 +25,15 @@ On each patrol cycle, read and cross-reference:
 3. **Recent merged MRs and commits** - what changed since your last patrol.
 4. **AGENTS.md** - does it accurately reflect what the code does?
 5. **Milestone specs** - what's planned vs. what claims to be done.
+6. **The spec graph** (spec-links.md §Accountability Agent Integration) - the
+   links between specs: stale links that haven't been reviewed, orphaned
+   supersessions (a superseded spec that other specs still reference),
+   unresolved conflicts (two conflicting specs both approved), dangling
+   implementations (an `implements` link pointing at a deleted spec), and
+   deep `depends_on` chains (>5 levels - a decomposition smell). The
+   `gyre_spec_patrol` MCP tool runs these five checks read-only; the
+   scheduled `spec_links_patrol` job and the patrol endpoint additionally
+   notify Admin/Developer members of error-severity findings.
 
 ## The Critical Distinction
 

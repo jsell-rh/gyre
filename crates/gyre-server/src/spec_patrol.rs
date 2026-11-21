@@ -70,9 +70,48 @@ pub struct PatrolResponse {
 // Patrol execution
 // ---------------------------------------------------------------------------
 
+/// Default stale-link threshold: 7 days (spec-links.md §Staleness —
+/// "a link is stale if the target spec's SHA has changed and the link
+/// hasn't been reviewed within 7 days"). Shared by the HTTP handler, the
+/// scheduled job, and the MCP tool so all three surfaces agree.
+pub const DEFAULT_STALE_THRESHOLD_SECS: u64 = 7 * 24 * 60 * 60;
+
+/// Scheduled-job entry point (jobs.rs `spec_links_patrol`, task-292):
+/// run the full spec-graph patrol and fan out notifications for
+/// error-severity findings, so the patrol runs on the accountability
+/// cycle without manual invocation.
+///
+/// This performs the SAME fan-out the ABAC-gated HTTP handler
+/// (`api::specs::patrol_spec_links`) performs. The MCP tool
+/// (`gyre_spec_patrol`) deliberately wraps only the side-effect-free
+/// `run_patrol` computation — notification fan-out stays exclusively with
+/// this job and the HTTP endpoint.
+pub async fn run_job_once(state: &std::sync::Arc<AppState>) -> anyhow::Result<()> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let findings = run_patrol(state, now, DEFAULT_STALE_THRESHOLD_SECS).await;
+    let finding_count = findings.len();
+
+    // Notification fan-out for error findings (unresolved conflicts,
+    // dangling implementations): durable notification rows for
+    // Admin/Developer members plus the drifted spec's owner.
+    create_notifications_for_error_findings(state, &findings, now).await;
+
+    info!(
+        findings = finding_count,
+        "spec_links_patrol: job cycle complete"
+    );
+    Ok(())
+}
+
 /// Run all 5 spec-graph patrol checks and return findings.
 ///
 /// This function is the core logic shared by the API handler and tests.
+/// It is side-effect-free: it snapshots the links store and spec ledger,
+/// computes findings, and returns them — it never writes.
 pub async fn run_patrol(
     state: &AppState,
     now_secs: u64,

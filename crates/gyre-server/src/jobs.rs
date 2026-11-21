@@ -494,6 +494,25 @@ pub async fn start_job_registry(state: Arc<AppState>) {
         )
         .await;
 
+    // Register spec_links_patrol job (runs daily,
+    // spec-links.md §Accountability Agent Integration — task-292)
+    registry
+        .register(
+            JobDefinition {
+                name: "spec_links_patrol".to_string(),
+                description: "Runs the spec-graph accountability patrol (stale links, \
+             orphaned supersessions, unresolved conflicts, dangling implementations, \
+             deep depends_on chains) and notifies Admin/Developer members of \
+             error-severity findings (spec-links.md §Accountability Agent Integration)"
+                    .to_string(),
+                interval_secs: 86400,
+                enabled: true,
+                run_at_utc_hour: None,
+            },
+            |state| async move { crate::spec_patrol::run_job_once(&state).await },
+        )
+        .await;
+
     // Register orphaned workspace check job (runs daily,
     // user-management.md §Ownership Transfer & Reclamation)
     registry
@@ -953,5 +972,172 @@ mod tests {
         let history = state.job_registry.history("pr_hygiene_check").await;
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].status, "success");
+    }
+
+    /// task-292 (spec-links.md §Accountability Agent Integration): the
+    /// spec-graph patrol must run on the accountability cycle as a
+    /// scheduled job, not only behind manual HTTP invocation — and when
+    /// due (triggered here), it must run the real patrol AND perform the
+    /// error-finding notification fan-out. Killing directions: removing
+    /// the job registration fails the `find` below; wiring the job to
+    /// run_patrol without create_notifications_for_error_findings leaves
+    /// admin1 with zero notifications.
+    #[tokio::test]
+    async fn spec_links_patrol_job_registered_runs_patrol_and_notifies() {
+        use gyre_common::{Id, NotificationType};
+        use gyre_domain::{
+            ApprovalStatus, RepoStatus, Repository, TrustLevel, Workspace,
+            WorkspaceMembership, WorkspaceRole,
+        };
+
+        let state = test_state();
+        start_job_registry(Arc::clone(&state)).await;
+
+        let jobs = state.job_registry.list_jobs().await;
+        let job = jobs
+            .iter()
+            .find(|j| j.name == "spec_links_patrol")
+            .expect("spec_links_patrol must be registered by start_job_registry");
+        assert!(job.enabled, "the spec-links patrol job must be enabled");
+        assert_eq!(
+            job.run_at_utc_hour, None,
+            "interval-scheduled, not a wall-clock daily job"
+        );
+        assert!(job.interval_secs > 0);
+
+        // Seed a dangling implements link (error-severity finding) with
+        // resolvable workspace context and an Admin member, so the
+        // notification fan-out has a real recipient.
+        state
+            .workspaces
+            .create(&Workspace {
+                id: Id::new("ws1"),
+                tenant_id: Id::new("default"),
+                name: "ws-ws1".to_string(),
+                slug: "ws-ws1".to_string(),
+                description: None,
+                budget: None,
+                max_repos: None,
+                max_agents_per_repo: None,
+                trust_level: TrustLevel::Guided,
+                llm_model: None,
+                created_at: 1_000_000,
+                compute_target_id: None,
+            })
+            .await
+            .unwrap();
+        state
+            .repos
+            .create(&Repository {
+                id: Id::new("repo1"),
+                name: "repo-repo1".to_string(),
+                path: "/repos/repo1".to_string(),
+                workspace_id: Id::new("ws1"),
+                default_branch: "main".to_string(),
+                is_mirror: false,
+                mirror_url: None,
+                mirror_interval_secs: None,
+                last_mirror_sync: None,
+                description: None,
+                status: RepoStatus::Active,
+                created_at: 1_000_000,
+                updated_at: 1_000_000,
+                max_agents: None,
+                max_agent_iterations: None,
+                budget: None,
+            })
+            .await
+            .unwrap();
+        state
+            .workspace_memberships
+            .create(&WorkspaceMembership {
+                id: Id::new(uuid::Uuid::new_v4().to_string()),
+                user_id: Id::new("admin1"),
+                workspace_id: Id::new("ws1"),
+                role: WorkspaceRole::Admin,
+                invited_by: Id::new("admin"),
+                accepted: true,
+                accepted_at: Some(1_000_000),
+                created_at: 1_000_000,
+            })
+            .await
+            .unwrap();
+        state
+            .spec_ledger
+            .save(&crate::spec_registry::SpecLedgerEntry {
+                path: "system/impl.md".to_string(),
+                title: "Impl".to_string(),
+                owner: "user:test".to_string(),
+                kind: None,
+                current_sha: "sha1".to_string(),
+                approval_mode: "human_only".to_string(),
+                approval_status: ApprovalStatus::Pending,
+                linked_tasks: vec![],
+                linked_mrs: vec![],
+                drift_status: "clean".to_string(),
+                created_at: 1_000_000,
+                updated_at: 1_000_000,
+                repo_id: Some("repo1".to_string()),
+                workspace_id: Some("ws1".to_string()),
+            })
+            .await
+            .unwrap();
+        {
+            let mut store = state.spec_links_store.lock().await;
+            store.push(crate::spec_registry::SpecLinkEntry {
+                id: "job-dangling".to_string(),
+                source_path: "system/impl.md".to_string(),
+                source_repo_id: Some("repo1".to_string()),
+                source_sha: "src-sha".to_string(),
+                link_type: crate::spec_registry::SpecLinkType::Implements,
+                target_path: "system/deleted.md".to_string(),
+                target_repo_id: None,
+                target_display: None,
+                target_sha: Some("sha123".to_string()),
+                reason: None,
+                status: "active".to_string(),
+                created_at: 1_000_000,
+                stale_since: None,
+            });
+        }
+
+        // No manual invocation: the scheduler's own trigger path runs the
+        // registered handler.
+        state
+            .job_registry
+            .trigger("spec_links_patrol", Arc::clone(&state))
+            .await
+            .unwrap();
+        let history = state.job_registry.history("spec_links_patrol").await;
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].status, "success");
+
+        // The fan-out ran: the Admin member received the error finding as a
+        // durable notification row.
+        let notifs = state
+            .notifications
+            .list_for_user(
+                &Id::new("admin1"),
+                Some(&Id::new("ws1")),
+                None,
+                None,
+                None,
+                None,
+                &[],
+                10,
+                0,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            notifs.len(),
+            1,
+            "the scheduled patrol must notify Admin members of error findings"
+        );
+        assert_eq!(
+            notifs[0].notification_type,
+            NotificationType::SpecDriftDetected
+        );
+        assert!(notifs[0].title.contains("Spec graph patrol"));
     }
 }

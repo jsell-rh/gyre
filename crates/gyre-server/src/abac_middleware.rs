@@ -437,6 +437,15 @@ impl ResourceResolver {
                 // spec-write routes; POST derives the `write` action
                 // (`method_to_action`), so no `action_override` is needed.
                 RouteResourceMapping::api("/api/v1/patrol/spec-lifecycle", "spec", None),
+                // task-292: spec-links accountability patrol. Same treatment
+                // as the spec-lifecycle patrol above — moved out of the
+                // frozen exemption file into the resolver so the route gets
+                // real policy evaluation. Previously the exempt route served
+                // forge-wide findings plus notification fan-out to ANY
+                // authenticated principal in any tenant (the handler names
+                // no auth extractor). POST derives the `write` action, so
+                // principals without spec write access are policy-denied.
+                RouteResourceMapping::api("/api/v1/patrol/spec-links", "spec", None),
                 // ── Spec editing backend (S3.3) ────────────────────────────
                 RouteResourceMapping::api(REPOS_SPECS_ASSIST_ROUTE, "spec", Some("generate")),
                 RouteResourceMapping::api("/api/v1/repos/:id/specs/save", "spec", Some("write")),
@@ -3036,6 +3045,91 @@ pub mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    /// task-292 (spec-links.md §Accountability Agent Integration): the
+    /// spec-links patrol route moved out of the frozen ABAC exemption file
+    /// into the resolver. A principal without spec write access (ReadOnly
+    /// role, foreign tenant) must now receive a policy denial — on the old
+    /// exempt route the same call fell through the middleware with NO
+    /// policy evaluation and served forge-wide findings plus notification
+    /// fan-out. The FORBIDDEN is the killing direction: an unregistered
+    /// (or exempt) route falls through with no evaluation and returns OK.
+    /// An Admin JWT stays allowed, so the gate is a policy decision, not a
+    /// blanket deny.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn spec_links_patrol_route_gets_policy_evaluation() {
+        use crate::auth::test_helpers::{make_test_state_with_jwt, sign_test_jwt};
+
+        let state = make_test_state_with_jwt();
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current()
+                .block_on(seed_builtin_policies(&state))
+                .expect("seed built-in policies")
+        });
+        init_resolver();
+
+        async fn ok_handler() -> StatusCode {
+            StatusCode::OK
+        }
+        let app = Router::new()
+            .route("/api/v1/patrol/spec-links", post(ok_handler))
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                abac_middleware,
+            ))
+            .with_state(state);
+
+        // ReadOnly principal in a foreign tenant: policy-denied.
+        let readonly_token = sign_test_jwt(
+            &serde_json::json!({
+                "tenant_id": "tenant-other",
+                "sub": "ro-sub",
+                "preferred_username": "readonly-user",
+                "realm_access": { "roles": ["readonly"] }
+            }),
+            3600,
+        );
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/patrol/spec-links")
+                    .header("Authorization", format!("Bearer {readonly_token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "a principal without spec write access must be policy-denied"
+        );
+
+        // Admin principal: still allowed — a real policy decision.
+        let admin_token = sign_test_jwt(
+            &serde_json::json!({
+                "tenant_id": "default",
+                "sub": "admin-sub",
+                "preferred_username": "admin",
+                "realm_access": { "roles": ["admin"] }
+            }),
+            3600,
+        );
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/patrol/spec-links")
+                    .header("Authorization", format!("Bearer {admin_token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 
     #[tokio::test(flavor = "multi_thread")]
