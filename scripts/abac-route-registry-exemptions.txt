@@ -34,11 +34,7 @@
 /api/v1/repos/:id/unarchive
 /api/v1/repos/:id/views
 /api/v1/repos/:id/views/:view_id
-/api/v1/specs/:path/dependencies
-/api/v1/specs/:path/dependents
 /api/v1/specs/:path/reject
-/api/v1/specs/conflicts
-/api/v1/specs/stale-links
 /api/v1/tenants/:id/trust-anchors
 /api/v1/tenants/:id/trust-anchors/:aid
 /api/v1/users/me/judgments
