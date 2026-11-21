@@ -2070,6 +2070,75 @@
         "2. Scope — What Subgraph to Show"
       ]
     },
+    "backlog/675c0dc7be4a127cb63039f3": {
+      "file": "specs/system/spec-links.md",
+      "heading": [
+        "Spec Links & Mechanical Gates",
+        "Link Types"
+      ]
+    },
+    "backlog/ff74a147e0ca35a407836447": {
+      "file": "specs/system/spec-links.md",
+      "heading": [
+        "Spec Links & Mechanical Gates",
+        "Cross-Repo and Cross-Workspace Links"
+      ]
+    },
+    "backlog/b222f4b88e85892d669131d7": {
+      "file": "specs/system/spec-links.md",
+      "heading": [
+        "Spec Links & Mechanical Gates",
+        "Forge-Maintained Spec Graph",
+        "Link Status"
+      ]
+    },
+    "backlog/dcd440115bac4622a351c857": {
+      "file": "specs/system/spec-links.md",
+      "heading": [
+        "Spec Links & Mechanical Gates",
+        "Mechanical Gates",
+        "Approval Gates"
+      ]
+    },
+    "backlog/cb0d56cefcb50d54be0121c4": {
+      "file": "specs/system/spec-links.md",
+      "heading": [
+        "Spec Links & Mechanical Gates",
+        "Mechanical Gates",
+        "Merge Gates"
+      ]
+    },
+    "backlog/58102d3a27f920beeb3fba71": {
+      "file": "specs/system/spec-links.md",
+      "heading": [
+        "Spec Links & Mechanical Gates",
+        "Querying the Graph",
+        "API"
+      ]
+    },
+    "backlog/5e761a34ffed5b87f0b401c1": {
+      "file": "specs/system/spec-links.md",
+      "heading": [
+        "Spec Links & Mechanical Gates",
+        "Querying the Graph",
+        "UI"
+      ]
+    },
+    "backlog/ac4a8552cbca5b1333030655": {
+      "file": "specs/system/spec-links.md",
+      "heading": [
+        "Spec Links & Mechanical Gates",
+        "Accountability Agent Integration"
+      ]
+    },
+    "backlog/8772dba48e530c04a3d2f953": {
+      "file": "specs/system/spec-links.md",
+      "heading": [
+        "Spec Links & Mechanical Gates",
+        "Mechanical Gates",
+        "Cycle Detection"
+      ]
+    },
     "backlog/dba01522c9fb7fb9aa3be898": {
       "file": "specs/system/activity-dashboard.md",
       "heading": [
@@ -2927,6 +2996,31 @@
     ],
     "Spec gap spec-57c2a110e6b0a8363571ac4d / diff-scope-commit-range / 78cf53a9a787": [
       "backlog/629ddb2f3b21a81f49e78ca3"
+    ],
+    "Spec gap spec-10bdced21a063f819b1baabd / spec-links-sha-pinning / 5a915155d9bc": [
+      "backlog/675c0dc7be4a127cb63039f3"
+    ],
+    "Spec gap spec-10bdced21a063f819b1baabd / spec-links-cross-repo-resolution / 5a915155d9bc": [
+      "backlog/ff74a147e0ca35a407836447"
+    ],
+    "Spec gap spec-10bdced21a063f819b1baabd / spec-links-status-lifecycle / 5a915155d9bc": [
+      "backlog/b222f4b88e85892d669131d7"
+    ],
+    "Spec gap spec-10bdced21a063f819b1baabd / spec-links-approval-gates / 5a915155d9bc": [
+      "backlog/dcd440115bac4622a351c857",
+      "backlog/cb0d56cefcb50d54be0121c4"
+    ],
+    "Spec gap spec-10bdced21a063f819b1baabd / spec-links-graph-repo-filter / 5a915155d9bc": [
+      "backlog/58102d3a27f920beeb3fba71"
+    ],
+    "Spec gap spec-10bdced21a063f819b1baabd / spec-links-ui-link-direction / 5a915155d9bc": [
+      "backlog/5e761a34ffed5b87f0b401c1"
+    ],
+    "Spec gap spec-10bdced21a063f819b1baabd / spec-links-accountability-patrol / 5a915155d9bc": [
+      "backlog/ac4a8552cbca5b1333030655"
+    ],
+    "Spec gap spec-10bdced21a063f819b1baabd / spec-links-tenant-cycle-detection / 5a915155d9bc": [
+      "backlog/8772dba48e530c04a3d2f953"
     ],
     "Spec gap spec-b128f93cd5d035d28c8bbf7f / activity-dashboard-completion / f0cbfae7cd02": [
       "backlog/dba01522c9fb7fb9aa3be898"
