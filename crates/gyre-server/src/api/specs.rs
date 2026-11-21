@@ -4,6 +4,8 @@
 //! GET  /api/v1/specs/pending       — specs awaiting approval
 //! GET  /api/v1/specs/drifted       — specs with open drift-review tasks
 //! GET  /api/v1/specs/index         — auto-generated markdown index
+//! GET  /api/v1/specs/graph        — full spec dependency graph
+//! GET  /api/v1/specs/graph?repo={id} — one repo's specs with all outbound/inbound links
 //! GET  /api/v1/specs/stale-links   — all stale links across the tenant (TASK-019)
 //! GET  /api/v1/specs/conflicts     — all active conflicts_with links (TASK-019)
 //! GET  /api/v1/specs/:path         — single spec (URL-encoded path)
@@ -27,6 +29,7 @@ use gyre_domain::AnalyticsEvent;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+use crate::auth::AuthenticatedAgent;
 use crate::gate_executor::truncate_bytes;
 use crate::spec_registry::{
     ApprovalStatus, SpecApprovalEvent, SpecLedgerEntry, SpecLinkEntry, SpecLinkType,
@@ -1737,14 +1740,77 @@ pub async fn get_spec_links(
 
 // ---------------------------------------------------------------------------
 // GET /api/v1/specs/graph — full spec dependency graph
+// GET /api/v1/specs/graph?repo={id} — one repo's specs with all
+// outbound/inbound links (spec-links.md §Querying the Graph)
 // ---------------------------------------------------------------------------
 
-pub async fn get_spec_graph(State(state): State<Arc<AppState>>) -> Json<SpecGraphResponse> {
+/// Query parameters of the spec-graph endpoint.
+#[derive(Deserialize, Default)]
+pub struct SpecGraphQuery {
+    /// Optional repo id: restrict the graph to that repo's specs plus every
+    /// stored link touching it (outbound, same-repo inbound, and cross-repo
+    /// inbound — the declaring repo of an inbound link may be another repo
+    /// of the same tenant). Absent → the full tenant-wide graph, unchanged.
+    repo: Option<String>,
+}
+
+pub async fn get_spec_graph(
+    State(state): State<Arc<AppState>>,
+    auth: AuthenticatedAgent,
+    Query(params): Query<SpecGraphQuery>,
+) -> Result<Json<SpecGraphResponse>, ApiError> {
+    // An empty ?repo= value cannot name a repo — reject it explicitly
+    // rather than silently returning the unfiltered graph.
+    let repo_filter = match params.repo.as_deref() {
+        None => None,
+        Some("") => {
+            return Err(ApiError::BadRequest(
+                "repo query parameter must not be empty".to_string(),
+            ))
+        }
+        Some(repo) => Some(repo.to_string()),
+    };
+
+    // Resolve and validate the requested repo before filtering: an
+    // unknown id is an explicit 404, never an empty graph masquerading as
+    // a filtered one.
+    if let Some(repo_id) = &repo_filter {
+        let repo = state
+            .repos
+            .find_by_id(&Id::new(repo_id.clone()))
+            .await?
+            .ok_or_else(|| ApiError::NotFound(format!("repo '{repo_id}' not found")))?;
+        // The graph route addresses no path entity, so the ABAC
+        // middleware's scope chain cannot resolve a resource tenant for
+        // it — enforce per-handler tenant containment here: a non-system
+        // caller may only filter to a repo in their own tenant. The
+        // system principal (global token) legitimately spans tenants
+        // (builtin system-full-access) and is not restricted. An
+        // unresolvable workspace fails closed (Forbidden), never open.
+        if !auth.is_system_principal() {
+            let in_callers_tenant = state
+                .workspaces
+                .find_by_id(&repo.workspace_id)
+                .await?
+                .is_some_and(|ws| ws.tenant_id.as_str() == auth.tenant_id);
+            if !in_callers_tenant {
+                return Err(ApiError::Forbidden(format!(
+                    "repo '{repo_id}' is not in your tenant"
+                )));
+            }
+        }
+    }
+
     let all_entries = state.spec_ledger.list_all().await.unwrap_or_default();
     let links = state.spec_links_store.lock().await;
 
     let mut nodes: Vec<SpecGraphNode> = all_entries
         .iter()
+        .filter(|e| {
+            repo_filter
+                .as_deref()
+                .is_none_or(|repo| e.repo_id.as_deref() == Some(repo))
+        })
         .map(|e| SpecGraphNode {
             path: e.path.clone(),
             title: e.title.clone(),
@@ -1755,6 +1821,12 @@ pub async fn get_spec_graph(State(state): State<Arc<AppState>>) -> Json<SpecGrap
 
     let edges: Vec<SpecGraphEdge> = links
         .iter()
+        .filter(|l| {
+            repo_filter.as_deref().is_none_or(|repo| {
+                l.source_repo_id.as_deref() == Some(repo)
+                    || l.target_repo_id.as_deref() == Some(repo)
+            })
+        })
         .map(|l| SpecGraphEdge {
             source: l.source_path.clone(),
             target: l.target_path.clone(),
@@ -1764,7 +1836,50 @@ pub async fn get_spec_graph(State(state): State<Arc<AppState>>) -> Json<SpecGrap
         })
         .collect();
 
-    Json(SpecGraphResponse { nodes, edges })
+    Ok(Json(SpecGraphResponse { nodes, edges }))
+}
+
+// ---------------------------------------------------------------------------
+// Tenant scoping for the spec-graph query endpoints
+// ---------------------------------------------------------------------------
+
+/// Repo ids that belong to `tenant_id` (workspace → repo enumeration over
+/// the real stores) — the "tenant-wide" scope of the spec-graph query
+/// endpoints (spec-links.md §Querying the Graph).
+async fn tenant_repo_ids(state: &AppState, tenant_id: &str) -> Result<Vec<String>, ApiError> {
+    let workspaces = state.workspaces.list_by_tenant(&Id::new(tenant_id)).await?;
+    let mut ids = Vec::new();
+    for ws in workspaces {
+        let repos = state.repos.list_by_workspace(&ws.id).await?;
+        ids.extend(repos.into_iter().map(|r| r.id.to_string()));
+    }
+    Ok(ids)
+}
+
+/// The spec-link rows visible to `auth`: the full forge-wide store for the
+/// system principal (the global-token identity legitimately spans tenants
+/// — builtin `system-full-access`), and for every other principal only rows
+/// declared by repos in the caller's tenant. A row whose declaring repo
+/// cannot be determined (`source_repo_id` absent — legacy unscoped rows) is
+/// not attributable to any tenant and is withheld from tenant-scoped
+/// callers rather than fabricating a scope for it.
+async fn links_visible_to(
+    state: &AppState,
+    auth: &AuthenticatedAgent,
+) -> Result<Vec<SpecLinkEntry>, ApiError> {
+    let links = state.spec_links_store.lock().await.clone();
+    if auth.is_system_principal() {
+        return Ok(links);
+    }
+    let tenant_repos = tenant_repo_ids(state, &auth.tenant_id).await?;
+    Ok(links
+        .into_iter()
+        .filter(|l| {
+            l.source_repo_id
+                .as_deref()
+                .is_some_and(|repo| tenant_repos.iter().any(|r| r == repo))
+        })
+        .collect())
 }
 
 // ---------------------------------------------------------------------------
@@ -1775,6 +1890,7 @@ pub async fn get_spec_graph(State(state): State<Arc<AppState>>) -> Json<SpecGrap
 
 pub async fn get_spec_dependents(
     State(state): State<Arc<AppState>>,
+    auth: AuthenticatedAgent,
     Path(encoded_path): Path<String>,
 ) -> Result<Json<Vec<SpecLinkResponse>>, ApiError> {
     let spec_path = encoded_path;
@@ -1785,7 +1901,12 @@ pub async fn get_spec_dependents(
         )));
     }
 
-    let links = state.spec_links_store.lock().await;
+    // Tenant-scoped view: the middleware evaluates policy for the
+    // addressed spec (entity lookup → tenant isolation), and the link
+    // rows themselves are filtered to the caller's tenant so a
+    // policy-allowed caller still never receives another tenant's
+    // declared links.
+    let links = links_visible_to(&state, &auth).await?;
     let mut result: Vec<SpecLinkResponse> = links
         .iter()
         .filter(|l| {
@@ -1808,6 +1929,7 @@ pub async fn get_spec_dependents(
 
 pub async fn get_spec_dependencies(
     State(state): State<Arc<AppState>>,
+    auth: AuthenticatedAgent,
     Path(encoded_path): Path<String>,
 ) -> Result<Json<Vec<SpecLinkResponse>>, ApiError> {
     let spec_path = encoded_path;
@@ -1818,7 +1940,8 @@ pub async fn get_spec_dependencies(
         )));
     }
 
-    let links = state.spec_links_store.lock().await;
+    // Tenant-scoped view — see get_spec_dependents.
+    let links = links_visible_to(&state, &auth).await?;
     let mut result: Vec<SpecLinkResponse> = links
         .iter()
         .filter(|l| {
@@ -1838,8 +1961,14 @@ pub async fn get_spec_dependencies(
 // TASK-019: spec-links.md §Querying the Graph
 // ---------------------------------------------------------------------------
 
-pub async fn get_stale_links(State(state): State<Arc<AppState>>) -> Json<Vec<SpecLinkResponse>> {
-    let links = state.spec_links_store.lock().await;
+pub async fn get_stale_links(
+    State(state): State<Arc<AppState>>,
+    auth: AuthenticatedAgent,
+) -> Result<Json<Vec<SpecLinkResponse>>, ApiError> {
+    // Tenant-scoped view ("all stale links across the tenant"): the route
+    // addresses no entity, so the handler itself restricts the store read
+    // to the caller's tenant.
+    let links = links_visible_to(&state, &auth).await?;
     let mut result: Vec<SpecLinkResponse> = links
         .iter()
         .filter(|l| l.status == "stale")
@@ -1847,7 +1976,7 @@ pub async fn get_stale_links(State(state): State<Arc<AppState>>) -> Json<Vec<Spe
         .map(Into::into)
         .collect();
     result.sort_by(|a, b| a.id.cmp(&b.id));
-    Json(result)
+    Ok(Json(result))
 }
 
 // ---------------------------------------------------------------------------
@@ -1855,16 +1984,17 @@ pub async fn get_stale_links(State(state): State<Arc<AppState>>) -> Json<Vec<Spe
 // TASK-019: spec-links.md §Querying the Graph
 // ---------------------------------------------------------------------------
 
-pub async fn get_conflicts(State(state): State<Arc<AppState>>) -> Json<Vec<SpecLinkResponse>> {
-    // Collect conflicts_with links without holding the lock across await points.
-    let candidate_links: Vec<_> = {
-        let links = state.spec_links_store.lock().await;
-        links
-            .iter()
-            .filter(|l| l.link_type == SpecLinkType::ConflictsWith)
-            .cloned()
-            .collect()
-    };
+pub async fn get_conflicts(
+    State(state): State<Arc<AppState>>,
+    auth: AuthenticatedAgent,
+) -> Result<Json<Vec<SpecLinkResponse>>, ApiError> {
+    // Tenant-scoped view — see get_stale_links. Collects conflicts_with
+    // links without holding the store lock across await points.
+    let candidate_links: Vec<_> = links_visible_to(&state, &auth)
+        .await?
+        .into_iter()
+        .filter(|l| l.link_type == SpecLinkType::ConflictsWith)
+        .collect();
 
     // An "active conflict" is a conflicts_with link where both specs are approved.
     // spec-links.md §Link Status: conflicted = both specs approved (violation).
@@ -1889,7 +2019,7 @@ pub async fn get_conflicts(State(state): State<Arc<AppState>>) -> Json<Vec<SpecL
         }
     }
     result.sort_by(|a, b| a.id.cmp(&b.id));
-    Json(result)
+    Ok(Json(result))
 }
 
 // ---------------------------------------------------------------------------
@@ -4966,6 +5096,429 @@ specs:
         assert_eq!(edges[0]["link_type"], "implements");
         assert_eq!(edges[0]["source"], "system/b.md");
         assert_eq!(edges[0]["target"], "system/a.md");
+    }
+
+    // -----------------------------------------------------------------------
+    // GET /api/v1/specs/graph?repo={id} (task-290, spec-links.md
+    // §Querying the Graph) and tenant scoping of the four query endpoints
+    // -----------------------------------------------------------------------
+
+    /// Seed a workspace in `tenant`, a repo under it, and an API-key user
+    /// bound to `tenant`, all into ONE shared state (multi-tenant tests need
+    /// a single forge-wide store for the leak assertions to be meaningful).
+    /// Returns (repo_id, raw_api_key).
+    async fn seed_tenant_into(
+        state: &std::sync::Arc<crate::AppState>,
+        tenant: &str,
+        tag: &str,
+    ) -> (String, String) {
+        use gyre_domain::{Repository, User, Workspace};
+
+        let ws = Workspace::new(
+            gyre_common::Id::new(format!("ws-{tag}")),
+            gyre_common::Id::new(tenant),
+            format!("Workspace {tag}"),
+            format!("ws-{tag}"),
+            0,
+        );
+        state.workspaces.create(&ws).await.unwrap();
+        let repo_id = format!("repo-{tag}");
+        state
+            .repos
+            .create(&Repository::new(
+                gyre_common::Id::new(&repo_id),
+                ws.id.clone(),
+                format!("repo {tag}"),
+                format!("/tmp/spec-graph/{tag}.git"),
+                0,
+            ))
+            .await
+            .unwrap();
+
+        let user = User {
+            tenant_id: Some(gyre_common::Id::new(tenant)),
+            ..User::new(
+                gyre_common::Id::new(format!("user-{tag}")),
+                format!("ext-{tag}"),
+                format!("user-{tag}"),
+                0,
+            )
+        };
+        state.users.create(&user).await.unwrap();
+        let raw_key = format!("key-{tag}");
+        state
+            .api_keys
+            .create(&crate::auth::hash_api_key(&raw_key), &user.id, "test-key")
+            .await
+            .unwrap();
+
+        (repo_id, raw_key)
+    }
+
+    fn ledger_entry(path: &str, repo_id: Option<String>, status: ApprovalStatus) -> SpecLedgerEntry {
+        SpecLedgerEntry {
+            path: path.to_string(),
+            title: path.to_string(),
+            owner: "user:jsell".to_string(),
+            kind: None,
+            current_sha: "a".repeat(40),
+            approval_mode: "human_only".to_string(),
+            approval_status: status,
+            linked_tasks: vec![],
+            linked_mrs: vec![],
+            drift_status: "unknown".to_string(),
+            created_at: 1700000000,
+            updated_at: 1700000000,
+            repo_id,
+            workspace_id: None,
+        }
+    }
+
+    fn link_entry(
+        id: &str,
+        source_repo_id: Option<String>,
+        source_path: &str,
+        target_repo_id: Option<String>,
+        target_path: &str,
+        link_type: crate::spec_registry::SpecLinkType,
+        status: &str,
+    ) -> crate::spec_registry::SpecLinkEntry {
+        crate::spec_registry::SpecLinkEntry {
+            id: id.to_string(),
+            source_path: source_path.to_string(),
+            source_repo_id,
+            source_sha: "src-sha".to_string(),
+            link_type,
+            target_path: target_path.to_string(),
+            target_repo_id,
+            target_display: None,
+            target_sha: None,
+            reason: None,
+            status: status.to_string(),
+            created_at: 1700000000,
+            stale_since: None,
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn get_spec_graph_repo_filter_returns_repo_nodes_and_inbound_edges() {
+        use crate::spec_registry::SpecLinkType;
+
+        // One tenant, two repos: repo-1's spec has an inbound depends_on
+        // link declared by repo-2's spec (spec-links.md §Querying the Graph:
+        // "Specs for one repo with all outbound/inbound links").
+        let state = test_state();
+        let (repo1, key) = seed_tenant_into(&state, "default", "one").await;
+        let repo2 = "repo-two".to_string();
+        let ws2 = gyre_domain::Workspace::new(
+            gyre_common::Id::new("ws-two"),
+            gyre_common::Id::new("default"),
+            "Workspace two".to_string(),
+            "ws-two".to_string(),
+            0,
+        );
+        state.workspaces.create(&ws2).await.unwrap();
+        state
+            .repos
+            .create(&gyre_domain::Repository::new(
+                gyre_common::Id::new(&repo2),
+                ws2.id.clone(),
+                "repo two".to_string(),
+                "/tmp/spec-graph/two.git".to_string(),
+                0,
+            ))
+            .await
+            .unwrap();
+        let app = crate::api::api_router().with_state(state.clone());
+
+        state
+            .spec_ledger
+            .save(&ledger_entry(
+                "system/a.md",
+                Some(repo1.clone()),
+                ApprovalStatus::Approved,
+            ))
+            .await
+            .unwrap();
+        state
+            .spec_ledger
+            .save(&ledger_entry(
+                "system/b.md",
+                Some(repo2.clone()),
+                ApprovalStatus::Pending,
+            ))
+            .await
+            .unwrap();
+        state
+            .spec_links_store
+            .lock()
+            .await
+            .push(link_entry(
+                "b-depends-a",
+                Some(repo2.clone()),
+                "system/b.md",
+                Some(repo1.clone()),
+                "system/a.md",
+                SpecLinkType::DependsOn,
+                "active",
+            ));
+
+        // ?repo=repo-1: only repo-1's spec nodes, and the repo-2 inbound
+        // edge is present.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/specs/graph?repo={repo1}"))
+                    .header("authorization", format!("Bearer {key}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let nodes = json["nodes"].as_array().unwrap();
+        assert_eq!(nodes.len(), 1, "only repo-1's specs appear as nodes");
+        assert_eq!(nodes[0]["path"], "system/a.md");
+        let edges = json["edges"].as_array().unwrap();
+        assert_eq!(edges.len(), 1, "the repo-2 inbound edge is present");
+        assert_eq!(edges[0]["source"], "system/b.md");
+        assert_eq!(edges[0]["target"], "system/a.md");
+
+        // No parameter: the full graph, unchanged.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/specs/graph")
+                    .header("authorization", format!("Bearer {key}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["nodes"].as_array().unwrap().len(), 2);
+        assert_eq!(json["edges"].as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn get_spec_graph_unknown_or_empty_repo_is_an_explicit_error() {
+        let state = test_state();
+        let (_repo, key) = seed_tenant_into(&state, "default", "u1").await;
+        let app = crate::api::api_router().with_state(state);
+
+        // Unknown repo id → 404, never an empty graph.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/specs/graph?repo=no-such-repo")
+                    .header("authorization", format!("Bearer {key}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        // Empty value → 400 (cannot name a repo).
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/specs/graph?repo=")
+                    .header("authorization", format!("Bearer {key}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn get_spec_graph_repo_filter_denies_cross_tenant_repo() {
+        // A caller in tenant "default" filtering to a repo of tenant
+        // "other" is a targeted cross-tenant read — denied (403), not
+        // served.
+        let state = test_state();
+        let (_repo_a, key_default) = seed_tenant_into(&state, "default", "c1").await;
+        let (repo_other, _key_other) = seed_tenant_into(&state, "other", "c2").await;
+        let app = crate::api::api_router().with_state(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/specs/graph?repo={repo_other}"))
+                    .header("authorization", format!("Bearer {key_default}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn spec_graph_query_endpoints_do_not_leak_other_tenants_links() {
+        use crate::spec_registry::SpecLinkType;
+
+        // Tenant A ("default"): a stale link and an approved-vs-approved
+        // conflict, both declared by tenant A's repo. Tenant B ("other"):
+        // one stale link declared by tenant B's repo, plus a spec with an
+        // inbound link from tenant A's repo. One shared forge-wide store:
+        // the assertions would be vacuous against separate states.
+        let state = test_state();
+        let (repo_a, _key_a) = seed_tenant_into(&state, "default", "la").await;
+        let (repo_b, key_b) = seed_tenant_into(&state, "other", "lb").await;
+        let app_b = crate::api::api_router().with_state(state.clone());
+
+        for (path, repo) in [
+            ("system/alpha.md", &repo_a),
+            ("system/beta.md", &repo_a),
+        ] {
+            state
+                .spec_ledger
+                .save(&ledger_entry(path, Some(repo.clone()), ApprovalStatus::Approved))
+                .await
+                .unwrap();
+        }
+        state
+            .spec_ledger
+            .save(&ledger_entry(
+                "system/gamma.md",
+                Some(repo_b.clone()),
+                ApprovalStatus::Approved,
+            ))
+            .await
+            .unwrap();
+
+        let mut store = state.spec_links_store.lock().await;
+        store.push(link_entry(
+            "stale-a",
+            Some(repo_a.clone()),
+            "system/alpha.md",
+            Some(repo_a.clone()),
+            "system/beta.md",
+            SpecLinkType::DependsOn,
+            "stale",
+        ));
+        store.push(link_entry(
+            "conflict-a",
+            Some(repo_a.clone()),
+            "system/alpha.md",
+            Some(repo_a.clone()),
+            "system/beta.md",
+            SpecLinkType::ConflictsWith,
+            "active",
+        ));
+        // Tenant A declares an inbound dependency on tenant B's spec.
+        store.push(link_entry(
+            "a-depends-b",
+            Some(repo_a.clone()),
+            "system/alpha.md",
+            Some(repo_b.clone()),
+            "system/gamma.md",
+            SpecLinkType::DependsOn,
+            "active",
+        ));
+        drop(store);
+        state
+            .spec_links_store
+            .lock()
+            .await
+            .push(link_entry(
+                "stale-b",
+                Some(repo_b.clone()),
+                "system/gamma.md",
+                Some(repo_b.clone()),
+                "system/gamma.md",
+                SpecLinkType::Implements,
+                "stale",
+            ));
+
+        // stale-links: tenant B sees only its own stale link.
+        let resp = app_b
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/specs/stale-links")
+                    .header("authorization", format!("Bearer {key_b}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let arr = body_json(resp).await.as_array().unwrap().clone();
+        assert_eq!(arr.len(), 1, "tenant B sees only its own stale link");
+        assert_eq!(arr[0]["id"], "stale-b");
+
+        // conflicts: tenant A's active conflict is not tenant B's.
+        let resp = app_b
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/specs/conflicts")
+                    .header("authorization", format!("Bearer {key_b}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let arr = body_json(resp).await.as_array().unwrap().clone();
+        assert!(arr.is_empty(), "tenant B sees no tenant A conflicts");
+
+        // dependents of tenant B's spec: the inbound link declared by
+        // tenant A's repo is tenant A's row and must not be returned.
+        let resp = app_b
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/specs/system%2Fgamma.md/dependents")
+                    .header("authorization", format!("Bearer {key_b}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let arr = body_json(resp).await.as_array().unwrap().clone();
+        assert_eq!(
+            arr.len(),
+            1,
+            "dependents of tenant B's spec: only tenant B's declared inbound link"
+        );
+        assert_eq!(arr[0]["id"], "stale-b");
+        assert!(
+            arr.iter().all(|l| l["id"] != "a-depends-b"),
+            "tenant A's declared inbound link is not returned to tenant B"
+        );
+
+        // dependencies of tenant B's spec: same containment.
+        let resp = app_b
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/specs/system%2Fgamma.md/dependencies")
+                    .header("authorization", format!("Bearer {key_b}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let arr = body_json(resp).await.as_array().unwrap().clone();
+        assert_eq!(
+            arr.len(),
+            1,
+            "dependencies of tenant B's spec: only tenant B's declared links"
+        );
+        assert_eq!(arr[0]["id"], "stale-b");
+        assert!(
+            arr.iter().all(|l| l["id"] != "a-depends-b"),
+            "tenant A's declared link is not returned to tenant B"
+        );
     }
 
     // -----------------------------------------------------------------------
