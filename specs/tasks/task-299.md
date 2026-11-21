@@ -3,7 +3,7 @@ title: "Scope MCP agents and queue resources to callers"
 spec_ref: "Spec gap spec-41a92c20354c6a108e6074e3 / mcp-resource-knowledge-boundary / 4a3f940495a8"
 depends_on: []
 progress: not-started
-commits: []
+commits: ["bd5f3a22c761155c05954e5401cea4eabbfbadcd"]
 ---
 
 ## Required behavior
