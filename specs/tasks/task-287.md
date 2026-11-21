@@ -3,7 +3,7 @@ title: "Spec Links — cross-repo link validation: same-workspace format resolut
 spec_ref: "Spec gap spec-10bdced21a063f819b1baabd / spec-links-cross-repo-resolution / 5a915155d9bc"
 depends_on: []
 progress: ready-for-review
-commits: ["e3270d273935b77b6b1c71df894320b232bde919", "5afb12e079b522701b1e24a263634a5500d8b205"]
+commits: ["5afb12e079b522701b1e24a263634a5500d8b205", "e3270d273935b77b6b1c71df894320b232bde919", "16d08a2bcdbe32aacc49407aff2663d2e32601cf"]
 ---
 
 ## Required behavior
@@ -95,6 +95,18 @@ api/repos.rs sync_specs + sync_mirror, mirror_sync) via `sync_spec_ledger`:
    literal `"default"` tenant lookup is removed. Unresolvable scopes skip and
    log.
 
+### Repair of the retained verification finding
+
+The retained verification run (`bash /tmp/stage/checks.sh`, candidate
+aa58cd59) failed its clippy gate on exactly one task-introduced lint:
+`spec_registry.rs:4231: clippy::too_many_arguments (11/7)` on the
+`cross_workspace_link_denied_without_read_access_stays_unresolved` test helper
+`async fn sync_a`. Fixed in 16d08a2b by bundling the helper's shared port
+references into a local `SyncCtx` struct (behavior-preserving mechanical
+refactor; same `sync_spec_ledger` call with the same arguments at both call
+sites). The web-build warnings in that log tail are pre-existing baseline
+noise; the failing lint was the clippy error line above them.
+
 ### Test evidence
 
 Six tests cover the acceptance criteria (all exercise real git repos and real
@@ -110,11 +122,18 @@ mem-backed port adapters; none stub the validators):
   (AC 1 staleness half + missing-path stays unresolved)
 - `spec_link_staleness::tests::staleness_does_not_flip_access_denied_link_active` (AC 2 staleness half)
 
-`cargo check -p gyre-server --tests` is clean and the repo's mechanical checks
-pass (fabricated-scope-defaults, scope-literal-defaults, byte-slice-truncation,
-inert-enforcement, relative-path-defaults, lossy-secret-conversion,
-fail-open-ref-resolution). Local execution of the gyre-server test binary is
-blocked by the 4 GiB build wrapper; the independent verifier must run
-`cargo test -p gyre-server --lib spec_registry::tests::cross` and
-`cargo test -p gyre-server --lib spec_link_staleness::tests::staleness`
-(evidence recorded under /tmp/stage/review-evidence).
+Focused probes run in this assignment (evidence under
+/tmp/stage/review-evidence): `cargo check -p gyre-server --tests` clean
+(cargo-check-gyre-server-tests.log, exit 0); `cargo clippy -p gyre-server
+--all-targets` exit 0 with no `too_many_arguments` remaining in
+spec_registry.rs — every remaining warning in the log is pre-existing at base
+f6115241 and outside every hunk this task changed (verified per hunk range:
+audit.rs:187, constraint_check.rs, git_http.rs:5098 `process_breaking_changes`
+exists at base, merge_processor.rs:1723, otlp_receiver.rs:615,
+explorer_ws.rs:2697, spec_registry.rs:739/745/2682/2748 unchanged lines).
+
+Local execution of the gyre-server test binary is blocked by the 4 GiB build
+wrapper; the independent verifier must run:
+
+- `cargo test -p gyre-server --lib spec_registry::tests::cross`
+- `cargo test -p gyre-server --lib spec_link_staleness::tests::staleness`
