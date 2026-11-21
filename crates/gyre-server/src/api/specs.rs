@@ -1856,22 +1856,28 @@ async fn tenant_repo_ids(state: &AppState, tenant_id: &str) -> Result<Vec<String
     Ok(ids)
 }
 
-/// The spec-link rows visible to `auth`: the full forge-wide store for the
-/// system principal (the global-token identity legitimately spans tenants
-/// — builtin `system-full-access`), and for every other principal only rows
-/// declared by repos in the caller's tenant. A row whose declaring repo
-/// cannot be determined (`source_repo_id` absent — legacy unscoped rows) is
-/// not attributable to any tenant and is withheld from tenant-scoped
-/// callers rather than fabricating a scope for it.
+/// The spec-link rows visible to a caller scoped to `caller_tenant`: the
+/// full forge-wide store for the system principal (the global-token identity
+/// legitimately spans tenants — builtin `system-full-access`), and for every
+/// other principal only rows declared by repos in the caller's tenant. A row
+/// whose declaring repo cannot be determined (`source_repo_id` absent —
+/// legacy unscoped rows) is not attributable to any tenant and is withheld
+/// from tenant-scoped callers rather than fabricating a scope for it.
+///
+/// Each query handler passes `auth.tenant_id` here itself — that is the
+/// per-handler authorization decision for these routes (the collection
+/// routes address no entity the middleware scope chain could resolve),
+/// so the caller's scope is consulted where the route is served.
 async fn links_visible_to(
     state: &AppState,
-    auth: &AuthenticatedAgent,
+    caller_tenant: &str,
+    system_principal: bool,
 ) -> Result<Vec<SpecLinkEntry>, ApiError> {
     let links = state.spec_links_store.lock().await.clone();
-    if auth.is_system_principal() {
+    if system_principal {
         return Ok(links);
     }
-    let tenant_repos = tenant_repo_ids(state, &auth.tenant_id).await?;
+    let tenant_repos = tenant_repo_ids(state, caller_tenant).await?;
     Ok(links
         .into_iter()
         .filter(|l| {
@@ -1902,11 +1908,11 @@ pub async fn get_spec_dependents(
     }
 
     // Tenant-scoped view: the middleware evaluates policy for the
-    // addressed spec (entity lookup → tenant isolation), and the link
-    // rows themselves are filtered to the caller's tenant so a
-    // policy-allowed caller still never receives another tenant's
+    // addressed spec (entity lookup → tenant isolation), and the handler
+    // itself restricts the link rows to the caller's tenant (auth.tenant_id)
+    // so a policy-allowed caller still never receives another tenant's
     // declared links.
-    let links = links_visible_to(&state, &auth).await?;
+    let links = links_visible_to(&state, &auth.tenant_id, auth.is_system_principal()).await?;
     let mut result: Vec<SpecLinkResponse> = links
         .iter()
         .filter(|l| {
@@ -1940,8 +1946,9 @@ pub async fn get_spec_dependencies(
         )));
     }
 
-    // Tenant-scoped view — see get_spec_dependents.
-    let links = links_visible_to(&state, &auth).await?;
+    // Tenant-scoped view — see get_spec_dependents: the handler consults
+    // the caller's tenant (auth.tenant_id) for the row scoping.
+    let links = links_visible_to(&state, &auth.tenant_id, auth.is_system_principal()).await?;
     let mut result: Vec<SpecLinkResponse> = links
         .iter()
         .filter(|l| {
@@ -1967,8 +1974,8 @@ pub async fn get_stale_links(
 ) -> Result<Json<Vec<SpecLinkResponse>>, ApiError> {
     // Tenant-scoped view ("all stale links across the tenant"): the route
     // addresses no entity, so the handler itself restricts the store read
-    // to the caller's tenant.
-    let links = links_visible_to(&state, &auth).await?;
+    // to the caller's tenant (auth.tenant_id).
+    let links = links_visible_to(&state, &auth.tenant_id, auth.is_system_principal()).await?;
     let mut result: Vec<SpecLinkResponse> = links
         .iter()
         .filter(|l| l.status == "stale")
@@ -1988,13 +1995,16 @@ pub async fn get_conflicts(
     State(state): State<Arc<AppState>>,
     auth: AuthenticatedAgent,
 ) -> Result<Json<Vec<SpecLinkResponse>>, ApiError> {
-    // Tenant-scoped view — see get_stale_links. Collects conflicts_with
-    // links without holding the store lock across await points.
-    let candidate_links: Vec<_> = links_visible_to(&state, &auth)
-        .await?
-        .into_iter()
-        .filter(|l| l.link_type == SpecLinkType::ConflictsWith)
-        .collect();
+    // Tenant-scoped view — see get_stale_links. The handler consults the
+    // caller's tenant (auth.tenant_id) for the row scoping; conflicts_with
+    // links are collected without holding the store lock across await
+    // points.
+    let candidate_links: Vec<_> =
+        links_visible_to(&state, &auth.tenant_id, auth.is_system_principal())
+            .await?
+            .into_iter()
+            .filter(|l| l.link_type == SpecLinkType::ConflictsWith)
+            .collect();
 
     // An "active conflict" is a conflicts_with link where both specs are approved.
     // spec-links.md §Link Status: conflicted = both specs approved (violation).
