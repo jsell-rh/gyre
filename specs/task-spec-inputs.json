@@ -2238,6 +2238,15 @@
         "Architecture & Engineering Standards",
         "API"
       ]
+    },
+    "backlog/c3a39b320325eff390c4b56c": {
+      "file": "specs/system/explorer-canvas.md",
+      "heading": [
+        "Explorer Canvas",
+        "Design",
+        "Lens Definitions",
+        "Structural (default)"
+      ]
     }
   },
   "bindings": {
@@ -3078,6 +3087,9 @@
     ],
     "Spec gap spec-f907eda3bd014fe546b838e2 / websocket-agent-transport / 4156114b8040": [
       "backlog/5e7a44c5f15c34d70101b959"
+    ],
+    "Spec gap spec-82658b0b4e08c1502a5f0793 / structural-metrics-verification / b3cd47ade570": [
+      "backlog/c3a39b320325eff390c4b56c"
     ]
   }
 }
