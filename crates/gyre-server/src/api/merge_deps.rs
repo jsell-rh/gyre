@@ -47,6 +47,7 @@ impl From<gyre_domain::MergeRequestDependency> for DependencyDetailResponse {
             gyre_domain::DependencySource::Explicit => "explicit",
             gyre_domain::DependencySource::BranchLineage => "branch-lineage",
             gyre_domain::DependencySource::AgentDeclared => "agent-declared",
+            gyre_domain::DependencySource::DependencyGraph => "dependency-graph",
         };
         Self {
             mr_id: dep.target_mr_id.to_string(),
@@ -363,6 +364,7 @@ pub async fn get_queue_graph(
                             gyre_domain::DependencySource::Explicit => "explicit",
                             gyre_domain::DependencySource::BranchLineage => "branch-lineage",
                             gyre_domain::DependencySource::AgentDeclared => "agent-declared",
+                            gyre_domain::DependencySource::DependencyGraph => "dependency-graph",
                         };
                         GraphDependencyEdge {
                             mr_id: d.target_mr_id.to_string(),
