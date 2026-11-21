@@ -5155,7 +5155,11 @@ specs:
         (repo_id, raw_key)
     }
 
-    fn ledger_entry(path: &str, repo_id: Option<String>, status: ApprovalStatus) -> SpecLedgerEntry {
+    fn ledger_entry(
+        path: &str,
+        repo_id: Option<String>,
+        status: ApprovalStatus,
+    ) -> SpecLedgerEntry {
         SpecLedgerEntry {
             path: path.to_string(),
             title: path.to_string(),
@@ -5249,23 +5253,20 @@ specs:
             ))
             .await
             .unwrap();
-        state
-            .spec_links_store
-            .lock()
-            .await
-            .push(link_entry(
-                "b-depends-a",
-                Some(repo2.clone()),
-                "system/b.md",
-                Some(repo1.clone()),
-                "system/a.md",
-                SpecLinkType::DependsOn,
-                "active",
-            ));
+        state.spec_links_store.lock().await.push(link_entry(
+            "b-depends-a",
+            Some(repo2.clone()),
+            "system/b.md",
+            Some(repo1.clone()),
+            "system/a.md",
+            SpecLinkType::DependsOn,
+            "active",
+        ));
 
         // ?repo=repo-1: only repo-1's spec nodes, and the repo-2 inbound
         // edge is present.
         let resp = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .uri(format!("/api/v1/specs/graph?repo={repo1}"))
@@ -5373,13 +5374,14 @@ specs:
         let (repo_b, key_b) = seed_tenant_into(&state, "other", "lb").await;
         let app_b = crate::api::api_router().with_state(state.clone());
 
-        for (path, repo) in [
-            ("system/alpha.md", &repo_a),
-            ("system/beta.md", &repo_a),
-        ] {
+        for (path, repo) in [("system/alpha.md", &repo_a), ("system/beta.md", &repo_a)] {
             state
                 .spec_ledger
-                .save(&ledger_entry(path, Some(repo.clone()), ApprovalStatus::Approved))
+                .save(&ledger_entry(
+                    path,
+                    Some(repo.clone()),
+                    ApprovalStatus::Approved,
+                ))
                 .await
                 .unwrap();
         }
@@ -5423,19 +5425,15 @@ specs:
             "active",
         ));
         drop(store);
-        state
-            .spec_links_store
-            .lock()
-            .await
-            .push(link_entry(
-                "stale-b",
-                Some(repo_b.clone()),
-                "system/gamma.md",
-                Some(repo_b.clone()),
-                "system/gamma.md",
-                SpecLinkType::Implements,
-                "stale",
-            ));
+        state.spec_links_store.lock().await.push(link_entry(
+            "stale-b",
+            Some(repo_b.clone()),
+            "system/gamma.md",
+            Some(repo_b.clone()),
+            "system/gamma.md",
+            SpecLinkType::Implements,
+            "stale",
+        ));
 
         // stale-links: tenant B sees only its own stale link.
         let resp = app_b
