@@ -3,7 +3,7 @@ title: "Activity Dashboard completion: real-time durable feed with time-period q
 spec_ref: "Spec gap spec-b128f93cd5d035d28c8bbf7f / activity-dashboard-completion / f0cbfae7cd02"
 depends_on: []
 progress: ready-for-review
-commits: ["4986339d71637c9161f7c09f367b2ca691f64f4c", "e4f941a12e393bdf00aedca3755f92a934c5b36f", "7410c3276e26a03ac2d686e54567b0e02ba8ac4f"]
+commits: ["7410c32759cff9c8930fbcc759e89046cc5c6184", "e4f941a12e393bdf00aedca3755f92a934c5b36f", "4986339d71637c9161f7c09f367b2ca691f64f4c"]
 ---
 
 ## Required behavior
