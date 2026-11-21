@@ -7239,7 +7239,11 @@ specs:
         assert_eq!(resp.status(), StatusCode::OK);
         let json = body_json(resp).await;
         let arr = json.as_array().unwrap();
-        assert_eq!(arr.len(), 1, "conflicts must list exactly the conflicted link");
+        assert_eq!(
+            arr.len(),
+            1,
+            "conflicts must list exactly the conflicted link"
+        );
         assert_eq!(arr[0]["id"], "link-cw");
         assert_eq!(arr[0]["status"], "conflicted");
 

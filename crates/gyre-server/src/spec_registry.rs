@@ -1469,7 +1469,10 @@ pub(crate) async fn evaluate_link_status(
     // target's repo is the explicit cross-repo target when set, else the
     // source's repo (same-repo links resolve within the source repo).
     if let Some(repos) = repos {
-        let repo_id = link.target_repo_id.as_ref().or(link.source_repo_id.as_ref());
+        let repo_id = link
+            .target_repo_id
+            .as_ref()
+            .or(link.source_repo_id.as_ref());
         if let Some(repo_id) = repo_id {
             if let Ok(Some(repo)) = repos.find_by_id(&gyre_common::Id::new(repo_id)).await {
                 if matches!(
@@ -3936,7 +3939,10 @@ specs:
             post_push[0].status, "active",
             "pinned SHA matches the ledger at push time — link must be active"
         );
-        assert_eq!(post_push[0].target_sha.as_deref(), Some(parent_blob.as_str()));
+        assert_eq!(
+            post_push[0].target_sha.as_deref(),
+            Some(parent_blob.as_str())
+        );
 
         // ── Restart: fresh store loaded from the durable repo. ──
         let restarted_store: SpecLinksStore = Arc::new(Mutex::new(Vec::new()));
@@ -4823,7 +4829,10 @@ specs:
         {
             let links: Vec<SpecLinkEntry> = links_store.lock().await.clone();
             let l = links.iter().find(|l| l.id == "link-inbound").unwrap();
-            assert_eq!(l.status, "active", "declared target must keep the link active");
+            assert_eq!(
+                l.status, "active",
+                "declared target must keep the link active"
+            );
         }
 
         // Push the removal: B's manifest no longer declares system/b.md.

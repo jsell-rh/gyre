@@ -56,9 +56,12 @@ pub async fn run_once(state: &Arc<AppState>) -> anyhow::Result<()> {
         // including stale/broken/conflicted, is RE-CHECKED — a link whose
         // defining condition has ceased transitions back per the normal
         // active/stale rules instead of being skipped forever.
-        let new_status =
-            crate::spec_registry::evaluate_link_status(&state.spec_ledger, Some(&state.repos), link)
-                .await;
+        let new_status = crate::spec_registry::evaluate_link_status(
+            &state.spec_ledger,
+            Some(&state.repos),
+            link,
+        )
+        .await;
 
         if new_status == link.status {
             // No transition — stale_since is preserved (not re-stamped).
@@ -891,8 +894,7 @@ mod tests {
         // is still health-evaluated (task-288): with the target present in
         // the ledger, the link stays active; it can be broken (target gone)
         // or conflicted (both endpoints approved) without any pin.
-        let target =
-            make_ledger_entry("system/target.md", "some_sha", ApprovalStatus::Approved);
+        let target = make_ledger_entry("system/target.md", "some_sha", ApprovalStatus::Approved);
         state.spec_ledger.save(&target).await.unwrap();
 
         let link = make_link(
@@ -930,10 +932,7 @@ mod tests {
             std::fs::create_dir_all(full.parent().unwrap()).unwrap();
             std::fs::write(&full, content).unwrap();
         }
-        for args in [
-            vec!["add", "-A"],
-            vec!["commit", "-m", "update"],
-        ] {
+        for args in [vec!["add", "-A"], vec!["commit", "-m", "update"]] {
             let out = std::process::Command::new("git")
                 .args(&args)
                 .current_dir(path)
@@ -998,12 +997,7 @@ mod tests {
                 ("specs/system/b.md", "# B\n"),
             ],
         );
-        let repo_b = make_named_repo(
-            "repo-b",
-            "repo-b",
-            "ws1",
-            dir.path().to_str().unwrap(),
-        );
+        let repo_b = make_named_repo("repo-b", "repo-b", "ws1", dir.path().to_str().unwrap());
         state.repos.create(&repo_b).await.unwrap();
 
         // Target present in the ledger at the pinned SHA — but the ledger
@@ -1033,7 +1027,10 @@ mod tests {
         {
             let store = state.spec_links_store.lock().await;
             let l = store.iter().find(|l| l.id == "link-manifest").unwrap();
-            assert_eq!(l.status, "active", "declared target must keep the link active");
+            assert_eq!(
+                l.status, "active",
+                "declared target must keep the link active"
+            );
         }
 
         // Push the removal: B's manifest no longer declares system/b.md
@@ -1101,12 +1098,7 @@ mod tests {
                 ("specs/system/b.md", "# B\n"),
             ],
         );
-        let repo_b = make_named_repo(
-            "repo-b",
-            "repo-b",
-            "ws1",
-            dir.path().to_str().unwrap(),
-        );
+        let repo_b = make_named_repo("repo-b", "repo-b", "ws1", dir.path().to_str().unwrap());
         state.repos.create(&repo_b).await.unwrap();
 
         // Deprecated via supersedes approval — but still in the manifest.
