@@ -1800,7 +1800,10 @@ serde = "1.0"
         }"#;
         let deps = crate::git_http::detect_package_json_deps(json);
         assert_eq!(deps.len(), 2);
-        assert_eq!(deps[0].0, "https://gyre.example.com/ws/repo-b.git");
+        // Git URL references are stored verbatim (matching the pyproject
+        // convention); repo_name_from_reference strips the scheme/`.git`
+        // suffix when matching known repos.
+        assert_eq!(deps[0].0, "git+https://gyre.example.com/ws/repo-b.git");
         assert_eq!(deps[0].1, Some("v1.2".to_string()));
         assert_eq!(deps[1].0, "git+ssh://git@gyre.example.com/ws/repo-c.git");
         assert_eq!(deps[1].1, None);

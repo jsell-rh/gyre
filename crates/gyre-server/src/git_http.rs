@@ -10104,36 +10104,33 @@ specs:
         // Tip 1: manifests and contracts referencing repo-b (known), repo-c
         // (not yet created), and repo-d only in non-URL positions (must
         // create no edge).
-        let sha1 = make_commit(
-            &repo_path_str,
-            &[
-                (
-                    "Cargo.toml",
-                    "[package]\nname = \"repo-a\"\nversion = \"0.1.0\"\n\n[dependencies]\nrepo-c = { git = \"https://gyre.example.com/proj-1/repo-c.git\" }\n".to_string(),
-                ),
-                (
-                    "crates/member/Cargo.toml",
-                    "[package]\nname = \"member\"\n\n[dependencies]\nrepo-b = { path = \"../../repo-b\" }\n".to_string(),
-                ),
-                (
-                    "package.json",
-                    "{\n  \"name\": \"repo-a\",\n  \"dependencies\": {\n    \"repo-b\": \"git+https://gyre.example.com/proj-1/repo-b.git\"\n  }\n}\n".to_string(),
-                ),
-                (
-                    "pyproject.toml",
-                    "[project]\nname = \"repo-a\"\ndependencies = [\n    \"repo-b @ git+https://gyre.example.com/proj-1/repo-b.git\",\n]\n".to_string(),
-                ),
-                (
-                    "api/openapi.yaml",
-                    "openapi: \"3.0.0\"\ninfo:\n  title: repo-a API\n  description: Calls repo-d for extra features\nservers:\n  - url: https://gyre.example.com/proj-1/repo-b/api/v1\n".to_string(),
-                ),
-                (
-                    "mcp.json",
-                    "{\n  \"mcpServers\": {\n    \"billing\": {\n      \"url\": \"https://gyre.example.com/proj-1/repo-b/mcp\",\n      \"description\": \"repo-d tools are not referenced here\"\n    }\n  }\n}\n".to_string(),
-                ),
-            ],
-        )
-        .await;
+        let tip_files = vec![
+            (
+                "Cargo.toml",
+                "[package]\nname = \"repo-a\"\nversion = \"0.1.0\"\n\n[dependencies]\nrepo-c = { git = \"https://gyre.example.com/proj-1/repo-c.git\" }\n".to_string(),
+            ),
+            (
+                "crates/member/Cargo.toml",
+                "[package]\nname = \"member\"\n\n[dependencies]\nrepo-b = { path = \"../../repo-b\" }\n".to_string(),
+            ),
+            (
+                "package.json",
+                "{\n  \"name\": \"repo-a\",\n  \"dependencies\": {\n    \"repo-b\": \"git+https://gyre.example.com/proj-1/repo-b.git\"\n  }\n}\n".to_string(),
+            ),
+            (
+                "pyproject.toml",
+                "[project]\nname = \"repo-a\"\ndependencies = [\n    \"repo-b @ git+https://gyre.example.com/proj-1/repo-b.git\",\n]\n".to_string(),
+            ),
+            (
+                "api/openapi.yaml",
+                "openapi: \"3.0.0\"\ninfo:\n  title: repo-a API\n  description: Calls repo-d for extra features\nservers:\n  - url: https://gyre.example.com/proj-1/repo-b/api/v1\n".to_string(),
+            ),
+            (
+                "mcp.json",
+                "{\n  \"mcpServers\": {\n    \"billing\": {\n      \"url\": \"https://gyre.example.com/proj-1/repo-b/mcp\",\n      \"description\": \"repo-d tools are not referenced here\"\n    }\n  }\n}\n".to_string(),
+            ),
+        ];
+        let sha1 = make_commit(&repo_path_str, &tip_files).await;
 
         detect_dependencies_on_push(&state, source_id.as_str(), &repo_path_str, &sha1).await;
 
@@ -10192,8 +10189,14 @@ specs:
             .all(|e| e.target_repo_id.as_str() != "repo-c-id"));
 
         // repo-c is created AFTER the manifest already referenced it. The
-        // next push touches only a README — with the changed-dependency-file
-        // short-circuit removed, detection still runs and creates the edge.
+        // next push re-commits the SAME manifest blobs (identical content →
+        // identical blob SHAs, so the push's changed-file set is README.md
+        // only — no dependency file changes) plus a README. make_commit
+        // builds each tree from only the files passed to that call, so the
+        // manifests must be re-listed to remain present at the pushed tip —
+        // the AC-6 scenario requires the committed manifest to still
+        // reference repo-c. With the changed-dependency-file short-circuit
+        // removed, detection still runs and creates the edge.
         let repo_c = Repository::new(
             Id::new("repo-c-id"),
             Id::new("proj-1"),
@@ -10203,7 +10206,9 @@ specs:
         );
         state.repos.create(&repo_c).await.unwrap();
 
-        let sha2 = make_commit(&repo_path_str, &[("README.md", "# repo-a\n".to_string())]).await;
+        let mut tip2_files = tip_files.clone();
+        tip2_files.push(("README.md", "# repo-a\n".to_string()));
+        let sha2 = make_commit(&repo_path_str, &tip2_files).await;
         detect_dependencies_on_push(&state, source_id.as_str(), &repo_path_str, &sha2).await;
 
         let edges = state.dependencies.list_by_repo(&source_id).await.unwrap();
