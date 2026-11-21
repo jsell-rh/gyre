@@ -35,6 +35,12 @@ pub enum DependencySource {
     BranchLineage,
     /// Declared at runtime by an agent that discovered the dependency.
     AgentDeclared,
+    /// Auto-created from the cross-repo dependency graph: the MR updates a
+    /// dependency declaration (a DependencyEdge's source artifact) on a
+    /// target repo that has a pending MR, so the merge must be ordered
+    /// after that MR (dependency-graph.md §Workspace Orchestrator
+    /// Integration — Merge ordering).
+    DependencyGraph,
 }
 
 /// Per-dependency metadata: which MR, how it was established, and why.
