@@ -197,6 +197,7 @@ mod tests {
             id: pid.to_string(),
             target_type: "local".to_string(),
             pid: Some(pid),
+            options: Default::default(),
         };
         target.kill_process(&handle).await.unwrap();
     }

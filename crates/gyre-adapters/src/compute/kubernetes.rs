@@ -587,6 +587,7 @@ mod tests {
             id: "already-gone".to_string(),
             target_type: "kubernetes".to_string(),
             pid: None,
+            options: Default::default(),
         };
         target.kill_process(&gone).await.unwrap();
 
@@ -594,6 +595,7 @@ mod tests {
             id: "still-running".to_string(),
             target_type: "kubernetes".to_string(),
             pid: None,
+            options: Default::default(),
         };
         let err = target.kill_process(&live).await.unwrap_err();
         assert!(
@@ -618,6 +620,7 @@ mod tests {
             id: "agent-pod-7".to_string(),
             target_type: "kubernetes".to_string(),
             pid: None,
+            options: Default::default(),
         };
         target.kill_process(&handle).await.unwrap();
         let invoked = std::fs::read_to_string(recorded).unwrap();

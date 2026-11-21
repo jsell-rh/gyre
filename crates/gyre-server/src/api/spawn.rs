@@ -2876,7 +2876,11 @@ pub(crate) async fn on_agent_process_exit(state: &AppState, agent_id: &str) {
     // clean exit (best-effort — the sweep treats still-recorded-running
     // rows whose process is gone as reaping candidates anyway, but the
     // explicit mark keeps the history accurate).
-    if let Err(e) = state.agent_instances.mark_terminated(agent_id, "clean_exit").await {
+    if let Err(e) = state
+        .agent_instances
+        .mark_terminated(agent_id, "clean_exit")
+        .await
+    {
         tracing::warn!(
             agent_id,
             "marking the agent instance terminated failed: {e:#}"
@@ -8346,6 +8350,7 @@ mod tests {
             id: "no-such-container-clean-exit".to_string(),
             target_type: "container".to_string(),
             pid: None,
+            options: std::collections::HashMap::new(),
         };
 
         let mut agent =

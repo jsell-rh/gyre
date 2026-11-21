@@ -624,6 +624,11 @@ pub(crate) async fn kill_and_mark(
         id: instance.handle_id.clone(),
         target_type: instance.target_type.clone(),
         pid: instance.pid,
+        // Connection facts (ssh identity/port) are never needed here: the
+        // in-memory fast path passes the owning `SpawnBackend` (which holds
+        // them), and reconstructed targets carry their own config from the
+        // durable `backend_config`.
+        options: std::collections::HashMap::new(),
     };
     target.kill_process(&handle).await?;
     state

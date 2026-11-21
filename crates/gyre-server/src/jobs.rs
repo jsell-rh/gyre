@@ -918,7 +918,7 @@ pub async fn start_job_registry(state: Arc<AppState>) {
                 enabled: true,
                 run_at_utc_hour: None,
             },
-            |state| async move { crate::api::meta_specs::run_once(&state).await },
+            |state, _log| async move { crate::api::meta_specs::run_once(&state).await },
         )
         .await;
 
@@ -940,7 +940,7 @@ pub async fn start_job_registry(state: Arc<AppState>) {
                 enabled: true,
                 run_at_utc_hour: None,
             },
-            |state| async move { crate::pr_hygiene::run_once(&state).await },
+            |state, _log| async move { crate::pr_hygiene::run_once(&state).await },
         )
         .await;
 

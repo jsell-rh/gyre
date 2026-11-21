@@ -16,12 +16,12 @@ use gyre_domain::{BranchInfo, CommitInfo, DiffResult, MergeResult};
 use gyre_ports::{
     AgentCommitRepository, AgentInstanceRepository, AgentRepository, AgentSessionRepository,
     AnalyticsQueryFilter, AnalyticsRepository, ApiKeyRepository, AuditQueryFilter, AuditRepository,
-    BudgetRepository, BudgetUsageRepository, CostRepository, DependencyRepository, JobRunRepository,
-    KvJsonStore, LlmConfigRepository, MergeQueueRepository, MergeRequestRepository,
-    MetaSpecSetRepository, NetworkPeerRepository, OAuthStateRepository, PersonaRepository,
-    RepoRepository, ReviewRepository, RolloutPolicyRepository, SpawnLogEntry, SpawnLogRepository,
-    TaskRepository, TenantMetaSpecSetRepository, TenantRepository, UserRepository,
-    UserWorkspaceStateRepository, WorkspaceRepository, WorktreeRepository,
+    BudgetRepository, BudgetUsageRepository, CostRepository, DependencyRepository,
+    JobRunRepository, KvJsonStore, LlmConfigRepository, MergeQueueRepository,
+    MergeRequestRepository, MetaSpecSetRepository, NetworkPeerRepository, OAuthStateRepository,
+    PersonaRepository, RepoRepository, ReviewRepository, RolloutPolicyRepository, SpawnLogEntry,
+    SpawnLogRepository, TaskRepository, TenantMetaSpecSetRepository, TenantRepository,
+    UserRepository, UserWorkspaceStateRepository, WorkspaceRepository, WorktreeRepository,
 };
 #[cfg(test)]
 use gyre_ports::{GitOpsPort, JjChange, JjNewChange, JjOpsPort};
