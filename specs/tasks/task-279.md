@@ -3,7 +3,7 @@ title: "Breaking change detection: API-contract-change route and MCP notificatio
 spec_ref: "Spec gap spec-cab97078efffe0fbfb7339be / breaking-change-contract-route / ed9f34316476"
 depends_on: []
 progress: not-started
-commits: ["843fae5350751ff8abd1585a19143b7a383827e5"]
+commits: []
 ---
 
 ## Required behavior
