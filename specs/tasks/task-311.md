@@ -2,7 +2,7 @@
 title: "Publish reviewed spec backlog for specs/development/architecture.md"
 spec_ref: "GOAL.md — real implementations and meaningful verification"
 depends_on: []
-progress: complete
+progress: ready-for-review
 commits: []
 ---
 
@@ -509,25 +509,34 @@ Publish exactly the independently reviewed missing-work plan below. Only create 
 
 Task definitions and explicit bindings only; no product implementation claimed.
 
-### Rebase resolution
+### Rebase resolution (against main f0f2ba5d, task-305 agent-runtime backlog)
 
-The published branch conflicted with main at `specs/task-spec-inputs.json`
-(main had merged the task-307 explorer-canvas backlog in the same registry
-blocks). Resolved as a union: the architecture.md backlog entries from this
-publication (sections `df78f83918d8549c48c15ea5` Storage,
-`2a696c7f5c2ffc02e88742ae` Tech Stack, `5e7a44c5f15c34d70101b959` API and
-their three spec-gap bindings) and main's explorer-canvas entries
-(`c3a39b320325eff390c4b56c` and its binding) are all present; main's new
-files `specs/tasks/task-306.md`/`task-307.md` are retained unchanged. No
-product file, spec, coverage status or gate changed.
+The published branch again conflicted with main at
+`specs/task-spec-inputs.json` (main had merged the task-305
+agent-runtime.md backlog in the same registry blocks). Resolved as a union:
+the architecture.md backlog entries from this publication (sections
+`df78f83918d8549c48c15ea5` Storage, `2a696c7f5c2ffc02e88742ae` Tech Stack,
+`5e7a44c5f15c34d70101b959` API and their three spec-gap bindings) and
+main's agent-runtime.md entries (`1bd201625dc5fbe0164ced05`,
+`15aec83b58b3494602d31ce8`, `a40446f46dbb0536f3c30ed0`,
+`de73e06638559fcca67b3c5d`, `e60f62cd06826e5e4de9decf`,
+`917eb99ea432ee472c349487`, `54a514da8df9bf4d236e09ff`,
+`e97ea9a092758dc93c245e6e`, `9f95c49cf209205750a0177a`,
+`47d309e09aac1e2e04d334d0`, `3ee23b90e9236c59b010822f`,
+`ebd16b0ebf8506b9c84eef25` and their spec-gap bindings) are all present;
+main's new files `specs/tasks/task-297.md` through `task-305.md` are
+retained unchanged. No product file, spec, coverage status or gate changed.
 
 ### Verification evidence
 
 - Merged registry parses as JSON; every section and binding key from both
-  parents present (dict-compare union check).
-- `python3 scripts/test_pipeline_spec_backlog.py`, `test_pipeline_requirements.py`
-  (23 tests), `test_pipeline_decisions.py` — all exit 0.
+  parents present (dict-compare union check: no head keys missing, no main
+  keys missing, no extra keys).
+- `python3 scripts/test_pipeline_spec_backlog.py`,
+  `test_pipeline_requirements.py` (23 tests), `test_pipeline_decisions.py`
+  — all exit 0.
 - Tasks 308/309/310 remain `not-started` with unique spec_refs; no duplicate
-  active assignment.
-- Evidence retained at `/tmp/stage/review-evidence/task-311-rebase-resolution.txt`
+  active assignment (each architecture.md gap section bound exactly once).
+- Evidence retained at
+  `/tmp/stage/review-evidence/task-311-rebase-resolution.txt`
   (controller artifact path; not a sandbox path).
