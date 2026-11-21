@@ -2,8 +2,8 @@
 title: "Spec Links — repo-scoped graph (?repo= filter) and authorization for the four registry-exempt query endpoints"
 spec_ref: "Spec gap spec-10bdced21a063f819b1baabd / spec-links-graph-repo-filter / 5a915155d9bc"
 depends_on: []
-progress: ready-for-review
-commits: ["b675ee0a9a52376f8c02ebcf46eee511f68a59e2", "f96b5a402e5f52ebf1f69775a5d3d139c591551a"]
+progress: not-started
+commits: []
 ---
 
 ## Required behavior
@@ -78,72 +78,3 @@ Canonical spec: `specs/system/spec-links.md`. Source: `678a8ac3e3bfeafeb66cdb47e
     ]
   }
 ]
-
-## Shipped
-
-Continued from checkpoint c0edace6 (previous assignment ended incomplete before finalization).
-The implementation from that checkpoint is preserved, verified, repaired, and finalized here.
-
-### Behavior
-
-(A) Repo-scoped graph — GET /api/v1/specs/graph now takes Query<SpecGraphQuery>
-(api/specs.rs:1749, handler :1757): with no repo parameter the response is the unchanged
-full tenant-wide graph. With ?repo={id}: nodes are the ledger entries whose repo_id equals
-the repo (SpecLedgerEntry.repo_id), edges are all stored links with source_repo_id == repo or
-target_repo_id == repo — i.e. the repo's specs with all outbound, same-repo inbound, and
-cross-repo inbound links. The repo is resolved and validated first: unknown id → 404, empty
-value → 400, a repo in another tenant → 403 (the route addresses no path entity, so the handler
-enforces tenant containment for non-system principals; unresolvable workspace fails closed).
-
-(B) Authorization — the four query endpoints (GET /specs/stale-links, /specs/conflicts,
-/specs/{path}/dependents, /specs/{path}/dependencies) are now resolver-mapped as
-RouteResourceMapping::api(..., "spec", None) in abac_middleware.rs:435-438 and removed from
-scripts/abac-route-registry-exemptions.txt (42 → 38 entries; FROZEN_EXEMPTION_COUNT lowered
-46 → 38 with a comment, per the script's own "delete the entry when you register a route"
-rule). /api/v1/specs/:path/reject is untouched (out of scope). Because the two collection
-routes (stale-links, conflicts) address no entity the middleware scope chain can resolve, and
-because dependents/dependencies return store rows declared by other repos, all four handlers
-additionally scope the store read to the caller's tenant via links_visible_to
-(api/specs.rs:1866): rows are visible only when their declaring source_repo_id belongs to a
-repo in the caller's tenant (system principal excepted — it legitimately spans tenants).
-Rows with no source_repo_id are withheld from tenant-scoped callers rather than given a
-fabricated scope.
-
-### Repairs over the checkpoint
-
-- Fixed a real compile defect the checkpoint shipped unverified: E0382 use of moved value
-  `app` in get_spec_graph_repo_filter_returns_repo_nodes_and_inbound_edges (router now cloned
-  before the first oneshot call) — caught by cargo check -p gyre-server --tests.
-- rustfmt over the task additions (cargo fmt -p gyre-server, clean).
-- Updated specs/coverage/system/spec-links.md rows 12 and 13 with concrete source evidence for
-  the now-implemented ?repo filter and the authorization fix (status stays `implemented`;
-  no independent-verification claim).
-
-### Test evidence
-
-- cargo check -p gyre-server and cargo check -p gyre-server --tests: 0 errors (wrapper
-  /tmp/stage/bin/cargo).
-- scripts/check-abac-route-registry.sh: OK, exit 0. scripts/check-abac-exempt-handlers.sh:
-  OK (86 handlers), exit 0. Exemption file strictly smaller (42 → 38).
-- Four new router-level tests in api/specs.rs:5208-5449, seeding real workspaces/repos/users/
-  API keys into one shared AppState and real ledger/link rows:
-  get_spec_graph_repo_filter_returns_repo_nodes_and_inbound_edges (repo-1 nodes only, repo-2
-  inbound edge present, unfiltered graph unchanged),
-  get_spec_graph_unknown_or_empty_repo_is_an_explicit_error (404/400),
-  get_spec_graph_repo_filter_denies_cross_tenant_repo (403),
-  spec_graph_query_endpoints_do_not_leak_other_tenants_links (tenant B receives none of
-  tenant A's stale/conflict/declared-link rows across all four endpoints).
-- gyre-server test-binary builds exceed this sandbox's 4 GiB budget rule, so the verifier must
-  execute: cargo test -p gyre-server --lib api::specs::tests::get_spec_graph_repo_filter_returns_repo_nodes_and_inbound_edges
-  api::specs::tests::get_spec_graph_unknown_or_empty_repo_is_an_explicit_error
-  api::specs::tests::get_spec_graph_repo_filter_denies_cross_tenant_repo
-  api::specs::tests::spec_graph_query_endpoints_do_not_leak_other_tenants_links
-  (plus the pre-existing get_spec_graph_returns_nodes_and_edges,
-  get_spec_links_returns_outbound_and_inbound, get_spec_dependents_*,
-  get_spec_dependencies_* regression tests). Probe log: /tmp/stage/review-evidence/task-290-evidence.md.
-
-### Commits
-
-- f96b5a40 — implement(task-290): pipeline checkpoint (repo filter, resolver mappings,
-  exemption removal, tests)
-- b675ee0a — fix(task-290): compile repair, rustfmt, coverage rows
