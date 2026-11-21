@@ -2,8 +2,8 @@
 title: "Spec Links — stored link statuses: broken when the target leaves the manifest, conflicted when both endpoints are approved, with reversion when the defining conditions cease"
 spec_ref: "Spec gap spec-10bdced21a063f819b1baabd / spec-links-status-lifecycle / 5a915155d9bc"
 depends_on: [task-287]
-progress: ready-for-review
-commits: ["92850243a262fabad6609d7bc95e89a22aeb33ca", "6a4b091b4e0949090c5931d072e576869e06da32"]
+progress: not-started
+commits: []
 ---
 
 ## Required behavior
@@ -63,81 +63,3 @@ Canonical spec: `specs/system/spec-links.md`. Source: `678a8ac3e3bfeafeb66cdb47e
     ]
   }
 ]
-
-## Shipped
-
-All four spec-links.md §Link Status values are now stored link states that
-track CURRENT conditions, delivered on top of the task-287 cross-repo
-resolution machinery.
-
-### Behavior
-
-- **Single status oracle** — `evaluate_link_status` (spec_registry.rs)
-  computes the status a link row must hold right now, in precedence order:
-  `conflicted` (conflicts_with link whose two endpoints are both
-  ledger-Approved) → `broken` (target absent from the ledger OR absent from
-  its repo's current manifest, read via `target_manifest_path_presence`
-  git-showing the target repo's `specs/manifest.yaml` at its default branch;
-  a supersedes-deprecated target still declared in its manifest is NOT
-  broken; an unreadable manifest is `Unknown` and falls through to the SHA
-  rules rather than breaking on undeterminable state) → `stale` (pinned
-  `target_sha` ≠ ledger `current_sha`) → `active`.
-- **Producers**: (1) the daily staleness pass (`spec_link_staleness.rs`
-  `run_once`) re-evaluates every non-unresolved link — the old
-  "Already known stale/broken — skip" one-way-ratchet guard is removed, so
-  stale/broken/conflicted are RE-CHECKED each pass and revert when their
-  defining condition ceases; (2) push-time sync (`sync_spec_ledger`) breaks
-  inbound links when the target leaves the manifest, stores
-  both-approved conflicts_with links as `conflicted` at store time, and
-  reconciles conflicts for every approval change it makes (content
-  invalidation, deprecation, re-add, extends drift) via
-  `refresh_conflict_statuses_for_spec`; (3) `approve_spec`/`revoke_spec`
-  call `refresh_conflicts_for_spec` so conflicted is set/reverted when an
-  approval lands, without waiting for the daily pass; (4)
-  `GET /api/v1/specs/conflicts` runs `reconcile_conflict_statuses` over
-  every conflicts_with link before filtering `status == "conflicted"`, so
-  the endpoint and the stored graph cannot drift.
-- **Write-through** — every transition persists via `write_link_status`
-  (hot cache + `spec_link_repo.save`); `stale_since` stamps the transition
-  INTO stale and is cleared when the link leaves stale.
-
-### Test evidence
-
-Six tests cover the four verification probes (all assert both the hot
-cache and the durable `spec_links` table where applicable):
-
-- `staleness_pass_tracks_target_manifest_presence_both_ways` — broken on
-  manifest removal (ledger keeps the target as Deprecated) + reversion to
-  active on manifest re-add (the one-way-ratchet defect).
-- `staleness_pass_does_not_break_deprecated_target_still_in_manifest` —
-  deprecation is not deletion.
-- `staleness_pass_sets_and_reverts_conflicted_status` — daily-pass
-  conflicted set/revert.
-- `sync_marks_inbound_links_broken_when_target_leaves_manifest` —
-  push-time broken transition.
-- `sync_stores_conflicts_with_link_as_conflicted_when_both_approved` —
-  link stored conflicted at sync.
-- `conflicted_status_set_on_approval_and_reverted_on_revoke` (api/specs.rs)
-  — API-level: approve → stored `conflicted` + listed by
-  `GET /api/v1/specs/conflicts`; revoke → delisted + status reverted to the
-  active/stale/broken rules.
-
-`cargo check -p gyre-server --lib --tests` exits 0 with zero warnings (see
-/tmp/stage/review-evidence/task-288-check.log). Per the 4 GiB build-wrapper
-budget, gyre-server test compilation is deferred to the independent
-verifier, which must run:
-
-    cargo test -p gyre-server --lib -- \
-      staleness_pass_tracks_target_manifest_presence_both_ways \
-      staleness_pass_does_not_break_deprecated_target_still_in_manifest \
-      staleness_pass_sets_and_reverts_conflicted_status \
-      sync_marks_inbound_links_broken_when_target_leaves_manifest \
-      sync_stores_conflicts_with_link_as_conflicted_when_both_approved \
-      conflicted_status_set_on_approval_and_reverted_on_revoke
-
-plus the regression surface: `cargo test -p gyre-server --lib --
-spec_link_staleness`, `... -- get_conflicts`, `... -- sync_`.
-
-Coverage row 6 (Link Status) in specs/coverage/system/spec-links.md is
-updated to `implemented` with the source evidence above; no unrelated rows
-touched.
