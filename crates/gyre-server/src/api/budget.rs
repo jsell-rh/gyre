@@ -521,25 +521,12 @@ pub async fn check_spawn_budget_for_repo(
     let key = workspace_key(repo.workspace_id.as_str());
     let config = effective_workspace_config(state, &key).await;
     if repo.budget.is_some() {
-        return enforce_workspace_spawn_caps(
-            state,
-            repo.workspace_id.as_str(),
-            &key,
-            &config,
-            1,
-        )
-        .await;
+        return enforce_workspace_spawn_caps(state, repo.workspace_id.as_str(), &key, &config, 1)
+            .await;
     }
     let dependents = repo_dependent_count(state, &repo.id).await;
     let weighted = weight_inherited_caps(&config, dependent_boost_factor(dependents));
-    enforce_workspace_spawn_caps(
-        state,
-        repo.workspace_id.as_str(),
-        &key,
-        &weighted,
-        1,
-    )
-    .await
+    enforce_workspace_spawn_caps(state, repo.workspace_id.as_str(), &key, &weighted, 1).await
 }
 
 /// Workspace-level spawn-cap enforcement body shared by the plain and the
@@ -4461,7 +4448,14 @@ mod tests {
         seed_dependents(state.as_ref(), &repo_heavy.id, 2).await;
         state
             .budget_usages
-            .add_tokens_cost(&super::repo_key("repo-dtok"), "repo", "repo-dtok", 0, 1200, 0.0)
+            .add_tokens_cost(
+                &super::repo_key("repo-dtok"),
+                "repo",
+                "repo-dtok",
+                0,
+                1200,
+                0.0,
+            )
             .await
             .unwrap();
         assert!(
@@ -4474,7 +4468,14 @@ mod tests {
         // Past the weighted cap → rejected with the weighted limit named.
         state
             .budget_usages
-            .add_tokens_cost(&super::repo_key("repo-dtok"), "repo", "repo-dtok", 0, 310, 0.0)
+            .add_tokens_cost(
+                &super::repo_key("repo-dtok"),
+                "repo",
+                "repo-dtok",
+                0,
+                310,
+                0.0,
+            )
             .await
             .unwrap();
         let err = super::check_repo_spawn_budget(state.as_ref(), &repo_heavy)

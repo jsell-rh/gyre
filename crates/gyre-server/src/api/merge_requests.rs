@@ -721,7 +721,11 @@ pub(crate) async fn detect_graph_deps(
         }
         linked_repos.push(edge.target_repo_id.clone());
         // B's pending MR: the most recently updated open MR in B.
-        let target_mrs = match state.merge_requests.list_by_repo(&edge.target_repo_id).await {
+        let target_mrs = match state
+            .merge_requests
+            .list_by_repo(&edge.target_repo_id)
+            .await
+        {
             Ok(mrs) => mrs,
             Err(e) => {
                 tracing::warn!(
@@ -747,12 +751,11 @@ pub(crate) async fn detect_graph_deps(
             "auto-detected graph-driven MR dependency"
         );
         deps.push(
-            MergeRequestDependency::new(target_mr.id, DependencySource::DependencyGraph).with_reason(
-                format!(
+            MergeRequestDependency::new(target_mr.id, DependencySource::DependencyGraph)
+                .with_reason(format!(
                     "dependency-graph: {artifact} updates the dependency on repo {}",
                     edge.target_repo_id
-                ),
-            ),
+                )),
         );
     }
     deps
@@ -763,11 +766,7 @@ pub(crate) async fn detect_graph_deps(
 /// changes relative to the default branch, i.e. the files whose content
 /// the MR updates. Empty when git fails or a branch name is unsafe to pass
 /// to git (same no-flag-injection rule as `detect_lineage_deps`).
-async fn diff_name_only(
-    repo_path: &str,
-    default_branch: &str,
-    source_branch: &str,
-) -> Vec<String> {
+async fn diff_name_only(repo_path: &str, default_branch: &str, source_branch: &str) -> Vec<String> {
     let is_safe_branch = |b: &str| !b.starts_with('-') && !b.contains("..");
     if !is_safe_branch(default_branch) || !is_safe_branch(source_branch) {
         return vec![];
@@ -808,9 +807,9 @@ pub(crate) async fn mrs_with_graph_deps_on(state: &AppState, mr_id: &Id) -> Vec<
         .into_iter()
         .filter(|m| m.status == MrStatus::Open)
         .filter(|m| {
-            m.depends_on.iter().any(|d| {
-                d.source == DependencySource::DependencyGraph && d.target_mr_id == *mr_id
-            })
+            m.depends_on
+                .iter()
+                .any(|d| d.source == DependencySource::DependencyGraph && d.target_mr_id == *mr_id)
         })
         .map(|m| m.id)
         .collect()
@@ -4272,7 +4271,9 @@ mod tests {
             &[("src/lib.rs", "pub fn new_version() {}\n")],
             "B work",
         );
-        let mr_b = repos.create_mr(&repos.repo_b_id, "feat/b", "B: new version").await;
+        let mr_b = repos
+            .create_mr(&repos.repo_b_id, "feat/b", "B: new version")
+            .await;
 
         // A's MR updates the dependency declaration — the repo-b line in
         // A's Cargo.toml (the edge's source artifact).
@@ -4283,7 +4284,9 @@ mod tests {
             &[("Cargo.toml", "repo-b = \"2.0\"\n")],
             "bump repo-b to 2.0",
         );
-        let mr_a = repos.create_mr(&repos.repo_a_id, "feat/a", "A: bump repo-b").await;
+        let mr_a = repos
+            .create_mr(&repos.repo_a_id, "feat/a", "A: bump repo-b")
+            .await;
 
         let deps = repos.deps_of(&mr_a).await;
         assert_eq!(
@@ -4346,7 +4349,9 @@ mod tests {
             &[("Cargo.toml", "repo-b = \"2.0\"\n")],
             "bump repo-b to 2.0",
         );
-        let mr_a = repos.create_mr(&repos.repo_a_id, "feat/a", "A: bump repo-b").await;
+        let mr_a = repos
+            .create_mr(&repos.repo_a_id, "feat/a", "A: bump repo-b")
+            .await;
 
         let deps = repos.deps_of(&mr_a).await;
         assert!(
@@ -4366,7 +4371,9 @@ mod tests {
             &[("src/lib.rs", "pub fn new_version() {}\n")],
             "B work",
         );
-        let mr_b = repos.create_mr(&repos.repo_b_id, "feat/b", "B: new version").await;
+        let mr_b = repos
+            .create_mr(&repos.repo_b_id, "feat/b", "B: new version")
+            .await;
         GraphDepRepos::commit_on(
             &repos.repo_a,
             "feat/a",
@@ -4374,7 +4381,9 @@ mod tests {
             &[("Cargo.toml", "repo-b = \"2.0\"\n")],
             "bump repo-b to 2.0",
         );
-        let mr_a = repos.create_mr(&repos.repo_a_id, "feat/a", "A: bump repo-b").await;
+        let mr_a = repos
+            .create_mr(&repos.repo_a_id, "feat/a", "A: bump repo-b")
+            .await;
         assert_eq!(repos.deps_of(&mr_a).await.len(), 1, "pre-close");
 
         // Closing B's MR must drop the graph-sourced dep on
@@ -4399,7 +4408,9 @@ mod tests {
             &[("src/lib.rs", "pub fn new_version() {}\n")],
             "B work",
         );
-        let _mr_b = repos.create_mr(&repos.repo_b_id, "feat/b", "B: new version").await;
+        let _mr_b = repos
+            .create_mr(&repos.repo_b_id, "feat/b", "B: new version")
+            .await;
         GraphDepRepos::commit_on(
             &repos.repo_a,
             "feat/a",
@@ -4407,7 +4418,9 @@ mod tests {
             &[("Cargo.toml", "repo-b = \"2.0\"\n")],
             "bump repo-b to 2.0",
         );
-        let mr_a = repos.create_mr(&repos.repo_a_id, "feat/a", "A: bump repo-b").await;
+        let mr_a = repos
+            .create_mr(&repos.repo_a_id, "feat/a", "A: bump repo-b")
+            .await;
         assert_eq!(repos.deps_of(&mr_a).await.len(), 1, "pre-update");
 
         // A's MR is updated (re-pushed) so its diff no longer touches
@@ -4441,7 +4454,9 @@ mod tests {
             &[("src/lib.rs", "pub fn new_version() {}\n")],
             "B work",
         );
-        let mr_b = repos.create_mr(&repos.repo_b_id, "feat/b", "B: new version").await;
+        let mr_b = repos
+            .create_mr(&repos.repo_b_id, "feat/b", "B: new version")
+            .await;
         GraphDepRepos::commit_on(
             &repos.repo_a,
             "feat/a",
@@ -4449,7 +4464,9 @@ mod tests {
             &[("Cargo.toml", "repo-b = \"2.0\"\n")],
             "bump repo-b to 2.0",
         );
-        let mr_a = repos.create_mr(&repos.repo_a_id, "feat/a", "A: bump repo-b").await;
+        let mr_a = repos
+            .create_mr(&repos.repo_a_id, "feat/a", "A: bump repo-b")
+            .await;
 
         // An explicit orchestrator-declared dep on another MR in A.
         GraphDepRepos::commit_on(
@@ -4526,7 +4543,9 @@ mod tests {
             &[("Cargo.toml", "repo-b = \"2.0\"\n")],
             "bump repo-b to 2.0",
         );
-        let mr_a = repos.create_mr(&repos.repo_a_id, "feat/a", "A: bump repo-b").await;
+        let mr_a = repos
+            .create_mr(&repos.repo_a_id, "feat/a", "A: bump repo-b")
+            .await;
 
         let deps = repos.deps_of(&mr_a).await;
         assert_eq!(deps.len(), 1, "one link per target repo: {deps:?}");

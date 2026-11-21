@@ -3,7 +3,7 @@ title: "Orchestrator integration: graph-driven auto-created MR dependencies (mer
 spec_ref: "Spec gap spec-cab97078efffe0fbfb7339be / orchestrator-merge-ordering-budget / ed9f34316476"
 depends_on: []
 progress: not-started
-commits: ["b0b7dc10b0511dc352aebf0cdebc0c298f18b857"]
+commits: []
 ---
 
 ## Required behavior

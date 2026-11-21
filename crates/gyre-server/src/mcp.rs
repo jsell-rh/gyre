@@ -1986,8 +1986,7 @@ async fn handle_create_mr(state: &AppState, args: &Value) -> Value {
         &repo.default_branch,
     )
     .await;
-    let graph_deps =
-        crate::api::merge_requests::detect_graph_deps(state, &repo, &source).await;
+    let graph_deps = crate::api::merge_requests::detect_graph_deps(state, &repo, &source).await;
     mr.depends_on = crate::api::merge_requests::merge_explicit_and_auto_deps(
         explicit_deps,
         lineage_deps,

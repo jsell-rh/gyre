@@ -861,11 +861,11 @@ async fn spawn_implementation_workers(state: &Arc<AppState>) {
         // when the repo inherits the workspace limit (no override), the
         // caps are weighted by the repo's dependent count
         // (dependency-graph.md §Budget allocation).
-        let budget_check =
-            match crate::api::budget::check_spawn_budget_for_repo(state, &repo).await {
-                Ok(()) => crate::api::budget::check_repo_spawn_budget(state, &repo).await,
-                Err(reason) => Err(reason),
-            };
+        let budget_check = match crate::api::budget::check_spawn_budget_for_repo(state, &repo).await
+        {
+            Ok(()) => crate::api::budget::check_repo_spawn_budget(state, &repo).await,
+            Err(reason) => Err(reason),
+        };
         if let Err(reason) = budget_check {
             // Flag the FRESHEST row (same stale-snapshot defense as the
             // claim below): persisting the snapshot taken at
