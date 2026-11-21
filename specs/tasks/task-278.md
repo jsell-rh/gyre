@@ -2,7 +2,7 @@
 title: "Dependency auto-detection: full extraction forms (git refs, structured contracts, nested files) and every-push trigger"
 spec_ref: "Spec gap spec-cab97078efffe0fbfb7339be / dep-detection-extraction-forms / ed9f34316476"
 depends_on: []
-progress: ready-for-review
+progress: complete
 commits: ["0ba78217e343b3c488178b5970f47d099e5cb3a6", "78bc6dacc4ca62bc2c05a164fda6cafc69011c3c", "08f3082ae98e67172f75986d158e2253ed32f15d", "05ba66134f77df6cffd99aa4720fd5d92764fe5a", "dcdb28f1eb469d2ab0cf694d975a90deaec628ad"]
 ---
 
