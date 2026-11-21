@@ -3,7 +3,7 @@ title: "AIBOM: dependency-graph snapshot and stale-dependency flags in release r
 spec_ref: "Spec gap spec-cab97078efffe0fbfb7339be / aibom-stale-dependency-flags / ed9f34316476"
 depends_on: []
 progress: not-started
-commits: []
+commits: ["f7a475ee8d98a206266ad239828300f97598c46f"]
 ---
 
 ## Required behavior
