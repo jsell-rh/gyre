@@ -508,3 +508,26 @@ Publish exactly the independently reviewed missing-work plan below. Only create 
 ## Shipped
 
 Task definitions and explicit bindings only; no product implementation claimed.
+
+### Rebase resolution
+
+The published branch conflicted with main at `specs/task-spec-inputs.json`
+(main had merged the task-307 explorer-canvas backlog in the same registry
+blocks). Resolved as a union: the architecture.md backlog entries from this
+publication (sections `df78f83918d8549c48c15ea5` Storage,
+`2a696c7f5c2ffc02e88742ae` Tech Stack, `5e7a44c5f15c34d70101b959` API and
+their three spec-gap bindings) and main's explorer-canvas entries
+(`c3a39b320325eff390c4b56c` and its binding) are all present; main's new
+files `specs/tasks/task-306.md`/`task-307.md` are retained unchanged. No
+product file, spec, coverage status or gate changed.
+
+### Verification evidence
+
+- Merged registry parses as JSON; every section and binding key from both
+  parents present (dict-compare union check).
+- `python3 scripts/test_pipeline_spec_backlog.py`, `test_pipeline_requirements.py`
+  (23 tests), `test_pipeline_decisions.py` — all exit 0.
+- Tasks 308/309/310 remain `not-started` with unique spec_refs; no duplicate
+  active assignment.
+- Evidence retained at `/tmp/stage/review-evidence/task-311-rebase-resolution.txt`
+  (controller artifact path; not a sandbox path).
