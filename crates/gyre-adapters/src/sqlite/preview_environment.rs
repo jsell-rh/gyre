@@ -319,7 +319,9 @@ mod tests {
         let (_tmp, s) = setup();
         s.create(&env("pe-old", "mr-1", 1000, 4600)).await.unwrap();
         s.create(&env("pe-new", "mr-1", 2000, 5600)).await.unwrap();
-        s.create(&env("pe-other", "mr-2", 3000, 6600)).await.unwrap();
+        s.create(&env("pe-other", "mr-2", 3000, 6600))
+            .await
+            .unwrap();
 
         let rows = s.find_by_mr(&Id::new("mr-1")).await.unwrap();
         assert_eq!(rows.len(), 2);

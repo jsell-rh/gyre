@@ -369,14 +369,7 @@ async fn record_preview_analytics(
             base.insert(k.clone(), v.clone());
         }
     }
-    let ev = AnalyticsEvent::new(
-        new_id(),
-        event_name,
-        None,
-        properties,
-        now_secs(),
-    )
-    .with_scope(
+    let ev = AnalyticsEvent::new(new_id(), event_name, None, properties, now_secs()).with_scope(
         Some(&env.requested_by),
         None,
         Some(&env.workspace_id),
@@ -410,9 +403,7 @@ pub async fn try_it_handler(
         .repos
         .find_by_id(&mr.repository_id)
         .await?
-        .ok_or_else(|| {
-            ApiError::NotFound(format!("repository {} not found", mr.repository_id))
-        })?;
+        .ok_or_else(|| ApiError::NotFound(format!("repository {} not found", mr.repository_id)))?;
 
     // Per-handler authorization BEFORE any side effect (primary probe).
     require_workspace_access(&state, &auth, &mr.workspace_id).await?;
@@ -503,8 +494,7 @@ pub async fn try_it_handler(
     // coordination plane so the requesting user can reach the environment
     // over the encrypted overlay. The private half travels to the
     // environment via launch env (same trust model as the SVID key).
-    let (wg_priv_b64, wg_pub_b64) =
-        generate_wireguard_keypair().map_err(ApiError::Internal)?;
+    let (wg_priv_b64, wg_pub_b64) = generate_wireguard_keypair().map_err(ApiError::Internal)?;
     let mesh_ip = state.wg_config.allocate_ip();
     let mut peer = NetworkPeer::new(
         new_id(),
@@ -545,9 +535,14 @@ pub async fn try_it_handler(
     state.preview_environments.create(&env).await?;
 
     // The trial half of the analytics feed: what the user actually TRIED.
-    record_preview_analytics(&state, "preview.started", &env, serde_json::json!({
-        "ttl_secs": ttl,
-    }))
+    record_preview_analytics(
+        &state,
+        "preview.started",
+        &env,
+        serde_json::json!({
+            "ttl_secs": ttl,
+        }),
+    )
     .await;
 
     // Preview agents are real processes: count them like any other for
@@ -564,16 +559,17 @@ pub async fn try_it_handler(
     // machinery (`ComputeTarget::spawn_process` on `LocalTarget`) with a
     // detached worktree of the commit in the scratch dir — deterministic,
     // still isolated from production.
-    let ct_entity: Option<ComputeTargetEntity> = if let Some(ct_id) = workspace.compute_target_id.clone() {
-        state.compute_targets.get_by_id(&ct_id).await.ok().flatten()
-    } else {
-        state
-            .compute_targets
-            .get_default_for_tenant(&workspace.tenant_id)
-            .await
-            .ok()
-            .flatten()
-    };
+    let ct_entity: Option<ComputeTargetEntity> =
+        if let Some(ct_id) = workspace.compute_target_id.clone() {
+            state.compute_targets.get_by_id(&ct_id).await.ok().flatten()
+        } else {
+            state
+                .compute_targets
+                .get_default_for_tenant(&workspace.tenant_id)
+                .await
+                .ok()
+                .flatten()
+        };
     let target_label = ct_entity
         .as_ref()
         .map(|e| match e.target_type {
@@ -670,11 +666,10 @@ pub async fn try_it_handler(
                         .lock()
                         .await
                         .insert(agent_key.clone(), handle.clone());
-                    state
-                        .spawned_backends
-                        .lock()
-                        .await
-                        .insert(agent_key.clone(), Arc::new(super::spawn::SpawnBackend::Local));
+                    state.spawned_backends.lock().await.insert(
+                        agent_key.clone(),
+                        Arc::new(super::spawn::SpawnBackend::Local),
+                    );
                     launched = true;
                 }
                 Err(e) => {
@@ -701,12 +696,7 @@ pub async fn try_it_handler(
         // the durable row records the failure.
         let failed_env = env.clone();
         state.preview_environments.update(&env).await?;
-        teardown_preview_environment(
-            &state,
-            failed_env,
-            TeardownOutcome::Failed,
-        )
-        .await;
+        teardown_preview_environment(&state, failed_env, TeardownOutcome::Failed).await;
         env = state
             .preview_environments
             .find_by_id(&env.id)
@@ -714,7 +704,10 @@ pub async fn try_it_handler(
             .ok_or_else(|| ApiError::Internal(anyhow::anyhow!("preview environment vanished")))?;
     }
 
-    Ok((StatusCode::CREATED, Json(PreviewEnvironmentResponse::from(env))))
+    Ok((
+        StatusCode::CREATED,
+        Json(PreviewEnvironmentResponse::from(env)),
+    ))
 }
 
 /// GET /api/v1/merge-requests/:id/try-it (alias: /api/v1/mrs/:id/try-it) —
@@ -732,7 +725,11 @@ pub async fn list_mr_environments(
         .ok_or_else(|| ApiError::NotFound(format!("merge request {id} not found")))?;
     require_workspace_access(&state, &auth, &mr.workspace_id).await?;
     let envs = state.preview_environments.find_by_mr(&mr.id).await?;
-    Ok(Json(envs.into_iter().map(PreviewEnvironmentResponse::from).collect()))
+    Ok(Json(
+        envs.into_iter()
+            .map(PreviewEnvironmentResponse::from)
+            .collect(),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -753,7 +750,11 @@ pub async fn list_environments(
     let ws_id = Id::new(&ws_id);
     require_workspace_access(&state, &auth, &ws_id).await?;
     let envs = state.preview_environments.find_by_workspace(&ws_id).await?;
-    Ok(Json(envs.into_iter().map(PreviewEnvironmentResponse::from).collect()))
+    Ok(Json(
+        envs.into_iter()
+            .map(PreviewEnvironmentResponse::from)
+            .collect(),
+    ))
 }
 
 /// GET /api/v1/preview-environments/:id — one environment's status.
@@ -955,11 +956,7 @@ mod tests {
         mr
     }
 
-    async fn try_it(
-        app: &Router,
-        mr_id: &str,
-        token: &str,
-    ) -> (StatusCode, serde_json::Value) {
+    async fn try_it(app: &Router, mr_id: &str, token: &str) -> (StatusCode, serde_json::Value) {
         let resp = app
             .clone()
             .oneshot(
@@ -1002,7 +999,10 @@ mod tests {
             .unwrap();
         assert!(envs.is_empty(), "no preview row may exist after a 403");
         let peers_after = state.network_peers.list().await.unwrap().len();
-        assert_eq!(peers_after, peers_before, "no mesh peer may be created after a 403");
+        assert_eq!(
+            peers_after, peers_before,
+            "no mesh peer may be created after a 403"
+        );
         // And no analytics trial event was recorded.
         assert_eq!(count_preview_events(&state, "preview.started").await, 0);
     }
@@ -1051,7 +1051,10 @@ mod tests {
         let (status, json) = try_it(&app(state.clone()), "mr-open", &member_key).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "body: {json}");
         assert!(
-            json["error"].as_str().unwrap_or_default().contains("merged"),
+            json["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("merged"),
             "body should name the merged-only rule: {json}"
         );
 
@@ -1084,7 +1087,10 @@ mod tests {
 
         let (status, json) = try_it(&app(state.clone()), "mr-ok", &member_key).await;
         assert_eq!(status, StatusCode::CREATED, "body: {json}");
-        assert_eq!(json["commit_sha"], commit, "row carries the resolved SHA: {json}");
+        assert_eq!(
+            json["commit_sha"], commit,
+            "row carries the resolved SHA: {json}"
+        );
         assert_eq!(json["mr_id"], "mr-ok");
         assert!(json["mesh_ip"].is_string() || json["mesh_ip"].is_null());
         let env_status = json["status"].as_str().unwrap();
@@ -1094,7 +1100,11 @@ mod tests {
         );
 
         // Durable row is queryable directly.
-        let envs = state.preview_environments.find_by_mr(&Id::new("mr-ok")).await.unwrap();
+        let envs = state
+            .preview_environments
+            .find_by_mr(&Id::new("mr-ok"))
+            .await
+            .unwrap();
         assert_eq!(envs.len(), 1);
         let env = &envs[0];
         assert_eq!(env.commit_sha, commit);
@@ -1105,7 +1115,10 @@ mod tests {
             .find_by_agent(&env.agent_id)
             .await
             .unwrap();
-        assert!(peer.is_some(), "a mesh peer must be registered for the environment");
+        assert!(
+            peer.is_some(),
+            "a mesh peer must be registered for the environment"
+        );
         let peer = peer.unwrap();
         assert_eq!(peer.mesh_ip, env.mesh_ip);
         assert_eq!(env.peer_id.as_deref(), Some(peer.id.as_str()));
@@ -1127,7 +1140,11 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NO_CONTENT);
 
-        let envs = state.preview_environments.find_by_mr(&Id::new("mr-ok")).await.unwrap();
+        let envs = state
+            .preview_environments
+            .find_by_mr(&Id::new("mr-ok"))
+            .await
+            .unwrap();
         let env = &envs[0];
         assert_eq!(env.status, gyre_domain::PreviewEnvironmentStatus::Expired);
         assert_eq!(env.end_reason.as_deref(), Some("torn-down"));
@@ -1153,7 +1170,10 @@ mod tests {
         assert_eq!(status, StatusCode::CREATED);
 
         // MR-scoped list: member 200, outsider 403.
-        for (token, expect) in [(&member_key, StatusCode::OK), (&outsider_key, StatusCode::FORBIDDEN)] {
+        for (token, expect) in [
+            (&member_key, StatusCode::OK),
+            (&outsider_key, StatusCode::FORBIDDEN),
+        ] {
             let resp = app(state.clone())
                 .oneshot(
                     Request::builder()
@@ -1168,7 +1188,11 @@ mod tests {
         }
 
         // Collection + status + teardown: outsider 403 on all of them.
-        let envs = state.preview_environments.find_by_mr(&Id::new("mr-g")).await.unwrap();
+        let envs = state
+            .preview_environments
+            .find_by_mr(&Id::new("mr-g"))
+            .await
+            .unwrap();
         let env_id = envs[0].id.to_string();
         for uri in [
             format!("/api/v1/preview-environments?workspace_id=ws-try"),
@@ -1199,7 +1223,11 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
         // The outsider's teardown attempts changed nothing.
-        let envs = state.preview_environments.find_by_mr(&Id::new("mr-g")).await.unwrap();
+        let envs = state
+            .preview_environments
+            .find_by_mr(&Id::new("mr-g"))
+            .await
+            .unwrap();
         assert!(envs[0].status.is_live());
     }
 

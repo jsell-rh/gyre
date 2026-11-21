@@ -492,8 +492,7 @@ pub fn api_router() -> Router<Arc<AppState>> {
         )
         .route(
             "/api/v1/preview-environments/:id",
-            get(preview_envs::get_environment)
-                .delete(preview_envs::teardown_environment_handler),
+            get(preview_envs::get_environment).delete(preview_envs::teardown_environment_handler),
         )
         .route(
             "/api/v1/trace-spans/:span_id/payload",

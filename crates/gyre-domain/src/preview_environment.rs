@@ -189,7 +189,10 @@ mod tests {
 
     #[test]
     fn status_strings_are_snake_case() {
-        assert_eq!(PreviewEnvironmentStatus::Provisioning.as_str(), "provisioning");
+        assert_eq!(
+            PreviewEnvironmentStatus::Provisioning.as_str(),
+            "provisioning"
+        );
         assert_eq!(PreviewEnvironmentStatus::Active.as_str(), "active");
         assert_eq!(PreviewEnvironmentStatus::Expired.as_str(), "expired");
         assert_eq!(PreviewEnvironmentStatus::Failed.as_str(), "failed");

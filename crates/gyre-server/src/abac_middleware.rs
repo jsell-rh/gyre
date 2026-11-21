@@ -411,11 +411,7 @@ impl ResourceResolver {
                     "merge_request",
                     Some("write"),
                 ),
-                RouteResourceMapping::api(
-                    "/api/v1/mrs/:id/try-it",
-                    "merge_request",
-                    Some("write"),
-                ),
+                RouteResourceMapping::api("/api/v1/mrs/:id/try-it", "merge_request", Some("write")),
                 RouteResourceMapping::api(
                     "/api/v1/preview-environments",
                     "preview_environment",

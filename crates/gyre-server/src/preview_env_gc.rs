@@ -33,7 +33,10 @@ pub async fn run_once(state: &AppState) -> anyhow::Result<()> {
         .as_secs();
 
     // 1. TTL expiry.
-    let expired = state.preview_environments.find_live_expired_before(now).await?;
+    let expired = state
+        .preview_environments
+        .find_live_expired_before(now)
+        .await?;
     for env in expired {
         tracing::info!(env_id = %env.id, "preview environment TTL expired; tearing down");
         teardown_preview_environment(state, env, TeardownOutcome::Expired).await;
@@ -67,7 +70,10 @@ pub async fn run_once(state: &AppState) -> anyhow::Result<()> {
 /// `true` = confirmed alive; `false` = confirmed gone (backend answered
 /// not-alive, or the server holds no handle — an exited process or a
 /// restart orphan); probe errors keep the environment monitored.
-async fn environment_process_alive(state: &AppState, env: &gyre_domain::PreviewEnvironment) -> bool {
+async fn environment_process_alive(
+    state: &AppState,
+    env: &gyre_domain::PreviewEnvironment,
+) -> bool {
     let agent_key = env.agent_id.to_string();
     let handle = state.process_registry.lock().await.get(&agent_key).cloned();
     let Some(handle) = handle else {

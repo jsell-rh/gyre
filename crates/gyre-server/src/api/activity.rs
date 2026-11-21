@@ -557,10 +557,26 @@ mod tests {
         // Deliberately more rows than the request limit so a
         // post-fetch-truncation implementation would ALSO fail by paging
         // the globally newest rows into the window.
-        state.notifications.create(&make("old-1", 900)).await.unwrap();
-        state.notifications.create(&make("old-2", 950)).await.unwrap();
-        state.notifications.create(&make("new-1", 1_100)).await.unwrap();
-        state.notifications.create(&make("new-2", 1_200)).await.unwrap();
+        state
+            .notifications
+            .create(&make("old-1", 900))
+            .await
+            .unwrap();
+        state
+            .notifications
+            .create(&make("old-2", 950))
+            .await
+            .unwrap();
+        state
+            .notifications
+            .create(&make("new-1", 1_100))
+            .await
+            .unwrap();
+        state
+            .notifications
+            .create(&make("new-2", 1_200))
+            .await
+            .unwrap();
 
         let app = app(state);
 

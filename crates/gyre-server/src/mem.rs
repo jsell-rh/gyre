@@ -8,9 +8,8 @@ use gyre_domain::BudgetUsage;
 use gyre_domain::{
     Agent, AgentCommit, AgentStatus, AgentUsage, AgentWorktree, AnalyticsEvent, AuditEvent,
     CostEntry, DependencyEdge, LlmFunctionConfig, MergeQueueEntry, MergeQueueEntryStatus,
-    MergeRequest, MrStatus, NetworkPeer, Persona, PersonaScope, PreviewEnvironment,
-    Repository, Review, ReviewComment,
-    ReviewDecision, Session, Task, TaskStatus, Tenant, User, Workspace,
+    MergeRequest, MrStatus, NetworkPeer, Persona, PersonaScope, PreviewEnvironment, Repository,
+    Review, ReviewComment, ReviewDecision, Session, Task, TaskStatus, Tenant, User, Workspace,
 };
 #[cfg(test)]
 use gyre_domain::{BranchInfo, CommitInfo, DiffResult, MergeResult};
@@ -20,9 +19,9 @@ use gyre_ports::{
     BudgetUsageRepository, CostRepository, DependencyRepository, KvJsonStore, LlmConfigRepository,
     MergeQueueRepository, MergeRequestRepository, MetaSpecSetRepository, NetworkPeerRepository,
     PersonaRepository, PreviewEnvironmentRepository, RepoRepository, ReviewRepository,
-    RolloutPolicyRepository, SpawnLogEntry,
-    SpawnLogRepository, TaskRepository, TenantMetaSpecSetRepository, TenantRepository,
-    UserRepository, UserWorkspaceStateRepository, WorkspaceRepository, WorktreeRepository,
+    RolloutPolicyRepository, SpawnLogEntry, SpawnLogRepository, TaskRepository,
+    TenantMetaSpecSetRepository, TenantRepository, UserRepository, UserWorkspaceStateRepository,
+    WorkspaceRepository, WorktreeRepository,
 };
 #[cfg(test)]
 use gyre_ports::{GitOpsPort, JjChange, JjNewChange, JjOpsPort};
@@ -2288,7 +2287,13 @@ impl PreviewEnvironmentRepository for MemPreviewEnvironmentRepository {
     }
 
     async fn find_by_id(&self, id: &Id) -> Result<Option<PreviewEnvironment>> {
-        Ok(self.store.lock().await.iter().find(|e| e.id == *id).cloned())
+        Ok(self
+            .store
+            .lock()
+            .await
+            .iter()
+            .find(|e| e.id == *id)
+            .cloned())
     }
 
     async fn find_by_mr(&self, mr_id: &Id) -> Result<Vec<PreviewEnvironment>> {
