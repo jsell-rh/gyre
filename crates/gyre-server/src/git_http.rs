@@ -1121,14 +1121,41 @@ pub async fn git_receive_pack(
         }
     }
 
-    // TASK-019: Cycle detection — reject pushes that create cycles in spec links.
-    // spec-links.md §Cycle Detection: "The forge rejects manifest changes that
-    // would create cycles in the spec graph."
+    // TASK-019 / task-293: Cycle detection — reject pushes that create
+    // cycles in the spec link graph. spec-links.md §Cycle Detection: "The
+    // forge rejects manifest changes that would create cycles in the spec
+    // graph." The check runs over the tenant-wide forge graph (durable
+    // spec_links table plus the pushed manifest's edges) so cycles whose
+    // edges are declared across two manifests/repos are rejected too.
     {
         let default_ref = format!("refs/heads/{default_branch}");
+        // Resolve the workspace's tenant for cross-workspace target
+        // attribution (same lookup the post-receive sync performs).
+        let cycle_tenant_id = state
+            .workspaces
+            .find_by_id(&repo_workspace_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|ws| ws.tenant_id);
+        let cycle_principal = crate::spec_registry::LinkPrincipal::from_auth(&auth);
+        let cycle_ctx = crate::spec_registry::TenantCycleContext {
+            link_repo: Some(&state.spec_link_repo),
+            source_repo_id: Some(&repo_id),
+            source_workspace_id: Some(repo_workspace_id.as_str()),
+            workspaces: Some(&state.workspaces),
+            repos: Some(&state.repos),
+            tenant_id: cycle_tenant_id.as_ref(),
+            memberships: Some(&state.workspace_memberships),
+            principal: Some(&cycle_principal),
+        };
         for update in ref_updates.iter().filter(|u| u.refname == default_ref) {
-            if let Err(rejection) =
-                crate::spec_registry::check_spec_link_cycles(&repo_path, &update.new_sha).await
+            if let Err(rejection) = crate::spec_registry::check_spec_link_cycles(
+                &repo_path,
+                &update.new_sha,
+                Some(&cycle_ctx),
+            )
+            .await
             {
                 undo_ref_updates(&repo_path, &ref_updates).await;
                 state
