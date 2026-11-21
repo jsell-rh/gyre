@@ -2,7 +2,7 @@
 title: "Publish reviewed spec backlog for specs/system/spec-links.md"
 spec_ref: "GOAL.md — real implementations and meaningful verification"
 depends_on: []
-progress: complete
+progress: ready-for-review
 commits: []
 ---
 
@@ -936,23 +936,30 @@ Publish exactly the independently reviewed missing-work plan below. Only create 
 
 ## Shipped
 
-Rebase repair of the task-294 backlog publication (PR 900, merge_conflict against
-main 9e7cf62e). Resolved the single conflicting path, `specs/task-spec-inputs.json`,
-as an exact union of both sides: the candidate's spec-links backlog section/bindings
-entries (task-286..293, spec-10bdced21a063f819b1baabd) and main's dependency-graph
-entries (task-278..285, spec-cab97078efffe0fbfb7339be). No task, spec, registry
-entry, coverage status, product file or gate was changed or dropped.
+Second rebase repair of the task-294 backlog publication (PR 900, merge_conflict
+against current main bacba2b2, which now carries the activity-dashboard backlog
+task-295/task-296 on top of the previously merged dependency-graph backlog).
+Resolved the single conflicting path, `specs/task-spec-inputs.json`, as an exact
+union of both sides: the candidate's spec-links backlog section/bindings entries
+(task-286..293, spec-10bdced21a063f819b1baabd) and main's activity-dashboard
+entries (task-295, section dba01522c9fb7fb9aa3be898, spec-b128f93cd5d035d28c8bbf7f).
+No task, spec, registry entry, coverage status, product file or gate was changed
+or dropped; the merge is purely additive from both parents' perspectives.
 
 ### Validation
 
 - Merged JSON parses and was mechanically compared key-by-key against both parents:
-`sections` (292 entries) and `bindings` (242 keys) are exact unions of the two
-parents' maps with zero mutated or lost entries and no overlapping conflicting keys.
-- `specs/tasks/task-278.md`..`task-285.md` (from main) and `task-286.md`..`task-293.md`
-(unchanged from the reviewed candidate, all `not-started` with dependency frontmatter
-intact) coexist; task numbering does not collide.
-- Task-294 remains a definitions-and-bindings publication; no product implementation
-claimed. New tasks stay `not-started` pending merge, per the acceptance criteria.
+`sections` (293 entries) and `bindings` (243 keys) are exact unions of the two
+parents' maps with zero mutated, lost, or spurious entries; overlapping keys are
+identical in both parents. Diff vs the candidate adds only main's dba01522 entry
+(9 lines); diff vs main adds only the candidate's spec-links entries (94 lines).
+- `specs/tasks/task-278.md`..`task-293.md` are byte-identical to the candidate
+HEAD (task-286..293 all `not-started` with dependency frontmatter intact);
+`task-295.md`/`task-296.md` arrive unchanged from main; task numbering does not
+collide.
+- Task-294 remains a definitions-and-bindings publication; no product
+implementation claimed. New tasks stay `not-started` pending merge, per the
+acceptance criteria.
 
 ### Deferred to verifier
 
