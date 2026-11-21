@@ -1599,4 +1599,16 @@ Publish exactly the independently reviewed missing-work plan below. Only create 
 
 ## Shipped
 
+Publication of the reviewed agent-runtime backlog, rebased onto the updated main base (077d942) that carried the dependency-graph (task-286..294) and explorer-canvas (task-306/307) backlogs.
+
+### What was done
+
+- Resolved the `specs/task-spec-inputs.json` merge conflict by keeping both sides: this plan's 12 `backlog/<section-id>` entries plus its 8 `Spec gap spec-41a92c20354c6a108e6074e3 / <key> / 4a3f940495a8` bindings, and main's explorer-canvas entry/binding. The resolved registry is the exact union of main's and the publication commit's sections/bindings (verified programmatically; nothing dropped), and `python3 json.load` validates it.
+- Created `specs/tasks/task-297.md` through `specs/tasks/task-304.md` exactly per the reviewed plan (publication commit 93a834af, unchanged by the merge): titles, `spec_ref` gap keys, `depends_on` ([task-298]→[task-302], [task-302]→[task-301], [task-303]→[task-298]), `progress: not-started`, empty `commits`, and the required-behavior / acceptance-criteria / verification-intent / discovery-evidence bodies were compared field-by-field against the embedded plan JSON — all match verbatim (discovery-evidence arrays list the covered audit sections in spec-document order; content identical).
+- No product file, canonical spec, existing task, coverage status, or gate was touched by the publication; no coverage rows were marked; new tasks remain `not-started`.
+
+### Audit challenge (per required behavior)
+
+Re-read `specs/system/agent-runtime.md` and spot-checked the audit's gap evidence against the current tree: `gyre_spawn_worker` is dispatched in `crates/gyre-server/src/mcp.rs`; the meta-spec CRUD lives at `/api/v1/meta-specs-registry` while `/api/v1/meta-specs/:path/blast-radius` occupies the specced prefix (`api/mod.rs:977-991`); the `/api/v1/personas` routes remain registered (`api/mod.rs:1002-1013`); the archive/unarchive routes sit in `scripts/abac-route-registry-exemptions.txt:30,34` with no `archive` action in the ABAC vocabulary; the registry write gate is tenant-Admin for every scope; `specs/system/ralph-loop.md` still exists with a live cross-reference in `specs/system/authorization-provenance.md`; the Workspace entity has no `max_agent_iterations`; the reject handler stops agents synchronously while the budget path runs a real grace timer; the unscoped `agents://` read falls through to `state.agents.list()` with no caller-scope filter (`mcp.rs:4664`); `docker/gyre-agent/Dockerfile` exists and `api/spawn.rs:1772` directs operators to build it; the workspace/tenant meta-spec-set routes are still live (`api/mod.rs:821,854`). All twelve gap decisions hold at this base. The decomposition (8 tasks, dependency chain 298→302→301 and 303→298 matching the plan's `dependencies`) is sound, and no other active task binds any of these gap section ids — only task-297..305 reference them, so there is no duplicate active assignment. Task numbering 297-304 collides with nothing on main (which carries up to task-296 plus 306/307).
+
 Task definitions and explicit bindings only; no product implementation claimed.
