@@ -2069,6 +2069,79 @@
         "Primitives",
         "2. Scope — What Subgraph to Show"
       ]
+    },
+    "backlog/12ff1c4b10f99712ceaf0c8e": {
+      "file": "specs/system/dependency-graph.md",
+      "heading": [
+        "Cross-Repo Dependency Graph",
+        "Automatic Detection"
+      ]
+    },
+    "backlog/e07d32e2ebc10c9a36f6343c": {
+      "file": "specs/system/dependency-graph.md",
+      "heading": [
+        "Cross-Repo Dependency Graph",
+        "Automatic Detection",
+        "1. Parse Dependency Files"
+      ]
+    },
+    "backlog/8244b7d9d6d350af456c6492": {
+      "file": "specs/system/dependency-graph.md",
+      "heading": [
+        "Cross-Repo Dependency Graph",
+        "Automatic Detection",
+        "3. Parse API Contracts"
+      ]
+    },
+    "backlog/c8dab08785afd0c6458ae06b": {
+      "file": "specs/system/dependency-graph.md",
+      "heading": [
+        "Cross-Repo Dependency Graph",
+        "Breaking Change Detection"
+      ]
+    },
+    "backlog/7014f11632cdabb887a52f2b": {
+      "file": "specs/system/dependency-graph.md",
+      "heading": [
+        "Cross-Repo Dependency Graph",
+        "Breaking Change Detection",
+        "Cascade Testing"
+      ]
+    },
+    "backlog/74607a9069c32b20ef245765": {
+      "file": "specs/system/dependency-graph.md",
+      "heading": [
+        "Cross-Repo Dependency Graph",
+        "Impact Analysis"
+      ]
+    },
+    "backlog/810eac26a99174ce812d04a3": {
+      "file": "specs/system/dependency-graph.md",
+      "heading": [
+        "Cross-Repo Dependency Graph",
+        "UI"
+      ]
+    },
+    "backlog/79be3a435216d41c4ebe0660": {
+      "file": "specs/system/dependency-graph.md",
+      "heading": [
+        "Cross-Repo Dependency Graph",
+        "API"
+      ]
+    },
+    "backlog/589b5beaab7b22bb95d9b7ee": {
+      "file": "specs/system/dependency-graph.md",
+      "heading": [
+        "Cross-Repo Dependency Graph",
+        "Workspace Orchestrator Integration"
+      ]
+    },
+    "backlog/551185c9c05657eddf50405e": {
+      "file": "specs/system/dependency-graph.md",
+      "heading": [
+        "Cross-Repo Dependency Graph",
+        "Version Drift Tracking"
+      ]
     }
   },
   "bindings": {
@@ -2848,6 +2921,30 @@
     ],
     "Spec gap spec-57c2a110e6b0a8363571ac4d / diff-scope-commit-range / 78cf53a9a787": [
       "backlog/629ddb2f3b21a81f49e78ca3"
+    ],
+    "Spec gap spec-cab97078efffe0fbfb7339be / dep-detection-extraction-forms / ed9f34316476": [
+      "backlog/12ff1c4b10f99712ceaf0c8e",
+      "backlog/e07d32e2ebc10c9a36f6343c",
+      "backlog/8244b7d9d6d350af456c6492"
+    ],
+    "Spec gap spec-cab97078efffe0fbfb7339be / breaking-change-contract-route / ed9f34316476": [
+      "backlog/c8dab08785afd0c6458ae06b"
+    ],
+    "Spec gap spec-cab97078efffe0fbfb7339be / cascade-test-execution / ed9f34316476": [
+      "backlog/7014f11632cdabb887a52f2b"
+    ],
+    "Spec gap spec-cab97078efffe0fbfb7339be / impact-cascade-results-ui / ed9f34316476": [
+      "backlog/74607a9069c32b20ef245765",
+      "backlog/810eac26a99174ce812d04a3"
+    ],
+    "Spec gap spec-cab97078efffe0fbfb7339be / deps-spec-route-paths / ed9f34316476": [
+      "backlog/79be3a435216d41c4ebe0660"
+    ],
+    "Spec gap spec-cab97078efffe0fbfb7339be / orchestrator-merge-ordering-budget / ed9f34316476": [
+      "backlog/589b5beaab7b22bb95d9b7ee"
+    ],
+    "Spec gap spec-cab97078efffe0fbfb7339be / aibom-stale-dependency-flags / ed9f34316476": [
+      "backlog/551185c9c05657eddf50405e"
     ]
   }
 }
