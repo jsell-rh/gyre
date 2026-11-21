@@ -2,8 +2,8 @@
 title: "Dependency auto-detection: full extraction forms (git refs, structured contracts, nested files) and every-push trigger"
 spec_ref: "Spec gap spec-cab97078efffe0fbfb7339be / dep-detection-extraction-forms / ed9f34316476"
 depends_on: []
-progress: ready-for-review
-commits: ["78bc6dacc4ca62bc2c05a164fda6cafc69011c3c", "08f3082ae98e67172f75986d158e2253ed32f15d", "05ba66134f77df6cffd99aa4720fd5d92764fe5a", "dcdb28f1eb469d2ab0cf694d975a90deaec628ad"]
+progress: not-started
+commits: []
 ---
 
 ## Required behavior
@@ -25,28 +25,6 @@ Narrow delta on the existing push-time detection pipeline (task-048's detect_dep
 Push a Cargo.toml whose only repo-b reference is `repo-b = { git = "https://gyre.example.com/<ws>/repo-b.git" }` (no `path` key) on a feature branch, then GET the repo's dependencies: pre-fix this fails twice over — detect_cargo_path_deps/extract_path_value parse only `path = "..."` values so a git reference produces no edge, and detection only runs for `u.refname == default_ref` updates so a feature-branch push never runs detection at all — the probe must fail until both the git-reference extraction and the every-push trigger land. Companion over-match probe: an openapi.yaml whose description text contains "repo-b" but whose servers[].url does not must produce NO Api edge — pre-fix `content.contains(repo_name)` creates one, so the probe fails until server-URL-structured extraction replaces the substring scan.
 
 Update the relevant coverage rows only after implementing the behavior, with concrete source evidence. Do not mark unrelated rows complete or claim independent verification before it occurs.
-
-## Shipped
-
-All three gap areas are implemented in `crates/gyre-server/src/git_http.rs`, scoped strictly to the detection helpers and the post-receive call site (no changes to `process_spec_lifecycle` or gates). Coverage rows 5/6/8 in `specs/coverage/system/dependency-graph.md` are re-evidenced with current function names and line numbers; no other rows touched.
-
-### Behavior
-
-- **Every-push trigger (gap 12ff1c4b):** the `detect_dependencies_on_push` call runs for every applied (non-delete) ref update on any branch. The changed-dependency-file early return is gone: all eight detectors always run against the tree at the pushed tip, `ran_methods` covers every method each push, and reconcile orphans (never deletes) edges whose declarations vanish from the tip while leaving Manual edges untouched. A target repo created after the manifest was committed is matched by the next push, even one whose changed-file set contains no dependency file.
-- **Cargo.toml (gap e07d32e2):** `detect_cargo_deps` parses `[dependencies]`/`[dev-dependencies]`/`[build-dependencies]` inline-table entries with word-boundary key matching for BOTH `path = "…"` and `git = "<url>"`, with `version`/`tag`/`rev` captured as the pinned version. `repo_name_from_reference` extracts the repo name from a reference (URL last path segment, `#fragment`/`?query` stripped, `.git` suffix removed, `git@host:` forms handled). ALL `Cargo.toml` files in the tree at the pushed SHA are enumerated via `git ls-tree`, with the manifest's tree path as `source_artifact`.
-- **package.json / pyproject.toml:** `detect_package_json_deps` additionally extracts git URL values (`git+https://…`, `git+ssh://…`, stored verbatim; `#fragment` as version); `detect_pyproject_deps` additionally extracts PEP 508 direct references `pkg @ git+https://…`. go.mod unchanged. External registry deps still ignored — only references matching a known tenant repo (excluding self) create edges.
-- **API contracts (gap 8244b7d9):** `detect_openapi_refs` parses the document (serde_yaml; JSON is valid YAML) and extracts server URLs only — OpenAPI 3.x `servers[].url`, Swagger 2.0 `host`+`basePath` — matching known repo names as whole URL labels (`repo_name_in_url`). `detect_mcp_refs` parses the mcp.json structure for `mcpServers.<name>.url`/`.server` and `tools[].url`/`.server` fields only. A repo name appearing only in a description/title/unrelated field creates NO edge. Contract files are enumerated tree-wide (`api/openapi.yaml` carries its tree path as `source_artifact`). Proto import detection unchanged.
-
-### This repair round (78bc6dac)
-
-Formatting-only fix for the verification finding (`check-clippy-diff` exit 1): the five dependency-detection pattern closures flagged as `clippy::manual_pattern_char_comparison` (`repo_name_from_reference` rsplit, `detect_pyproject_deps` trim_matches/trim_end_matches, `repo_name_in_url` split, `detect_proto_imports` trim_end_matches) were converted to char-array patterns — behavior-identical, matching the repo's existing style (`email.rs`). No production behavior change.
-
-### Test evidence
-
-- `cargo check -p gyre-server` passes via the build wrapper (exit 0, 7m07s cold; log: `task-278-cargo-check.log` in review evidence).
-- Standalone probe compiling the exact post-fix functions (`/tmp/stage/review-evidence/task-278-clippy-probe/`): `cargo clippy --all-targets --all-features -W clippy::all -D clippy::manual_pattern_char_comparison` exits 0, and 4/4 behavior tests (git-URL reference extraction, URL whole-label matching, PEP 508 direct refs, proto import trimming) pass via `cargo test -p task-278-clippy-probe`.
-- rustfmt changed-lines check clean (edition 2021, `skip_children=true`) on the edited lines.
-- Full gyre-server test execution remains deferred to the independent verifier (model-phase 4 GiB budget; the cargo wrapper blocks server test builds mechanically). Required verifier probes: `cargo test -p gyre-server` — in particular `git_http::tests::detect_dependencies_on_push_full_extraction_forms` and `git_http::tests::push_to_non_default_branch_detects_git_dependency_then_orphans`, plus the detector unit tests in `api::dependencies::tests` (`test_cargo_toml_dep_detection_path_and_git_forms`, `test_repo_name_from_reference`, `test_detect_package_json_git_ref`, `test_detect_pyproject_pep508_git_ref`, `test_detect_openapi_description_mention_no_edge`, `test_detect_mcp_refs_unrelated_field_no_edge`, and the reconcile suite); plus the workspace clippy gate (`check-clippy-diff.py`) that this round repairs.
 
 ## Discovery evidence
 
