@@ -88,7 +88,16 @@ echo "=== Agent ready. Workspace: /workspace/repo ==="
 # If GYRE_AGENT_COMMAND is set, run it (server-controlled, not user input)
 if [ -n "${GYRE_AGENT_COMMAND:-}" ]; then
     exec $GYRE_AGENT_COMMAND
-else
-    echo "Starting Claude agent runner..."
-    exec node /gyre/agent-runner.mjs
 fi
+
+# Explicit command args (e.g. `docker run … image bash -c <script>`) run after
+# the bootstrap above: the clone, credential setup and heartbeat have already
+# happened, so the command sees a ready checkout at /workspace/repo. Used by
+# preview environments (activity-dashboard.md §"Try it" links), which pass
+# `bash -c 'git checkout $GYRE_COMMIT_SHA && exec node /gyre/preview-serve.mjs'`.
+if [ "$#" -gt 0 ]; then
+    exec "$@"
+fi
+
+echo "Starting Claude agent runner..."
+exec node /gyre/agent-runner.mjs
