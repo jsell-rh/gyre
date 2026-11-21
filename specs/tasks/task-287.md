@@ -2,8 +2,8 @@
 title: "Spec Links — cross-repo link validation: same-workspace format resolution, linking-user read access, target-manifest existence, tenant-scoped re-resolution"
 spec_ref: "Spec gap spec-10bdced21a063f819b1baabd / spec-links-cross-repo-resolution / 5a915155d9bc"
 depends_on: []
-progress: ready-for-review
-commits: ["e3270d273935b77b6b1c71df894320b232bde919", "5afb12e079b522701b1e24a263634a5500d8b205"]
+progress: not-started
+commits: []
 ---
 
 ## Required behavior
@@ -62,59 +62,3 @@ Canonical spec: `specs/system/spec-links.md`. Source: `678a8ac3e3bfeafeb66cdb47e
     ]
   }
 ]
-
-## Shipped
-
-All four specced validation behaviors for cross-repo/cross-workspace links
-(spec-links.md §Cross-Repo and Cross-Workspace Links) are implemented in
-production code, shared by every sync entry point (git_http push handler,
-api/repos.rs sync_specs + sync_mirror, mirror_sync) via `sync_spec_ledger`:
-
-1. **Same-workspace `@{repo}/{path}` resolution** — `validate_cross_repo_target`
-   (spec_registry.rs) resolves the repo via `find_by_name_and_workspace` on the
-   SOURCE workspace id (previously `None`, which never resolved); the staleness
-   pass (`resolve_unresolved_cross_workspace_links`) re-resolves unresolved
-   CrossRepo links via the source link's repo → workspace (previously it
-   explicitly refused).
-2. **Linking-user read access** — `LinkPrincipal::from_auth` threads the
-   authenticated pusher into `sync_spec_ledger`; `validate_cross_workspace_target`
-   checks `principal_has_read_access` (workspace-membership lookup; system
-   principals exempt; fail-closed on lookup error) before resolving a
-   cross-workspace target. A denial stores the link `unresolved` with
-   `target_repo_id` NULL, logs a warning naming principal and target, and records
-   a durable KV marker (`spec_link_denials` namespace) that the staleness pass
-   consults so a denied link is never silently flipped `active`. Mirror fetches
-   pass `None` (no linking user) — exempt per the sync-origin distinction.
-3. **Target-manifest existence** — `target_manifest_declares_path` reads the
-   target repo's current `specs/manifest.yaml` (git-show on
-   `refs/heads/{default_branch}`) and requires the declared path at push time and
-   at staleness re-resolution; a missing path stores `unresolved` with the path
-   named in the warning.
-4. **Tenant-scoped re-resolution** — cross-workspace re-resolution derives the
-   tenant from the source link (source repo → workspace → tenant); the fabricated
-   literal `"default"` tenant lookup is removed. Unresolvable scopes skip and
-   log.
-
-### Test evidence
-
-Six tests cover the acceptance criteria (all exercise real git repos and real
-mem-backed port adapters; none stub the validators):
-
-- `spec_registry::tests::cross_repo_same_workspace_link_resolves_active_then_stale_on_target_change`
-  (AC 1: resolves to B's repo id, active, then stale on target change)
-- `spec_registry::tests::cross_repo_link_unresolved_when_target_path_not_in_target_manifest` (AC 3)
-- `spec_registry::tests::cross_workspace_link_denied_without_read_access_stays_unresolved`
-  (AC 2, incl. durable denial marker + authorized re-push positive control)
-- `spec_link_staleness::tests::staleness_pass_resolves_cross_workspace_link_under_source_tenant` (AC 4)
-- `spec_link_staleness::tests::staleness_pass_resolves_cross_repo_same_workspace_link`
-  (AC 1 staleness half + missing-path stays unresolved)
-- `spec_link_staleness::tests::staleness_does_not_flip_access_denied_link_active` (AC 2 staleness half)
-
-`cargo check -p gyre-server --tests` is clean and the repo's mechanical checks
-pass (fabricated-scope-defaults, scope-literal-defaults, byte-slice-truncation,
-inert-enforcement, relative-path-defaults, lossy-secret-conversion,
-fail-open-ref-resolution). Local execution of the gyre-server test binary is
-blocked by the 4 GiB build wrapper; the independent verifier must run
-`cargo test -p gyre-server --lib spec_registry::tests::cross` and
-`cargo test -p gyre-server --lib spec_link_staleness::tests::staleness`
-(evidence recorded under /tmp/stage/review-evidence).
