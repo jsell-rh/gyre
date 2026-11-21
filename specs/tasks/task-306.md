@@ -3,7 +3,7 @@ title: "Verify structural-lens complexity/churn indicators end-to-end on the liv
 spec_ref: "Spec gap spec-82658b0b4e08c1502a5f0793 / structural-metrics-verification / b3cd47ade570"
 depends_on: []
 progress: blocked-on-external-implementation
-commits: []
+commits: ["765a89fcb86c7bb39112df7f38e35932c7e5c148", "4fa5514fbf3f15464b27d68a326dec05baa9955d", "31c99529ca9d627bf9920a2d5eb13c664130a420"]
 ---
 
 ## Required behavior
