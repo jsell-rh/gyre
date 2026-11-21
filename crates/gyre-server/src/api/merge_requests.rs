@@ -705,8 +705,8 @@ pub(crate) async fn detect_graph_deps(
     let mut deps: Vec<MergeRequestDependency> = Vec::new();
     let mut linked_repos: Vec<Id> = Vec::new();
     for edge in &edges {
-        // Normalize "./Cargo.toml" and "Cargo.toml" to the same artifact
-        // path git reports.
+        // Normalize a leading ./ prefix (./Cargo.toml vs Cargo.toml)
+        // to the path git reports.
         let artifact = edge
             .source_artifact
             .strip_prefix("./")
