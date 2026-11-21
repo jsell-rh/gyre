@@ -1664,6 +1664,29 @@ pub struct SpecLinkResponse {
     pub status: String,
     pub created_at: u64,
     pub stale_since: Option<u64>,
+    /// Direction of the link relative to the queried spec path: "outbound"
+    /// when the queried spec is the link's source, "inbound" when it is the
+    /// target (a self-link is outbound). Omitted when no queried path applies
+    /// (tenant-wide stale-links/conflicts listings).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub direction: Option<String>,
+}
+
+impl SpecLinkResponse {
+    /// Set `direction` relative to `queried_path`: "outbound" when the queried
+    /// spec is the link's source, "inbound" when it is the target. A self-link
+    /// (source and target both the queried spec) is outbound.
+    fn with_direction_relative_to(mut self, queried_path: &str) -> Self {
+        self.direction = Some(
+            if self.source_path == queried_path {
+                "outbound"
+            } else {
+                "inbound"
+            }
+            .to_string(),
+        );
+        self
+    }
 }
 
 impl From<SpecLinkEntry> for SpecLinkResponse {
@@ -1681,6 +1704,7 @@ impl From<SpecLinkEntry> for SpecLinkResponse {
             status: e.status,
             created_at: e.created_at,
             stale_since: e.stale_since,
+            direction: None,
         }
     }
 }
@@ -1729,7 +1753,7 @@ pub async fn get_spec_links(
         .iter()
         .filter(|l| l.source_path == spec_path || l.target_path == spec_path)
         .cloned()
-        .map(Into::into)
+        .map(|l| SpecLinkResponse::from(l).with_direction_relative_to(&spec_path))
         .collect();
     result.sort_by(|a, b| a.id.cmp(&b.id));
     Ok(Json(result))
@@ -1794,7 +1818,7 @@ pub async fn get_spec_dependents(
                     || l.link_type == SpecLinkType::Implements)
         })
         .cloned()
-        .map(Into::into)
+        .map(|l| SpecLinkResponse::from(l).with_direction_relative_to(&spec_path))
         .collect();
     result.sort_by(|a, b| a.id.cmp(&b.id));
     Ok(Json(result))
@@ -1827,7 +1851,7 @@ pub async fn get_spec_dependencies(
                     || l.link_type == SpecLinkType::Implements)
         })
         .cloned()
-        .map(Into::into)
+        .map(|l| SpecLinkResponse::from(l).with_direction_relative_to(&spec_path))
         .collect();
     result.sort_by(|a, b| a.id.cmp(&b.id));
     Ok(Json(result))
@@ -4874,6 +4898,11 @@ specs:
             .save(&make_ledger_entry("system/b.md", ApprovalStatus::Pending))
             .await
             .unwrap();
+        state
+            .spec_ledger
+            .save(&make_ledger_entry("system/c.md", ApprovalStatus::Pending))
+            .await
+            .unwrap();
         // a → b (outbound from a, inbound to b)
         state.spec_links_store.lock().await.push(SpecLinkEntry {
             id: "a-depends-b".to_string(),
@@ -4890,10 +4919,28 @@ specs:
             created_at: 1700000000,
             stale_since: None,
         });
+        // b → c (outbound from b)
+        state.spec_links_store.lock().await.push(SpecLinkEntry {
+            id: "b-depends-c".to_string(),
+            source_path: "system/b.md".to_string(),
+            source_repo_id: None,
+            source_sha: "src-sha".to_string(),
+            link_type: SpecLinkType::DependsOn,
+            target_path: "system/c.md".to_string(),
+            target_repo_id: None,
+            target_display: None,
+            target_sha: None,
+            reason: None,
+            status: "active".to_string(),
+            created_at: 1700000000,
+            stale_since: None,
+        });
 
         let app = crate::api::api_router().with_state(state);
-        // Query links for b — should get the inbound link from a
+        // Query links for b — should get the inbound link from a (direction
+        // "inbound") and the outbound link to c (direction "outbound").
         let resp = app
+            .clone()
             .oneshot(
                 axum::http::Request::builder()
                     .uri("/api/v1/specs/system%2Fb.md/links")
@@ -4906,9 +4953,143 @@ specs:
         assert_eq!(resp.status(), StatusCode::OK);
         let json = body_json(resp).await;
         let arr = json.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        let by_id = |id: &str| {
+            arr.iter()
+                .find(|l| l["id"] == id)
+                .unwrap_or_else(|| panic!("link {id} missing"))
+                .clone()
+        };
+        let inbound = by_id("a-depends-b");
+        assert_eq!(inbound["link_type"], "depends_on");
+        assert_eq!(inbound["source_path"], "system/a.md");
+        assert_eq!(
+            inbound["direction"], "inbound",
+            "link whose target_path is the queried spec must be direction=inbound"
+        );
+        let outbound = by_id("b-depends-c");
+        assert_eq!(
+            outbound["direction"], "outbound",
+            "link whose source_path is the queried spec must be direction=outbound"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn get_spec_links_self_link_is_outbound() {
+        use crate::spec_registry::{SpecLinkEntry, SpecLinkType};
+        let state = test_state();
+
+        state
+            .spec_ledger
+            .save(&make_ledger_entry("system/self.md", ApprovalStatus::Pending))
+            .await
+            .unwrap();
+        // self → self (self-link)
+        state.spec_links_store.lock().await.push(SpecLinkEntry {
+            id: "self-depends-self".to_string(),
+            source_path: "system/self.md".to_string(),
+            source_repo_id: None,
+            source_sha: "src-sha".to_string(),
+            link_type: SpecLinkType::DependsOn,
+            target_path: "system/self.md".to_string(),
+            target_repo_id: None,
+            target_display: None,
+            target_sha: None,
+            reason: None,
+            status: "active".to_string(),
+            created_at: 1700000000,
+            stale_since: None,
+        });
+
+        let app = crate::api::api_router().with_state(state);
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/specs/system%2Fself.md/links")
+                    .header("authorization", "Bearer test-token")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let arr = json.as_array().unwrap();
         assert_eq!(arr.len(), 1);
-        assert_eq!(arr[0]["link_type"], "depends_on");
-        assert_eq!(arr[0]["source_path"], "system/a.md");
+        assert_eq!(arr[0]["direction"], "outbound");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn get_spec_dependents_and_dependencies_populate_direction() {
+        use crate::spec_registry::{SpecLinkEntry, SpecLinkType};
+        let state = test_state();
+
+        for path in ["system/a.md", "system/b.md", "system/c.md"] {
+            state
+                .spec_ledger
+                .save(&make_ledger_entry(path, ApprovalStatus::Pending))
+                .await
+                .unwrap();
+        }
+        // a → b → c chain; query b.
+        for (id, src, tgt) in [
+            ("a-depends-b", "system/a.md", "system/b.md"),
+            ("b-depends-c", "system/b.md", "system/c.md"),
+        ] {
+            state.spec_links_store.lock().await.push(SpecLinkEntry {
+                id: id.to_string(),
+                source_path: src.to_string(),
+                source_repo_id: None,
+                source_sha: "src-sha".to_string(),
+                link_type: SpecLinkType::DependsOn,
+                target_path: tgt.to_string(),
+                target_repo_id: None,
+                target_display: None,
+                target_sha: None,
+                reason: None,
+                status: "active".to_string(),
+                created_at: 1700000000,
+                stale_since: None,
+            });
+        }
+
+        let app = crate::api::api_router().with_state(state);
+        // dependents of b: the a → b link, direction inbound
+        let resp = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/specs/system%2Fb.md/dependents")
+                    .header("authorization", "Bearer test-token")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let arr = json.as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["id"], "a-depends-b");
+        assert_eq!(arr[0]["direction"], "inbound");
+
+        // dependencies of b: the b → c link, direction outbound
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/specs/system%2Fb.md/dependencies")
+                    .header("authorization", "Bearer test-token")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let arr = json.as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["id"], "b-depends-c");
+        assert_eq!(arr[0]["direction"], "outbound");
     }
 
     // -----------------------------------------------------------------------
