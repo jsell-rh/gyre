@@ -1373,6 +1373,10 @@ pub async fn git_receive_pack(
     let push_tenant_id = auth.tenant_id.clone();
     let push_workspace_id = repo_workspace_id.clone();
     let push_gate_outcomes_clone = push_gate_outcomes.clone();
+    // Linking principal for cross-workspace link validation (spec-links.md
+    // §Cross-Repo and Cross-Workspace Links: "the linking user has read
+    // access") — the authenticated pusher.
+    let push_principal = crate::spec_registry::LinkPrincipal::from_auth(&auth);
     tokio::spawn(async move {
         let commit_count = record_pushed_commits(
             &state_clone,
@@ -1612,6 +1616,9 @@ pub async fn git_receive_pack(
                 Some(&state_clone.workspaces),
                 Some(&state_clone.repos),
                 workspace_tenant_id.as_ref(),
+                Some(&push_principal),
+                Some(&state_clone.workspace_memberships),
+                Some(&state_clone.kv_store),
                 Some(&state_clone.tasks),
             )
             .await;
