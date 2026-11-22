@@ -2,13 +2,18 @@
 //!
 //! Walks a TypeScript/JavaScript repository and extracts:
 //! - Modules (.ts, .tsx, .js, .jsx files)
-//! - Classes (`class_declaration`)
+//! - Classes (`class_declaration`) — `extends Base` heritage emits an
+//!   Implements edge to the base class (the `implements` clause is owned by
+//!   the realized-model graph-edge-emitters plan; this extractor must not
+//!   parse it)
 //! - Interfaces (`interface_declaration`)
-//! - Exported functions (`export function` / `export const f = () =>`)
+//! - Exported functions (`export function` / `export const f = () =>`), with
+//!   Returns edges from return type annotations
 //! - API call sites (`fetch("/path")` / `axios.get("/path")`) → Endpoint nodes + Calls edges
 //!
 //! Only exported symbols are extracted; non-exported symbols are internal details.
 
+use crate::edge_resolution::{node_type_index, resolve_deferred_target};
 use crate::extractor::{
     shallow_scan_for_marker, ExtractionError, ExtractionResult, LanguageExtractor,
 };
@@ -58,10 +63,17 @@ impl LanguageExtractor for TypeScriptExtractor {
             edges: Vec::new(),
             errors: Vec::new(),
             name_to_id: HashMap::new(),
+            deferred_implements: Vec::new(),
+            deferred_returns: Vec::new(),
         };
 
         // Pass 1: tree-sitter based extraction (declarations + API call sites)
         ctx.extract_ts_files();
+        // Deferred-edge resolution: `extends` bases and return-type
+        // annotations can reference nodes extracted later in the run, so they
+        // are resolved only after every file has been extracted.
+        ctx.resolve_deferred_implements();
+        ctx.resolve_deferred_returns();
 
         ExtractionResult {
             nodes: ctx.nodes,
@@ -84,6 +96,13 @@ struct ExtractionContext {
     errors: Vec<ExtractionError>,
     /// Map qualified_name → node Id for edge resolution and deduplication.
     name_to_id: HashMap<String, Id>,
+    /// Deferred Implements edges: (class_id, base_class_name) collected from
+    /// `extends Base` heritage clauses, resolved after all files are
+    /// extracted (the base class may live in a later file).
+    deferred_implements: Vec<(Id, String)>,
+    /// Deferred Returns edges: (function_id, return_type_name) collected from
+    /// return type annotations, resolved after all files are extracted.
+    deferred_returns: Vec<(Id, String)>,
 }
 
 impl ExtractionContext {
@@ -403,6 +422,37 @@ impl ExtractionContext {
         self.nodes.push(graph_node);
         self.edges.push(edge);
 
+        // Class heritage: `class Admin extends User` → deferred Implements
+        // edge from this class to the base class. Only the `extends` clause
+        // is read here — the `implements` clause is owned by the
+        // realized-model graph-edge-emitters plan, and this extractor must
+        // not emit Implements edges from it. Only plain identifier bases are
+        // collected; expression bases (mixin calls like `extends mixin(Base)`)
+        // resolve to nothing and yield no edge. Resolution is deferred
+        // because the base class may be extracted later in the run.
+        for i in 0..node.child_count() {
+            let Some(child) = node.child(i) else { continue };
+            if child.kind() != "class_heritage" {
+                continue;
+            }
+            for j in 0..child.child_count() {
+                let Some(clause) = child.child(j) else { continue };
+                if clause.kind() != "extends_clause" {
+                    continue; // implements_clause: not owned by this extractor
+                }
+                let Some(value) = clause.child_by_field_name("value") else {
+                    continue;
+                };
+                if value.kind() == "identifier" {
+                    let base_name = &content[value.byte_range()];
+                    if !base_name.is_empty() {
+                        self.deferred_implements
+                            .push((node_id.clone(), base_name.to_string()));
+                    }
+                }
+            }
+        }
+
         // Extract fields from class body (public_field_definition / property_declaration).
         if let Some(body) = node.child_by_field_name("body") {
             self.extract_fields_from_body(content, body, rel_path, &qname, &node_id);
@@ -615,9 +665,18 @@ impl ExtractionContext {
                     graph_node.test_node = is_test_file;
                     let node_id = graph_node.id.clone();
                     self.name_to_id.insert(qname, node_id.clone());
-                    let edge = self.make_edge(EdgeType::Contains, module_id.clone(), node_id);
+                    let edge = self.make_edge(EdgeType::Contains, module_id.clone(), node_id.clone());
                     self.nodes.push(graph_node);
                     self.edges.push(edge);
+
+                    // Return type annotation: `function f(): User` → deferred
+                    // Returns edge. Unresolved names (primitives like
+                    // string/number/void, external types) yield no edge.
+                    if let Some(ret) = child.child_by_field_name("return_type") {
+                        if let Some(type_name) = ts_return_type_name(content, ret) {
+                            self.deferred_returns.push((node_id, type_name));
+                        }
+                    }
                 }
                 "lexical_declaration" => {
                     // `export const funcName = () => ...` or `export const funcName = function() ...`
@@ -654,13 +713,71 @@ impl ExtractionContext {
                             let node_id = graph_node.id.clone();
                             self.name_to_id.insert(qname, node_id.clone());
                             let edge =
-                                self.make_edge(EdgeType::Contains, module_id.clone(), node_id);
+                                self.make_edge(EdgeType::Contains, module_id.clone(), node_id.clone());
                             self.nodes.push(graph_node);
                             self.edges.push(edge);
+
+                            // Return type annotation on the arrow/function
+                            // expression: `export const f = (x): User => x`.
+                            if let Some(value) = decl.child_by_field_name("value") {
+                                if let Some(ret) = value.child_by_field_name("return_type") {
+                                    if let Some(type_name) = ts_return_type_name(content, ret) {
+                                        self.deferred_returns.push((node_id, type_name));
+                                    }
+                                }
+                            }
                         }
                     }
                 }
                 _ => {}
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Deferred-edge resolution (after all files are extracted)
+    // -----------------------------------------------------------------------
+
+    /// Resolve deferred Implements edges: derived class → resolvable `extends` base.
+    fn resolve_deferred_implements(&mut self) {
+        let deferred = std::mem::take(&mut self.deferred_implements);
+        let id_to_type = node_type_index(&self.nodes);
+        let mut seen: std::collections::HashSet<(String, String)> =
+            std::collections::HashSet::new();
+        for (class_id, base_name) in deferred {
+            let Some(target_id) =
+                resolve_deferred_target(&base_name, &self.name_to_id, &id_to_type, '.')
+            else {
+                continue;
+            };
+            // Skip degenerate self-inheritance and duplicate (class, base) pairs.
+            if class_id == target_id {
+                continue;
+            }
+            let key = (class_id.to_string(), target_id.to_string());
+            if seen.insert(key) {
+                let edge = self.make_edge(EdgeType::Implements, class_id, target_id);
+                self.edges.push(edge);
+            }
+        }
+    }
+
+    /// Resolve deferred Returns edges: function → return-type node.
+    fn resolve_deferred_returns(&mut self) {
+        let deferred = std::mem::take(&mut self.deferred_returns);
+        let id_to_type = node_type_index(&self.nodes);
+        let mut seen: std::collections::HashSet<(String, String)> =
+            std::collections::HashSet::new();
+        for (fn_id, type_name) in deferred {
+            let Some(target_id) =
+                resolve_deferred_target(&type_name, &self.name_to_id, &id_to_type, '.')
+            else {
+                continue;
+            };
+            let key = (fn_id.to_string(), target_id.to_string());
+            if seen.insert(key) {
+                let edge = self.make_edge(EdgeType::Returns, fn_id, target_id);
+                self.edges.push(edge);
             }
         }
     }
@@ -828,6 +945,31 @@ fn extract_string_literal(content: &str, node: tree_sitter::Node) -> Option<Stri
 // ---------------------------------------------------------------------------
 // Utilities
 // ---------------------------------------------------------------------------
+
+/// Normalize a TypeScript return-type `type_annotation` node into a
+/// resolvable type name.
+///
+/// Handles the common annotation forms:
+/// - `: User` → `User`
+/// - `: Array<User>` → `Array` (the outer name; generics are stripped the
+///   same way the Rust extractor strips `Vec<T>` — a container name resolves
+///   to no repo node and yields no edge)
+/// - `: string` / `: number` / `: void` → returned as-is; primitives resolve
+///   to no repo node and yield no edge
+///
+/// Returns `None` for empty annotations.
+fn ts_return_type_name(content: &str, ret_node: tree_sitter::Node) -> Option<String> {
+    let text = &content[ret_node.byte_range()];
+    // Strip the leading `:` of the type_annotation and surrounding whitespace.
+    let trimmed = text.trim_start_matches(':').trim();
+    // Strip generic parameters (`Array<User>` → `Array`).
+    let base = trimmed.split('<').next().unwrap_or(trimmed).trim();
+    if base.is_empty() {
+        None
+    } else {
+        Some(base.to_string())
+    }
+}
 
 /// Check if a file path indicates a TypeScript/JavaScript test file.
 ///
@@ -1273,6 +1415,186 @@ app.delete('/users/:id', deleteUser);
         assert!(
             endpoint.is_some(),
             "should extract Next.js API route handler as Endpoint node"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Implements edges (`extends` heritage — the `implements` clause is owned
+    // by the realized-model graph-edge-emitters plan and is never parsed here)
+    // -----------------------------------------------------------------------
+
+    fn node_id_by_name(result: &ExtractionResult, name: &str) -> Option<Id> {
+        result
+            .nodes
+            .iter()
+            .find(|n| n.name == name)
+            .map(|n| n.id.clone())
+    }
+
+    fn has_edge(result: &ExtractionResult, et: EdgeType, from_name: &str, to_name: &str) -> bool {
+        match (
+            node_id_by_name(result, from_name),
+            node_id_by_name(result, to_name),
+        ) {
+            (Some(f), Some(t)) => result
+                .edges
+                .iter()
+                .any(|e| e.edge_type == et && e.source_id == f && e.target_id == t),
+            _ => false,
+        }
+    }
+
+    #[test]
+    fn class_extends_emits_implements_edge_with_base_declared_after() {
+        let dir = make_tempdir();
+        // User is declared AFTER Admin: at the moment Admin is extracted, no
+        // User node exists yet. The deferred resolution must still produce
+        // the Implements edge (order-independence).
+        let result = extract_ts(
+            &dir,
+            "models.ts",
+            "class Admin extends User {}\n\nclass User {}\n",
+        );
+        assert!(
+            result.errors.is_empty(),
+            "unexpected errors: {:?}",
+            result.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+        assert!(
+            has_edge(&result, EdgeType::Implements, "Admin", "User"),
+            "class Admin extends User must emit an Implements edge Admin -> User"
+        );
+    }
+
+    #[test]
+    fn class_extends_across_files_in_both_extraction_orders() {
+        for (admin_first, label) in [(true, "admin file first"), (false, "user file first")] {
+            let dir = make_tempdir();
+            fs::write(dir.path().join("package.json"), r#"{"name":"test"}"#).unwrap();
+            let files: Vec<(&str, &str)> = if admin_first {
+                vec![
+                    ("admin.ts", "class Admin extends User {}\n"),
+                    ("user.ts", "class User {}\n"),
+                ]
+            } else {
+                vec![
+                    ("user.ts", "class User {}\n"),
+                    ("admin.ts", "class Admin extends User {}\n"),
+                ]
+            };
+            for (name, content) in files {
+                fs::write(dir.path().join(name), content).unwrap();
+            }
+
+            let result = TypeScriptExtractor.extract(dir.path(), "abc123");
+            assert!(
+                result.errors.is_empty(),
+                "unexpected errors ({}): {:?}",
+                label,
+                result.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+            );
+            assert!(
+                has_edge(&result, EdgeType::Implements, "Admin", "User"),
+                "cross-file class Admin extends User must emit Implements edge ({label})"
+            );
+        }
+    }
+
+    #[test]
+    fn class_extends_unknown_base_yields_no_implements_edge() {
+        let dir = make_tempdir();
+        let result = extract_ts(&dir, "models.ts", "class Admin extends Unknown {}\n");
+        assert!(
+            result.errors.is_empty(),
+            "unexpected errors: {:?}",
+            result.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+        let implements_count = result
+            .edges
+            .iter()
+            .filter(|e| e.edge_type == EdgeType::Implements)
+            .count();
+        assert_eq!(
+            implements_count, 0,
+            "extends Unknown (no such node) must yield no Implements edge"
+        );
+    }
+
+    #[test]
+    fn class_extends_mixin_expression_yields_no_implements_edge() {
+        let dir = make_tempdir();
+        // Expression bases (mixin calls) resolve to nothing — no edge. The
+        // base class exists as a node, but the heritage value is not a plain
+        // identifier.
+        let result = extract_ts(
+            &dir,
+            "models.ts",
+            "class Base {}\nclass Admin extends mixin(Base) {}\n",
+        );
+        assert!(
+            result.errors.is_empty(),
+            "unexpected errors: {:?}",
+            result.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+        let implements_count = result
+            .edges
+            .iter()
+            .filter(|e| e.edge_type == EdgeType::Implements)
+            .count();
+        assert_eq!(
+            implements_count, 0,
+            "mixin-call heritage must yield no Implements edge"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Returns edges (function signatures)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn return_type_annotation_emits_returns_edge() {
+        let dir = make_tempdir();
+        let result = extract_ts(
+            &dir,
+            "api.ts",
+            "class User {}\n\nexport function getUser(): User {\n  return new User();\n}\n\nexport function nope(): string {\n  return '';\n}\n",
+        );
+        assert!(
+            result.errors.is_empty(),
+            "unexpected errors: {:?}",
+            result.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+        assert!(
+            has_edge(&result, EdgeType::Returns, "getUser", "User"),
+            "export function getUser(): User must emit a Returns edge getUser -> User"
+        );
+        let returns_count = result
+            .edges
+            .iter()
+            .filter(|e| e.edge_type == EdgeType::Returns)
+            .count();
+        assert_eq!(
+            returns_count, 1,
+            "primitive return type (string) must yield no Returns edge"
+        );
+    }
+
+    #[test]
+    fn arrow_function_return_type_annotation_emits_returns_edge() {
+        let dir = make_tempdir();
+        let result = extract_ts(
+            &dir,
+            "api.ts",
+            "class User {}\n\nexport const makeUser = (id: number): User => new User();\n",
+        );
+        assert!(
+            result.errors.is_empty(),
+            "unexpected errors: {:?}",
+            result.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+        assert!(
+            has_edge(&result, EdgeType::Returns, "makeUser", "User"),
+            "export const makeUser = (id): User => ... must emit a Returns edge"
         );
     }
 }
