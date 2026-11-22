@@ -51,7 +51,8 @@ pub struct AgentContext {
     pub stack_hash: String,
     /// Agent attestation level (0–3).
     pub attestation_level: i64,
-    /// Hash of the meta-spec set the agent is running.
+    /// Hash of the registry's effective (required, approved, visible)
+    /// meta-spec set the agent is running under.
     pub meta_spec_set_sha: String,
     /// Who spawned this agent.
     pub spawned_by: String,

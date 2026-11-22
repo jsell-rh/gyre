@@ -829,6 +829,25 @@ pub async fn verify_spec_ref(state: &AppState, spec_ref: &str) -> Result<(), Str
         ));
     }
 
+    // Registry-metadata invalidation (agent-runtime.md §2 Spec-Level
+    // Binding): the spec's binding set is registry metadata covered by the
+    // registry SHA recorded in the approval ledger — a pin update resets
+    // the ledger entry to Pending, so an approval row for the content SHA
+    // alone no longer authorizes a merge until a human re-approves at the
+    // new registry SHA. Content-edit invalidation (push resets Pending)
+    // flows through the same gate. Specs absent from the ledger keep the
+    // row-only check below (no registry entry to consult).
+    if let Ok(Some(entry)) = state.spec_ledger.find_by_path(path).await {
+        use gyre_domain::spec_ledger::ApprovalStatus;
+        if entry.approval_status != ApprovalStatus::Approved {
+            return Err(format!(
+                "spec '{path}' approval status is '{}' — the recorded approval no \
+                 longer authorizes this spec version; re-approval required",
+                entry.approval_status
+            ));
+        }
+    }
+
     // Approval status per SHA (agent-gates.md §Spec Approval Ledger): query
     // the exact (spec_path, spec_sha) version — the forge's step-8 check —
     // rather than loading every approval for the path. An entry is active
@@ -868,6 +887,25 @@ pub async fn verify_signed_spec_ref(state: &AppState, spec_ref: &str) -> Result<
         return Err(format!(
             "spec_ref SHA '{sha}' is not a valid 40-char hex SHA"
         ));
+    }
+
+    // Registry-metadata invalidation (agent-runtime.md §2 Spec-Level
+    // Binding): the spec's binding set is registry metadata covered by the
+    // registry SHA recorded in the approval ledger — a pin update resets
+    // the ledger entry to Pending, so an approval row for the content SHA
+    // alone no longer authorizes a merge until a human re-approves at the
+    // new registry SHA. Content-edit invalidation (push resets Pending)
+    // flows through the same gate. Specs absent from the ledger keep the
+    // row-only check below (no registry entry to consult).
+    if let Ok(Some(entry)) = state.spec_ledger.find_by_path(path).await {
+        use gyre_domain::spec_ledger::ApprovalStatus;
+        if entry.approval_status != ApprovalStatus::Approved {
+            return Err(format!(
+                "spec '{path}' approval status is '{}' — the recorded approval no \
+                 longer authorizes this spec version; re-approval required",
+                entry.approval_status
+            ));
+        }
     }
 
     let for_sha = state

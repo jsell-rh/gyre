@@ -1133,6 +1133,7 @@ mod tests {
         state
             .spec_ledger
             .save(&SpecLedgerEntry {
+bindings_sha: String::new(),
                 path: "system/search.md".to_string(),
                 title: "Search".to_string(),
                 owner: "user:test".to_string(),
@@ -1506,6 +1507,7 @@ mod tests {
         state
             .spec_ledger
             .save(&SpecLedgerEntry {
+bindings_sha: String::new(),
                 path: "system/search.md".to_string(),
                 title: "Search".to_string(),
                 owner: "user:test".to_string(),

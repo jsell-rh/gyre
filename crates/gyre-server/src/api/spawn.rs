@@ -743,6 +743,28 @@ pub(crate) async fn spawn_agent_core(
                 ));
             }
         }
+
+        // agent-runtime.md §2 (Spec-Level Binding / Stale Pin Detection):
+        // the binding set is spec-registry metadata covered by the registry
+        // SHA in the approval ledger — updating a pin invalidates the spec's
+        // approval, and no worker agent may run for tasks referencing the
+        // spec until a human re-approves it (the SpecApproved → orchestrator
+        // → delegation chain then re-implements under the new pins). The
+        // same gate covers content-edit invalidation (a push that changes
+        // the spec resets it to Pending). Tasks whose spec is not in the
+        // registry cannot be evaluated and are not gated here.
+        if let Some(spec_path) = task.spec_path.as_deref() {
+            if let Ok(Some(entry)) = state.spec_ledger.find_by_path(spec_path).await {
+                use gyre_domain::spec_ledger::ApprovalStatus;
+                if entry.approval_status != ApprovalStatus::Approved {
+                    return Err(ApiError::Conflict(format!(
+                        "spec '{spec_path}' approval status is '{}' — re-approve the \
+                         spec before spawning worker agents for its tasks",
+                        entry.approval_status
+                    )));
+                }
+            }
+        }
     }
 
     // Fetch workspace for compute target resolution and clone URL.

@@ -2351,6 +2351,7 @@ mod tests {
             state.personas.create(&persona).await.unwrap();
         }
         let entry = gyre_domain::SpecLedgerEntry {
+bindings_sha: String::new(),
             path: "specs/system/auth.md".to_string(),
             title: "Auth".to_string(),
             owner: "owner".to_string(),

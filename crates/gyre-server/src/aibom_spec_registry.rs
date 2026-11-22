@@ -412,6 +412,7 @@ mod tests {
 
     fn ledger_entry(path: &str, status: ApprovalStatus, repo_id: &str) -> SpecLedgerEntry {
         SpecLedgerEntry {
+bindings_sha: String::new(),
             path: path.to_string(),
             title: format!("Spec {path}"),
             owner: "owner-1".to_string(),

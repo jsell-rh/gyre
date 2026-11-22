@@ -596,14 +596,8 @@ impl ResourceResolver {
                     "merge_request",
                     None,
                 ),
-                RouteResourceMapping::api(
-                    "/api/v1/workspaces/:id/meta-spec-set",
-                    "meta_spec",
-                    None,
-                ),
                 RouteResourceMapping::api("/api/v1/workspaces/:id/merge-policy", "workspace", None),
-                RouteResourceMapping::api("/api/v1/tenants/:id/meta-specs/set", "meta_spec", None),
-                RouteResourceMapping::api(
+                        RouteResourceMapping::api(
                     "/api/v1/workspaces/:id/meta-specs/rollout-policy",
                     "meta_spec",
                     None,
@@ -6538,6 +6532,7 @@ pub mod tests {
         state
             .spec_ledger
             .save(&SpecLedgerEntry {
+bindings_sha: String::new(),
                 path: "system/design.md".to_string(),
                 title: "Design".to_string(),
                 owner: "user:alice".to_string(),

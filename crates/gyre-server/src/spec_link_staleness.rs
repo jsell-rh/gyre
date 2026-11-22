@@ -493,6 +493,7 @@ mod tests {
 
     fn make_ledger_entry(path: &str, sha: &str, status: ApprovalStatus) -> SpecLedgerEntry {
         SpecLedgerEntry {
+bindings_sha: String::new(),
             path: path.to_string(),
             title: format!("Spec {path}"),
             owner: "user:test".to_string(),

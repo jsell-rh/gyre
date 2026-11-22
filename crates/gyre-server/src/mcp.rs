@@ -3834,7 +3834,7 @@ async fn handle_spec_assist(
     // inject the workspace's pinned personas/principles/standards/process
     // as `{{meta_spec_context}}`.
     let meta_spec_context =
-        crate::llm_helpers::workspace_meta_spec_context(state, &repo.workspace_id, Some(&repo.id))
+        crate::llm_helpers::workspace_meta_spec_context(state, &repo.workspace_id)
             .await;
 
     // Spec content and graph context travel in the system template as

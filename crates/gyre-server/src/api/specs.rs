@@ -492,8 +492,10 @@ pub async fn approve_spec(
     // mint an approval `verify_spec_ref` honors at merge even though nobody
     // ever saw that content. An empty `current_sha` means the manifest entry
     // has no resolvable file at HEAD — there is no version to approve.
-    let ledger_current = match state.spec_ledger.find_by_path(&spec_path).await? {
-        Some(entry) if !entry.current_sha.is_empty() => entry.current_sha,
+    let (ledger_current, registry_sha) = match state.spec_ledger.find_by_path(&spec_path).await? {
+        Some(entry) if !entry.current_sha.is_empty() => {
+            (entry.current_sha.clone(), entry.registry_sha())
+        }
         Some(_) => {
             return Err(ApiError::Conflict(format!(
                 "spec '{spec_path}' has no current version to approve (ledger current_sha is empty)"
@@ -511,6 +513,14 @@ pub async fn approve_spec(
             req.sha, ledger_current
         )));
     }
+    // The approval event records the spec's REGISTRY SHA — content blob SHA
+    // plus meta-spec binding set (agent-runtime.md §2 Spec-Level Binding:
+    // bindings are stored in the spec registry alongside other spec
+    // metadata, so the SHA an approval is recorded against must cover
+    // them; a later pin update produces a new registry SHA and this
+    // approval goes stale through the ordinary spec_sha != registry_sha
+    // validity check). For a spec with no bindings the registry SHA IS the
+    // content SHA, so recorded approvals keep their existing meaning.
 
     // Enforce link-based approval gates.
     {
@@ -633,7 +643,7 @@ pub async fn approve_spec(
     let event = SpecApprovalEvent {
         id: new_id().to_string(),
         spec_path: spec_path.clone(),
-        spec_sha: req.sha.clone(),
+        spec_sha: registry_sha.clone(),
         approver_type,
         approver_id: approver_id.clone(),
         persona: req.persona.clone(),
@@ -754,11 +764,17 @@ pub async fn approve_spec(
                 });
 
                 // Populate meta_spec_set_sha from the workspace's current
-                // meta-spec set (§2.2). When no set is configured, remains
+                // effective registry meta-spec set (§2.2, registry model):
+                // SHA-256 over the required+approved meta-spec snapshots
+                // visible from the workspace. When none apply, remains
                 // empty string (graceful fallback).
-                let meta_spec_set_sha =
-                    crate::compute_meta_spec_set_sha(&state, &gyre_common::Id::new(&workspace_id))
-                        .await;
+                let meta_spec_set_sha = crate::reconciliation::meta_spec_snapshot_sha(
+                    &crate::reconciliation::required_meta_spec_snapshots(
+                        &state,
+                        &gyre_common::Id::new(&workspace_id),
+                    )
+                    .await,
+                );
 
                 let input_content = gyre_common::InputContent {
                     spec_path: spec_path.clone(),
@@ -1130,7 +1146,7 @@ async fn resolve_new_approval_status(
         // so a revoke that removes the last approval demotes to Pending.
         let has_valid = events
             .iter()
-            .any(|e| e.spec_sha == entry.current_sha && e.is_active());
+            .any(|e| e.spec_sha == entry.registry_sha() && e.is_active());
         return if has_valid {
             ApprovalStatus::Approved
         } else {
@@ -1157,7 +1173,7 @@ async fn resolve_new_approval_status(
     crate::spec_registry::resolve_approval_status(
         &manifest_entry,
         &defaults,
-        &entry.current_sha,
+        &entry.registry_sha(),
         &events,
     )
 }
@@ -2318,7 +2334,9 @@ pub async fn dry_run_constraints(
     });
 
     // Build a representative agent context from workspace state.
-    let meta_spec_set_sha = crate::compute_meta_spec_set_sha(&state, &ws_id).await;
+    let meta_spec_set_sha = crate::reconciliation::meta_spec_snapshot_sha(
+        &crate::reconciliation::required_meta_spec_snapshots(&state, &ws_id).await,
+    );
 
     let agent_ctx = AgentContext {
         id: "dry-run-preview".to_string(),
@@ -2638,6 +2656,7 @@ mod tests {
                 state
                     .spec_ledger
                     .save(&SpecLedgerEntry {
+bindings_sha: String::new(),
                         path: "system/design-principles.md".to_string(),
                         title: "Design Principles".to_string(),
                         owner: "user:jsell".to_string(),
@@ -2742,6 +2761,7 @@ mod tests {
                     state
                         .spec_ledger
                         .save(&SpecLedgerEntry {
+bindings_sha: String::new(),
                             path: path.to_string(),
                             title: format!("Spec {path}"),
                             owner: "user:jsell".to_string(),
@@ -2980,6 +3000,7 @@ mod tests {
                 state
                     .spec_ledger
                     .save(&SpecLedgerEntry {
+bindings_sha: String::new(),
                         path: "system/auth.md".to_string(),
                         title: "Auth".to_string(),
                         owner: "user:jsell".to_string(),
@@ -3145,6 +3166,7 @@ mod tests {
                 state
                     .spec_ledger
                     .save(&SpecLedgerEntry {
+bindings_sha: String::new(),
                         path: "system/auth.md".to_string(),
                         title: "Auth".to_string(),
                         owner: "user:jsell".to_string(),
@@ -3335,6 +3357,7 @@ mod tests {
                 state
                     .spec_ledger
                     .save(&SpecLedgerEntry {
+bindings_sha: String::new(),
                         path: path.to_string(),
                         title: format!("Spec {path}"),
                         owner: "user:jsell".to_string(),
@@ -3952,6 +3975,7 @@ specs:
             state
                 .spec_ledger
                 .save(&SpecLedgerEntry {
+bindings_sha: String::new(),
                     path: spec.clone(),
                     title: spec.clone(),
                     owner: "user:jsell".to_string(),
@@ -4425,6 +4449,7 @@ specs:
 
     fn make_ledger_entry(path: &str, status: ApprovalStatus) -> SpecLedgerEntry {
         SpecLedgerEntry {
+bindings_sha: String::new(),
             path: path.to_string(),
             title: path.to_string(),
             owner: "user:jsell".to_string(),
@@ -5664,6 +5689,7 @@ specs:
                 state
                     .spec_ledger
                     .save(&SpecLedgerEntry {
+bindings_sha: String::new(),
                         path: "system/ws-scoped.md".to_string(),
                         title: "WS Scoped".to_string(),
                         owner: "user:jsell".to_string(),
@@ -5737,6 +5763,7 @@ specs:
                 state
                     .spec_ledger
                     .save(&SpecLedgerEntry {
+bindings_sha: String::new(),
                         path: "system/orphaned.md".to_string(),
                         title: "Orphaned".to_string(),
                         owner: "user:jsell".to_string(),
@@ -5950,6 +5977,7 @@ specs:
         state
             .spec_ledger
             .save(&SpecLedgerEntry {
+bindings_sha: String::new(),
                 path: spec_path.to_string(),
                 title: "Design Principles".to_string(),
                 owner: "user:jsell".to_string(),
@@ -6810,6 +6838,7 @@ specs:
                     state
                         .spec_ledger
                         .save(&SpecLedgerEntry {
+bindings_sha: String::new(),
                             path: path.to_string(),
                             title: title.to_string(),
                             owner: "user:test".to_string(),
@@ -7034,6 +7063,7 @@ specs:
                 state
                     .spec_ledger
                     .save(&SpecLedgerEntry {
+bindings_sha: String::new(),
                         path: "system/alpha.md".to_string(),
                         title: "Alpha".to_string(),
                         owner: "user:test".to_string(),
@@ -7054,6 +7084,7 @@ specs:
                 state
                     .spec_ledger
                     .save(&SpecLedgerEntry {
+bindings_sha: String::new(),
                         path: "system/beta.md".to_string(),
                         title: "Beta".to_string(),
                         owner: "user:test".to_string(),
@@ -7176,6 +7207,7 @@ specs:
                 state
                     .spec_ledger
                     .save(&SpecLedgerEntry {
+bindings_sha: String::new(),
                         path: "system/old.md".to_string(),
                         title: "Old Spec".to_string(),
                         owner: "user:test".to_string(),
@@ -7242,6 +7274,7 @@ specs:
                 state
                     .spec_ledger
                     .save(&SpecLedgerEntry {
+bindings_sha: String::new(),
                         path: "system/spec-a.md".to_string(),
                         title: "Spec A".to_string(),
                         owner: "user:test".to_string(),
@@ -7262,6 +7295,7 @@ specs:
                 state
                     .spec_ledger
                     .save(&SpecLedgerEntry {
+bindings_sha: String::new(),
                         path: "system/spec-b.md".to_string(),
                         title: "Spec B".to_string(),
                         owner: "user:test".to_string(),
@@ -7326,6 +7360,7 @@ specs:
                 state
                     .spec_ledger
                     .save(&SpecLedgerEntry {
+bindings_sha: String::new(),
                         path: "system/consumer.md".to_string(),
                         title: "Consumer".to_string(),
                         owner: "user:test".to_string(),
@@ -7346,6 +7381,7 @@ specs:
                 state
                     .spec_ledger
                     .save(&SpecLedgerEntry {
+bindings_sha: String::new(),
                         path: "system/dependency.md".to_string(),
                         title: "Dependency".to_string(),
                         owner: "user:test".to_string(),
@@ -7424,6 +7460,7 @@ specs:
                 state
                     .spec_ledger
                     .save(&SpecLedgerEntry {
+bindings_sha: String::new(),
                         path: "system/spec-a.md".to_string(),
                         title: "Spec A".to_string(),
                         owner: "user:test".to_string(),
@@ -7445,6 +7482,7 @@ specs:
                 state
                     .spec_ledger
                     .save(&SpecLedgerEntry {
+bindings_sha: String::new(),
                         path: "system/spec-b.md".to_string(),
                         title: "Spec B".to_string(),
                         owner: "user:test".to_string(),
@@ -7506,6 +7544,7 @@ specs:
 
         // Seed an implements link pointing to a deleted spec (dangling).
         let source = SpecLedgerEntry {
+bindings_sha: String::new(),
             path: "system/impl.md".to_string(),
             title: "Impl".to_string(),
             owner: "user:test".to_string(),

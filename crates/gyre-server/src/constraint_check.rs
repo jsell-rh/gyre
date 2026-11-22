@@ -1237,11 +1237,14 @@ pub(crate) async fn build_agent_context(
         .flatten()
         .unwrap_or_default();
 
-    // Meta-spec set SHA: compute from the workspace's current meta-spec set.
-    // The agent runs in this workspace, so its meta-spec set is the workspace's
-    // current set. If no set is configured, the SHA is empty (correctly fails
-    // against a non-empty input SHA, indicating the set has changed).
-    let meta_spec_set_sha = crate::compute_meta_spec_set_sha(state, workspace_id).await;
+    // Meta-spec set SHA: compute from the workspace's current effective
+    // (required, approved, visible) registry meta-spec set. The agent runs
+    // in this workspace, so its set is the workspace's current set. If no
+    // required meta-specs apply, the SHA is empty (correctly fails against
+    // a non-empty input SHA, indicating the set has changed).
+    let meta_spec_set_sha = crate::reconciliation::meta_spec_snapshot_sha(
+        &crate::reconciliation::required_meta_spec_snapshots(state, workspace_id).await,
+    );
 
     // Workload attestation: populate container_id, image_hash, and stack_hash
     // from the KV-cached workload attestation record if available.

@@ -851,8 +851,7 @@ async fn record_meta_spec_drift_warning(
 
     warn!(
         mr_id = %mr.id,
-        produced_set = %drift.produced_set_sha,
-        current_set = %drift.current_set_sha,
+        drifted = ?drift.current,
         "meta-spec drift detected (warn only, merge proceeds)"
     );
 }
@@ -4549,14 +4548,18 @@ async fn selection_meta_spec_drift_hold(
             if policy.require_current_meta_spec_set {
                 warn!(
                     mr_id = %mr.id,
-                    produced_set = %drift.produced_set_sha,
-                    current_set = %drift.current_set_sha,
+                    drifted = ?drift.current,
                     "meta-spec drift blocked merge (strict workspace policy)"
                 );
                 return Ok(Some(format!(
-                    "meta-spec drift: code produced under meta-spec set {}, current is {} \
-                     (require_current_meta_spec_set)",
-                    drift.produced_set_sha, drift.current_set_sha
+                    "meta-spec drift: required meta-specs not matched by the recorded \
+                     meta_specs_used: {} (require_current_meta_spec_set)",
+                    drift
+                        .current
+                        .iter()
+                        .map(|s| s.label())
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 )));
             }
             record_meta_spec_drift_warning(state, mr, &drift).await;

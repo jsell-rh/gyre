@@ -117,8 +117,8 @@ pub use merge_request::{
 pub use message_type::MessageType;
 pub use meta_spec::{
     MetaSpec, MetaSpecApprovalStatus, MetaSpecBinding, MetaSpecKind, MetaSpecScope,
-    MetaSpecVersion, ReconciliationPriority, RolloutPolicy, RolloutStrategy,
-    DEFAULT_MAX_CONCURRENT_AGENTS,
+    MetaSpecSnapshot, MetaSpecVersion, ReconciliationPriority, RolloutPolicy,
+    RolloutStrategy, DEFAULT_MAX_CONCURRENT_AGENTS,
 };
 pub use network_peer::NetworkPeer;
 pub use notification::{Notification, NotificationType};

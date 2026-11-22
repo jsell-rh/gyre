@@ -1,7 +1,5 @@
 //! Meta-spec reconciliation API endpoints (M32).
 //!
-//! GET  /api/v1/workspaces/{id}/meta-spec-set  — get workspace meta-spec set
-//! PUT  /api/v1/workspaces/{id}/meta-spec-set  — update (Admin only)
 //! GET  /api/v1/workspaces/{id}/meta-specs/rollout-policy — get rollout policy (§7)
 //! PUT  /api/v1/workspaces/{id}/meta-specs/rollout-policy — update (Admin only, §7)
 //! GET  /api/v1/meta-specs/{path}/blast-radius — blast radius for a meta-spec
@@ -31,91 +29,6 @@ use super::{new_id, now_secs};
 // ---------------------------------------------------------------------------
 // Types — meta-spec set
 // ---------------------------------------------------------------------------
-
-/// A pinned meta-spec entry (path + SHA).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MetaSpecPinnedEntry {
-    pub path: String,
-    pub sha: String,
-}
-
-/// The bound collection of meta-specs active in a workspace.
-///
-/// `personas` is a `BTreeMap` (not a `HashMap`) so that serialization is
-/// canonical: the same set of pinned entries always serializes to
-/// byte-identical JSON. `compute_meta_spec_set_sha` hashes the stored JSON,
-/// and the conformance sweep (meta-spec-reconciliation.md §10) plus the §9
-/// constraint `agent.meta_spec_set_sha == input.meta_spec_set_sha` compare
-/// those hashes — a HashMap's per-instance iteration order would flip the
-/// SHA on every re-PUT of an identical set, false-drifting all provenance.
-#[derive(Clone, Debug, Serialize, Deserialize, Default)]
-pub struct MetaSpecSet {
-    pub workspace_id: String,
-    /// Named persona bindings: role -> pinned entry (e.g. "backend" -> path@sha).
-    #[serde(default)]
-    pub personas: BTreeMap<String, MetaSpecPinnedEntry>,
-    /// Ordered principle specs.
-    #[serde(default)]
-    pub principles: Vec<MetaSpecPinnedEntry>,
-    /// Ordered coding standard specs.
-    #[serde(default)]
-    pub standards: Vec<MetaSpecPinnedEntry>,
-    /// Ordered process specs.
-    #[serde(default)]
-    pub process: Vec<MetaSpecPinnedEntry>,
-}
-
-/// Request body for PUT /api/v1/workspaces/{id}/meta-spec-set.
-#[derive(Deserialize)]
-pub struct UpdateMetaSpecSetRequest {
-    #[serde(default)]
-    pub personas: BTreeMap<String, MetaSpecPinnedEntry>,
-    #[serde(default)]
-    pub principles: Vec<MetaSpecPinnedEntry>,
-    #[serde(default)]
-    pub standards: Vec<MetaSpecPinnedEntry>,
-    #[serde(default)]
-    pub process: Vec<MetaSpecPinnedEntry>,
-}
-
-/// The tenant-level default binding of meta-specs
-/// (meta-spec-reconciliation.md §8 — Tenant-Scope Meta-Spec Changes).
-///
-/// Every workspace in the tenant inherits these pinned entries unless its
-/// own meta-spec set overrides the pinned path — the workspace pin wins on
-/// conflict. Same canonical-serialization rule as `MetaSpecSet` (BTreeMap
-/// personas) so the effective-set SHA is stable across re-PUTs.
-#[derive(Clone, Debug, Serialize, Deserialize, Default)]
-pub struct TenantMetaSpecSet {
-    pub tenant_id: String,
-    #[serde(default)]
-    pub personas: BTreeMap<String, MetaSpecPinnedEntry>,
-    #[serde(default)]
-    pub principles: Vec<MetaSpecPinnedEntry>,
-    #[serde(default)]
-    pub standards: Vec<MetaSpecPinnedEntry>,
-    #[serde(default)]
-    pub process: Vec<MetaSpecPinnedEntry>,
-}
-
-/// Request body for PUT /api/v1/tenants/{id}/meta-specs/set.
-#[derive(Deserialize)]
-pub struct UpdateTenantMetaSpecSetRequest {
-    #[serde(default)]
-    pub personas: BTreeMap<String, MetaSpecPinnedEntry>,
-    #[serde(default)]
-    pub principles: Vec<MetaSpecPinnedEntry>,
-    #[serde(default)]
-    pub standards: Vec<MetaSpecPinnedEntry>,
-    #[serde(default)]
-    pub process: Vec<MetaSpecPinnedEntry>,
-    /// Tenant-admin override (§8): propagate this change past workspace-level
-    /// overrides — urgent compliance-driven changes that must be applied
-    /// immediately. Without it, workspaces whose own set pins a changed path
-    /// are skipped (their own rollout policy governs).
-    #[serde(default)]
-    pub force: bool,
-}
 
 /// Request body for PUT /api/v1/workspaces/{id}/meta-specs/rollout-policy
 /// (meta-spec-reconciliation.md §7). `strategy` is required; the other
@@ -262,269 +175,6 @@ pub struct PreviewRecord {
 }
 
 // ---------------------------------------------------------------------------
-// GET /api/v1/workspaces/{id}/meta-spec-set
-// ---------------------------------------------------------------------------
-
-pub async fn get_meta_spec_set(
-    State(state): State<Arc<AppState>>,
-    _auth: AuthenticatedAgent,
-    Path(workspace_id): Path<String>,
-) -> Result<Json<MetaSpecSet>, ApiError> {
-    // Verify workspace exists.
-    let ws = state
-        .workspaces
-        .find_by_id(&Id::new(&workspace_id))
-        .await?
-        .ok_or_else(|| ApiError::NotFound(format!("workspace '{workspace_id}' not found")))?;
-
-    // §8 inheritance: the workspace's EFFECTIVE set — tenant defaults merged
-    // with the workspace's own overrides (workspace pin wins on conflict).
-    // A workspace with no set of its own inherits the tenant defaults.
-    let set = crate::reconciliation::resolve_effective_meta_spec_set(&state, &ws).await?;
-    Ok(Json(set))
-}
-
-// ---------------------------------------------------------------------------
-// PUT /api/v1/workspaces/{id}/meta-spec-set  (Admin only)
-// ---------------------------------------------------------------------------
-
-pub async fn put_meta_spec_set(
-    State(state): State<Arc<AppState>>,
-    Path(workspace_id): Path<String>,
-    auth: AuthenticatedAgent,
-    Json(req): Json<UpdateMetaSpecSetRequest>,
-) -> Result<(StatusCode, Json<MetaSpecSet>), ApiError> {
-    // Admin-only: meta-spec-set bindings are governance controls that determine
-    // which personas, principles, standards, and processes govern all agents in a
-    // workspace. Allowing non-Admin callers (Developers, Agents) to modify these
-    // bindings would let agents rewrite the rules they operate under (NEW-26).
-    if !auth.roles.contains(&gyre_domain::UserRole::Admin) {
-        crate::rbac::record_rbac_denied(
-            &state,
-            &auth,
-            "Admin",
-            "PUT /api/v1/workspaces/:id/meta-spec-set",
-        )
-        .await;
-        return Err(ApiError::Forbidden(
-            "only Admin role may update workspace meta-spec-set bindings".to_string(),
-        ));
-    }
-
-    // Verify workspace exists.
-    let ws_record = state
-        .workspaces
-        .find_by_id(&Id::new(&workspace_id))
-        .await?
-        .ok_or_else(|| ApiError::NotFound(format!("workspace '{workspace_id}' not found")))?;
-
-    // Load the OLD set before upsert — the diff between old and new pinned
-    // SHAs is the reconciliation trigger (meta-spec-reconciliation.md §6:
-    // "Reconciliation is triggered when a workspace's meta-spec set is
-    // updated to reference a new version of a meta-spec").
-    let old_set = match state.meta_spec_sets.get(&Id::new(&workspace_id)).await? {
-        Some(json) => serde_json::from_str::<MetaSpecSet>(&json)
-            .map_err(|e| ApiError::Internal(anyhow::anyhow!("corrupt meta_spec_set: {e}")))?,
-        None => MetaSpecSet {
-            workspace_id: workspace_id.clone(),
-            ..Default::default()
-        },
-    };
-
-    let set = MetaSpecSet {
-        workspace_id: workspace_id.clone(),
-        personas: req.personas,
-        principles: req.principles,
-        standards: req.standards,
-        process: req.process,
-    };
-
-    let json = serde_json::to_string(&set)
-        .map_err(|e| ApiError::Internal(anyhow::anyhow!("serialize meta_spec_set: {e}")))?;
-    state
-        .meta_spec_sets
-        .upsert(&Id::new(&workspace_id), &json)
-        .await?;
-
-    // §6: only version changes (new or re-pinned entries) trigger
-    // reconciliation — an identical re-PUT is a no-op, and `run_reconciliation`
-    // itself skips specs that are not yet Approved (a Pending bind is not a
-    // rollout; the approval transition owns that wave).
-    let changed_paths = crate::reconciliation::diff_meta_spec_set(&old_set, &set);
-    if !changed_paths.is_empty() {
-        // §11 MetaSpecSetUpdated: workspace meta-spec set binding changed.
-        crate::reconciliation::emit_meta_spec_set_updated(
-            &state,
-            &Id::new(&workspace_id),
-            &changed_paths,
-        )
-        .await;
-        let summary = crate::reconciliation::run_reconciliation(
-            &state,
-            &Id::new(&workspace_id),
-            &changed_paths,
-        )
-        .await;
-        tracing::info!(
-            workspace_id = %workspace_id,
-            changed = changed_paths.len(),
-            created = summary.tasks_created,
-            skipped = summary.tasks_skipped,
-            "meta-spec-set update triggered reconciliation"
-        );
-    }
-
-    // Respond with the EFFECTIVE set (§8 inheritance): tenant defaults
-    // merged with the just-written workspace overrides. The stored workspace
-    // set is exactly `set`; the response shows what is now active.
-    let effective =
-        crate::reconciliation::resolve_effective_meta_spec_set(&state, &ws_record).await?;
-    Ok((StatusCode::OK, Json(effective)))
-}
-
-// ---------------------------------------------------------------------------
-// GET /api/v1/tenants/{id}/meta-specs/set
-// ---------------------------------------------------------------------------
-
-pub async fn get_tenant_meta_spec_set(
-    State(state): State<Arc<AppState>>,
-    Path(tenant_id): Path<String>,
-    auth: AuthenticatedAgent,
-) -> Result<Json<TenantMetaSpecSet>, ApiError> {
-    // Tenant governance config, same authorization rule as tenant trust
-    // anchors: Admin role + tenant containment (the caller's tenant scope
-    // must match the path — a tenant admin manages only their own defaults).
-    if !auth.roles.contains(&gyre_domain::UserRole::Admin) {
-        return Err(ApiError::Forbidden(
-            "only Admin role may view tenant meta-spec-set bindings".to_string(),
-        ));
-    }
-    if auth.tenant_id != tenant_id {
-        return Err(ApiError::Forbidden(
-            "cannot access meta-spec-set for a different tenant".to_string(),
-        ));
-    }
-
-    state
-        .tenants
-        .find_by_id(&Id::new(&tenant_id))
-        .await?
-        .ok_or_else(|| ApiError::NotFound(format!("tenant '{tenant_id}' not found")))?;
-
-    let set = match state
-        .tenant_meta_spec_sets
-        .get(&Id::new(&tenant_id))
-        .await?
-    {
-        Some(json) => serde_json::from_str::<TenantMetaSpecSet>(&json).map_err(|e| {
-            ApiError::Internal(anyhow::anyhow!("corrupt tenant_meta_spec_set: {e}"))
-        })?,
-        None => TenantMetaSpecSet {
-            tenant_id: tenant_id.clone(),
-            ..Default::default()
-        },
-    };
-    Ok(Json(set))
-}
-
-// ---------------------------------------------------------------------------
-// PUT /api/v1/tenants/{id}/meta-specs/set  (Admin only, tenant-scoped)
-// ---------------------------------------------------------------------------
-
-pub async fn put_tenant_meta_spec_set(
-    State(state): State<Arc<AppState>>,
-    Path(tenant_id): Path<String>,
-    auth: AuthenticatedAgent,
-    Json(req): Json<UpdateTenantMetaSpecSetRequest>,
-) -> Result<(StatusCode, Json<TenantMetaSpecSet>), ApiError> {
-    // Admin-only + tenant containment: the tenant set is the default binding
-    // every workspace in the tenant inherits (§8) — the same NEW-26 governance
-    // rule as the workspace set, scoped to the caller's own tenant.
-    if !auth.roles.contains(&gyre_domain::UserRole::Admin) {
-        return Err(ApiError::Forbidden(
-            "only Admin role may update tenant meta-spec-set bindings".to_string(),
-        ));
-    }
-    if auth.tenant_id != tenant_id {
-        return Err(ApiError::Forbidden(
-            "cannot update meta-spec-set for a different tenant".to_string(),
-        ));
-    }
-
-    state
-        .tenants
-        .find_by_id(&Id::new(&tenant_id))
-        .await?
-        .ok_or_else(|| ApiError::NotFound(format!("tenant '{tenant_id}' not found")))?;
-
-    // Load the OLD set before upsert — the diff between old and new pinned
-    // SHAs is the tenant propagation trigger (§8 step 5: the tenant binding
-    // update is what rolls the change out to inheriting workspaces).
-    let old_set = match state
-        .tenant_meta_spec_sets
-        .get(&Id::new(&tenant_id))
-        .await?
-    {
-        Some(json) => serde_json::from_str::<TenantMetaSpecSet>(&json).map_err(|e| {
-            ApiError::Internal(anyhow::anyhow!("corrupt tenant_meta_spec_set: {e}"))
-        })?,
-        None => TenantMetaSpecSet {
-            tenant_id: tenant_id.clone(),
-            ..Default::default()
-        },
-    };
-
-    let set = TenantMetaSpecSet {
-        tenant_id: tenant_id.clone(),
-        personas: req.personas,
-        principles: req.principles,
-        standards: req.standards,
-        process: req.process,
-    };
-
-    let json = serde_json::to_string(&set)
-        .map_err(|e| ApiError::Internal(anyhow::anyhow!("serialize tenant_meta_spec_set: {e}")))?;
-    state
-        .tenant_meta_spec_sets
-        .upsert(&Id::new(&tenant_id), &json)
-        .await?;
-
-    // §8: changed pins propagate to every workspace in the tenant that does
-    // not override them (each workspace then reconciles autonomously per its
-    // own rollout policy — run_reconciliation). `force` (tenant-admin
-    // override) bypasses the workspace-level overrides for urgent changes.
-    let changed_paths = crate::reconciliation::diff_tenant_meta_spec_set(&old_set, &set);
-    if !changed_paths.is_empty() {
-        crate::reconciliation::emit_tenant_meta_spec_set_updated(
-            &state,
-            &Id::new(&tenant_id),
-            &changed_paths,
-        )
-        .await;
-        let summary = crate::reconciliation::run_tenant_reconciliation(
-            &state,
-            &Id::new(&tenant_id),
-            &changed_paths,
-            req.force,
-        )
-        .await;
-        tracing::info!(
-            tenant_id = %tenant_id,
-            changed = changed_paths.len(),
-            force = req.force,
-            workspaces_scanned = summary.workspaces_scanned,
-            workspaces_skipped_override = summary.workspaces_skipped_override,
-            workspaces_skipped_error = summary.workspaces_skipped_error,
-            created = summary.tasks_created,
-            skipped = summary.tasks_skipped,
-            "tenant meta-spec-set update triggered reconciliation"
-        );
-    }
-
-    Ok((StatusCode::OK, Json(set)))
-}
-
-// ---------------------------------------------------------------------------
 // GET /api/v1/workspaces/{id}/meta-specs/rollout-policy  (§7)
 // ---------------------------------------------------------------------------
 
@@ -655,78 +305,97 @@ pub async fn get_meta_spec_blast_radius(
     let mut affected_workspaces: Vec<AffectedWorkspace> = Vec::new();
     let mut affected_repos: Vec<AffectedRepo> = Vec::new();
 
-    // List all workspaces and check each one's EFFECTIVE meta-spec-set (§8:
-    // tenant defaults merged with workspace overrides) for a pinned entry
-    // referencing spec_path. A workspace with no set of its own is affected
-    // when its tenant's set pins the path (tenant inheritance); a workspace
-    // whose own set pins the path is affected via its own binding.
-    let workspaces = state.workspaces.list().await.unwrap_or_default();
-    for workspace in &workspaces {
-        let ws_id = workspace.id.as_str();
-        let own_set = state
-            .meta_spec_sets
-            .get(&workspace.id)
-            .await
-            .ok()
-            .flatten()
-            .and_then(|json| serde_json::from_str::<MetaSpecSet>(&json).ok());
-        let tenant_set = state
-            .tenant_meta_spec_sets
-            .get(&workspace.tenant_id)
-            .await
-            .ok()
-            .flatten()
-            .and_then(|json| serde_json::from_str::<TenantMetaSpecSet>(&json).ok());
+    // Registry model (meta-spec-reconciliation.md amendments row): the
+    // retired meta-spec-set KV model is replaced by registry required flags
+    // plus spec-level bindings. A workspace is affected by a change to this
+    // meta-spec when either surface references it:
+    // - required flags: a Global required meta-spec affects every workspace;
+    //   a Tenant-scoped required one affects its tenant's workspaces
+    //   (tenant inheritance); a Workspace-scoped required one affects its
+    //   own workspace;
+    // - spec-level bindings: a spec bound to this meta-spec drags its
+    //   owning workspace in (the binding injects the meta-spec into every
+    //   agent spawned for that spec).
+    let ms = crate::reconciliation::find_meta_spec_by_name(&state, &spec_path)
+        .await
+        .ok()
+        .flatten();
+    let Some(ms) = ms else {
+        return Json(BlastRadiusResponse {
+            spec_path,
+            affected_repos,
+            affected_workspaces,
+        });
+    };
+    let ms_id = ms.id.clone();
 
-        if own_set.is_none() && tenant_set.is_none() {
+    // (workspace_id, reason) pairs, deduplicated by workspace with the
+    // first (most specific) reason winning.
+    let mut affected: Vec<(Id, &str)> = Vec::new();
+    let mut push_ws = |ws_id: Id, reason: &'static str, affected: &mut Vec<(Id, &'static str)>| {
+        if !affected.iter().any(|(id, _)| *id == ws_id) {
+            affected.push((ws_id, reason));
+        }
+    };
+
+    let workspaces = state.workspaces.list().await.unwrap_or_default();
+    if ms.required {
+        match ms.scope {
+            MetaSpecScope::Global => {
+                for ws in &workspaces {
+                    push_ws(ws.id.clone(), "required_global", &mut affected);
+                }
+            }
+            MetaSpecScope::Tenant => {
+                if let Some(tenant_id) = ms.scope_id.as_deref() {
+                    for ws in &workspaces {
+                        if ws.tenant_id.as_str() == tenant_id {
+                            push_ws(ws.id.clone(), "required_tenant", &mut affected);
+                        }
+                    }
+                }
+            }
+            MetaSpecScope::Workspace => {
+                if let Some(ws_id) = ms.scope_id.as_deref() {
+                    push_ws(Id::new(ws_id), "required_workspace", &mut affected);
+                }
+            }
+        }
+    }
+
+    // Spec-level bindings: every spec bound to this meta-spec drags its
+    // owning workspace (per the ledger entry's workspace scope) in.
+    let bindings = state
+        .meta_spec_bindings
+        .list_all()
+        .await
+        .unwrap_or_default();
+    for binding in &bindings {
+        if binding.meta_spec_id != ms_id {
             continue;
         }
-
-        let effective = crate::reconciliation::merge_meta_spec_sets(
-            tenant_set.as_ref().unwrap_or(&TenantMetaSpecSet::default()),
-            own_set.as_ref().unwrap_or(&MetaSpecSet::default()),
-        );
-        let references_spec = effective.personas.values().any(|e| e.path == spec_path)
-            || effective.principles.iter().any(|e| e.path == spec_path)
-            || effective.standards.iter().any(|e| e.path == spec_path)
-            || effective.process.iter().any(|e| e.path == spec_path);
-
-        if references_spec {
-            // Own binding wins the reason label: a workspace that pins the
-            // path itself is affected by its own binding; otherwise the
-            // affectation flows from the tenant default.
-            let own_references = own_set
-                .as_ref()
-                .map(|s| {
-                    s.personas.values().any(|e| e.path == spec_path)
-                        || s.principles.iter().any(|e| e.path == spec_path)
-                        || s.standards.iter().any(|e| e.path == spec_path)
-                        || s.process.iter().any(|e| e.path == spec_path)
-                })
-                .unwrap_or(false);
-            let reason = if own_references {
-                "workspace_binding"
-            } else {
-                "tenant_inheritance"
-            };
-
-            affected_workspaces.push(AffectedWorkspace {
-                id: ws_id.to_string(),
-            });
-
-            // Collect repos bound to this workspace via the database.
-            let repos = state
-                .repos
-                .list_by_workspace(&Id::new(ws_id))
-                .await
-                .unwrap_or_default();
-            for repo in &repos {
-                affected_repos.push(AffectedRepo {
-                    id: repo.id.to_string(),
-                    workspace_id: ws_id.to_string(),
-                    reason: reason.to_string(),
-                });
+        if let Ok(Some(entry)) = state.spec_ledger.find_by_path(&binding.spec_id).await {
+            if let Some(ws_id) = entry.workspace_id.as_deref() {
+                push_ws(Id::new(ws_id), "spec_binding", &mut affected);
             }
+        }
+    }
+
+    for (ws_id, reason) in affected {
+        affected_workspaces.push(AffectedWorkspace {
+            id: ws_id.to_string(),
+        });
+        let repos = state
+            .repos
+            .list_by_workspace(&ws_id)
+            .await
+            .unwrap_or_default();
+        for repo in &repos {
+            affected_repos.push(AffectedRepo {
+                id: repo.id.to_string(),
+                workspace_id: ws_id.to_string(),
+                reason: reason.to_string(),
+            });
         }
     }
 
@@ -7463,6 +7132,7 @@ mod tests {
         jwt_state
             .spec_ledger
             .save(&gyre_domain::SpecLedgerEntry {
+bindings_sha: String::new(),
                 path: "system/search.md".to_string(),
                 title: "Search".to_string(),
                 owner: "user:admin".to_string(),
@@ -8617,12 +8287,6 @@ pub struct UpdateMetaSpecRequest {
     pub prompt: Option<String>,
     pub required: Option<bool>,
     pub approval_status: Option<String>,
-    /// Tenant-admin override (§8): when approving a Tenant-scoped meta-spec,
-    /// propagate the change past workspace-level overrides (urgent
-    /// compliance-driven changes). Only meaningful for Tenant-scoped specs;
-    /// rejected otherwise. Restricted to admins of that tenant.
-    #[serde(default)]
-    pub force: Option<bool>,
 }
 
 // ---------------------------------------------------------------------------
@@ -9102,33 +8766,6 @@ pub async fn update_meta_spec_registry(
     )
     .await?;
 
-    // §8 tenant-admin force flag: only defined for Tenant-scoped specs, and
-    // only an admin of THAT tenant may force propagation into its
-    // workspaces (an admin of another tenant must not be able to stomp
-    // workspace rollout policies outside their own scope).
-    let force = req.force.unwrap_or(false);
-    if force {
-        if ms.scope != MetaSpecScope::Tenant {
-            return Err(ApiError::BadRequest(
-                "force is only valid when approving a Tenant-scoped meta-spec".to_string(),
-            ));
-        }
-        match &ms.scope_id {
-            Some(scope_tenant) if auth.tenant_id == *scope_tenant => {}
-            Some(_) => {
-                return Err(ApiError::Forbidden(
-                    "only an admin of the scope tenant may force tenant-wide propagation"
-                        .to_string(),
-                ))
-            }
-            None => {
-                return Err(ApiError::Internal(anyhow::anyhow!(
-                    "Tenant-scoped meta-spec '{id}' has no scope_id"
-                )))
-            }
-        }
-    }
-
     let now = now_secs();
 
     // Content hash the CURRENT approval covers, before this request mutates
@@ -9158,6 +8795,10 @@ pub async fn update_meta_spec_registry(
         ms.approved_by = None;
         ms.approved_at = None;
     }
+    // Required-flag state BEFORE this request mutates it — the
+    // required-flag reconciliation trigger (the registry replacement for
+    // the retired set-PUT's binding diff) fires on false→true only.
+    let previously_required = ms.required;
     if let Some(required) = req.required {
         // §2 Required vs Optional: only scope-level admins can change the
         // required flag (either direction — both alter the injected set).
@@ -9196,8 +8837,11 @@ pub async fn update_meta_spec_registry(
 
     // Meta-spec change approved and rolled out (§6 trigger): the content
     // under approval differs from what the previous approval covered, and
-    // this update leaves the spec Approved. Every workspace whose meta-spec
-    // set binds this meta-spec reconciles.
+    // this update leaves the spec Approved. Registry model (amendments
+    // row): the retired workspace/tenant meta-spec-set PUT is replaced by
+    // required-flag changes and meta-spec approval driving the same
+    // reconciliation waves — every workspace where this meta-spec is
+    // REQUIRED-visible reconciles.
     //
     // Comparison is against the hash stamped by the LAST approval — not
     // `req.prompt.is_some()` — so the two-step edit-then-approve flow the
@@ -9208,68 +8852,72 @@ pub async fn update_meta_spec_registry(
         previously_approved_hash.as_deref() != Some(ms.content_hash.as_str());
     let newly_approved = ms.approval_status == MetaSpecApprovalStatus::Approved
         && content_changed_since_last_approval;
-    if newly_approved {
+    // Required-flag trigger: flipping a meta-spec to required binds every
+    // workspace it is visible from (the registry replacement for the retired
+    // set-PUT's "newly bound" diff entry — removals were never triggers in
+    // the old model either, so true→false does not fan out). The §11
+    // `meta_spec_set_updated` event the retired set-PUT emitted on binding
+    // changes is preserved here.
+    let required_newly_set = ms.required && !previously_required;
+    if required_newly_set && ms.scope == MetaSpecScope::Workspace {
+        // §11 `meta_spec_set_updated` (the event the retired set-PUT emitted
+        // on binding changes), emitted only where a real workspace identity
+        // exists — the meta-spec's own scope. Global/Tenant required changes
+        // fan out through the reconciliation controllers below, which emit
+        // their own per-workspace events; no workspace identity is ever
+        // fabricated for them.
+        if let Some(ws_id) = ms.scope_id.as_deref() {
+            crate::reconciliation::emit_meta_spec_set_updated(
+                &state,
+                &Id::new(ws_id),
+                std::slice::from_ref(&ms.name),
+            )
+            .await;
+        }
+    }
+    if newly_approved || required_newly_set {
         let spec_path = ms.name.clone();
         if ms.scope == MetaSpecScope::Tenant {
-            // §8 Tenant-Scope Meta-Spec Changes: a tenant-level approval fans
-            // out to every workspace in the tenant — workspaces that override
-            // the meta-spec with their own pin are skipped (their rollout
-            // policy governs) unless `force` (tenant-admin override for
-            // urgent compliance-driven changes). Each non-overriding
-            // workspace reconciles autonomously via run_reconciliation.
+            // §8 Tenant-Scope Meta-Spec Changes: a tenant-level change fans
+            // out to every workspace in the tenant. Each workspace
+            // reconciles autonomously via run_reconciliation under its own
+            // rollout policy.
             if let Some(scope_tenant) = &ms.scope_id {
                 let summary = crate::reconciliation::run_tenant_reconciliation(
                     &state,
                     &Id::new(scope_tenant),
                     std::slice::from_ref(&spec_path),
-                    force,
                 )
                 .await;
                 tracing::info!(
                     tenant_id = %scope_tenant,
                     meta_spec = %spec_path,
-                    force,
                     workspaces_scanned = summary.workspaces_scanned,
-                    workspaces_skipped_override = summary.workspaces_skipped_override,
-                    workspaces_skipped_error = summary.workspaces_skipped_error,
                     created = summary.tasks_created,
                     skipped = summary.tasks_skipped,
-                    "tenant meta-spec approval triggered reconciliation"
+                    "tenant meta-spec change triggered reconciliation"
                 );
             }
         } else {
-            // Global / Workspace scope: every workspace whose EFFECTIVE
-            // meta-spec set (own bindings plus inherited tenant defaults, §8)
-            // binds this meta-spec reconciles.
-            let workspaces = state.workspaces.list().await.unwrap_or_default();
-            for ws in &workspaces {
-                // Never fail open the override gate (standing repo rule, same
-                // fail-closed-skip as the tenant controller in
-                // run_tenant_reconciliation): a workspace whose set cannot
-                // be read is skipped, not decoded as "binds nothing".
-                // Propagating the error with `?` would 500 the approval
-                // AFTER `state.meta_specs.update(&ms)` already persisted it
-                // and after workspaces listed earlier already received their
-                // reconciliation tasks — a persisted approval paired with a
-                // partially executed, error-terminated fan-out.
-                let resolved =
-                    crate::reconciliation::resolve_effective_meta_spec_set(&state, ws).await;
-                let effective = match resolved {
-                    Ok(set) => set,
-                    Err(e) => {
-                        tracing::warn!(
-                            workspace_id = %ws.id,
-                            error = %e,
-                            "meta-spec approval fan-out: failed to resolve effective meta-spec set; skipping workspace (fail closed)"
-                        );
+            // Global / Workspace scope: every workspace the required
+            // meta-spec is visible from reconciles — Global+required binds
+            // all workspaces; Workspace+required binds its own workspace.
+            // A non-required Global/Workspace meta-spec has no
+            // workspace-level binding (spec-level bindings own their drift
+            // via the stale-pin cascade), so it never fans out here.
+            if ms.required {
+                let workspaces = state.workspaces.list().await.unwrap_or_default();
+                for ws in &workspaces {
+                    let in_scope = match ms.scope {
+                        MetaSpecScope::Global => true,
+                        MetaSpecScope::Workspace => {
+                            ms.scope_id.as_deref() == Some(ws.id.as_str())
+                        }
+                        MetaSpecScope::Tenant => false,
+                    };
+                    if !in_scope {
                         continue;
                     }
-                };
-                let binds = effective.personas.values().any(|e| e.path == spec_path)
-                    || effective.principles.iter().any(|e| e.path == spec_path)
-                    || effective.standards.iter().any(|e| e.path == spec_path)
-                    || effective.process.iter().any(|e| e.path == spec_path);
-                if binds {
                     let summary = crate::reconciliation::run_reconciliation(
                         &state,
                         &ws.id,
@@ -9281,7 +8929,7 @@ pub async fn update_meta_spec_registry(
                         meta_spec = %spec_path,
                         created = summary.tasks_created,
                         skipped = summary.tasks_skipped,
-                        "meta-spec approval triggered reconciliation"
+                        "meta-spec change triggered reconciliation"
                     );
                 }
             }
@@ -9737,6 +9385,36 @@ pub async fn put_spec_meta_spec_bindings(
             if key.starts_with(&prefix) {
                 let _ = state.kv_store.kv_remove("meta_spec_stale_pins", &key).await;
             }
+        }
+    }
+
+    // The binding set is spec-registry metadata covered by the registry SHA
+    // recorded in the approval ledger (agent-runtime.md §2 Spec-Level
+    // Binding + Stale Pin Detection: "Human updates the pin → spec metadata
+    // changes → spec SHA changes → spec needs re-approval"). A changed
+    // binding set updates the ledger entry's `bindings_sha` (producing a new
+    // registry SHA) and invalidates the prior approval exactly as a content
+    // edit does: approval_status resets to Pending, so no worker agent
+    // spawns for tasks referencing this spec and no merge passes the
+    // approval gate until a human re-approves — which re-fires the existing
+    // SpecApproved → orchestrator → delegation cascade under the new pins.
+    if let Ok(Some(mut entry)) = state.spec_ledger.find_by_path(&spec_path).await {
+        let new_bindings_sha = gyre_domain::meta_spec::canonical_bindings_sha(&created);
+        if entry.bindings_sha != new_bindings_sha {
+            let prior_status = entry.approval_status.clone();
+            entry.bindings_sha = new_bindings_sha;
+            entry.updated_at = now;
+            entry.approval_status = gyre_domain::spec_ledger::ApprovalStatus::Pending;
+            if let Err(e) = state.spec_ledger.save(&entry).await {
+                return Err(ApiError::Internal(anyhow::anyhow!(
+                    "failed to record spec binding set in the registry ledger: {e}"
+                )));
+            }
+            tracing::info!(
+                spec_path = %spec_path,
+                prior_status = %prior_status,
+                "spec meta-spec bindings changed: registry SHA updated, approval invalidated (re-approval required)"
+            );
         }
     }
 
@@ -11035,6 +10713,7 @@ mod registry_tests {
 
         // Spec ledger entry so the binding's spec resolves to the workspace.
         let entry = gyre_domain::SpecLedgerEntry {
+bindings_sha: String::new(),
             path: "system/stale.md".to_string(),
             title: "Stale".to_string(),
             owner: "system".to_string(),
@@ -11156,6 +10835,7 @@ mod registry_tests {
 
         // Spec ledger entry scoped to the victim workspace.
         let entry = gyre_domain::SpecLedgerEntry {
+bindings_sha: String::new(),
             path: "system/victim-bind.md".to_string(),
             title: "Victim".to_string(),
             owner: "system".to_string(),
