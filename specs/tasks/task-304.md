@@ -2,7 +2,7 @@
 title: "Retire Dockerfile and complete backend security defaults"
 spec_ref: "Spec gap spec-41a92c20354c6a108e6074e3 / agent-image-single-definition / 4a3f940495a8"
 depends_on: []
-progress: ready-for-review
+progress: complete
 commits: ["7e27cbdf0c786b16233aee07e7c11a869a7d33af", "95ab1dcbc602b3efb7481107f83854c30a0f7981"]
 ---
 
