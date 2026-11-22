@@ -4,7 +4,7 @@
 
 ## Goal
 
-Make Gyre self-driving out of the box: one `docker build` + one env var, and agents run autonomously using Claude Code without any manual compute target setup.
+Make Gyre self-driving out of the box: one image build (now `nix build` — the Dockerfile was later retired, agent-runtime.md §3) + one env var, and agents run autonomously using Claude Code without any manual compute target setup.
 
 ## Deliverables
 
@@ -37,8 +37,10 @@ New server env var `GYRE_AGENT_CREDENTIALS`: newline-separated `KEY=value` pairs
 ## Operator Workflow (zero-config)
 
 ```bash
-# 1. Build the image once
-docker build -t gyre-agent:latest docker/gyre-agent/
+# 1. Build the image once (run in docker/gyre-agent/; the M25-era
+#    `docker build` was later retired — the Nix flake is the single
+#    image definition, agent-runtime.md §3)
+nix build .#agent-image-docker && docker load < result
 
 # 2. Start server with API key — gyre-agent-default auto-registered
 GYRE_AGENT_CREDENTIALS=ANTHROPIC_API_KEY=sk-ant-xxx cargo run -p gyre-server
@@ -54,13 +56,13 @@ No manual compute target creation, no manual credential wiring, no manual Docker
 - `GYRE_AGENT_CREDENTIALS` values are injected at container start and never stored in the DB
 - `--network=none` G8 invariant: `gyre-agent-default` uses bridge networking explicitly to allow MCP/API calls back to the server; all other container targets default to `--network=none`
 - Agent JWT pre-minted at spawn (M24) and revoked on `gyre_agent_complete` (M18)
-- SDK version pinned in Dockerfile for supply chain reproducibility
+- SDK version pinned in the image build for supply chain reproducibility (pinned in the Nix flake since the Dockerfile's retirement)
 
 ## Files Changed
 
 | File | Change |
 |---|---|
-| `docker/gyre-agent/Dockerfile` | Node 22 Alpine base, pinned SDK version |
+| `docker/gyre-agent/Dockerfile` | Node 22 Alpine base, pinned SDK version (since removed: replaced by the Nix flake as the single image definition) |
 | `docker/gyre-agent/agent-runner.mjs` | New — autonomous Claude Code runner |
 | `docker/gyre-agent/entrypoint.sh` | Default to `agent-runner.mjs` when `GYRE_AGENT_COMMAND` unset |
 | `crates/gyre-server/src/lib.rs` | Auto-register `gyre-agent-default` on startup |
