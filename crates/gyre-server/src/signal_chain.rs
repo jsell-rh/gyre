@@ -2566,6 +2566,14 @@ mod tests {
     async fn scheduler_decomposes_delegation_into_ordered_subtasks() {
         let state = chain_state().await;
 
+        // Production parity: approve_spec writes the Approved status to
+        // the ledger before the signal chain runs (api/specs.rs), and the
+        // Phase-4 worker spawn below is gated on that status — a Pending
+        // spec must not get worker agents (api/spawn.rs). Calling the
+        // on_spec_approved hook directly, as this test does, skips the
+        // handler's ledger write, so perform it here as the human approval
+        // the payload represents.
+        approve_spec_in_ledger(&state).await;
         on_spec_approved(&state, &approved_payload()).await;
         scheduler_run_once(&state).await.unwrap();
 
@@ -2736,16 +2744,19 @@ mod tests {
 
     // ── Phase 4 (task-118): worker agent spawning ──────────────────────────
 
-    /// Helper: a Backlog Implementation task in repo r-1 (workspace ws-1).
-    /// The worker-spawn gate (api/spawn.rs) blocks spawns for tasks whose
-    /// spec is not Approved in the ledger, and chain_state seeds
+    /// Helper: mirror of the production approval step the signal chain
+    /// hangs off — approve_spec (api/specs.rs) writes the Approved status
+    /// to the ledger BEFORE invoking on_spec_approved, and the Phase-4
+    /// worker-spawn gate (api/spawn.rs) blocks spawns for tasks whose
+    /// spec is not Approved in the ledger. chain_state seeds
     /// "specs/system/auth.md" as Pending (the pre-approval state the
-    /// Phase-2 flow starts from) — a spawnable Implementation task implies
-    /// its spec has been approved, so the helper performs the same
-    /// re-approval a human does before the scheduler runs. The Pending
-    /// spawn-block itself is pinned by
+    /// Phase-2 flow starts from), so any test that drives the full chain
+    /// into a worker spawn — or hands the scheduler a spawnable
+    /// Implementation task — must first perform this same ledger
+    /// approval a human does. The Pending spawn-block itself is pinned
+    /// by
     /// api/spawn.rs::spawn_blocks_worker_for_pending_spec_until_reapproval.
-    async fn impl_task(state: &Arc<crate::AppState>, id: &str) -> Task {
+    async fn approve_spec_in_ledger(state: &Arc<crate::AppState>) {
         if let Some(mut entry) = state
             .spec_ledger
             .find_by_path("specs/system/auth.md")
@@ -2755,6 +2766,13 @@ mod tests {
             entry.approval_status = ApprovalStatus::Approved;
             state.spec_ledger.save(&entry).await.unwrap();
         }
+    }
+
+    /// Helper: a Backlog Implementation task in repo r-1 (workspace ws-1).
+    /// A spawnable Implementation task implies its spec has been approved;
+    /// approve_spec_in_ledger performs that ledger approval first.
+    async fn impl_task(state: &Arc<crate::AppState>, id: &str) -> Task {
+        approve_spec_in_ledger(state).await;
         let mut t = Task::new(Id::new(id), "Implement thing", 0);
         t.task_type = Some(TaskType::Implementation);
         t.workspace_id = Id::new("ws-1");
