@@ -2,8 +2,8 @@
 title: "Activity Dashboard completion: real-time durable feed with time-period queries, artifact links, Try-it ephemeral preview environments, TTY attach, and trial analytics"
 spec_ref: "Spec gap spec-b128f93cd5d035d28c8bbf7f / activity-dashboard-completion / f0cbfae7cd02"
 depends_on: []
-progress: complete
-commits: ["abbb9a4434e2fa0fa62e98f492178f32ecd8d452", "2f1f2c909ec5cc429380fa1e5cfd37de321cc59c", "5c043f3008a9e4b9a8076fc297911a69f3013773", "63ae1466c5cde34707d32ab49e8c8cdc1a377496", "28bfa569f1532567fb8d6acd0139cac9c9c576d8", "012714900a30a81a8401fb600cfac72e7835180c", "8f720877e6eadee1e2bf4bcbe13ab294c6c910d7", "7410c32759cff9c8930fbcc759e89046cc5c6184", "e4f941a12e393bdf00aedca3755f92a934c5b36f", "4986339d71637c9161f7c09f367b2ca691f64f4c", "6d8b7b85b82796d0b47098ec0f65e0aba97ca02c"]
+progress: ready-for-review
+commits: ["4986339d71637c9161f7c09f367b2ca691f64f4c", "e4f941a12e393bdf00aedca3755f92a934c5b36f", "7410c32759cff9c8930fbcc759e89046cc5c6184", "8f720877e6eadee1e2bf4bcbe13ab294c6c910d7", "012714900a30a81a8401fb600cfac72e7835180c", "28bfa569f1532567fb8d6acd0139cac9c9c576d8", "63ae1466c5cde34707d32ab49e8c8cdc1a377496", "5c043f3008a9e4b9a8076fc297911a69f3013773", "2f1f2c909ec5cc429380fa1e5cfd37de321cc59c", "abbb9a4434e2fa0fa62e98f492178f32ecd8d452", "6d8b7b85b82796d0b47098ec0f65e0aba97ca02c", "64e7f26cd29c5b6c959b5e35a5d2701bea63590a"]
 ---
 
 ## Required behavior
@@ -93,26 +93,32 @@ Canonical spec: `specs/system/activity-dashboard.md`. Source: `678a8ac3e3bfeafeb
 
 ## Shipped
 
-All five spec bullets of specs/system/activity-dashboard.md are closed in production code, carried on this branch through the prior verified rounds (implementation 4986339d through tenant-scope CI repair 5c043f30, asset build abbb9a44). This round was a rebase repair: the published PR conflicted with current main, so main's head 73c504f2 (task-301: meta-spec registry moved to the specced flat `/api/v1/meta-specs` routes with scope-level admin auth) was merged in as a72f7a89. Source conflicts were resolved by consistently applying main's route rename across abac_middleware.rs (RouteResourceMapping entries + prefix_entity_type special case dropped), api/mod.rs, rbac.rs and reconciliation.rs tests, web/src/lib/api.js, scripts/e2e-flow.sh, and docs/api-reference.md — the task-295 implementation (try-it routes, preview-environment ABAC entries, migration 000070, list_since port, activityStream/AgentTty frontend) is preserved unchanged. No new source conflicts remain (no conflict markers; only meta_specs.rs's intentional `registry_old_prefix_removed_no_alias` test still names the old prefix to assert it 404s).
+All five spec bullets of specs/system/activity-dashboard.md are closed in production code, carried on this branch through the prior verified rounds (implementation 4986339d through verified asset build abbb9a44/6d8b7b85). This round was a rebase repair: the published PR (head c70b8879) conflicted with current main 82aed3db (task-280, cascade testing). Main was merged in as 64e7f26c with two source resolutions, both preserving the retained task-295 implementation unchanged:
 
-### Test evidence (this round, merged head a72f7a89)
+- `crates/gyre-adapters/src/schema.rs` (the only textual conflict): both sides had added a `diesel::table!` at the same location — ours `preview_environments`, main's `cascade_test_results`. Resolution keeps both tables; no other source conflicts existed.
+- Migration version collision: main's `2026-11-21-000070_cascade_test_results` duplicated our `2026-11-21-000070_preview_environments` sequence number (duplicate versions silently never run). Ours was renumbered to `2026-11-21-000071_preview_environments`; `scripts/check-migration-versions.sh` failed before and passes after. The rename is behavior-preserving (Diesel embeds by path; the preview_environment adapter tests run all embedded migrations against a fresh temp SQLite DB and pass).
 
-- `SKIP_WEB_BUILD=1 cargo check -p gyre-server` — clean (6m34s).
-- `cargo test -p gyre-adapters preview_environment` — 7/7 passed, including tenant-scoped reads and durability-across-reopen.
+Spot-checks that the task-295 surfaces survived the merge: `/api/v1/merge-requests/:id/try-it` and `/api/v1/mrs/:id/try-it` routes registered, 14 preview RouteResourceMapping references in abac_middleware.rs, `NotificationRepository::list_since` in gyre-ports, and `git diff c70b8879 -- web/src` empty (frontend byte-identical to the independently reviewed published head).
+
+### Test evidence (this round, merged head 64e7f26c)
+
+- `SKIP_WEB_BUILD=1 cargo check -p gyre-adapters -p gyre-ports -p gyre-domain` — clean (5m23s).
+- `SKIP_WEB_BUILD=1 cargo check -p gyre-server` — clean (3m52s).
+- `cargo test -p gyre-adapters preview_environment` — 7/7 passed (tenant-scoped reads, expiry queries, migration via fresh temp DB).
+- `cargo test -p gyre-adapters cascade` — 5/5 passed (main's task-280 surface intact after the schema resolution).
 - `cargo test -p gyre-ports` — passed.
-- `cd web && npm ci && npm test` — 132 files, 2614 passed / 41 skipped (covers activityStream, AgentTty, WorkspaceHome activity sidebar, api.js meta-specs rename consumers).
-- `cargo fmt --all -- --check`, `scripts/check-arch.sh`, `check-abac-route-registry.sh`, `check-migration-versions.sh`, `check-mem-port-contracts.sh`, `check-tenant-filter.sh` — all exit 0.
-- Evidence saved under /tmp/stage/review-evidence.
+- `cargo fmt --all -- --check`, `scripts/check-arch.sh`, `check-abac-route-registry.sh`, `check-migration-versions.sh`, `check-mem-port-contracts.sh` — all exit 0.
+- Evidence saved under /tmp/stage/review-evidence (rebase-repair-round.txt).
 
 ### Verifier-owed test execution (gyre-server test binaries exceed the in-sandbox 4 GiB budget)
 
-- `cargo test --all` (full suite), minimally: `cargo test -p gyre-server --lib try_it_`, `cargo test -p gyre-server --lib api::activity::tests::unified_activity_honors_since_against_durable_notifications`, and — new this round, exercising the merged route rename — `cargo test -p gyre-server --lib meta_specs`, plus `cargo test -p gyre-adapters preview_environment` and `cd web && npm ci && npm test`.
+- `cargo test --all` (full suite), minimally: `cargo test -p gyre-server --lib try_it_`, `cargo test -p gyre-server --lib api::activity`, plus — new this round, exercising main's merged surface — `cargo test -p gyre-adapters cascade`, alongside `cargo test -p gyre-adapters preview_environment` and `cd web && npm ci && npm test`.
 
 ### Standing implementation summary (unchanged this round)
 
 - Time-period feed: `NotificationRepository::list_since(since, limit)` in every adapter (mem, SQLite, PostgreSQL, broadcasting wrapper); GET /api/v1/activity filters in the repository; api.js `activity(limit, since)` forwards it.
 - Real-time sidebars: web/src/lib/activityStream.svelte.js rides the single shared /ws connection, live-prepends per workspace, dedupes, re-syncs via `GET /api/v1/activity?since=` on reconnect.
-- Try-it preview environments: durable PreviewEnvironment + port + SQLite migration 000070 + adapters wired with store!; POST /api/v1/merge-requests/:id/try-it (+ /mrs/:id alias), GET /api/v1/preview-environments[/:id], DELETE teardown; compute-target dispatch, WireGuard mesh peer registration, TTL GC job, ABAC entries, per-handler tenant/membership scoping.
+- Try-it preview environments: durable PreviewEnvironment + port + SQLite migration (now 000071 after this round's renumber) + adapters wired with store!; POST /api/v1/merge-requests/:id/try-it (+ /mrs/:id alias), GET /api/v1/preview-environments[/:id], DELETE teardown; compute-target dispatch, WireGuard mesh peer registration, TTL GC job, ABAC entries, per-handler tenant/membership scoping.
 - Trial analytics: preview.started/ended/expired/failed AnalyticsEvents via state.analytics.record; approve/reject half untouched.
 - TTY attach: web/src/lib/AgentTty.svelte consumes api.agentTtyUrl (no longer dead code), mounted in DetailPanel.
 - Artifact deep links: entries surface mr_id/repo_id/agent_id/task_id/spec_path/gate_name/commit_sha/branch; gate-failure/test-result entries land on the MR's gates tab; merged-MR entries render TryItButton.
