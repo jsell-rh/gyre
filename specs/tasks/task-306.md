@@ -97,7 +97,7 @@ Canonical spec: `specs/system/explorer-canvas.md`. Source: `678a8ac3e3bfeafeb66c
 
 ### What changed this round
 
-Round 81 (repair dispatch from checkpoint `e03cd3b1`). `origin/main` is **unchanged** at `7e746233` — the exact commit already reconciled into this branch by round-76's merge `f2a0f9da` — so no new reconciliation was needed. Both external blockers were re-verified with focused deterministic source-level probes at head `e03cd3b1`; evidence saved to `/tmp/stage/review-evidence/task306-round81-probe.txt` (probe script `task306-round81-probe.sh`, exit 0; watched-file diff vs discovery base empty). Docs-only round; zero changes shipped to the extractors, the graph store/adapters, or the upsert path (AC 1 holds).
+Round 82 (repair dispatch from checkpoint `c08716a8`). `origin/main` is **unchanged** at `7e746233` — the exact commit already reconciled into this branch by round-76's merge `f2a0f9da` — so no new reconciliation was needed. Both external blockers were re-verified with focused deterministic source-level probes at head `c08716a8`; evidence saved to `/tmp/stage/review-evidence/task306-round82-probe.txt` (probe script `task306-round82-probe.sh`, exit 0; watched-file diff vs discovery base empty). Docs-only round; zero changes shipped to the extractors, the graph store/adapters, or the upsert path (AC 1 holds).
 
 ### Realized-model graph-node-metrics backend — NOT landed
 
@@ -121,7 +121,7 @@ There is a genuine, unresolved conflict between two canonical specs over the ren
 
 ### Round output
 
-Task file at round 81 with truthful `blocked-on-external-implementation`; coverage row round reference updated (row stays open); 0/7 acceptance criteria ticked. Docs-only round — no Rust or web source touched, so no formatting or build work was needed (no cold build of an unchanged crate; no newly added Rust files to format). Per the assignment constraint, large gyre-server builds/test compilation run in the independent verifier; this round runs no server tests, so nothing is deferred beyond that standing constraint.
+Task file at round 82 with truthful `blocked-on-external-implementation`; coverage row round reference updated (row stays open); 0/7 acceptance criteria ticked. Docs-only round — no Rust or web source touched, so no formatting or build work was needed (no cold build of an unchanged crate; no newly added Rust files to format). Per the assignment constraint, large gyre-server builds/test compilation run in the independent verifier; this round runs no server tests, so nothing is deferred beyond that standing constraint.
 
 ### Remaining work to unblock
 
