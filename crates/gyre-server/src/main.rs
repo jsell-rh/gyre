@@ -156,6 +156,14 @@ async fn main() -> Result<()> {
         Arc::clone(&state),
     );
 
+    // Try-it preview environment GC (activity-dashboard.md §"Try it"
+    // links): TTL expiry + liveness teardown for ephemeral environments.
+    jobs::spawn_job(
+        Arc::clone(&state.job_registry),
+        gyre_server::preview_env_gc::JOB_NAME.to_string(),
+        Arc::clone(&state),
+    );
+
     // PR hygiene (specs/development/agent-workflow.md §PRs as the
     // Collaboration Primitive, task-270): continuously (minutes-scale
     // interval) monitors open MRs for stale classes — unreviewed,
