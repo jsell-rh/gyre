@@ -1642,6 +1642,16 @@ pub async fn check_manifest_coverage(
 // not just the single manifest being pushed. A cycle whose edges are
 // declared in two different manifests or repos (the enterprise case the
 // spec's Problem section exists for) is therefore rejected at receive time.
+//
+// task-293 review repair (round 2), two scope corrections:
+// - FAIL CLOSED on storage errors: if the durable spec_links table cannot
+//   be read, the push is rejected — never silently degraded to the
+//   pushed manifest's own edges (the pre-task-293 scope).
+// - REJECT ONLY CYCLES THE PUSH CREATES: a cycle is reported only when at
+//   least one edge contributed by the pushed manifest participates in it.
+//   Stored-only cycles (legacy pre-gate rows, ungated mirror-synced edges)
+//   are not created by this push and must not block unrelated repos that
+//   have no remedy of their own.
 // ---------------------------------------------------------------------------
 
 /// Node identity in the tenant-wide spec graph: (repo id, spec path).
@@ -1726,9 +1736,32 @@ pub async fn check_spec_link_cycles(
     match tenant {
         None => detect_link_cycles(&manifest),
         Some(ctx) => {
-            let adj = build_tenant_cycle_graph(&manifest, ctx).await;
-            detect_graph_cycles(&adj)
+            let graph = build_tenant_cycle_graph(&manifest, ctx).await?;
+            detect_graph_cycles(&graph)
         }
+    }
+}
+
+/// The combined tenant-wide spec-link graph used for cycle detection:
+/// adjacency over (repo, path) nodes plus the list of edges contributed
+/// by the manifest being pushed. Only cycles containing at least one
+/// pushed edge are cycles THIS push creates (spec-links.md §Cycle
+/// Detection: the forge "rejects manifest changes that WOULD CREATE
+/// cycles") — a stored-only cycle (legacy pre-gate rows, ungated
+/// mirror-synced edges) exists regardless of the push.
+struct SpecCycleGraph {
+    adj: std::collections::HashMap<SpecGraphKey, Vec<SpecGraphKey>>,
+    /// Edges contributed by the pushed manifest: (from, to) pairs. A cycle
+    /// is reported only when one of these edges participates in it.
+    pushed: Vec<(SpecGraphKey, SpecGraphKey)>,
+}
+
+impl SpecCycleGraph {
+    fn add_edge(&mut self, from: SpecGraphKey, to: SpecGraphKey, pushed: bool) {
+        if pushed {
+            self.pushed.push((from.clone(), to.clone()));
+        }
+        self.adj.entry(from).or_default().push(to);
     }
 }
 
@@ -1746,40 +1779,55 @@ pub async fn check_spec_link_cycles(
 ///    source repo. Unresolved cross-repo targets have no attributable
 ///    target node — the sync stores them unresolved, so they are not edges
 ///    in the stored graph either.
+///
+/// FAILS CLOSED (review repair, round 2): a `list_all` storage error is
+/// propagated as `Err` — the push is rejected when the durable graph
+/// cannot be read, mirroring the task-264 signing-gate contract
+/// ("enumeration failure REJECTS the push ... never a silent pass").
+/// Silently skipping the stored half would re-open the pre-task-293
+/// detection scope exactly when the graph is unreadable.
 async fn build_tenant_cycle_graph(
     manifest: &SpecManifest,
     ctx: &TenantCycleContext<'_>,
-) -> std::collections::HashMap<SpecGraphKey, Vec<SpecGraphKey>> {
-    let mut adj: std::collections::HashMap<SpecGraphKey, Vec<SpecGraphKey>> =
-        std::collections::HashMap::new();
+) -> Result<SpecCycleGraph, String> {
+    let mut graph = SpecCycleGraph {
+        adj: std::collections::HashMap::new(),
+        pushed: Vec::new(),
+    };
     let repo_scope = ctx.source_repo_id.unwrap_or("");
     let manifest_paths: std::collections::HashSet<&str> =
         manifest.specs.iter().map(|e| e.path.as_str()).collect();
 
     // 1. Stored links, minus the rows this push replaces.
     if let Some(link_repo) = ctx.link_repo {
-        if let Ok(stored) = link_repo.list_all().await {
-            for link in stored {
-                if !participates_in_cycle_detection(&link.link_type) {
-                    continue;
-                }
-                let link_repo_key = link.source_repo_id.as_deref().unwrap_or("");
-                if link_repo_key == repo_scope && manifest_paths.contains(link.source_path.as_str())
-                {
-                    continue; // replaced by the pushed manifest's edges below
-                }
-                let target_repo = match link.target_repo_id.as_deref() {
-                    Some(r) => r.to_string(),
-                    // Same-repo link: the target lives in the source repo.
-                    None if link.target_display.is_none() => link_repo_key.to_string(),
-                    // Unresolved cross-repo link: no attributable target
-                    // node — the stored graph has no edge here either.
-                    None => continue,
-                };
-                adj.entry(spec_graph_key(link_repo_key, &link.source_path))
-                    .or_default()
-                    .push(spec_graph_key(&target_repo, &link.target_path));
+        let stored = link_repo.list_all().await.map_err(|e| {
+            warn!(
+                error = %e,
+                "spec-registry: cannot read stored spec links for cycle check — failing closed"
+            );
+            format!("spec link cycle check failed: unable to read the stored spec link graph: {e}")
+        })?;
+        for link in stored {
+            if !participates_in_cycle_detection(&link.link_type) {
+                continue;
             }
+            let link_repo_key = link.source_repo_id.as_deref().unwrap_or("");
+            if link_repo_key == repo_scope && manifest_paths.contains(link.source_path.as_str()) {
+                continue; // replaced by the pushed manifest's edges below
+            }
+            let target_repo = match link.target_repo_id.as_deref() {
+                Some(r) => r.to_string(),
+                // Same-repo link: the target lives in the source repo.
+                None if link.target_display.is_none() => link_repo_key.to_string(),
+                // Unresolved cross-repo link: no attributable target
+                // node — the stored graph has no edge here either.
+                None => continue,
+            };
+            graph.add_edge(
+                spec_graph_key(link_repo_key, &link.source_path),
+                spec_graph_key(&target_repo, &link.target_path),
+                false,
+            );
         }
     }
 
@@ -1810,82 +1858,62 @@ async fn build_tenant_cycle_graph(
                 None if resolved.target_display.is_none() => repo_scope.to_string(),
                 None => continue,
             };
-            adj.entry(spec_graph_key(repo_scope, &entry.path))
-                .or_default()
-                .push(spec_graph_key(&target_repo, &resolved.target_path));
+            graph.add_edge(
+                spec_graph_key(repo_scope, &entry.path),
+                spec_graph_key(&target_repo, &resolved.target_path),
+                true,
+            );
         }
     }
 
-    adj
+    Ok(graph)
 }
 
-/// Detect cycles in the (repo, path)-keyed spec link graph. Checks
-/// `depends_on`, `implements`, and `extends` links; excludes
-/// `conflicts_with` (bidirectional), `references`, and `supersedes`
-/// per spec-links.md §Cycle Detection (callers filter edges by
-/// [`participates_in_cycle_detection`]). The error message names the cycle
-/// with repo-attributed nodes joined by ` → `.
-fn detect_graph_cycles(
-    adj: &std::collections::HashMap<SpecGraphKey, Vec<SpecGraphKey>>,
-) -> Result<(), String> {
-    use std::collections::{HashSet, VecDeque};
+/// Detect cycles the PUSHED MANIFEST would create in the (repo, path)-keyed
+/// spec link graph (review repair, round 2: only cycles in which at least
+/// one edge contributed by the pushed manifest participates are reported —
+/// a stored-only cycle is not created by this push). A cycle contains the
+/// pushed edge (u → v) exactly when u is reachable from v through the
+/// combined graph, so each pushed edge is checked with a BFS from its
+/// target back to its source. Checks `depends_on`, `implements`, and
+/// `extends` links; excludes `conflicts_with` (bidirectional), `references`,
+/// and `supersedes` per spec-links.md §Cycle Detection (callers filter
+/// edges by [`participates_in_cycle_detection`]). The error message names
+/// the cycle with repo-attributed nodes joined by ` → `.
+fn detect_graph_cycles(graph: &SpecCycleGraph) -> Result<(), String> {
+    use std::collections::{HashMap, HashSet, VecDeque};
 
-    let all_nodes: HashSet<&SpecGraphKey> = adj
-        .keys()
-        .chain(adj.values().flat_map(|vs| vs.iter()))
-        .collect();
-
-    for start_node in all_nodes {
-        let Some(targets) = adj.get(start_node) else {
-            continue;
-        };
-        for target in targets {
-            if target == start_node {
-                return Err(format!(
-                    "spec link cycle detected: {} → {}",
-                    display_spec_graph_key(start_node),
-                    display_spec_graph_key(start_node)
-                ));
-            }
-            // BFS from `target` to see if `start_node` is reachable back.
-            let mut visited: HashSet<&SpecGraphKey> = HashSet::new();
-            let mut parent: std::collections::HashMap<&SpecGraphKey, &SpecGraphKey> =
-                std::collections::HashMap::new();
-            let mut queue: VecDeque<&SpecGraphKey> = VecDeque::new();
-            queue.push_back(target);
-            parent.insert(target, start_node);
-            while let Some(node) = queue.pop_front() {
-                if node == start_node {
-                    // Reconstruct the cycle: the parent chain from the
-                    // reached start node back around to the BFS root is the
-                    // cycle in reverse edge order.
-                    let mut path: Vec<&SpecGraphKey> = Vec::new();
-                    let mut cur = node;
-                    loop {
-                        if cur == start_node && !path.is_empty() {
-                            path.push(cur); // close the cycle
-                            break;
-                        }
-                        path.push(cur);
-                        match parent.get(cur) {
-                            Some(&p) => cur = p,
-                            None => break,
-                        }
+    for (u, v) in &graph.pushed {
+        // BFS from v back to u: if u is reachable, the pushed edge u → v
+        // closes a cycle u → v → … → u.
+        let mut visited: HashSet<&SpecGraphKey> = HashSet::new();
+        let mut parent: HashMap<&SpecGraphKey, &SpecGraphKey> = HashMap::new();
+        let mut queue: VecDeque<&SpecGraphKey> = VecDeque::new();
+        queue.push_back(v);
+        visited.insert(v);
+        while let Some(node) = queue.pop_front() {
+            if node == u {
+                // Reconstruct the cycle: walk the parent chain from u back
+                // to the BFS root v, reverse it, and prepend u.
+                let mut chain: Vec<&SpecGraphKey> = Vec::new();
+                let mut cur = node;
+                loop {
+                    chain.push(cur);
+                    match parent.get(cur) {
+                        Some(&p) => cur = p,
+                        None => break,
                     }
-                    path.reverse();
-                    let named: Vec<String> =
-                        path.iter().map(|k| display_spec_graph_key(k)).collect();
-                    return Err(format!("spec link cycle detected: {}", named.join(" → ")));
                 }
-                if !visited.insert(node) {
-                    continue;
-                }
-                if let Some(node_targets) = adj.get(node) {
-                    for next in node_targets {
-                        if !visited.contains(next) {
-                            parent.entry(next).or_insert(node);
-                            queue.push_back(next);
-                        }
+                chain.reverse(); // v → … → u
+                let mut named: Vec<String> = vec![display_spec_graph_key(u)];
+                named.extend(chain.iter().map(|k| display_spec_graph_key(k)));
+                return Err(format!("spec link cycle detected: {}", named.join(" → ")));
+            }
+            if let Some(targets) = graph.adj.get(node) {
+                for next in targets {
+                    if visited.insert(next) {
+                        parent.insert(next, node);
+                        queue.push_back(next);
                     }
                 }
             }
@@ -1898,12 +1926,16 @@ fn detect_graph_cycles(
 /// Detect cycles in the spec link graph from a parsed manifest (its own
 /// edges only, all nodes attributed to one scope — the pre-task-293
 /// single-manifest check, kept for manifests pushed without tenant
-/// context). Checks `depends_on`, `implements`, and `extends` links.
+/// context). Every edge comes from the manifest, so every edge is a
+/// "pushed" edge: any cycle in the manifest's own edges is a cycle this
+/// push creates. Checks `depends_on`, `implements`, and `extends` links.
 /// Excludes `conflicts_with` (bidirectional), `references`, and `supersedes`
 /// per spec-links.md §Cycle Detection.
 pub fn detect_link_cycles(manifest: &SpecManifest) -> Result<(), String> {
-    let mut adj: std::collections::HashMap<SpecGraphKey, Vec<SpecGraphKey>> =
-        std::collections::HashMap::new();
+    let mut graph = SpecCycleGraph {
+        adj: std::collections::HashMap::new(),
+        pushed: Vec::new(),
+    };
     for entry in &manifest.specs {
         for link in &entry.links {
             if !participates_in_cycle_detection(&link.link_type) {
@@ -1916,12 +1948,14 @@ pub fn detect_link_cycles(manifest: &SpecManifest) -> Result<(), String> {
                 CrossWorkspaceTarget::CrossRepo { path, .. } => path,
                 CrossWorkspaceTarget::CrossWorkspace { path, .. } => path,
             };
-            adj.entry(spec_graph_key("", &entry.path))
-                .or_default()
-                .push(spec_graph_key("", &target_path));
+            graph.add_edge(
+                spec_graph_key("", &entry.path),
+                spec_graph_key("", &target_path),
+                true,
+            );
         }
     }
-    detect_graph_cycles(&adj)
+    detect_graph_cycles(&graph)
 }
 
 // ---------------------------------------------------------------------------
@@ -5452,5 +5486,223 @@ specs:
         check_spec_link_cycles(dir_a.path().to_str().unwrap(), &sha_a, Some(&ctx_a))
             .await
             .expect("an unresolved stored cross-repo row must not fabricate a cycle");
+    }
+
+    /// Test-only SpecLinkRepository whose `list_all` fails, modeling the
+    /// storage-error path (SQLite "database is locked" under concurrent
+    /// receive-packs, pool/disk failure) the cycle gate must FAIL CLOSED
+    /// on — never silently degrade to the pushed manifest's own edges.
+    struct FailingSpecLinkRepository;
+
+    #[async_trait::async_trait]
+    impl gyre_ports::SpecLinkRepository for FailingSpecLinkRepository {
+        async fn list_all(&self) -> anyhow::Result<Vec<SpecLinkEntry>> {
+            anyhow::bail!("storage unavailable (test)")
+        }
+        async fn replace_for_source(
+            &self,
+            _source_repo_id: &str,
+            _source_path: &str,
+            _links: &[SpecLinkEntry],
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn save(&self, _entry: &SpecLinkEntry) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn delete_by_source_repo(&self, _source_repo_id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Review repair (round 2), fail-closed: when the durable spec_links
+    /// table cannot be read, the push is REJECTED — the check must not
+    /// silently fall back to the pushed manifest's own edges (the
+    /// pre-task-293 scope). Against the round-1 code this fails: the
+    /// `if let Ok(stored)` guard skipped the stored half and the B→A push
+    /// returned Ok even though the A→B row was in the table.
+    #[tokio::test]
+    async fn tenant_cycle_list_all_error_fails_closed() {
+        // Repo A's edge A→B is already stored (its push landed earlier).
+        let (dir_b, _sha_b1) = make_test_repo(&[
+            (
+                "specs/manifest.yaml",
+                "version: 1\nspecs:\n  - path: system/b.md\n    title: B\n    owner: user:test\n",
+            ),
+            ("specs/system/b.md", "# B\n"),
+        ])
+        .await;
+        let (dir_a, _sha_a) = make_test_repo(&[(
+            "specs/manifest.yaml",
+            "version: 1\nspecs:\n  - path: system/a.md\n    title: A\n    owner: user:test\n",
+        )])
+        .await;
+
+        let (ws_ctx, repos_ctx, tenant) = two_repo_workspace(&dir_a, &dir_b).await;
+        // The storage backend errors on read — the exact state the round-1
+        // code silently ignored.
+        let link_repo: Arc<dyn gyre_ports::SpecLinkRepository> =
+            Arc::new(FailingSpecLinkRepository);
+
+        // Repo B pushes the back-edge B depends_on @A/a.
+        let sha_b2 = add_commit(
+            &dir_b,
+            &[(
+                "specs/manifest.yaml",
+                "version: 1\nspecs:\n  - path: system/b.md\n    title: B\n    owner: user:test\n    links:\n      - type: depends_on\n        target: \"@A/system/a.md\"\n",
+            )],
+        );
+        let ctx_b = TenantCycleContext {
+            link_repo: Some(&link_repo),
+            source_repo_id: Some("repo-b"),
+            source_workspace_id: Some("ws-1"),
+            workspaces: Some(&ws_ctx),
+            repos: Some(&repos_ctx),
+            tenant_id: Some(&tenant),
+            memberships: None,
+            principal: None,
+        };
+        let err = check_spec_link_cycles(dir_b.path().to_str().unwrap(), &sha_b2, Some(&ctx_b))
+            .await
+            .expect_err(
+                "a storage error reading the durable graph must reject the push (fail closed), \
+                 not silently degrade to the manifest's own edges",
+            );
+        assert!(
+            err.contains("spec link cycle check failed"),
+            "fail-closed rejection must say the graph could not be read: {err}"
+        );
+    }
+
+    /// Review repair (round 2), push-scoped detection: a stored-only cycle
+    /// (legacy pre-gate rows — the exact state the task's discovery
+    /// evidence describes, and equally reachable via the ungated
+    /// mirror-sync paths) must NOT block a push that creates no cycle.
+    /// Against the round-1 code this fails: detect_graph_cycles scanned
+    /// every node of the combined graph, so any manifest push was rejected
+    /// while a stored cycle existed anywhere. The companion assertion
+    /// (re-declaring a cycle-participating edge in the same fixture is
+    /// still rejected) proves the gate was scoped, not disabled.
+    #[tokio::test]
+    async fn tenant_cycle_legacy_stored_cycle_does_not_block_unrelated_push() {
+        use crate::mem::{MemRepoRepository, MemSpecLinkRepository, MemWorkspaceRepository};
+
+        let (dir_b, _sha_b1) = make_test_repo(&[
+            (
+                "specs/manifest.yaml",
+                "version: 1\nspecs:\n  - path: system/b.md\n    title: B\n    owner: user:test\n",
+            ),
+            ("specs/system/b.md", "# B\n"),
+        ])
+        .await;
+        let (dir_a, _sha_a) = make_test_repo(&[(
+            "specs/manifest.yaml",
+            "version: 1\nspecs:\n  - path: system/a.md\n    title: A\n    owner: user:test\n",
+        )])
+        .await;
+        // Repo C: unrelated to the stored cycle, pushing a real edge of
+        // its own (C depends_on @A/a — acyclic).
+        let (dir_c, sha_c1) = make_test_repo(&[
+            (
+                "specs/manifest.yaml",
+                "version: 1\nspecs:\n  - path: system/c.md\n    title: C\n    owner: user:test\n    links:\n      - type: depends_on\n        target: \"@A/system/a.md\"\n",
+            ),
+        ])
+        .await;
+
+        // Three-repo workspace fixture (repo C must resolve @A/... too).
+        let ws_ctx: Arc<dyn gyre_ports::WorkspaceRepository> =
+            Arc::new(MemWorkspaceRepository::default());
+        ws_ctx
+            .create(&make_workspace_in_tenant("ws-1", "tenant-293", "ws-one"))
+            .await
+            .unwrap();
+        let repos_ctx: Arc<dyn gyre_ports::RepoRepository> = Arc::new(MemRepoRepository::default());
+        for (id, name, dir) in [
+            ("repo-a", "A", &dir_a),
+            ("repo-b", "B", &dir_b),
+            ("repo-c", "C", &dir_c),
+        ] {
+            repos_ctx
+                .create(&make_repo_entity(
+                    id,
+                    name,
+                    "ws-1",
+                    dir.path().to_str().unwrap(),
+                ))
+                .await
+                .unwrap();
+        }
+        let tenant = gyre_common::Id::new("tenant-293");
+
+        let link_repo: Arc<dyn gyre_ports::SpecLinkRepository> =
+            Arc::new(MemSpecLinkRepository::default());
+        // Legacy stored cycle A↔B (recorded before the gate existed, or
+        // mirror-synced past it): both directions in the durable table.
+        link_repo
+            .save(&stored_link(
+                "repo-a",
+                "system/a.md",
+                SpecLinkType::DependsOn,
+                Some("repo-b"),
+                "system/b.md",
+            ))
+            .await
+            .unwrap();
+        link_repo
+            .save(&stored_link(
+                "repo-b",
+                "system/b.md",
+                SpecLinkType::DependsOn,
+                Some("repo-a"),
+                "system/a.md",
+            ))
+            .await
+            .unwrap();
+
+        // Repo C pushes its own acyclic edge while the legacy cycle sits in
+        // the stored graph: the push creates no cycle, so it is accepted.
+        let ctx_c = TenantCycleContext {
+            link_repo: Some(&link_repo),
+            source_repo_id: Some("repo-c"),
+            source_workspace_id: Some("ws-1"),
+            workspaces: Some(&ws_ctx),
+            repos: Some(&repos_ctx),
+            tenant_id: Some(&tenant),
+            memberships: None,
+            principal: None,
+        };
+        check_spec_link_cycles(dir_c.path().to_str().unwrap(), &sha_c1, Some(&ctx_c))
+            .await
+            .expect("a stored-only legacy cycle must not block a push that creates no cycle");
+
+        // Companion: a push that DOES contribute an edge participating in
+        // the stored cycle is still rejected — the gate was scoped, not
+        // disabled. Repo A re-declares A depends_on @B/b; the stored B→A
+        // back-edge closes the cycle through the pushed edge.
+        let sha_a2 = add_commit(
+            &dir_a,
+            &[(
+                "specs/manifest.yaml",
+                "version: 1\nspecs:\n  - path: system/a.md\n    title: A\n    owner: user:test\n    links:\n      - type: depends_on\n        target: \"@B/system/b.md\"\n",
+            )],
+        );
+        let ctx_a = TenantCycleContext {
+            link_repo: Some(&link_repo),
+            source_repo_id: Some("repo-a"),
+            source_workspace_id: Some("ws-1"),
+            workspaces: Some(&ws_ctx),
+            repos: Some(&repos_ctx),
+            tenant_id: Some(&tenant),
+            memberships: None,
+            principal: None,
+        };
+        let err = check_spec_link_cycles(dir_a.path().to_str().unwrap(), &sha_a2, Some(&ctx_a))
+            .await
+            .expect_err("a push contributing a cycle-participating edge must still be rejected");
+        assert!(
+            err.contains("spec link cycle detected"),
+            "rejection must name the cycle: {err}"
+        );
     }
 }
