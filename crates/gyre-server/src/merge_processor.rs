@@ -3997,6 +3997,17 @@ async fn load_cascade_context(state: &AppState, task_id: &Id) -> Option<CascadeT
     }
 }
 
+/// Outcome of `trigger_cascade_tests` (task-281): what the trigger actually
+/// did, so the API surface can report it instead of guessing from
+/// side-effects. `created_task_ids` has one entry per dependent repo for
+/// which a cascade-test task was created; `skipped_dependents` counts
+/// dependents whose workspace policy disables cascade testing.
+#[derive(Debug, Default)]
+pub(crate) struct CascadeTriggerOutcome {
+    pub created_task_ids: Vec<Id>,
+    pub skipped_dependents: usize,
+}
+
 /// Trigger cascade tests for all repos that depend on the merged repo.
 ///
 /// When `require_cascade_tests` is enabled in the workspace dependency policy
@@ -4005,6 +4016,10 @@ async fn load_cascade_context(state: &AppState, task_id: &Id) -> Option<CascadeT
 /// 2. Creates a cascade test task in each dependent repo
 /// 3. Emits a `cascade_test_triggered` event to the dependent repo's workspace
 /// 4. Notifies workspace members of the cascade test
+///
+/// Returns the created cascade-task ids and the count of dependents skipped
+/// by policy, so callers (the merge path ignores it; the task-281 API
+/// endpoint reports it) can distinguish "triggered" from "skipped".
 ///
 /// EXECUTION link (task-280): each cascade-test task is created with
 /// `task_type = Implementation` — the discriminator the worker scheduler
@@ -4018,7 +4033,9 @@ pub(crate) async fn trigger_cascade_tests(
     merged_repo_name: &str,
     merge_commit_sha: &str,
     workspace_id: &Id,
-) {
+) -> CascadeTriggerOutcome {
+    let mut outcome = CascadeTriggerOutcome::default();
+
     // Check workspace dependency policy.
     let policy = state
         .dependency_policies
@@ -4027,7 +4044,7 @@ pub(crate) async fn trigger_cascade_tests(
         .unwrap_or_default();
 
     if !policy.require_cascade_tests {
-        return;
+        return outcome;
     }
 
     // Query dependency graph for all repos depending on the merged repo.
@@ -4039,12 +4056,12 @@ pub(crate) async fn trigger_cascade_tests(
         Ok(deps) => deps,
         Err(e) => {
             warn!("cascade-test: failed to list dependents for {merged_repo_id}: {e}");
-            return;
+            return outcome;
         }
     };
 
     if dependents.is_empty() {
-        return;
+        return outcome;
     }
 
     let now = crate::api::now_secs();
@@ -4085,6 +4102,7 @@ pub(crate) async fn trigger_cascade_tests(
                 dependent_workspace = dep_workspace_id.as_str(),
                 "skipping cascade test — dependent workspace has cascade testing disabled"
             );
+            outcome.skipped_dependents += 1;
             continue;
         }
 
@@ -4158,6 +4176,7 @@ pub(crate) async fn trigger_cascade_tests(
                     "cascade-test: failed to persist cascade context; result record will lack merged repo identity"
                 );
             }
+            outcome.created_task_ids.push(task.id.clone());
         }
 
         // Emit a cascade_test_triggered event to the dependent repo's workspace.
@@ -4227,6 +4246,8 @@ pub(crate) async fn trigger_cascade_tests(
         "cascade testing triggered for {} dependent repo(s)",
         dependents.len(),
     );
+
+    outcome
 }
 
 /// Report the result of a cascade test and handle failures.
