@@ -97,18 +97,18 @@ Canonical spec: `specs/system/explorer-canvas.md`. Source: `678a8ac3e3bfeafeb66c
 
 ### What changed this round
 
-Round 86 (repair dispatch from checkpoint `3ab69e1c`). `origin/main` fetched and **unchanged** at `7e746233` — the exact commit already reconciled into this branch by round-76's merge `f2a0f9da` — so no new reconciliation was needed. Both external blockers re-verified with the focused deterministic source-level probe at head `3ab69e1c`; evidence saved to `/tmp/stage/review-evidence/task306-round86-probe.txt` (exit 0). Docs-only round: zero changes to the four language extractors, the graph store/adapters, or the upsert path (AC 1 holds) — no Rust or web source touched, so no formatting or build work was needed and there is no product-surface commit to attribute beyond this docs commit.
+Round 87 (repair dispatch from checkpoint `6b6bcf3b`). `origin/main` fetched and **unchanged** at `7e746233` — the exact commit already reconciled into this branch by round-76's merge `f2a0f9da` — so no new reconciliation was needed. Both external blockers re-verified with the focused deterministic source-level probe at head `6b6bcf3b`; evidence saved to `/tmp/stage/review-evidence/task306-round87-probe.txt` (exit 0). Docs-only round: zero changes to the four language extractors, the graph store/adapters, or the upsert path (AC 1 holds) — no Rust or web source touched, so there were no newly added Rust files to format and no product-surface commit to attribute beyond this docs commit.
 
 ### Realized-model graph-node-metrics backend — NOT landed
 
-- `git diff 678a8ac3 HEAD` over the four extractors, `sqlite/graph.rs`, and `graph_extraction.rs` is **empty** — watched backend surfaces byte-identical to the discovery base; all four extractors still hardcode `complexity: None` / `churn_count_30d: 0` at the exact discovery lines (rust:160-161, go:135-136, python:136-137, typescript:129-130); the upsert still overwrites stored values at sqlite/graph.rs:366-367.
-- Zero files in `crates/` mention cyclomatic complexity; `specs/tasks/` still maxes at task-311 — no task file exists for the realized-model plan's graph-node-metrics task (plan b26f707c…); it has not been dispatched (task-307, which mentions the key, is the complete plan-publishing task, not the implementation).
+- `git diff 678a8ac3 HEAD` over the four extractors, `sqlite/graph.rs`, and `graph_extraction.rs` is **empty** (0 lines) — watched backend surfaces byte-identical to the discovery base; all four extractors still hardcode `complexity: None` / `churn_count_30d: 0` at the exact discovery lines (rust:160, go:135, python:136, typescript:129); the upsert still overwrites stored values at sqlite/graph.rs:366-367.
+- Zero `cyclomatic` occurrences in `crates/`; `specs/tasks/` still maxes at task-311 — no task file exists for the realized-model graph-node-metrics implementation (the only files mentioning the key are this task and task-307, the plan-publishing task, not the implementation).
 
 Ordering guard applies — the end-to-end indicator probe cannot run against populated metrics and fails as designed, leaving this task open rather than triggering any local backend implementation.
 
 ### ui-layout d3-force rerouting — NOT landed
 
-`getLayout('graph')` still resolves to ExplorerCanvas (Canvas 2D; layoutRegistry.js 'graph' entry maps `component: ExplorerCanvas` at :47 with no `engine` selector); ExplorerView still defaults `activeLayout = $state('graph')` at :455. SVG-path interaction case (3) does not trigger, and no narrow frontend defect exists under permitted work (a) — the Canvas indicator formulas (ExplorerCanvas.svelte:1813-1815 `nodeWeight = Math.max(1, n.complexity || 1)`, :3717 `churnThickness = Math.min(4, 1 + (n?.churn_count_30d || 0) * 0.3)`) and API→renderer field plumbing (ExplorerView.svelte:2958/:3028/:3042 `nodes={effectiveGraph.nodes ?? []}`) remain intact.
+`getLayout('graph')` still resolves to ExplorerCanvas (Canvas 2D; layoutRegistry.js 'graph' entry maps `component: ExplorerCanvas` at :46-47 with no `engine` selector); ExplorerView still defaults `activeLayout = $state('graph')` at :455. SVG-path interaction case (3) does not trigger, and no narrow frontend defect exists under permitted work (a) — the Canvas indicator formulas (ExplorerCanvas.svelte:1813-1815 `nodeWeight = Math.max(1, n.complexity || 1)`, :3717 `churnThickness = Math.min(4, 1 + (n?.churn_count_30d || 0) * 0.3)`) and API→renderer field plumbing remain intact.
 
 ### Spec-vs-spec conflict escalation (acceptance criterion 5)
 
@@ -116,7 +116,7 @@ Recorded: **explorer-canvas.md §Component Architecture** (Canvas 2D for graph/t
 
 ### Evidence
 
-Probe evidence with source SHAs saved at `/tmp/stage/review-evidence/task306-round86-probe.txt` (exit 0). Per the standing constraint, large gyre-server builds/test compilation run in the independent verifier; this round ran no server tests and defers none.
+Probe evidence with source SHAs saved at `/tmp/stage/review-evidence/task306-round87-probe.txt` (exit 0). Per the standing constraint, large gyre-server builds/test compilation run in the independent verifier; this round ran no server tests and defers none.
 
 ### Remaining work to unblock
 
