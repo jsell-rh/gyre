@@ -2339,7 +2339,63 @@
         "Explorer Canvas",
         "Design",
         "Lens Definitions",
-        "Structural (default)"      ]
+        "Structural (default)"
+      ]
+    },
+    "backlog/cdd27aa428258fd587e513cd": {
+      "file": "specs/development/ci-docs-release.md",
+      "heading": [
+        "Documentation, CI & Release",
+        "User-Facing Docs"
+      ]
+    },
+    "backlog/b7c86bc0e72bd8b20c253c5c": {
+      "file": "specs/development/ci-docs-release.md",
+      "heading": [
+        "Documentation, CI & Release",
+        "CI"
+      ]
+    },
+    "backlog/0707840bfbb865b285a8c0a7": {
+      "file": "specs/development/ci-docs-release.md",
+      "heading": [
+        "Documentation, CI & Release",
+        "Versioning & Release",
+        "Conventional Commits: Forge-Enforced",
+        "Pre-Accept Enforcement"
+      ]
+    },
+    "backlog/5e69a034fc0a01c1f8222f5e": {
+      "file": "specs/development/ci-docs-release.md",
+      "heading": [
+        "Documentation, CI & Release",
+        "Versioning & Release",
+        "Changelog Generation"
+      ]
+    },
+    "backlog/c467a8f584b42b34991ff696": {
+      "file": "specs/development/ci-docs-release.md",
+      "heading": [
+        "Documentation, CI & Release",
+        "Versioning & Release",
+        "Release Process"
+      ]
+    },
+    "backlog/3d8bcb425b5e801f88e7fb66": {
+      "file": "specs/development/ci-docs-release.md",
+      "heading": [
+        "Documentation, CI & Release",
+        "Versioning & Release",
+        "Pre-Release Versions"
+      ]
+    },
+    "backlog/4a0c06c902b41dd1a2000ebe": {
+      "file": "specs/development/ci-docs-release.md",
+      "heading": [
+        "Documentation, CI & Release",
+        "Versioning & Release",
+        "Version in Code"
+      ]
     }
   },
   "bindings": {
@@ -3211,6 +3267,27 @@
     ],
     "Spec gap spec-82658b0b4e08c1502a5f0793 / structural-metrics-verification / b3cd47ade570": [
       "backlog/c3a39b320325eff390c4b56c"
+    ],
+    "Spec gap spec-17849f2036d5093f11e2a1ae / docs-site-starlight-pages / d1e5376399b8": [
+      "backlog/cdd27aa428258fd587e513cd"
+    ],
+    "Spec gap spec-17849f2036d5093f11e2a1ae / ci-invariant-i18n-doc-freshness / d1e5376399b8": [
+      "backlog/b7c86bc0e72bd8b20c253c5c"
+    ],
+    "Spec gap spec-17849f2036d5093f11e2a1ae / forge-level-conventional-push-enforcement / d1e5376399b8": [
+      "backlog/0707840bfbb865b285a8c0a7"
+    ],
+    "Spec gap spec-17849f2036d5093f11e2a1ae / changelog-spec-reference-provenance / d1e5376399b8": [
+      "backlog/5e69a034fc0a01c1f8222f5e"
+    ],
+    "Spec gap spec-17849f2036d5093f11e2a1ae / release-flow-artifacts-publish / d1e5376399b8": [
+      "backlog/c467a8f584b42b34991ff696"
+    ],
+    "Spec gap spec-17849f2036d5093f11e2a1ae / prerelease-dev-version / d1e5376399b8": [
+      "backlog/3d8bcb425b5e801f88e7fb66"
+    ],
+    "Spec gap spec-17849f2036d5093f11e2a1ae / build-time-version-injection / d1e5376399b8": [
+      "backlog/4a0c06c902b41dd1a2000ebe"
     ]
   }
 }
