@@ -1434,6 +1434,122 @@ async fn spec_approvals_list_is_accessible() {
     assert!(list.is_array());
 }
 
+// ── 23b. Spec approval is the single trigger for implementation tasks ───────
+
+/// agent-runtime.md §1 The Signal Chain — task-creation gate (AC task-297):
+/// POST /api/v1/tasks with task_type=implementation and a spec_ref whose
+/// spec has no Approved ledger entry at that SHA returns 4xx and creates
+/// no task; the identical request after POST /api/v1/specs/:path/approve
+/// succeeds and the created task enters the normal chain (Backlog,
+/// spec_ref pinned, eligible for the Phase-4 scheduler).
+#[tokio::test]
+async fn tasks_create_implementation_requires_approved_spec() {
+    let ctx = Ctx::new().await;
+    let spec_path = "specs/system/single-trigger.md";
+    let sha = "5f4a3b2c1d0e9f8a7b6c5d4e3f2a1b0c9d8e7f6a";
+
+    // The registry state a push leaves behind: the spec's current version
+    // is known (current_sha) but not yet approved (Pending), and no
+    // approval ledger row exists. No workspace/repo on the entry, so the
+    // later approve emits SpecApproved without routing a chain (the
+    // gate's own effect is what this test asserts).
+    let entry = gyre_domain::SpecLedgerEntry {
+        path: spec_path.to_string(),
+        title: "Single trigger".to_string(),
+        owner: "user:approver".to_string(),
+        kind: None,
+        current_sha: sha.to_string(),
+        approval_mode: "single".to_string(),
+        approval_status: gyre_domain::ApprovalStatus::Pending,
+        linked_tasks: vec![],
+        linked_mrs: vec![],
+        drift_status: "clean".to_string(),
+        created_at: 0,
+        updated_at: 0,
+        repo_id: None,
+        workspace_id: None,
+    };
+    ctx.state.spec_ledger.save(&entry).await.unwrap();
+
+    let body = json!({
+        "title": "Implement single-trigger feature",
+        "task_type": "implementation",
+        "spec_path": spec_path,
+        "spec_ref": format!("{spec_path}@{sha}"),
+    });
+
+    // Unapproved spec_ref: 4xx, no task created.
+    let resp = ctx.post("/api/v1/tasks", body.clone()).await;
+    assert_eq!(
+        resp.status(),
+        400,
+        "implementation task with an unapproved spec_ref must be rejected"
+    );
+    let err: serde_json::Value = resp.json().await.unwrap();
+    let msg = err["error"].as_str().unwrap_or("");
+    assert!(
+        msg.contains("single trigger"),
+        "rejection must name the spec-approval requirement, got: {msg}"
+    );
+    let list = ctx.get_json("/api/v1/tasks").await;
+    assert!(
+        list.as_array()
+            .unwrap()
+            .iter()
+            .all(|t| t["title"] != "Implement single-trigger feature"),
+        "no task row may be written for the rejected request"
+    );
+
+    // Approve the spec version through the real endpoint (the :path route
+    // param is a single segment — the slashed spec path is percent-encoded,
+    // the same form the in-crate approve tests use).
+    let encoded_path = "specs%2Fsystem%2Fsingle-trigger.md";
+    let resp = ctx
+        .post(
+            &format!("/api/v1/specs/{encoded_path}/approve"),
+            json!({ "sha": sha }),
+        )
+        .await;
+    assert_eq!(
+        resp.status(),
+        201,
+        "approving the current spec version must succeed: {:?}",
+        resp.text().await
+    );
+
+    // The identical request now succeeds; the task enters the normal chain.
+    let resp = ctx.post("/api/v1/tasks", body).await;
+    assert_eq!(
+        resp.status(),
+        201,
+        "identical request must succeed after approval"
+    );
+    let task: serde_json::Value = resp.json().await.unwrap();
+    let task_id = task["id"].as_str().unwrap().to_string();
+    assert_eq!(task["status"], "backlog");
+    assert_eq!(
+        task["spec_ref"],
+        format!("{spec_path}@{sha}"),
+        "the created task pins the approved version"
+    );
+
+    // Delegation tasks are unaffected by the gate (the orchestrator chain
+    // creates them from SpecApproved).
+    let resp = ctx
+        .post(
+            "/api/v1/tasks",
+            json!({
+                "title": "Decompose single-trigger spec",
+                "task_type": "delegation",
+                "spec_path": spec_path,
+            }),
+        )
+        .await;
+    assert_eq!(resp.status(), 201);
+
+    let _ = task_id;
+}
+
 // ── 24. Release automation ────────────────────────────────────────────────────
 
 #[tokio::test]

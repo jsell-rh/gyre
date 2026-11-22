@@ -60,7 +60,64 @@ fn git_local(args: &[&str], dir: &std::path::Path) {
     assert!(status.success(), "git {:?} failed", args);
 }
 
-/// Bind a server, return (port, base_url, auth_token).
+/// Bind a server, return (port, base_url, auth_token, state) — the
+/// state handle lets callers seed the durable spec-approval state the
+/// implementation task-create gate resolves (agent-runtime.md §1).
+async fn start_server_with_state(
+    auth_token: &str,
+) -> (u16, String, std::sync::Arc<gyre_server::AppState>) {
+    unsafe { std::env::set_var("GYRE_SIGNING_MODE", "local") };
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let base_url = format!("http://127.0.0.1:{port}");
+    let state = build_state(auth_token, &base_url, None);
+    abac_middleware::seed_builtin_policies(&state)
+        .await
+        .expect("seed builtin policies");
+    merge_processor::spawn_merge_processor(state.clone());
+    let app = build_router(state.clone());
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    (port, base_url, state)
+}
+
+/// Seed an approved spec version — the durable state POST
+/// /api/v1/specs/:path/approve leaves behind — so the implementation
+/// task-create gate (agent-runtime.md §1: spec approval is the single
+/// trigger) accepts tasks pinning `path@sha`.
+async fn seed_approved_spec(state: &std::sync::Arc<gyre_server::AppState>, path: &str, sha: &str) {
+    let entry = gyre_domain::SpecLedgerEntry {
+        path: path.to_string(),
+        title: path.to_string(),
+        owner: "test".to_string(),
+        kind: None,
+        current_sha: sha.to_string(),
+        approval_mode: "single".to_string(),
+        approval_status: gyre_domain::ApprovalStatus::Approved,
+        linked_tasks: vec![],
+        linked_mrs: vec![],
+        drift_status: "clean".to_string(),
+        created_at: 0,
+        updated_at: 0,
+        repo_id: None,
+        workspace_id: None,
+    };
+    state.spec_ledger.save(&entry).await.unwrap();
+    let apr = gyre_domain::SpecApproval::new(
+        gyre_common::Id::new(uuid::Uuid::new_v4().to_string()),
+        path,
+        sha,
+        "user:test",
+    );
+    state.spec_approvals.create(&apr).await.unwrap();
+    state
+        .spec_approvals
+        .approve(&apr.id, 0)
+        .await
+        .unwrap()
+        .expect("freshly created approval row must transition to Approved");
+}
+
+/// Bind a server, return (port, base_url).
 async fn start_server(auth_token: &str) -> (u16, String) {
     // task-264: production's default signing mode is keyless Fulcio; this
     // harness drives real pushes with non-JWT dev tokens, so it explicitly
@@ -126,11 +183,20 @@ async fn create_repo(
 }
 
 /// Create a task via REST and return its ID.
-async fn create_task(client: &reqwest::Client, api: &str, auth_hdr: &str, title: &str) -> String {
+async fn create_task(
+    client: &reqwest::Client,
+    api: &str,
+    auth_hdr: &str,
+    title: &str,
+    spec_ref: &str,
+) -> String {
+    // agent-runtime.md §1: the task-create gate requires an approved
+    // spec_ref for implementation tasks — callers seed the approved
+    // version (seed_approved_spec) and pin it here.
     let resp: serde_json::Value = client
         .post(format!("{api}/tasks"))
         .header("Authorization", auth_hdr)
-        .json(&serde_json::json!({ "title": title, "task_type": "implementation" }))
+        .json(&serde_json::json!({ "title": title, "task_type": "implementation", "spec_ref": spec_ref }))
         .send()
         .await
         .unwrap()
@@ -441,7 +507,7 @@ async fn push_em_dash_commit_rejected_by_gate() {
 #[tokio::test(flavor = "multi_thread")]
 async fn push_records_agent_commit_provenance() {
     let token = "git-test-provenance-token";
-    let (_port, base_url) = start_server(token).await;
+    let (_port, base_url, state) = start_server_with_state(token).await;
     let api = format!("{base_url}/api/v1");
     let auth_hdr = format!("Bearer {token}");
     let client = reqwest::Client::new();
@@ -449,7 +515,20 @@ async fn push_records_agent_commit_provenance() {
     // Create repo and task.
     let ws_id = uniq("ws-prov");
     let repo_id = create_repo(&client, &api, &auth_hdr, &ws_id, "prov-repo").await;
-    let task_id = create_task(&client, &api, &auth_hdr, "Provenance test task").await;
+    seed_approved_spec(
+        &state,
+        "specs/test/prov.md",
+        "aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11",
+    )
+    .await;
+    let task_id = create_task(
+        &client,
+        &api,
+        &auth_hdr,
+        "Provenance test task",
+        "specs/test/prov.md@aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11",
+    )
+    .await;
 
     // Spawn an agent to get a per-agent token.
     let spawn_resp: serde_json::Value = client
@@ -573,14 +652,27 @@ async fn push_records_agent_commit_provenance() {
 #[tokio::test(flavor = "multi_thread")]
 async fn merge_queue_auto_merges_mr_and_commit_on_main() {
     let token = "git-test-merge-queue-token";
-    let (_port, base_url) = start_server(token).await;
+    let (_port, base_url, state) = start_server_with_state(token).await;
     let api = format!("{base_url}/api/v1");
     let auth_hdr = format!("Bearer {token}");
     let client = reqwest::Client::new();
 
     let ws_id = uniq("ws-mq");
     let repo_id = create_repo(&client, &api, &auth_hdr, &ws_id, "mq-repo").await;
-    let task_id = create_task(&client, &api, &auth_hdr, "Merge queue test task").await;
+    seed_approved_spec(
+        &state,
+        "specs/test/mq.md",
+        "bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22",
+    )
+    .await;
+    let task_id = create_task(
+        &client,
+        &api,
+        &auth_hdr,
+        "Merge queue test task",
+        "specs/test/mq.md@bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22",
+    )
+    .await;
 
     // Spawn agent.
     let spawn_resp: serde_json::Value = client
