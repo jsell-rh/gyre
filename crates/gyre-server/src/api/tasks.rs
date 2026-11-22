@@ -268,6 +268,30 @@ pub async fn create_task(
             .await?;
         task.repo_id = Id::new(repo_id.clone());
     }
+    // agent-runtime.md §1 The Signal Chain — spec approval is the single
+    // trigger for implementation work ("There is no other trigger. The
+    // SpecApproved event is the universal starting signal."). A task may
+    // only be created as `implementation` when its spec_ref resolves to a
+    // spec currently Approved in the spec approval ledger at exactly the
+    // pinned SHA; an unapproved, Pending, invalidated, or unresolvable
+    // spec_ref rejects the request before any task row is written.
+    // Delegation/Coordination tasks and untyped (pre-approval push-hook)
+    // tasks are unaffected — the orchestrator chain creates those from
+    // SpecApproved and pins the approved SHA, so the legitimate chain
+    // passes this gate.
+    if task.task_type == Some(TaskType::Implementation) {
+        let gate = match task.spec_ref.as_deref() {
+            Some(spec_ref) => super::gates::verify_implementation_spec_ref(&state, spec_ref).await,
+            None => Err("the task carries no spec_ref (path@sha)".to_string()),
+        };
+        if let Err(reason) = gate {
+            return Err(ApiError::InvalidInput(format!(
+                "spec approval is the single trigger for implementation work \
+                 (agent-runtime.md §1): {reason} — approve the spec first via \
+                 POST /api/v1/specs/:path/approve"
+            )));
+        }
+    }
     state.tasks.create(&task).await?;
     // Index for search (search.md §Searchable Entities: task facets
     // status/priority/assigned_to, workspace/repo scope).
