@@ -5303,10 +5303,12 @@ specs:
             ("specs/system/b.md", "# B\n"),
         ])
         .await;
+        // Repo A's initial manifest carries the A→B edge — the state that
+        // produced the legacy stored row below.
         let (dir_a, _sha_a) = make_test_repo(&[
             (
                 "specs/manifest.yaml",
-                "version: 1\nspecs:\n  - path: system/a.md\n    title: A\n    owner: user:test\n",
+                "version: 1\nspecs:\n  - path: system/a.md\n    title: A\n    owner: user:test\n    links:\n      - type: depends_on\n        target: \"@B/system/b.md\"\n",
             ),
             ("specs/system/a.md", "# A\n"),
         ])
