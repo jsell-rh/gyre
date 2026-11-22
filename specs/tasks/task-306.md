@@ -97,31 +97,22 @@ Canonical spec: `specs/system/explorer-canvas.md`. Source: `678a8ac3e3bfeafeb66c
 
 ### What changed this round
 
-Round 82 (repair dispatch from checkpoint `c08716a8`). `origin/main` is **unchanged** at `7e746233` — the exact commit already reconciled into this branch by round-76's merge `f2a0f9da` — so no new reconciliation was needed. Both external blockers were re-verified with focused deterministic source-level probes at head `c08716a8`; evidence saved to `/tmp/stage/review-evidence/task306-round82-probe.txt` (probe script `task306-round82-probe.sh`, exit 0; watched-file diff vs discovery base empty). Docs-only round; zero changes shipped to the extractors, the graph store/adapters, or the upsert path (AC 1 holds).
+Round 83 (repair dispatch from checkpoint `2378f3b2`). `origin/main` fetched and **unchanged** at `7e746233` — the exact commit already reconciled into this branch by round-76's merge `f2a0f9da` — so no new reconciliation was needed. Both external blockers re-verified with the focused deterministic source-level probe at head `2378f3b2`; evidence saved to `/tmp/stage/review-evidence/task306-round83-probe.txt` (script `task306-round83-probe.sh`, exit 0). Docs-only round: zero changes to the four language extractors, the graph store/adapters, or the upsert path (AC 1 holds) — no Rust or web source touched, so no formatting or build work was needed and there is no product-surface commit to attribute beyond this docs commit.
 
 ### Realized-model graph-node-metrics backend — NOT landed
 
-- `git diff 678a8ac3 HEAD --stat` over the four extractors, `sqlite/graph.rs`, and `graph_extraction.rs` is **empty** — watched backend surfaces byte-identical to the discovery base; all four extractors still hardcode `complexity: None` at the exact discovery lines (rust:160, go:135, python:136, typescript:129) and the upsert still overwrites stored values at sqlite/graph.rs:366-367.
-- No file in `crates/` mentions cyclomatic complexity — no per-extractor complexity computation exists in production; no churn accumulation from ArchitecturalDelta history exists.
-- Task registry: `specs/tasks/` still maxes at task-311 — **no task file exists for the realized-model plan's graph-node-metrics task** (plan b26f707c…); it has not been dispatched.
+- `git diff 678a8ac3 HEAD --stat` over the four extractors, `sqlite/graph.rs`, and `graph_extraction.rs` is **empty** — watched backend surfaces byte-identical to the discovery base; all four extractors still hardcode `complexity: None` / `churn_count_30d: 0` at the exact discovery lines (rust:160-161, go:135-136, python:136-137, typescript:129-130); the upsert still overwrites stored values at sqlite/graph.rs:366-367.
+- No file in `crates/` mentions cyclomatic complexity; `specs/tasks/` still maxes at task-311 — no task file exists for the realized-model plan's graph-node-metrics task (plan b26f707c…); it has not been dispatched.
 
-Ordering guard applies — no local backend work is permitted, so the end-to-end indicator verification cannot run against populated metrics. The probe fails as designed (every node returns null complexity / zero churn and renders uniformly), which leaves this task open rather than triggering any local implementation.
+Ordering guard applies — the end-to-end indicator probe cannot run against populated metrics and fails as designed, leaving this task open rather than triggering any local backend implementation.
 
 ### ui-layout d3-force rerouting — NOT landed
 
-`getLayout('graph')` still resolves to ExplorerCanvas (Canvas 2D; layoutRegistry.js 'graph' entry maps `component: ExplorerCanvas` with no `engine` selector), and ExplorerView still defaults `activeLayout = $state('graph')` at :455. SvgGraphCanvas is served only for hierarchical/layered, so SVG-path case (3) does not trigger.
+`getLayout('graph')` still resolves to ExplorerCanvas (Canvas 2D; layoutRegistry.js 'graph' entry maps `component: ExplorerCanvas` with no `engine` selector); ExplorerView still defaults `activeLayout = $state('graph')` at :455. SVG-path interaction case (3) does not trigger, and no narrow frontend defect exists under permitted work (a) — the Canvas indicator formulas (ExplorerCanvas.svelte:1814, :3717) and API→renderer field plumbing remain intact.
 
-### No narrow frontend defect under permitted work (a)
+### Spec-vs-spec conflict escalation (acceptance criterion 5)
 
-Canvas indicator formulas (ExplorerCanvas.svelte:1814 `nodeWeight = Math.max(1, n.complexity || 1)`; :3717 `churnThickness = Math.min(4, 1 + (n?.churn_count_30d || 0) * 0.3)`) and the API→renderer field plumbing (api/graph.rs serializing `complexity`/`churn_count_30d` per node → ExplorerView `nodes={effectiveGraph.nodes ?? []}` → ExplorerCanvas formulas) verified intact at this head — once the backend populates the metrics, the live Canvas-2D path activates the formulas with zero frontend changes.
-
-### Spec-vs-spec conflict escalation (acceptance criterion 5, recorded for the spec lifecycle)
-
-There is a genuine, unresolved conflict between two canonical specs over the rendering technology for the same layouts: **explorer-canvas.md §Component Architecture** ("ExplorerCanvas (layout dispatcher — Canvas 2D graph for graph/timeline views)") vs **ui-layout.md §10 Rendering Technology** ("The Explorer canvas uses **SVG** for graph/hierarchical/layered layouts"; Layout Engines table: graph → d3-force Svelte wrapper; timeline → d3-scale + Svelte). Mutually incompatible canonical requirements for 'graph' and 'timeline'. This task does not resolve the conflict — no registry change, no unilateral renderer swap; it must be settled by a human through the spec lifecycle, not by whichever plan lands first. The Component Architecture section's 'satisfied' disposition (79dcb4bb8b305568aa2d80f1) is valid only while ExplorerCanvas actually serves the 'graph' layout, which holds at this head but would be invalidated by the pending ui-layout rerouting.
-
-### Round output
-
-Task file at round 82 with truthful `blocked-on-external-implementation`; coverage row round reference updated (row stays open); 0/7 acceptance criteria ticked. Docs-only round — no Rust or web source touched, so no formatting or build work was needed (no cold build of an unchanged crate; no newly added Rust files to format). Per the assignment constraint, large gyre-server builds/test compilation run in the independent verifier; this round runs no server tests, so nothing is deferred beyond that standing constraint.
+Recorded: **explorer-canvas.md §Component Architecture** (Canvas 2D for graph/timeline) vs **ui-layout.md §10** (SVG d3-force / d3-scale+Svelte for the same layouts) — mutually incompatible canonical requirements requiring human spec-lifecycle resolution; not settled by landing order or registry changes. The Component Architecture section's 'satisfied' disposition (79dcb4bb8b305568aa2d80f1) is valid only while ExplorerCanvas actually serves the 'graph' layout, which holds at this head.
 
 ### Remaining work to unblock
 
