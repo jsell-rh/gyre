@@ -29,6 +29,7 @@
   let error = $state(null);
   let acknowledging = $state({});
   let triggeringCascade = $state(false);
+  let cascadeError = $state(null);
   let resolvedWorkspaceId = $state(null);
 
   // ── Derived ─────────────────────────────────────────────────────────
@@ -48,6 +49,29 @@
     const map = new Map();
     for (const edge of dependentEdges) {
       map.set(edge.id, edge.source_repo_id);
+    }
+    return map;
+  });
+
+  // Per-dependent cascade test status (task-281): the blast-radius
+  // response carries each dependent's test_status
+  // ("passing"/"failing"/"unknown", from its most recent durable cascade
+  // test result); when that field is absent (older server), derive the
+  // same status from the cascade-test-results records — the same
+  // underlying store, newest first.
+  const testStatusByRepo = $derived.by(() => {
+    const map = new Map();
+    if (Array.isArray(blastRadius?.dependents)) {
+      for (const d of blastRadius.dependents) {
+        if (d.test_status) map.set(d.repo_id, d.test_status);
+      }
+    }
+    if (cascadeTestResults) {
+      for (const r of cascadeTestResults) {
+        if (!map.has(r.dependent_repo_id)) {
+          map.set(r.dependent_repo_id, r.passed ? 'passing' : 'failing');
+        }
+      }
     }
     return map;
   });
@@ -72,10 +96,6 @@
         return depRepoId === dep.id;
       });
       const edge = edgeByDependent.get(dep.id);
-      // Cascade test result for this dependent, if available
-      const cascadeResult = cascadeTestResults
-        ? cascadeTestResults.find(r => r.repo_id === dep.id)
-        : null;
       return {
         repoId: dep.id,
         name: entityName('repo', dep.id),
@@ -83,8 +103,7 @@
         versionPinned: edge?.version_pinned ?? '--',
         versionCurrent: edge?.target_version_current ?? '--',
         drift: edge?.version_drift ?? null,
-        testStatus: '--',
-        cascadeResult: cascadeResult?.status ?? '--',
+        testStatus: testStatusByRepo.get(dep.id) ?? 'unknown',
         breakingChange: bc ?? null,
       };
     });
@@ -101,6 +120,7 @@
       dependencyPolicy = null;
       dependentEdges = [];
       cascadeTestResults = null;
+      cascadeError = null;
       resolvedWorkspaceId = null;
       error = null;
     }
@@ -127,7 +147,7 @@
         api.breakingChanges(),
         api.repoDependents(repoId),
         wsId ? api.workspaceDependencyPolicy(wsId) : Promise.resolve(null),
-        api.cascadeTestResults?.(repoId) ?? Promise.resolve(null),
+        api.cascadeTestResults(repoId),
       ]);
       blastRadius = blast.status === 'fulfilled' ? blast.value : null;
       breakingChanges = bcs.status === 'fulfilled' ? (Array.isArray(bcs.value) ? bcs.value : []) : [];
@@ -162,15 +182,28 @@
   // ── Trigger cascade tests ───────────────────────────────────────────
   async function triggerCascadeTests() {
     triggeringCascade = true;
+    cascadeError = null;
     try {
-      await api.triggerCascadeTests?.(repoId);
-      // Reload data to pick up new cascade test status
+      await api.triggerCascadeTests(repoId);
+      // Reload data to pick up the new cascade test status
       await loadData();
-    } catch {
-      // Graceful degradation — cascade tests may not be configured
+    } catch (e) {
+      // Surface the refusal (e.g. cascade testing disabled by the
+      // workspace policy) — the user must see why nothing was triggered.
+      cascadeError = e?.message ?? 'Failed to trigger cascade tests';
     } finally {
       triggeringCascade = false;
     }
+  }
+
+  function shortSha(sha) {
+    if (!sha) return '--';
+    return sha.slice(0, 8);
+  }
+
+  function formatRecordedAt(ts) {
+    if (!ts) return '';
+    return new Date(ts * 1000).toLocaleString();
   }
 
   function driftLabel(drift) {
@@ -334,18 +367,34 @@
         <div class="cascade-results" data-testid="cascade-results">
           {#each cascadeTestResults as result}
             <div class="cascade-result-row" data-testid="cascade-result">
-              <span class="cascade-repo">{entityName('repo', result.repo_id)}</span>
-              <Badge
-                value={result.status === 'passed' ? 'Pass' : result.status === 'failed' ? 'Fail' : result.status}
-                variant={result.status === 'passed' ? 'success' : result.status === 'failed' ? 'danger' : 'muted'}
-              />
+              <div class="cascade-result-main">
+                <span class="cascade-repo">{entityName('repo', result.dependent_repo_id)}</span>
+                <span class="cascade-sha mono" title={result.merge_commit_sha}>
+                  {shortSha(result.merge_commit_sha)}
+                </span>
+              </div>
+              <div class="cascade-result-side">
+                {#if result.failure_details}
+                  <span class="cascade-failure" title={result.failure_details}>
+                    {result.failure_details}
+                  </span>
+                {/if}
+                <span class="cascade-time">{formatRecordedAt(result.recorded_at)}</span>
+                <Badge
+                  value={result.passed ? 'Pass' : 'Fail'}
+                  variant={result.passed ? 'success' : 'danger'}
+                />
+              </div>
             </div>
           {/each}
         </div>
       {:else}
         <p class="cascade-status" data-testid="cascade-status">
-          {cascadeTestResults ? 'No cascade test results yet' : 'Cascade tests: not configured'}
+          {cascadeTestResults ? 'Cascade test results: not yet run' : 'Cascade test results unavailable'}
         </p>
+      {/if}
+      {#if cascadeError}
+        <p class="cascade-error" data-testid="cascade-error">{cascadeError}</p>
       {/if}
       <button
         class="cascade-trigger-btn"
@@ -589,10 +638,51 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
+    gap: var(--space-3);
     padding: var(--space-1) var(--space-2);
     background: var(--color-surface-elevated);
     border-radius: var(--radius-sm);
     font-size: var(--text-sm);
+  }
+
+  .cascade-result-main {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    min-width: 0;
+  }
+
+  .cascade-sha {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+  }
+
+  .cascade-result-side {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    min-width: 0;
+  }
+
+  .cascade-failure {
+    font-size: var(--text-xs);
+    color: var(--color-danger);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 260px;
+  }
+
+  .cascade-time {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    white-space: nowrap;
+  }
+
+  .cascade-error {
+    font-size: var(--text-xs);
+    color: var(--color-danger);
+    margin: 0 0 var(--space-2) 0;
   }
 
   .cascade-repo {
