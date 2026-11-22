@@ -74,7 +74,7 @@ fn default_dep_type() -> DependencyType {
     DependencyType::Manual
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 pub struct DependencyEdgeResponse {
     pub id: String,
     pub source_repo_id: String,
@@ -111,7 +111,7 @@ impl From<DependencyEdge> for DependencyEdgeResponse {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 pub struct GraphNode {
     pub repo_id: String,
     pub name: String,
@@ -119,7 +119,7 @@ pub struct GraphNode {
 
 /// Breaking-change summary attached to a graph edge (dependency-graph.md §UI
 /// dependency detail panel: "breaking changes, acknowledgment status").
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 pub struct BreakingChangeSummary {
     pub id: String,
     pub commit_sha: String,
@@ -144,7 +144,7 @@ impl From<gyre_domain::BreakingChange> for BreakingChangeSummary {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 pub struct GraphEdgeResponse {
     pub id: String,
     pub source: String,
@@ -166,7 +166,7 @@ pub struct GraphEdgeResponse {
     pub breaking_changes: Vec<BreakingChangeSummary>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 pub struct GraphResponse {
     pub nodes: Vec<GraphNode>,
     pub edges: Vec<GraphEdgeResponse>,
