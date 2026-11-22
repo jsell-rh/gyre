@@ -17,9 +17,10 @@
 #     package-lock.json — every version and integrity hash is in the
 #     lockfile, no version resolution happens at build time.
 #
-# This replaces the Dockerfile as the canonical build path; the Dockerfile
-# remains for environments without Nix (system packages there are NOT
-# pinned, which is exactly the gap this flake closes).
+# This is the ONLY image definition — the legacy Dockerfile was removed
+# (task-304); nothing in the tree builds or instructs building a
+# non-reproducible agent image. Environments without Nix transfer the
+# tarball target below.
 {
   description = "Gyre agent image — reproducible container image for agent execution";
 
