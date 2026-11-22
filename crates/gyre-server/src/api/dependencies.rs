@@ -7,6 +7,8 @@
 //!   DELETE /api/v1/repos/{id}/dependencies/{dep_id}  — remove a dependency (manual only)
 //!   GET    /api/v1/dependencies/graph                 — full tenant-wide graph
 //!   GET    /api/v1/repos/{id}/blast-radius            — transitive dependents (BFS)
+//!   GET    /api/v1/repos/{id}/cascade-test-results    — durable cascade test results (task-281)
+//!   POST   /api/v1/repos/{id}/cascade-tests/trigger   — trigger cascade tests for dependents
 
 use axum::{
     extract::{Path, State},
@@ -222,6 +224,69 @@ pub struct BlastRadiusResponse {
     pub direct_dependents: Vec<String>,
     pub transitive_dependents: Vec<String>,
     pub total: usize,
+    /// Per-dependent health entries (dependency-graph.md §Impact Analysis
+    /// "Dependent repo health"): each dependent in the blast radius with
+    /// its cascade test status — `"passing"`/`"failing"` from the
+    /// dependent's most recent durable `CascadeTestResult` against this
+    /// repo, `"unknown"` when none exists (task-281).
+    pub dependents: Vec<BlastRadiusDependent>,
+    /// Durable cascade test results for merges in this repo
+    /// (§Impact Analysis "Cascade test results"), newest first — empty
+    /// when none have run ("not yet run").
+    pub cascade_test_results: Vec<CascadeTestResultResponse>,
+}
+
+/// One dependent repo in a blast radius, with its cascade test status.
+#[derive(Serialize)]
+pub struct BlastRadiusDependent {
+    pub repo_id: String,
+    /// True when the repo depends directly on the analyzed repo (BFS
+    /// depth 0), false for transitive dependents.
+    pub direct: bool,
+    /// `"passing"` / `"failing"` from the dependent's most recent durable
+    /// cascade test result against the analyzed repo; `"unknown"` when
+    /// no result exists.
+    pub test_status: String,
+}
+
+/// Durable cascade test result as served by the API (task-281).
+///
+/// Serialized from the `CascadeTestResult` domain record persisted by
+/// `report_cascade_test_result` (task-280) — per-dependent outcome, merged
+/// repo, merge SHA, and timestamp, served from the durable store rather
+/// than one-shot workspace events.
+#[derive(Serialize, Debug)]
+pub struct CascadeTestResultResponse {
+    pub id: String,
+    /// The dependent repo whose test suite ran against the new version.
+    pub dependent_repo_id: String,
+    /// The repo whose merge triggered the cascade test.
+    pub merged_repo_id: String,
+    /// The merge commit SHA of the merged repo that triggered the run.
+    pub merge_commit_sha: String,
+    /// The cascade-test task the run executed under.
+    pub cascade_task_id: String,
+    /// Whether the dependent repo's tests passed against the new version.
+    pub passed: bool,
+    /// Failure details when `passed` is false.
+    pub failure_details: Option<String>,
+    /// Unix timestamp when the result was recorded.
+    pub recorded_at: u64,
+}
+
+impl From<gyre_domain::CascadeTestResult> for CascadeTestResultResponse {
+    fn from(r: gyre_domain::CascadeTestResult) -> Self {
+        Self {
+            id: r.id.to_string(),
+            dependent_repo_id: r.dependent_repo_id.to_string(),
+            merged_repo_id: r.merged_repo_id.to_string(),
+            merge_commit_sha: r.merge_commit_sha,
+            cascade_task_id: r.cascade_task_id.to_string(),
+            passed: r.passed,
+            failure_details: r.failure_details,
+            recorded_at: r.recorded_at,
+        }
+    }
 }
 
 // ── Handlers ────────────────────────────────────────────────────────────────
@@ -467,12 +532,221 @@ pub async fn blast_radius(
     }
 
     let total = direct.len() + transitive.len();
+
+    // Cascade test results for merges in this repo, newest first
+    // (task-281): the durable store is the source — one-shot workspace
+    // events are not queryable. `list_by_merged_repo` is documented
+    // newest-first, so the FIRST match per dependent below is its most
+    // recent result.
+    let cascade_results = state
+        .cascade_test_results
+        .list_by_merged_repo(&repo_id)
+        .await
+        .map_err(ApiError::Internal)?;
+
+    // Per-dependent test status (§Impact Analysis "Dependent repo health"):
+    // the dependent's most recent durable result AGAINST THIS repo. A
+    // result against a different merged repo says nothing about how the
+    // dependent fares against a change merged here, which is the question
+    // the blast radius answers — such dependents report `"unknown"`.
+    let test_status = |rid: &str| -> &str {
+        cascade_results
+            .iter()
+            .find(|r| r.dependent_repo_id.as_str() == rid)
+            .map(|r| if r.passed { "passing" } else { "failing" })
+            .unwrap_or("unknown")
+    };
+
+    let mut dependents: Vec<BlastRadiusDependent> = Vec::with_capacity(total);
+    for rid in &direct {
+        dependents.push(BlastRadiusDependent {
+            repo_id: rid.clone(),
+            direct: true,
+            test_status: test_status(rid).to_string(),
+        });
+    }
+    for rid in &transitive {
+        dependents.push(BlastRadiusDependent {
+            repo_id: rid.clone(),
+            direct: false,
+            test_status: test_status(rid).to_string(),
+        });
+    }
+
     Ok(Json(BlastRadiusResponse {
         repo_id: id,
         direct_dependents: direct,
         transitive_dependents: transitive,
         total,
+        dependents,
+        cascade_test_results: cascade_results.into_iter().map(Into::into).collect(),
     }))
+}
+
+// ── Cascade test results endpoints (task-281) ─────────────────────────────
+
+/// GET /api/v1/repos/{id}/cascade-test-results
+///
+/// Durable cascade test results for merges in this repo (dependency-graph.md
+/// §Impact Analysis "Cascade test results"), newest first, from the
+/// `CascadeTestResultRepository` store — records that survive a server
+/// restart, not the one-shot `cascade_test_passed`/`cascade_test_failed`
+/// workspace events. Empty when no cascade test has run ("not yet run").
+///
+/// Authorization: repo-scoped middleware ABAC (registered in the resolver
+/// with the `repo` resource, like the sibling blast-radius route).
+pub async fn list_cascade_test_results(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<CascadeTestResultResponse>>, ApiError> {
+    let repo_id = Id::new(&id);
+    state
+        .repos
+        .find_by_id(&repo_id)
+        .await
+        .map_err(ApiError::Internal)?
+        .ok_or_else(|| ApiError::NotFound(format!("repo {id} not found")))?;
+
+    let results = state
+        .cascade_test_results
+        .list_by_merged_repo(&repo_id)
+        .await
+        .map_err(ApiError::Internal)?;
+
+    Ok(Json(results.into_iter().map(Into::into).collect()))
+}
+
+#[derive(Deserialize, Default)]
+pub struct TriggerCascadeTestsRequest {
+    /// Merge commit SHA to test the dependents against. Optional — defaults
+    /// to the current HEAD of the repo's default branch (the manual trigger
+    /// is used from the impact-analysis modal, which has no merge in flight).
+    pub merge_commit_sha: Option<String>,
+}
+
+#[derive(Serialize, Debug)]
+pub struct TriggerCascadeTestsResponse {
+    pub repo_id: String,
+    /// Cascade-test tasks created (one per dependent whose workspace allows
+    /// cascade testing).
+    pub triggered: usize,
+    /// Dependents skipped because their workspace's dependency policy
+    /// disables cascade testing.
+    pub skipped: usize,
+}
+
+/// POST /api/v1/repos/{id}/cascade-tests/trigger
+///
+/// Trigger cascade tests for the repo's dependents (dependency-graph.md
+/// §Cascade Testing) — the same production path the merge completes through
+/// (`merge_processor::trigger_cascade_tests`), so the triggered tasks are
+/// real Implementation tasks the worker scheduler spawns.
+///
+/// Policy gating mirrors the merge path: the merged repo's workspace
+/// policy must have `require_cascade_tests` enabled (the request is refused
+/// with 409 otherwise), and each dependent's own workspace policy is
+/// respected — a dependent whose workspace opted out is skipped and counted
+/// in `skipped`.
+///
+/// Authorization: repo-scoped middleware ABAC (registered in the resolver)
+/// PLUS per-handler tenant containment — the trigger mints tasks in other
+/// workspaces (the dependents'), so the handler loads the repo, resolves its
+/// workspace, and compares the workspace's tenant against the caller's
+/// tenant, refusing with Forbidden on mismatch (task-093 F3 fix class: the
+/// policy engine's default is permissive when no per-repo policies are
+/// stored, so the handler must compare the loaded entity's scope itself).
+pub async fn trigger_cascade_tests(
+    State(state): State<Arc<AppState>>,
+    auth: crate::auth::AuthenticatedAgent,
+    Path(id): Path<String>,
+    body: Option<Json<TriggerCascadeTestsRequest>>,
+) -> Result<(StatusCode, Json<TriggerCascadeTestsResponse>), ApiError> {
+    let repo_id = Id::new(&id);
+    let repo = state
+        .repos
+        .find_by_id(&repo_id)
+        .await
+        .map_err(ApiError::Internal)?
+        .ok_or_else(|| ApiError::NotFound(format!("repo {id} not found")))?;
+
+    // Per-handler authorization: load the scoped entity (the repo's
+    // workspace) and compare its tenant against the caller's. A dangling
+    // workspace reference means the tenant scope cannot be determined —
+    // fail closed rather than trigger cross-workspace tasks for an
+    // unscopeable repo.
+    let workspace = state
+        .workspaces
+        .find_by_id(&repo.workspace_id)
+        .await
+        .map_err(ApiError::Internal)?
+        .ok_or_else(|| {
+            ApiError::NotFound(format!(
+                "repo {id} references workspace {} which does not exist — the tenant \
+                 scope cannot be determined; fix the repo's workspace reference",
+                repo.workspace_id
+            ))
+        })?;
+    if workspace.tenant_id.as_str() != auth.tenant_id {
+        return Err(ApiError::Forbidden(format!(
+            "repo {id} belongs to tenant {}, not the caller's tenant {}",
+            workspace.tenant_id, auth.tenant_id
+        )));
+    }
+
+    // Same policy gate as the merge path: refuse when the merged repo's
+    // workspace disables cascade testing (the merge path silently skips;
+    // an explicit API caller gets an explicit refusal).
+    let policy = state
+        .dependency_policies
+        .get_for_workspace(&repo.workspace_id)
+        .await
+        .map_err(ApiError::Internal)?;
+    if !policy.require_cascade_tests {
+        return Err(ApiError::Conflict(format!(
+            "cascade tests are disabled for workspace {} (require_cascade_tests = false)",
+            repo.workspace_id
+        )));
+    }
+
+    // The SHA the dependents test against: explicit when provided, else the
+    // current HEAD of the repo's default branch. Fail closed when it cannot
+    // be resolved — there is no valid empty-string SHA, and a trigger
+    // without a commit identity would send the spawned agent after nothing.
+    let merge_commit_sha = match body
+        .and_then(|Json(req)| req.merge_commit_sha)
+        .filter(|sha| !sha.is_empty())
+    {
+        Some(sha) => sha,
+        None => {
+            crate::git_refs::resolve_ref(&repo.path, &format!("refs/heads/{}", repo.default_branch))
+                .await
+                .ok_or_else(|| {
+                    ApiError::InvalidInput(format!(
+                        "cannot resolve HEAD of the default branch '{}' for repo {id} — pass an \
+                 explicit merge_commit_sha or push at least one commit",
+                        repo.default_branch
+                    ))
+                })?
+        }
+    };
+
+    let outcome = crate::merge_processor::trigger_cascade_tests(
+        &state,
+        repo.id.as_str(),
+        &repo.name,
+        &merge_commit_sha,
+        &repo.workspace_id,
+    )
+    .await;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(TriggerCascadeTestsResponse {
+            repo_id: id,
+            triggered: outcome.created_task_ids.len(),
+            skipped: outcome.skipped_dependents,
+        }),
+    ))
 }
 
 // ── Stale dependencies endpoint (TASK-021) ─────────────────────────────────
@@ -2848,5 +3122,476 @@ import "google/protobuf/empty.proto";
 
         // No more events.
         assert!(rx.try_recv().is_err(), "no more events expected");
+    }
+
+    // ── Cascade test results in the impact surface (task-281) ──────────
+
+    /// Record a durable CascadeTestResult: dependent `dep` tested against
+    /// merged repo `merged` under cascade task `task`, outcome `passed`.
+    async fn record_cascade_result(
+        state: &Arc<AppState>,
+        dep: &Id,
+        merged: &Id,
+        task: &str,
+        passed: bool,
+        recorded_at: u64,
+    ) {
+        let record = gyre_domain::CascadeTestResult {
+            id: Id::new(uuid::Uuid::new_v4().to_string()),
+            dependent_repo_id: dep.clone(),
+            merged_repo_id: merged.clone(),
+            merge_commit_sha: format!("{task}-sha-0123456789abcdef0123456789abcdef"),
+            cascade_task_id: Id::new(task),
+            passed,
+            failure_details: if passed {
+                None
+            } else {
+                Some("test_foo panicked at assertion".to_string())
+            },
+            recorded_at,
+        };
+        state.cascade_test_results.record(&record).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn blast_radius_reports_dependent_test_status_and_results() {
+        // Graph: A and C depend on B. A has a passing cascade result against
+        // B; C has none. B's blast radius must carry A="passing", C="unknown",
+        // and the cascade test results themselves.
+        let state = setup();
+        seed_workspace(&state, "proj-1").await;
+        let a = create_repo(&state, "br-cascade-a").await;
+        let c = create_repo(&state, "br-cascade-c").await;
+        let b = create_repo(&state, "br-cascade-b").await;
+
+        for src in [&a, &c] {
+            state
+                .dependencies
+                .save(&DependencyEdge::new(
+                    Id::new(uuid::Uuid::new_v4().to_string()),
+                    src.clone(),
+                    b.clone(),
+                    DependencyType::Code,
+                    "Cargo.toml",
+                    "crate-b",
+                    DetectionMethod::CargoToml,
+                    1000,
+                ))
+                .await
+                .unwrap();
+        }
+
+        record_cascade_result(&state, &a, &b, "ct-br-1", true, 5000).await;
+
+        let Json(resp) = blast_radius(State(state.clone()), Path(b.to_string()))
+            .await
+            .expect("blast radius handler");
+
+        assert_eq!(resp.total, 2);
+        assert_eq!(resp.dependents.len(), 2);
+
+        let entry_a = resp
+            .dependents
+            .iter()
+            .find(|d| d.repo_id == a.as_str())
+            .expect("dependent A present");
+        assert!(entry_a.direct);
+        assert_eq!(entry_a.test_status, "passing");
+
+        let entry_c = resp
+            .dependents
+            .iter()
+            .find(|d| d.repo_id == c.as_str())
+            .expect("dependent C present");
+        assert_eq!(entry_c.test_status, "unknown");
+
+        // The cascade test results are included in the response, with the
+        // per-dependent outcome, merged repo, SHA, and timestamp.
+        assert_eq!(resp.cascade_test_results.len(), 1);
+        let r = &resp.cascade_test_results[0];
+        assert_eq!(r.dependent_repo_id, a.as_str());
+        assert_eq!(r.merged_repo_id, b.as_str());
+        assert_eq!(
+            r.merge_commit_sha,
+            "ct-br-1-sha-0123456789abcdef0123456789abcdef"
+        );
+        assert!(r.passed);
+        assert_eq!(r.recorded_at, 5000);
+    }
+
+    #[tokio::test]
+    async fn blast_radius_test_status_uses_most_recent_result() {
+        // A failed first, then passed on retry against the same merged repo:
+        // the most recent result wins.
+        let state = setup();
+        seed_workspace(&state, "proj-1").await;
+        let a = create_repo(&state, "br-retry-a").await;
+        let b = create_repo(&state, "br-retry-b").await;
+
+        state
+            .dependencies
+            .save(&DependencyEdge::new(
+                Id::new(uuid::Uuid::new_v4().to_string()),
+                a.clone(),
+                b.clone(),
+                DependencyType::Code,
+                "Cargo.toml",
+                "crate-b",
+                DetectionMethod::CargoToml,
+                1000,
+            ))
+            .await
+            .unwrap();
+
+        record_cascade_result(&state, &a, &b, "ct-retry-1", false, 5000).await;
+        record_cascade_result(&state, &a, &b, "ct-retry-2", true, 6000).await;
+
+        let Json(resp) = blast_radius(State(state.clone()), Path(b.to_string()))
+            .await
+            .expect("blast radius handler");
+
+        let entry_a = resp
+            .dependents
+            .iter()
+            .find(|d| d.repo_id == a.as_str())
+            .expect("dependent A present");
+        assert_eq!(entry_a.test_status, "passing", "most recent result wins");
+        // Newest first: the retry (6000) precedes the failure (5000).
+        assert_eq!(resp.cascade_test_results[0].recorded_at, 6000);
+        assert_eq!(resp.cascade_test_results[1].recorded_at, 5000);
+    }
+
+    #[tokio::test]
+    async fn blast_radius_test_status_ignores_results_for_other_merged_repos() {
+        // A's only result is against a DIFFERENT merged repo X: it says
+        // nothing about how A fares against a change merged in B, so B's
+        // blast radius reports "unknown" for A.
+        let state = setup();
+        seed_workspace(&state, "proj-1").await;
+        let a = create_repo(&state, "br-other-a").await;
+        let b = create_repo(&state, "br-other-b").await;
+        let x = create_repo(&state, "br-other-x").await;
+
+        state
+            .dependencies
+            .save(&DependencyEdge::new(
+                Id::new(uuid::Uuid::new_v4().to_string()),
+                a.clone(),
+                b.clone(),
+                DependencyType::Code,
+                "Cargo.toml",
+                "crate-b",
+                DetectionMethod::CargoToml,
+                1000,
+            ))
+            .await
+            .unwrap();
+
+        record_cascade_result(&state, &a, &x, "ct-other-1", true, 5000).await;
+
+        let Json(resp) = blast_radius(State(state.clone()), Path(b.to_string()))
+            .await
+            .expect("blast radius handler");
+
+        let entry_a = resp
+            .dependents
+            .iter()
+            .find(|d| d.repo_id == a.as_str())
+            .expect("dependent A present");
+        assert_eq!(entry_a.test_status, "unknown");
+        assert!(
+            resp.cascade_test_results.is_empty(),
+            "results for other merged repos are not B's"
+        );
+    }
+
+    #[tokio::test]
+    async fn cascade_test_results_endpoint_returns_durable_records() {
+        let state = setup();
+        seed_workspace(&state, "proj-1").await;
+        let a = create_repo(&state, "ctr-endpoint-a").await;
+        let b = create_repo(&state, "ctr-endpoint-b").await;
+
+        record_cascade_result(&state, &a, &b, "ct-endpoint-1", true, 5000).await;
+        record_cascade_result(&state, &a, &b, "ct-endpoint-2", false, 6000).await;
+
+        let Json(results) = list_cascade_test_results(State(state.clone()), Path(b.to_string()))
+            .await
+            .expect("cascade results handler");
+
+        assert_eq!(results.len(), 2);
+        // Newest first.
+        assert_eq!(results[0].cascade_task_id, "ct-endpoint-2");
+        assert!(!results[0].passed);
+        assert_eq!(
+            results[0].failure_details.as_deref(),
+            Some("test_foo panicked at assertion")
+        );
+        assert_eq!(results[1].cascade_task_id, "ct-endpoint-1");
+        assert!(results[1].passed);
+        assert_eq!(results[0].dependent_repo_id, a.as_str());
+        assert_eq!(results[0].merged_repo_id, b.as_str());
+    }
+
+    #[tokio::test]
+    async fn cascade_test_results_endpoint_unknown_repo_is_404() {
+        let state = setup();
+        let err = list_cascade_test_results(State(state.clone()), Path("no-such-repo".to_string()))
+            .await
+            .expect_err("unknown repo");
+        assert!(matches!(err, ApiError::NotFound(_)), "got: {err}");
+    }
+
+    /// Hand-rolled caller for the trigger endpoint (the auth extractor is
+    /// not in play in unit tests) — same pattern as orchestrator.rs tests.
+    fn auth_in_tenant(tenant: &str) -> crate::auth::AuthenticatedAgent {
+        crate::auth::AuthenticatedAgent {
+            auth_mechanism: crate::auth::AuthMechanism::GlobalToken,
+            agent_id: "caller-1".to_string(),
+            user_id: None,
+            roles: vec![gyre_domain::UserRole::Admin],
+            tenant_id: tenant.to_string(),
+            workspace_id: None,
+            repo_id: None,
+            scope: Vec::new(),
+            jwt_claims: None,
+            bearer_token: None,
+            deprecated_token_auth: false,
+            impersonation: None,
+        }
+    }
+
+    /// Enable/disable cascade testing for a test workspace.
+    async fn set_cascade_policy(state: &Arc<AppState>, workspace_id: &str, enabled: bool) {
+        let policy = gyre_domain::DependencyPolicy {
+            require_cascade_tests: enabled,
+            ..Default::default()
+        };
+        state
+            .dependency_policies
+            .set_for_workspace(&Id::new(workspace_id), &policy)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn trigger_endpoint_creates_cascade_tasks_for_dependents() {
+        // A depends on B; both in a workspace with cascade testing enabled.
+        // POST the trigger for B: one cascade-test task is created for A
+        // (spawnable — task_type Implementation), and the response reports
+        // it.
+        let state = setup();
+        // ensure_test_workspace seeds tenant "tenant-1" — the caller must
+        // be in that tenant to pass containment.
+        let a = create_repo_in_workspace(&state, "trig-a", "ws-trig").await;
+        let b = create_repo_in_workspace(&state, "trig-b", "ws-trig").await;
+        set_cascade_policy(&state, "ws-trig", true).await;
+
+        state
+            .dependencies
+            .save(&DependencyEdge::new(
+                Id::new(uuid::Uuid::new_v4().to_string()),
+                a.clone(),
+                b.clone(),
+                DependencyType::Code,
+                "Cargo.toml",
+                "crate-b",
+                DetectionMethod::CargoToml,
+                1000,
+            ))
+            .await
+            .unwrap();
+
+        let (code, body) = trigger_cascade_tests(
+            State(state.clone()),
+            auth_in_tenant("tenant-1"),
+            Path(b.to_string()),
+            Some(Json(TriggerCascadeTestsRequest {
+                merge_commit_sha: Some("abc123def4567890fedcba0987654321abcdefff".to_string()),
+            })),
+        )
+        .await
+        .expect("trigger handler");
+
+        assert_eq!(code, StatusCode::CREATED);
+        assert_eq!(body.repo_id, b.as_str());
+        assert_eq!(body.triggered, 1);
+        assert_eq!(body.skipped, 0);
+
+        // The created task is the real production cascade-test task the
+        // worker scheduler spawns (task-280 EXECUTION link), in the
+        // DEPENDENT repo, pinned to the requested SHA.
+        let tasks = state.tasks.list_by_repo(&a).await.unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(
+            tasks[0].task_type,
+            Some(gyre_domain::TaskType::Implementation)
+        );
+        assert_eq!(tasks[0].workspace_id.as_str(), "ws-trig");
+        let desc = tasks[0].description.as_deref().expect("description");
+        assert!(desc.contains("abc123def4567890fedcba0987654321abcdefff"));
+    }
+
+    #[tokio::test]
+    async fn trigger_endpoint_refused_when_policy_disables_cascade_tests() {
+        let state = setup();
+        let a = create_repo_in_workspace(&state, "trig-off-a", "ws-trig-off").await;
+        let b = create_repo_in_workspace(&state, "trig-off-b", "ws-trig-off").await;
+        set_cascade_policy(&state, "ws-trig-off", false).await;
+
+        state
+            .dependencies
+            .save(&DependencyEdge::new(
+                Id::new(uuid::Uuid::new_v4().to_string()),
+                a.clone(),
+                b.clone(),
+                DependencyType::Code,
+                "Cargo.toml",
+                "crate-b",
+                DetectionMethod::CargoToml,
+                1000,
+            ))
+            .await
+            .unwrap();
+
+        let err = trigger_cascade_tests(
+            State(state.clone()),
+            auth_in_tenant("tenant-1"),
+            Path(b.to_string()),
+            Some(Json(TriggerCascadeTestsRequest {
+                merge_commit_sha: Some("abc123def4567890fedcba0987654321abcdefff".to_string()),
+            })),
+        )
+        .await
+        .expect_err("policy disabled must refuse");
+
+        assert!(matches!(err, ApiError::Conflict(_)), "got: {err}");
+        // Nothing was created.
+        let tasks = state.tasks.list_by_repo(&a).await.unwrap();
+        assert!(tasks.is_empty());
+    }
+
+    #[tokio::test]
+    async fn trigger_endpoint_skips_dependent_whose_workspace_opted_out() {
+        // B's workspace enables cascade testing, but dependent A lives in a
+        // workspace that disabled it: A is skipped and counted, not
+        // triggered.
+        let state = setup();
+        let a = create_repo_in_workspace(&state, "trig-skip-a", "ws-trig-dep-off").await;
+        let b = create_repo_in_workspace(&state, "trig-skip-b", "ws-trig-on").await;
+        set_cascade_policy(&state, "ws-trig-on", true).await;
+        set_cascade_policy(&state, "ws-trig-dep-off", false).await;
+
+        state
+            .dependencies
+            .save(&DependencyEdge::new(
+                Id::new(uuid::Uuid::new_v4().to_string()),
+                a.clone(),
+                b.clone(),
+                DependencyType::Code,
+                "Cargo.toml",
+                "crate-b",
+                DetectionMethod::CargoToml,
+                1000,
+            ))
+            .await
+            .unwrap();
+
+        let (code, body) = trigger_cascade_tests(
+            State(state.clone()),
+            auth_in_tenant("tenant-1"),
+            Path(b.to_string()),
+            Some(Json(TriggerCascadeTestsRequest {
+                merge_commit_sha: Some("abc123def4567890fedcba0987654321abcdefff".to_string()),
+            })),
+        )
+        .await
+        .expect("trigger handler");
+
+        assert_eq!(code, StatusCode::CREATED);
+        assert_eq!(body.triggered, 0);
+        assert_eq!(body.skipped, 1);
+        let tasks = state.tasks.list_by_repo(&a).await.unwrap();
+        assert!(tasks.is_empty());
+    }
+
+    #[tokio::test]
+    async fn trigger_endpoint_denied_across_tenants() {
+        // The repo's workspace is in tenant-1; a caller authenticated in
+        // another tenant is refused with Forbidden — no cross-tenant task
+        // creation.
+        let state = setup();
+        let a = create_repo_in_workspace(&state, "trig-x-a", "ws-trig-x").await;
+        let b = create_repo_in_workspace(&state, "trig-x-b", "ws-trig-x").await;
+        set_cascade_policy(&state, "ws-trig-x", true).await;
+
+        state
+            .dependencies
+            .save(&DependencyEdge::new(
+                Id::new(uuid::Uuid::new_v4().to_string()),
+                a.clone(),
+                b.clone(),
+                DependencyType::Code,
+                "Cargo.toml",
+                "crate-b",
+                DetectionMethod::CargoToml,
+                1000,
+            ))
+            .await
+            .unwrap();
+
+        let err = trigger_cascade_tests(
+            State(state.clone()),
+            auth_in_tenant("tenant-evil"),
+            Path(b.to_string()),
+            Some(Json(TriggerCascadeTestsRequest {
+                merge_commit_sha: Some("abc123def4567890fedcba0987654321abcdefff".to_string()),
+            })),
+        )
+        .await
+        .expect_err("cross-tenant caller must be refused");
+
+        assert!(matches!(err, ApiError::Forbidden(_)), "got: {err}");
+        let tasks = state.tasks.list_by_repo(&a).await.unwrap();
+        assert!(tasks.is_empty());
+    }
+
+    #[tokio::test]
+    async fn trigger_endpoint_without_sha_fails_closed_on_unresolvable_head() {
+        // No explicit SHA and the repo has no resolvable default-branch HEAD
+        // (test repos point at nonexistent /tmp paths): the request is
+        // refused — never a fabricated empty SHA.
+        let state = setup();
+        let a = create_repo_in_workspace(&state, "trig-nosha-a", "ws-trig-nosha").await;
+        let b = create_repo_in_workspace(&state, "trig-nosha-b", "ws-trig-nosha").await;
+        set_cascade_policy(&state, "ws-trig-nosha", true).await;
+
+        state
+            .dependencies
+            .save(&DependencyEdge::new(
+                Id::new(uuid::Uuid::new_v4().to_string()),
+                a.clone(),
+                b.clone(),
+                DependencyType::Code,
+                "Cargo.toml",
+                "crate-b",
+                DetectionMethod::CargoToml,
+                1000,
+            ))
+            .await
+            .unwrap();
+
+        let err = trigger_cascade_tests(
+            State(state.clone()),
+            auth_in_tenant("tenant-1"),
+            Path(b.to_string()),
+            None,
+        )
+        .await
+        .expect_err("unresolvable HEAD must refuse");
+
+        assert!(matches!(err, ApiError::InvalidInput(_)), "got: {err}");
+        let tasks = state.tasks.list_by_repo(&a).await.unwrap();
+        assert!(tasks.is_empty());
     }
 }

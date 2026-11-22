@@ -2,8 +2,8 @@
 title: "Impact analysis: cascade test results and per-dependent test status served by the API and shown in the UI"
 spec_ref: "Spec gap spec-cab97078efffe0fbfb7339be / impact-cascade-results-ui / ed9f34316476"
 depends_on: [task-280]
-progress: not-started
-commits: []
+progress: complete
+commits: ["82d862acbe689c2232ab333f51b8fccbbee27735", "71bda29a3c4b96d9e2dae8a3b9a4b04f86c94471"]
 ---
 
 ## Required behavior
@@ -75,3 +75,29 @@ Canonical spec: `specs/system/dependency-graph.md`. Source: `678a8ac3e3bfeafeb66
     ]
   }
 ]
+
+## Shipped
+
+### Server (crates/gyre-server)
+
+- `BlastRadiusResponse` (api/dependencies.rs) now carries `dependents: [{repo_id, direct, test_status}]` and `cascade_test_results: [{id, dependent_repo_id, merged_repo_id, merge_commit_sha, cascade_task_id, passed, failure_details, recorded_at}]`. `test_status` is `passing`/`failing` from the dependent's most recent durable `CascadeTestResult` **against this repo** (results for other merged repos report `unknown` — they say nothing about a change merged here), `unknown` when none exists; results are served newest-first from the durable `CascadeTestResultRepository` store (`state.cascade_test_results`), so the BFS core is unchanged and the specced response lines have a real source.
+- `GET /api/v1/repos/{id}/cascade-test-results` (api/mod.rs route → `list_cascade_test_results`): durable records for merges in the repo, newest first, `[]` ("not yet run") when none — from the task-280 store that survives restart, not one-shot workspace events. Unknown repo → 404.
+- `POST /api/v1/repos/{id}/cascade-tests/trigger` (`trigger_cascade_tests`): triggers the SAME production path the merge completes through — `merge_processor::trigger_cascade_tests`, now returning a `CascadeTriggerOutcome` (created task ids + skipped-dependent count) instead of `()`, merge-path caller unchanged. Policy gating mirrors the merge path: merged-repo workspace `require_cascade_tests = false` → 409 refusal; each dependent's own workspace policy respected (opted-out dependents skipped and counted). Per-handler authorization loads the repo, resolves its workspace, and compares the workspace's tenant against the caller's (403 on mismatch; a dangling workspace reference fails closed). The tested SHA is the explicit `merge_commit_sha` body field or the default-branch HEAD resolved via `git_refs::resolve_ref` — an unresolvable HEAD is a 400 refusal, never a fabricated empty SHA.
+- ABAC: both routes have `RouteResourceMapping` entries in `abac_middleware.rs` (`repo` resource; `write` action on the trigger). `scripts/check-abac-route-registry.sh` → OK; `scripts/check-abac-exempt-handlers.sh` → OK (86 handlers, no new exemptions).
+- `docs/api-reference.md` documents all three surfaces.
+
+### UI (web)
+
+- `web/src/lib/api.js`: `cascadeTestResults(id)` and `triggerCascadeTests(id)` are real implementations against the new endpoints (no optional chaining).
+- `ImpactAnalysisModal.svelte`: the dead `api.cascadeTestResults?.(repoId) ?? Promise.resolve(null)` is now a real `api.cascadeTestResults(repoId)` call; the per-dependent test-status column populates from `blastRadius.dependents[].test_status` (falling back to deriving the same status from the results records) and defaults to `unknown`, never a hardcoded `--`; the cascade-results section renders per-result dependent, short merge SHA, failure details, timestamp, and Pass/Fail badge, with "Cascade test results: not yet run" when the store is empty; the trigger button calls the real endpoint, refreshes the data on success, and surfaces a refusal (e.g. 409 policy-disabled) in a `cascade-error` element instead of silently dropping it.
+
+### Test evidence
+
+- Web (this sandbox, vitest, locked deps via `npm ci`): `src/__tests__/ImpactAnalysisModal.test.js` — 23/23 passed, including the new tests: per-dependent test-status column populated from cascade results (passing/failing/unknown, never `--`), "not yet run" on empty store, per-result SHA/failure-details rendering, trigger performs the real call and re-fetches, and trigger refusal surfaced.
+- Server: `cargo check -p gyre-server` and `cargo check -p gyre-server --tests` pass (the checkpoint had 4 test-cfg compile errors — `expect_err` on non-`Debug` response types — fixed by deriving `Debug` on `CascadeTestResultResponse`/`TriggerCascadeTestsResponse`; newly added Rust code is rustfmt-clean). Per the 4 GiB budget rule, gyre-server test compilation/execution is deferred to the independent verifier, which must run in `crates/gyre-server`: `blast_radius_reports_dependent_test_status_and_results`, `blast_radius_test_status_uses_most_recent_result`, `blast_radius_test_status_ignores_results_for_other_merged_repos`, `cascade_test_results_endpoint_returns_durable_records`, `cascade_test_results_endpoint_unknown_repo_is_404`, `trigger_endpoint_creates_cascade_tasks_for_dependents`, `trigger_endpoint_refused_when_policy_disables_cascade_tests`, `trigger_endpoint_skips_dependent_whose_workspace_opted_out`, `trigger_endpoint_denied_across_tenants`, `trigger_endpoint_without_sha_fails_closed_on_unresolvable_head` (api/dependencies.rs tests module).
+- Coverage rows 14 (Impact Analysis) and 17 (UI) in `specs/coverage/system/dependency-graph.md` updated with the concrete source evidence for the new behavior; no other rows touched.
+
+### Contract-restoration rounds (no source change)
+
+- The executor re-checked out the assigned task document three times (rounds 2–4), reverting it to the raw contract each time; the production fix from `82d862ac`/`71bda29a` was preserved untouched every time (the working tree differed from HEAD only in `specs/tasks/task-281.md`). No behavior changed, so no crate was rebuilt.
+- Round 4 re-verified the current checkout on this exact tree (`5c70afd7`): `cargo fmt --check -p gyre-server` → clean; `scripts/check-abac-route-registry.sh` → exit 0, OK; `scripts/check-abac-exempt-handlers.sh` → exit 0, OK (86 handlers); web vitest `src/__tests__/ImpactAnalysisModal.test.js` → 23/23 passed (locked deps via `npm ci`). Evidence: `/tmp/stage/review-evidence/r4-routes.txt`, `r4-exempt.txt`, `r4-vitest.txt`, `r4-npmci.txt`.
