@@ -5,6 +5,7 @@
   import { createPresenceHeartbeat } from './lib/presence.js';
   import { createLivenessTracker } from './lib/liveness.svelte.js';
   import { attachNotificationStream } from './lib/notifications.svelte.js';
+  import { attachActivityStream } from './lib/activityStream.svelte.js';
   import WorkspaceHome from './components/WorkspaceHome.svelte';
   import RepoMode from './components/RepoMode.svelte';
   import WorkspaceSettings from './components/WorkspaceSettings.svelte';
@@ -101,6 +102,11 @@
     // badge live. Rides the same socket as presence/liveness — the SPA
     // holds one realtime channel per tab.
     const detachNotifications = attachNotificationStream(store);
+    // Real-time activity feed (activity-dashboard.md §"Real-time activity
+    // feed"): bus Messages for the subscribed workspace are live-prepended
+    // into the activity sidebars' buckets; reconnects re-sync via
+    // GET /activity?since=. Rides the same socket as the bell/liveness.
+    const detachActivity = attachActivityStream(store);
     // Presence heartbeat (HSI §1): send-on-connect, 30s timer, view-change
     // re-send (5s debounce), and disconnect on beforeunload. Without it the
     // server idle-evicts this tab after 60s and other users lose the
@@ -119,6 +125,7 @@
     return () => {
       unsub();
       detachNotifications();
+      detachActivity();
       presenceHeartbeat.destroy();
       presenceHeartbeat = null;
       livenessTracker.destroy();
