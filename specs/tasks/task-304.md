@@ -2,8 +2,8 @@
 title: "Retire Dockerfile and complete backend security defaults"
 spec_ref: "Spec gap spec-41a92c20354c6a108e6074e3 / agent-image-single-definition / 4a3f940495a8"
 depends_on: []
-progress: not-started
-commits: []
+progress: complete
+commits: ["7e27cbdf0c786b16233aee07e7c11a869a7d33af", "95ab1dcbc602b3efb7481107f83854c30a0f7981"]
 ---
 
 ## Required behavior
@@ -94,3 +94,36 @@ Canonical spec: `specs/system/agent-runtime.md`. Source: `678a8ac3e3bfeafeb66cdb
     ]
   }
 ]
+
+## Shipped
+
+Implemented on this branch (checkpoint commit `95ab1dcb` carried the implementation from the prior interrupted assignment; commit `7e27cbdf` is behavior-preserving rustfmt of the newly added test code — the trusted-finalizer formatting pass). This assignment was the rebase repair onto main: merge commit `3c8e4bec` brought in main `88202d67` (task-310 WebSocket-primary agent transport, task-301 meta-spec API). The one content conflict, `docs/agent-protocol.md`, was resolved preserving both sides — task-304's Nix-flake/single-image-definition wording of the `docker/gyre-agent/` paragraph and build commands, plus task-310's `GYRE_WORKSPACE_ID` row and WebSocket-primary-transport section (including the "holding an authenticated WebSocket connection" clause on the same paragraph). `crates/gyre-server/src/api/spawn.rs` auto-merged cleanly: the task-304 Nix failure guidance and task-310's `GYRE_WORKSPACE_ID` injection coexist. All verification below was re-run at the merged head. (An earlier base merge `464dcdd3` brought in task-278 work with no overlap.)
+
+### Single image definition (Nix flake)
+
+- `docker/gyre-agent/Dockerfile` deleted (unpinned `node:22-alpine` image that diverged from the attested `wl_image_hash`).
+- The spawn-failure guidance in `crates/gyre-server/src/api/spawn.rs` (`dispatch_agent_launch`) now directs operators to the Nix targets: `nix build .#agent-image-docker` then `docker load < result`, or `nix build .#agent-image-tar` for air-gapped transfer — no `docker build` instruction remains anywhere in the production tree (remaining `docker build` mentions are historical retirement notes in milestone docs and the unrelated gyre-worker CI image in docs/dev-pipeline.md).
+- `README.md`, `docker/gyre-agent/README.md`, `docker/gyre-agent/flake.nix` (comments only), `docs/agent-protocol.md`, and the m24/m25 milestone docs updated to the Nix-only build path. `flake.nix`/`flake.lock` unchanged in substance.
+
+### Kubernetes security defaults
+
+- PID limit: the Pod manifest carries `spec.containers[0].resources.limits.pids: "512"` (the supported per-Pod mechanism), overridable via `pids_limit` compute-target config (`build_pod_manifest`, `kubernetes_target_from_config`).
+- Network isolation: unless the compute target config opts in (`"network": "bridge"`), `spawn_process` applies a platform-created default-deny NetworkPolicy alongside the Pod in the same `kubectl apply -f -` stream — both policy types, empty rule lists, `podSelector` scoped to the spawned Pod's `gyre-agent` label; `kill_process` deletes both objects. This replaces the code-comment deferral to cluster admins.
+
+### Remote worktree volume — spec amendment
+
+The blanket "worktree mounted as volume" wording was amended in `specs/system/agent-runtime.md` §3 (task-304 amendment paragraph) with the concrete technical evidence: a git worktree's `.git` is a file pointing into the server-local main repository, so a copy shipped to a remote docker host or kubelet node carries a dangling `.git` linkage and no object database — `git status`/`commit`/`push` all fail. Remote backends provision the working copy via the entrypoint's authenticated clone of the task branch (content-identical, self-contained, and preserves per-agent token scoping).
+
+### Test evidence
+
+Re-run at merged head `3c8e4bec`:
+
+- `cargo test -p gyre-adapters compute`: 53 passed, 0 failed, 4 ignored (require live container runtime/SSH daemon). Includes the Container backend regression (`docker_run_args_enforce_security_defaults`, `spawn_executes_security_defaults_via_docker_stub`/`podman_stub` asserting `--network=none`, `--memory=2g`, `--pids-limit=512`, `--user=65534:65534`, worktree volume), the SSH backend regression (`ssh_docker_run_args_enforce_security_defaults`), and the new k8s tests (pids limit default/override, default-deny policy scoping, RFC 1123 policy naming, apply-stream composition incl. bridge opt-in applying the Pod only, stub-kubectl spawn capturing the full stream, kill deleting both objects).
+- `cargo check -p gyre-server`: passes at the merged head (test-binary linking exceeds the sandbox 4 GiB budget — the verifier must run `cargo test -p gyre-server spawn`, in particular `kubernetes_spawn_applies_default_deny_network_policy_and_pids_limit`, which observes the applied stream end-to-end through the stub kubectl).
+- `cargo fmt --check -p gyre-adapters -p gyre-server`: clean.
+- Probe log saved at `/tmp/stage/review-evidence/probes.txt`.
+
+### Deferred to independent verifier
+
+- `cargo test -p gyre-server spawn` (full spawn suite; sandbox build budget).
+- `nix build` of the three flake targets (`.#agent-image`, `.#agent-image-docker`, `.#agent-image-tar`) — no Nix in this sandbox; flake inputs unchanged in substance (comments only), so the committed lockfile still applies.
