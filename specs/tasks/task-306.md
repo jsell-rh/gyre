@@ -97,7 +97,7 @@ Canonical spec: `specs/system/explorer-canvas.md`. Source: `678a8ac3e3bfeafeb66c
 
 ### What changed this round
 
-Round 88 (repair dispatch from checkpoint `9445f0d6`). `origin/main` fetched and **unchanged** at `7e746233` — the exact commit already reconciled into this branch by round-76's merge `f2a0f9da` — so no new reconciliation was needed. Both external blockers re-verified with the focused deterministic source-level probe at head `9445f0d6`; evidence saved to `/tmp/stage/review-evidence/task306-round88-probe.txt` (exit 0).
+Round 89 (repair dispatch from checkpoint `724837b7`). `origin/main` fetched and **unchanged** at `7e746233` — the exact commit already reconciled into this branch by round-76's merge `f2a0f9da` — so no new reconciliation was needed. Both external blockers re-verified with the focused deterministic source-level probe at head `724837b7`; evidence with source SHAs saved to `/tmp/stage/review-evidence/task306-round89-probe.txt` (exit 0).
 
 Docs-only round: zero changes to the four language extractors, the graph store/adapters, or the upsert path (AC 1 holds) — no Rust or web source touched, so there were no newly added Rust files to format and no product-surface commit to attribute beyond this docs commit.
 
@@ -110,7 +110,7 @@ Ordering guard applies — the end-to-end indicator probe cannot run against pop
 
 ### ui-layout d3-force rerouting — NOT landed
 
-`getLayout('graph')` still resolves to ExplorerCanvas (Canvas 2D; layoutRegistry.js 'graph' entry maps `component: ExplorerCanvas` at :46-47 with no `engine` selector); ExplorerView still defaults `activeLayout = $state('graph')` at :455. SVG-path interaction case (3) does not trigger, and no narrow frontend defect exists under permitted work (a) — the Canvas indicator formulas (ExplorerCanvas.svelte:1813-1815 `nodeWeight = Math.max(1, n.complexity || 1)`, :3717 `churnThickness = Math.min(4, 1 + (n?.churn_count_30d || 0) * 0.3)`) and API→renderer field plumbing remain intact.
+`getLayout('graph')` still resolves to ExplorerCanvas (Canvas 2D; layoutRegistry.js 'graph' entry maps `component: ExplorerCanvas` with no `engine` selector); ExplorerView still defaults `activeLayout = $state('graph')` at :455. SVG-path interaction case (3) does not trigger, and no narrow frontend defect exists under permitted work (a) — the Canvas indicator formulas (ExplorerCanvas.svelte:1813-1815 `nodeWeight = Math.max(1, n.complexity || 1)`, :3717 `churnThickness = Math.min(4, 1 + (n?.churn_count_30d || 0) * 0.3)`) and API→renderer field plumbing remain intact.
 
 ### Spec-vs-spec conflict escalation (acceptance criterion 5)
 
@@ -118,7 +118,7 @@ Recorded: **explorer-canvas.md §Component Architecture** (Canvas 2D for graph/t
 
 ### Evidence
 
-Probe evidence with source SHAs saved at `/tmp/stage/review-evidence/task306-round88-probe.txt` (exit 0). Per the standing constraint, large gyre-server builds/test compilation run in the independent verifier; this round ran no server tests and defers none.
+Probe evidence with source SHAs saved at `/tmp/stage/review-evidence/task306-round89-probe.txt` (exit 0). Per the standing constraint, large gyre-server builds/test compilation run in the independent verifier; this round ran no server tests and defers none.
 
 ### Remaining work to unblock
 
