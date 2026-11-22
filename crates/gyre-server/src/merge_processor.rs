@@ -4115,10 +4115,7 @@ pub(crate) async fn trigger_cascade_tests(
         );
         task.task_type = Some(gyre_domain::TaskType::Implementation);
         task.priority = TaskPriority::High;
-        task.labels = vec![
-            CASCADE_TEST_LABEL.to_string(),
-            "auto-created".to_string(),
-        ];
+        task.labels = vec![CASCADE_TEST_LABEL.to_string(), "auto-created".to_string()];
         // The description is the spawned agent's instruction set: it is
         // rendered into the agent's `system://context` prompt (prompts.rs
         // `format_context_prompt` → "Description / Acceptance Criteria"),

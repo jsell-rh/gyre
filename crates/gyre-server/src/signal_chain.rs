@@ -3104,12 +3104,7 @@ mod tests {
         // whose approval has been invalidated by a later push (registry
         // entry moved to a new blob, approval rows revoked).
         let task = impl_task(&state, "impl-cascade-labeled").await;
-        let mut labeled = state
-            .tasks
-            .find_by_id(&task.id)
-            .await
-            .unwrap()
-            .unwrap();
+        let mut labeled = state.tasks.find_by_id(&task.id).await.unwrap().unwrap();
         labeled
             .labels
             .push(crate::merge_processor::CASCADE_TEST_LABEL.to_string());

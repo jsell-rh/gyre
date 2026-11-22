@@ -3721,8 +3721,7 @@ pub async fn complete_agent(
                 .iter()
                 .any(|l| l == crate::merge_processor::CASCADE_TEST_LABEL)
             {
-                crate::merge_processor::report_cascade_test_result(&state, &task, true, None)
-                    .await;
+                crate::merge_processor::report_cascade_test_result(&state, &task, true, None).await;
             }
         }
     }
