@@ -5380,6 +5380,7 @@ specs:
         status: ApprovalStatus,
     ) -> SpecLedgerEntry {
         SpecLedgerEntry {
+            bindings_sha: String::new(),
             path: path.to_string(),
             title: path.to_string(),
             owner: "user:jsell".to_string(),

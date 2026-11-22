@@ -98,8 +98,8 @@ pub use decisions::{
     DecisionResult,
 };
 pub use dependency::{
-    BreakingChange, BreakingChangeBehavior, DependencyEdge, DependencyPolicy, DependencyStatus,
-    DependencyType, DetectionMethod,
+    BreakingChange, BreakingChangeBehavior, CascadeTestResult, DependencyEdge, DependencyPolicy,
+    DependencyStatus, DependencyType, DetectionMethod,
 };
 pub use extractor::{ExtractionError, ExtractionResult, LanguageExtractor};
 pub use git_types::{BranchInfo, CommitInfo, DiffResult, FileDiff, MergeResult, RevertResult};

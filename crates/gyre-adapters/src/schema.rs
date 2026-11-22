@@ -1250,3 +1250,16 @@ diesel::table! {
         checked_at -> BigInt,
     }
 }
+
+diesel::table! {
+    cascade_test_results (id) {
+        id -> Text,
+        dependent_repo_id -> Text,
+        merged_repo_id -> Text,
+        merge_commit_sha -> Text,
+        cascade_task_id -> Text,
+        passed -> Bool,
+        failure_details -> Nullable<Text>,
+        recorded_at -> BigInt,
+    }
+}

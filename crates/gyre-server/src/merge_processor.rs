@@ -3955,6 +3955,47 @@ async fn notify_escalation(
     .await;
 }
 
+/// KV namespace for the per-task cascade context (task-280): the merged
+/// repo identity and merge SHA a cascade-test task was triggered for,
+/// keyed by cascade task id. Written at trigger time so
+/// `report_cascade_test_result` can persist the full result identity
+/// (merged repo id, merge SHA) without parsing the task description.
+const CASCADE_TEST_CTX_NS: &str = "cascade_test_ctx";
+
+/// Trigger-time context of one cascade-test task (task-280).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct CascadeTestContext {
+    merged_repo_id: String,
+    merged_repo_name: String,
+    merge_commit_sha: String,
+    dependent_repo_id: String,
+}
+
+/// Load the trigger-time cascade context for a cascade-test task. Returns
+/// None when the task predates the durable-context hand-off, the record is
+/// corrupt, or the lookup fails (each logged — the caller still records
+/// the result with the fields recoverable from the task row).
+async fn load_cascade_context(state: &AppState, task_id: &Id) -> Option<CascadeTestContext> {
+    match state
+        .kv_store
+        .kv_get(CASCADE_TEST_CTX_NS, task_id.as_str())
+        .await
+    {
+        Ok(Some(raw)) => match serde_json::from_str::<CascadeTestContext>(&raw) {
+            Ok(ctx) => Some(ctx),
+            Err(e) => {
+                warn!(task_id = task_id.as_str(), error = %e, "cascade-test: corrupt context record");
+                None
+            }
+        },
+        Ok(None) => None,
+        Err(e) => {
+            warn!(task_id = task_id.as_str(), error = %e, "cascade-test: cannot read context record");
+            None
+        }
+    }
+}
+
 /// Trigger cascade tests for all repos that depend on the merged repo.
 ///
 /// When `require_cascade_tests` is enabled in the workspace dependency policy
@@ -3963,6 +4004,13 @@ async fn notify_escalation(
 /// 2. Creates a cascade test task in each dependent repo
 /// 3. Emits a `cascade_test_triggered` event to the dependent repo's workspace
 /// 4. Notifies workspace members of the cascade test
+///
+/// EXECUTION link (task-280): each cascade-test task is created with
+/// `task_type = Implementation` — the discriminator the worker scheduler
+/// spawns — so the forge itself dispatches an agent to run the dependent
+/// repo's tests, with no human or orchestrator action beyond the policy
+/// gates. The task description is the spawned agent's instruction set
+/// (rendered into its `system://context` prompt).
 pub(crate) async fn trigger_cascade_tests(
     state: &AppState,
     merged_repo_id: &str,
@@ -3999,7 +4047,9 @@ pub(crate) async fn trigger_cascade_tests(
     }
 
     let now = crate::api::now_secs();
-    let sha_short = &merge_commit_sha[..8.min(merge_commit_sha.len())];
+    // Char-boundary-safe prefix (merge SHAs are hex ASCII; the repo
+    // invariant forbids fixed byte-index slicing on principle).
+    let sha_short: String = merge_commit_sha.chars().take(8).collect();
 
     for dep_edge in &dependents {
         // Resolve the dependent repo's workspace — the task belongs to
@@ -4038,23 +4088,75 @@ pub(crate) async fn trigger_cascade_tests(
         }
 
         // Create a cascade test task in the dependent repo.
+        //
+        // task_type = Implementation is the discriminator the worker
+        // scheduler spawns (signal_chain.rs `spawn_implementation_workers`
+        // skips untyped tasks — "untyped → never spawned"). Without it the
+        // cascade-test task sits in the Backlog until a human manually
+        // spawns an agent; with it the forge runs the tests itself
+        // (task-280 EXECUTION link).
         let task_id = Id::new(Uuid::new_v4().to_string());
         let mut task = gyre_domain::Task::new(
             task_id,
             format!("Cascade test: {dep_repo_name} against {merged_repo_name}@{sha_short}"),
             now,
         );
+        task.task_type = Some(gyre_domain::TaskType::Implementation);
         task.priority = TaskPriority::High;
         task.labels = vec!["cascade-test".to_string(), "auto-created".to_string()];
+        // The description is the spawned agent's instruction set: it is
+        // rendered into the agent's `system://context` prompt (prompts.rs
+        // `format_context_prompt` → "Description / Acceptance Criteria"),
+        // so the agent receives the full cascade context — dependent repo,
+        // merged repo, merge SHA — and the test-run procedure against
+        // Repo B's new version.
         task.description = Some(format!(
-            "Repo '{merged_repo_name}' merged commit {merge_commit_sha}. \
-             Run tests in '{dep_repo_name}' against the new version to verify compatibility."
+            "Cascade test (dependency-graph.md §Cascade Testing).\n\n\
+             Repo '{merged_repo_name}' ({merged_repo_id}) merged commit {merge_commit_sha}. \
+             This repo ('{dep_repo_name}') depends on it.\n\n\
+             Run this repo's test suite against the new version:\n\
+             1. Update the dependency reference on '{merged_repo_name}' to the \
+             merged commit {merge_commit_sha} (pin the commit, or its tag if the \
+             merge was tagged).\n\
+             2. Run this repo's full test suite against the new version.\n\
+             3. Report the outcome: complete your agent run when the tests \
+             pass; fail your agent run with the failing test output as the \
+             failure reason when they do not."
         ));
         task.workspace_id = dep_workspace_id.clone();
         task.repo_id = dep_edge.source_repo_id.clone();
 
         if let Err(e) = state.tasks.create(&task).await {
             warn!("cascade-test: failed to create task for {dep_repo_name}: {e}");
+        } else {
+            // Durable context hand-off for report_cascade_test_result
+            // (task-280): the merged repo id and merge SHA are not
+            // derivable from the task row alone, so persist them keyed by
+            // the cascade task id — the durable result record then carries
+            // the full identity of the merge that triggered the run.
+            let ctx = serde_json::to_string(&CascadeTestContext {
+                merged_repo_id: merged_repo_id.to_string(),
+                merged_repo_name: merged_repo_name.to_string(),
+                merge_commit_sha: merge_commit_sha.to_string(),
+                dependent_repo_id: dep_edge.source_repo_id.to_string(),
+            })
+            .unwrap_or_default();
+            if ctx.is_empty() {
+                warn!(
+                    task_id = task.id.as_str(),
+                    "cascade-test: cannot serialize cascade context; result record will lack merged repo identity"
+                );
+            } else if let Err(e) = state
+                .kv_store
+                .kv_set(CASCADE_TEST_CTX_NS, task.id.as_str(), ctx)
+                .await
+            {
+                warn!(
+                    task_id = task.id.as_str(),
+                    error = %e,
+                    "cascade-test: failed to persist cascade context; result record will lack merged repo identity"
+                );
+            }
         }
 
         // Emit a cascade_test_triggered event to the dependent repo's workspace.
@@ -4134,6 +4236,11 @@ pub(crate) async fn trigger_cascade_tests(
 /// 3. Sends CascadeTestFailed notifications to workspace members
 ///
 /// On success, emits a `cascade_test_passed` activity event.
+///
+/// DURABLE RESULTS (task-280): the outcome is also persisted as a
+/// `CascadeTestResult` record through the `CascadeTestResultRepository`
+/// port (mem / SQLite / PostgreSQL), so it survives a server restart —
+/// cascade outcomes are records, not just one-shot workspace events.
 pub(crate) async fn report_cascade_test_result(
     state: &AppState,
     task: &gyre_domain::Task,
@@ -4141,6 +4248,48 @@ pub(crate) async fn report_cascade_test_result(
     failure_details: Option<&str>,
 ) {
     let now = crate::api::now_secs();
+
+    // Durable result record. The merged repo id and merge SHA come from
+    // the trigger-time context (`CASCADE_TEST_CTX_NS`); a missing context
+    // (a task predating the hand-off, or a failed context write) degrades
+    // to empty identity fields with a warning — the record is still
+    // written, never skipped, so the outcome is never lost.
+    let ctx = load_cascade_context(state, &task.id).await;
+    if ctx.is_none() {
+        warn!(
+            task_id = task.id.as_str(),
+            "cascade-test: no trigger-time context for task; recording result without merged repo identity"
+        );
+    }
+    let details = failure_details.unwrap_or("Cascade test failed — see task for details");
+    let record = gyre_domain::CascadeTestResult {
+        id: Id::new(Uuid::new_v4().to_string()),
+        dependent_repo_id: task.repo_id.clone(),
+        merged_repo_id: Id::new(
+            ctx.as_ref()
+                .map(|c| c.merged_repo_id.clone())
+                .unwrap_or_default(),
+        ),
+        merge_commit_sha: ctx
+            .as_ref()
+            .map(|c| c.merge_commit_sha.clone())
+            .unwrap_or_default(),
+        cascade_task_id: task.id.clone(),
+        passed,
+        failure_details: if passed {
+            None
+        } else {
+            Some(details.to_string())
+        },
+        recorded_at: now,
+    };
+    if let Err(e) = state.cascade_test_results.record(&record).await {
+        error!(
+            task_id = task.id.as_str(),
+            error = %e,
+            "cascade-test: failed to persist durable result record"
+        );
+    }
 
     if passed {
         // Emit cascade_test_passed activity event.
@@ -4164,8 +4313,6 @@ pub(crate) async fn report_cascade_test_result(
             "cascade test passed"
         );
     } else {
-        let details = failure_details.unwrap_or("Cascade test failed — see task for details");
-
         // Create a follow-up task in the dependent repo with failure details.
         let follow_up_id = Id::new(Uuid::new_v4().to_string());
         let mut follow_up = gyre_domain::Task::new(
@@ -4815,6 +4962,49 @@ mod tests {
         assert_eq!(tasks[0].workspace_id.as_str(), "ws-1");
         assert_eq!(tasks[0].repo_id.as_str(), repo_a.id.as_str());
 
+        // EXECUTION link (task-280): the task carries a spawnable task_type
+        // AT CREATION — Implementation is the discriminator the worker
+        // scheduler spawns; an untyped task would sit in the Backlog
+        // forever ("untyped → never spawned").
+        assert_eq!(
+            tasks[0].task_type,
+            Some(gyre_domain::TaskType::Implementation),
+            "cascade-test task must be spawnable by the worker scheduler at creation"
+        );
+
+        // The description is the spawned agent's instruction set (rendered
+        // into its system://context prompt): full context — dependent
+        // repo, merged repo, merge SHA — plus the test-run procedure.
+        let desc = tasks[0].description.as_deref().expect("description set");
+        assert!(
+            desc.contains(repo_b.id.as_str()),
+            "merged repo id in prompt"
+        );
+        assert!(desc.contains("abc123def456"), "merge SHA in prompt");
+        assert!(desc.contains("repo-a"), "dependent repo name in prompt");
+        assert!(
+            desc.contains("test suite"),
+            "run-tests instruction in prompt"
+        );
+        assert!(
+            desc.contains("Update the dependency reference"),
+            "dependency-update instruction in prompt"
+        );
+
+        // Durable context hand-off: the merged repo id / merge SHA are
+        // persisted keyed by the cascade task id so the result record
+        // carries the full identity of the triggering merge.
+        let ctx_raw = state
+            .kv_store
+            .kv_get("cascade_test_ctx", tasks[0].id.as_str())
+            .await
+            .expect("kv read")
+            .expect("cascade context recorded");
+        let ctx: serde_json::Value = serde_json::from_str(&ctx_raw).unwrap();
+        assert_eq!(ctx["merged_repo_id"], repo_b.id.as_str());
+        assert_eq!(ctx["merge_commit_sha"], "abc123def456");
+        assert_eq!(ctx["dependent_repo_id"], repo_a.id.as_str());
+
         // Verify cascade_test_triggered event was emitted (F1).
         let msg = rx
             .try_recv()
@@ -5138,6 +5328,125 @@ mod tests {
             payload["follow_up_task_id"].as_str().is_some(),
             "event should include follow_up_task_id"
         );
+    }
+
+    /// Helper for the durable-record tests (task-280): enable the cascade
+    /// policy in ws-1, create a repo pair with a dependency edge, run
+    /// trigger_cascade_tests, and return the created cascade-test task.
+    async fn triggered_cascade_task(state: &AppState) -> gyre_domain::Task {
+        let repo_b = create_repo_in_workspace(state, "repo-b", "ws-1").await;
+        let repo_a = create_repo_in_workspace(state, "repo-a", "ws-1").await;
+        create_dependency(state, &repo_a.id, &repo_b.id).await;
+        let policy = DependencyPolicy {
+            require_cascade_tests: true,
+            ..Default::default()
+        };
+        state
+            .dependency_policies
+            .set_for_workspace(&Id::new("ws-1"), &policy)
+            .await
+            .unwrap();
+
+        trigger_cascade_tests(
+            state,
+            repo_b.id.as_str(),
+            "repo-b",
+            "abc123def456",
+            &Id::new("ws-1"),
+        )
+        .await;
+
+        let tasks = state.tasks.list_by_repo(&repo_a.id).await.unwrap();
+        assert_eq!(tasks.len(), 1, "one cascade task per dependent");
+        tasks[0].clone()
+    }
+
+    /// DURABLE RESULTS (task-280): agent completion persists a
+    /// CascadeTestResult (passed) retrievable from the store — the record
+    /// carries the dependent repo, merged repo, merge SHA, cascade task id,
+    /// outcome, and timestamp.
+    #[tokio::test]
+    async fn report_cascade_test_result_persists_durable_pass_record() {
+        let state = test_state();
+        let task = triggered_cascade_task(&state).await;
+
+        report_cascade_test_result(&state, &task, true, None).await;
+
+        let record = state
+            .cascade_test_results
+            .find_by_task(&task.id)
+            .await
+            .expect("port read")
+            .expect("durable pass record exists");
+        assert_eq!(record.cascade_task_id, task.id);
+        assert_eq!(record.dependent_repo_id, task.repo_id);
+        assert!(
+            !record.merged_repo_id.as_str().is_empty(),
+            "merged repo identity from trigger-time context"
+        );
+        assert_eq!(record.merge_commit_sha, "abc123def456");
+        assert!(record.passed);
+        assert!(record.failure_details.is_none());
+        assert!(record.recorded_at > 0);
+
+        // The dependent-repo listing sees the same record.
+        let by_dep = state
+            .cascade_test_results
+            .list_by_dependent_repo(&task.repo_id)
+            .await
+            .expect("port list");
+        assert_eq!(by_dep.len(), 1);
+        assert_eq!(by_dep[0].cascade_task_id, task.id);
+    }
+
+    /// DURABLE RESULTS (task-280): agent failure persists the record with
+    /// the failure details — alongside (not instead of) the existing
+    /// follow-up task and cascade_test_failed event.
+    #[tokio::test]
+    async fn report_cascade_test_result_persists_durable_failure_record() {
+        let state = test_state();
+        let task = triggered_cascade_task(&state).await;
+
+        report_cascade_test_result(&state, &task, false, Some("test_foo panicked")).await;
+
+        let record = state
+            .cascade_test_results
+            .find_by_task(&task.id)
+            .await
+            .expect("port read")
+            .expect("durable failure record exists");
+        assert!(!record.passed);
+        assert_eq!(record.failure_details.as_deref(), Some("test_foo panicked"));
+        assert_eq!(record.merge_commit_sha, "abc123def456");
+
+        // The existing failure follow-up link still fires.
+        let tasks = state.tasks.list_by_repo(&task.repo_id).await.unwrap();
+        assert_eq!(tasks.len(), 2, "original + follow-up task");
+        assert!(tasks
+            .iter()
+            .any(|t| t.labels.contains(&"cascade-test-failure".to_string())));
+    }
+
+    /// Port contract at the server level: re-reporting the same cascade
+    /// task REPLACES the record (one result per run — last report wins),
+    /// so an agent failure followed by a retried pass never leaves a stale
+    /// failure row.
+    #[tokio::test]
+    async fn report_cascade_test_result_rereport_replaces_record() {
+        let state = test_state();
+        let task = triggered_cascade_task(&state).await;
+
+        report_cascade_test_result(&state, &task, false, Some("first attempt failed")).await;
+        report_cascade_test_result(&state, &task, true, None).await;
+
+        let records = state
+            .cascade_test_results
+            .list_by_dependent_repo(&task.repo_id)
+            .await
+            .expect("port list");
+        assert_eq!(records.len(), 1, "one row per cascade task");
+        assert!(records[0].passed, "latest report wins");
+        assert!(records[0].failure_details.is_none());
     }
 
     #[tokio::test]

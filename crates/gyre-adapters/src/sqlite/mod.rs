@@ -15,6 +15,7 @@ pub mod audit;
 pub mod breaking_change;
 pub mod budget;
 pub mod budget_call;
+pub mod cascade_test_result;
 pub mod chain_attestation;
 pub mod commit_signature;
 pub mod compute_target;
