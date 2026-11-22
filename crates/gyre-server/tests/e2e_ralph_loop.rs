@@ -93,6 +93,11 @@ async fn full_ralph_loop_via_gyre() {
     // Keyless/fail-loud signing has its own dedicated suites.
     unsafe { std::env::set_var("GYRE_SIGNING_MODE", "local") };
 
+    // Explicit in-memory opt-in (architecture.md §Storage): the default
+    // (unset) backend is now durable SQLite at the platform default
+    // data path — a test run must never touch the operator's real
+    // database file.
+    gyre_server::select_in_memory_storage();
     let state = build_state(auth_token, &base_url, None);
     abac_middleware::seed_builtin_policies(&state)
         .await

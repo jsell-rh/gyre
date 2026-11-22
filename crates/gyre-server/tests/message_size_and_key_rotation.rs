@@ -188,7 +188,11 @@ fn verify_ed25519(jwk_x: &str, sign_input: &str, signature_b64: &str) -> Result<
 async fn oversized_message_body_rejected_413_no_store_no_broadcast() {
     let _env = ENV_LOCK.lock().await;
     unsafe {
-        std::env::remove_var("GYRE_DATABASE_URL");
+        // Explicit in-memory opt-in (architecture.md §Storage): unset now
+        // means durable SQLite at the platform default data path; this
+        // stateless test opts into memory instead of removing the var
+        // (which would fall through to the durable default).
+        std::env::set_var("GYRE_DATABASE_URL", "memory");
         std::env::remove_var("GYRE_AGENT_SIGNING_KEY");
         std::env::remove_var("GYRE_MAX_MESSAGE_SIZE");
     }
@@ -263,7 +267,8 @@ async fn oversized_message_body_rejected_413_no_store_no_broadcast() {
 async fn max_message_size_env_overrides_default() {
     let _env = ENV_LOCK.lock().await;
     unsafe {
-        std::env::remove_var("GYRE_DATABASE_URL");
+        // Explicit in-memory opt-in: see the 413 test above.
+        std::env::set_var("GYRE_DATABASE_URL", "memory");
         std::env::remove_var("GYRE_AGENT_SIGNING_KEY");
         std::env::set_var("GYRE_MAX_MESSAGE_SIZE", "2048");
     }

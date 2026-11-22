@@ -60,6 +60,10 @@ tonic = { version = "0.12", default-features = false, features = ["transport", "
 opentelemetry-proto = { version = "0.27", default-features = false, features = ["gen-tonic", "trace"] }
 tokio-stream = { version = "0.1", features = ["net"] }
 parking_lot = "0.12"
+# Platform data-directory resolution for the default SQLite database path
+# (architecture.md §Storage: SQLite as the default, zero ops) — XDG data
+# home on Linux, Application Support on macOS, %APPDATA% on Windows.
+dirs = "7"
 
 [dev-dependencies]
 # tokio test-only utilities (#[tokio::test(start_paused = true)] in
