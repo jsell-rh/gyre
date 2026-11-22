@@ -28,6 +28,8 @@
   import ExplorerView from './ExplorerView.svelte';
   import InlineChat from '../lib/InlineChat.svelte';
   import { toastSuccess, toastError } from '../lib/toast.svelte.js';
+  import { activityStreamState, mergeFetchedActivity } from '../lib/activityStream.svelte.js';
+  import TryItButton from '../lib/TryItButton.svelte';
 
   const openDetailPanel = getContext('openDetailPanel') ?? null;
   const goToEntityDetail = getContext('goToEntityDetail') ?? null;
@@ -1002,18 +1004,27 @@
 
   // ── Activity feed state ─────────────────────────────────────────────────
   let activityLoading = $state(true);
-  let activityEvents = $state([]);
+  // Real-time (activity-dashboard.md §"Real-time activity feed"): the
+  // sidebar renders the live stream bucket for the open workspace — bus
+  // Messages pushed over the shared /ws connection are live-prepended by
+  // activityStream.svelte.js; loadActivity only merges the fetched page
+  // into the same deduped, newest-first bucket. No reload or scope change
+  // is needed for new entries to appear.
+  let activityEvents = $derived(activityStreamState.byWorkspace[workspace?.id] ?? []);
 
   async function loadActivity() {
     const gen = wsLoadGen;
     activityLoading = true;
+    // Entries land in the live stream's per-workspace bucket so fetched and
+    // pushed entries share one deduped, newest-first list.
+    const wsId = workspace?.id ?? 'global';
     try {
       const data = await api.activity(30);
       if (stale(gen)) return;
       const events = Array.isArray(data) ? data : [];
       if (events.length > 0) {
         // Sanitize: strip raw JSON from description fields — show human-readable text only
-        activityEvents = events.map(e => {
+        const sanitized = events.map(e => {
           const desc = e.description ?? e.detail ?? '';
           if (desc && (desc.startsWith('{') || desc.startsWith('['))) {
             // Try to extract something useful from the JSON
@@ -1028,15 +1039,25 @@
           }
           return e;
         });
+        // The unified feed spans workspaces; bucket each entry under its own
+        // workspace so every open sidebar stays scoped. Entries without a
+        // workspace (legacy rows) fall back to the open workspace's bucket —
+        // the feed the sidebar has always shown.
+        const byWs = new Map();
+        for (const e of sanitized) {
+          const bucket = e.workspace_id ?? wsId;
+          if (!byWs.has(bucket)) byWs.set(bucket, []);
+          byWs.get(bucket).push(e);
+        }
+        for (const [bucket, list] of byWs) mergeFetchedActivity(bucket, list);
       } else {
         // Activity API may return empty — synthesize from notifications
         // which contain rich event data (agent completions, gate failures, etc.)
-        const wsId = workspace?.id;
         const notifs = wsId
           ? await api.myNotifications({ workspace_id: wsId, limit: 30 }).catch(() => ({ notifications: [] }))
           : await api.myNotifications({ limit: 30 }).catch(() => ({ notifications: [] }));
         const notifList = notifs?.notifications ?? (Array.isArray(notifs) ? notifs : []);
-        activityEvents = notifList.map(n => {
+        const synthesized = notifList.map(n => {
           const body = parseNotifBody(n);
           const typeMap = {
             'AgentCompleted': 'agent_completed',
@@ -1073,10 +1094,11 @@
             timestamp: n.created_at,
           };
         });
+        mergeFetchedActivity(wsId, synthesized);
       }
     } catch {
       if (stale(gen)) return;
-      activityEvents = [];
+      // Fetch failed — the live stream keeps whatever it already tracks.
     } finally {
       if (!stale(gen)) activityLoading = false;
     }
@@ -1195,6 +1217,37 @@
     'budget_exhausted': 'Budget exhausted',
     'mr_reverted': 'MR reverted',
     'agent_clarification': 'Agent needs input',
+    // Live bus-message kinds (activityStream.svelte.js maps Telemetry/Event
+    // tier MessageKind strings, already snake_case, onto this table).
+    'run_started': 'Agent run started',
+    'run_finished': 'Agent run finished',
+    'tool_call_start': 'Tool call',
+    'tool_call_end': 'Tool call finished',
+    'state_changed': 'State changed',
+    'agent_created': 'Agent created',
+    'agent_status_changed': 'Agent status changed',
+    'agent_error': 'Agent error',
+    'agent_completed': 'Agent completed',
+    'agent_failed': 'Agent failed',
+    'task_created': 'Task created',
+    'task_transitioned': 'Task transitioned',
+    'mr_status_changed': 'MR status changed',
+    'mr_merged': 'MR merged',
+    'mr_reverted': 'MR reverted',
+    'gate_result': 'Gate completed',
+    'gate_failure': 'Gate failed',
+    'spec_changed': 'Spec updated',
+    'spec_approved': 'Spec approved',
+    'push_accepted': 'Push accepted',
+    'push_rejected': 'Push rejected',
+    'queue_updated': 'Merge queue updated',
+    'budget_warning': 'Budget warning',
+    'budget_exhausted': 'Budget exhausted',
+    'hot_files_changed': 'Hot files changed',
+    'speculative_conflict': 'Speculative conflict',
+    'speculative_merge_clean': 'Speculative merge clean',
+    'stale_spec_warning': 'Stale spec pinned',
+    'reconciliation_completed': 'Reconciliation completed',
   };
 
   function activityLabel(event) {
@@ -1986,11 +2039,20 @@
                   {@const variant = activityVariant(event)}
                   {@const primaryType = event.entity_type ?? (event.agent_id ? 'agent' : event.mr_id ? 'mr' : event.task_id ? 'task' : event.spec_path ? 'spec' : null)}
                   {@const primaryId = event.entity_id ?? event.agent_id ?? event.mr_id ?? event.task_id ?? event.spec_path ?? null}
+                  {@const eventType = event.event_type ?? event.event ?? event.type ?? ''}
+                  {@const gateFailure = eventType.includes('gate') && (eventType.includes('fail') || Boolean(event.gate_name))}
                   <button
                     class="sidebar-activity-item"
                     onclick={() => {
                       if (primaryType && primaryId) {
-                        const data = primaryType === 'spec' ? { path: event.spec_path, repo_id: event.repo_id } : { repo_id: event.repo_id };
+                        // Deep link to the artifact's detail — gate-failure /
+                        // test-result entries land on the MR's gate output
+                        // (activity-dashboard.md §"Each activity entry links
+                        // to the relevant artifact").
+                        const data = primaryType === 'spec'
+                          ? { path: event.spec_path, repo_id: event.repo_id }
+                          : { repo_id: event.repo_id };
+                        if (primaryType === 'mr' && gateFailure) data._openTab = 'gates';
                         nav(primaryType, primaryId, data);
                       }
                     }}
@@ -2002,6 +2064,14 @@
                     {/if}
                     <span class="sidebar-activity-time">{relTime(event.timestamp ?? event.created_at)}</span>
                   </button>
+                  {#if primaryType === 'mr' && event.mr_id && (eventType === 'merged' || eventType === 'mr_merged' || eventType === 'MrMerged')}
+                    <!-- "Try it" link: completed (merged) work gets an
+                         ephemeral preview environment of the landed commit
+                         (activity-dashboard.md §"Try it" links). -->
+                    <div class="sidebar-activity-tryit">
+                      <TryItButton mrId={event.mr_id} compact={true} />
+                    </div>
+                  {/if}
                 {/each}
               </div>
               {#if activityEvents.length > activityLimit}
@@ -2610,6 +2680,12 @@
   }
 
   .sidebar-activity-item:hover { background: var(--color-surface-elevated); }
+
+  .sidebar-activity-tryit {
+    display: flex;
+    justify-content: flex-end;
+    padding: 0 var(--space-2) 3px;
+  }
 
   .sidebar-activity-dot {
     width: 6px;

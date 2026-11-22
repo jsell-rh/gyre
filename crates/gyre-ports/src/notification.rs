@@ -135,6 +135,18 @@ pub trait NotificationRepository: Send + Sync {
     /// Ordered by created_at descending.
     async fn list_recent(&self, limit: usize) -> Result<Vec<Notification>>;
 
+    /// List most recent notifications across all users created at or after
+    /// `since` (epoch seconds) — the unified activity feed's time-period
+    /// query (activity-dashboard.md §"over any time period"). The
+    /// `created_at >= since` filter runs in the repository query itself,
+    /// never as post-fetch truncation, so paging a historical window
+    /// returns the rows inside that window rather than the globally newest
+    /// rows. Tenant scope follows the storage handle like `list_recent`.
+    /// Ordered by created_at descending. Distinct from
+    /// [`NotificationRepository::list_by_workspace_type_since`], which is
+    /// the type-specific, workspace-scoped, unbounded fan-out query.
+    async fn list_since(&self, since: i64, limit: usize) -> Result<Vec<Notification>>;
+
     /// List notifications of a given type within a workspace created at or
     /// after `since` (epoch seconds), across ALL users — the SpecAssertionFailure
     /// fan-out creates one row per notified member, so a user-scoped query

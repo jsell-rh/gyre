@@ -48,6 +48,9 @@ sha1 = "0.10"
 hex = { workspace = true }
 subtle = { workspace = true }
 ring = { workspace = true }
+# WireGuard mesh keypairs for preview environments (activity-dashboard.md
+# §"Try it"): X25519 static keys, matching `wg genkey`/`wg pubkey` semantics.
+x25519-dalek = { version = "2", default-features = false, features = ["static_secrets"] }
 x509-parser = { version = "0.16", features = ["verify"] }
 rcgen = { version = "0.13", features = ["x509-parser"] }
 pem = "3.0"
