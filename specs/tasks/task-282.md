@@ -3,7 +3,7 @@ title: "Serve the spec's literal /api/v1/deps/* API surface (all ten rows, ?work
 spec_ref: "Spec gap spec-cab97078efffe0fbfb7339be / deps-spec-route-paths / ed9f34316476"
 depends_on: [task-281]
 progress: ready-for-review
-commits: ["53b8b41983bdf52dc96e9f5d72dd8c8621a8eca8", "88309116208775e04bc778364f335ae5afcb6688", "f5703622638027ab45be016c909da3e5cbe02c8a"]
+commits: ["f5703622638027ab45be016c909da3e5cbe02c8a", "53b8b41983bdf52dc96e9f5d72dd8c8621a8eca8", "88309116208775e04bc778364f335ae5afcb6688"]
 ---
 
 ## Required behavior
