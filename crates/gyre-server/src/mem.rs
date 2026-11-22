@@ -8,8 +8,8 @@ use gyre_domain::BudgetUsage;
 use gyre_domain::{
     Agent, AgentCommit, AgentStatus, AgentUsage, AgentWorktree, AnalyticsEvent, AuditEvent,
     CostEntry, DependencyEdge, LlmFunctionConfig, MergeQueueEntry, MergeQueueEntryStatus,
-    MergeRequest, MrStatus, NetworkPeer, Persona, PersonaScope, Repository, Review, ReviewComment,
-    ReviewDecision, Session, Task, TaskStatus, Tenant, User, Workspace,
+    MergeRequest, MrStatus, NetworkPeer, Persona, PersonaScope, PreviewEnvironment, Repository,
+    Review, ReviewComment, ReviewDecision, Session, Task, TaskStatus, Tenant, User, Workspace,
 };
 #[cfg(test)]
 use gyre_domain::{BranchInfo, CommitInfo, DiffResult, MergeResult};
@@ -18,9 +18,10 @@ use gyre_ports::{
     AnalyticsRepository, ApiKeyRepository, AuditQueryFilter, AuditRepository, BudgetRepository,
     BudgetUsageRepository, CostRepository, DependencyRepository, KvJsonStore, LlmConfigRepository,
     MergeQueueRepository, MergeRequestRepository, MetaSpecSetRepository, NetworkPeerRepository,
-    PersonaRepository, RepoRepository, ReviewRepository, RolloutPolicyRepository, SpawnLogEntry,
-    SpawnLogRepository, TaskRepository, TenantMetaSpecSetRepository, TenantRepository,
-    UserRepository, UserWorkspaceStateRepository, WorkspaceRepository, WorktreeRepository,
+    PersonaRepository, PreviewEnvironmentRepository, RepoRepository, ReviewRepository,
+    RolloutPolicyRepository, SpawnLogEntry, SpawnLogRepository, TaskRepository,
+    TenantMetaSpecSetRepository, TenantRepository, UserRepository, UserWorkspaceStateRepository,
+    WorkspaceRepository, WorktreeRepository,
 };
 #[cfg(test)]
 use gyre_ports::{GitOpsPort, JjChange, JjNewChange, JjOpsPort};
@@ -2266,6 +2267,91 @@ pub struct MemNetworkPeerRepository {
     store: Arc<Mutex<Vec<NetworkPeer>>>,
 }
 
+#[derive(Default)]
+pub struct MemPreviewEnvironmentRepository {
+    store: Arc<Mutex<Vec<PreviewEnvironment>>>,
+}
+
+#[async_trait]
+impl PreviewEnvironmentRepository for MemPreviewEnvironmentRepository {
+    async fn create(&self, env: &PreviewEnvironment) -> Result<()> {
+        let mut store = self.store.lock().await;
+        // Port contract: a duplicate id must fail, not overwrite — the mem
+        // adapter has no schema, so the guard lives in code (same contract
+        // the SQL adapters get from the PRIMARY KEY).
+        if store.iter().any(|e| e.id == env.id) {
+            anyhow::bail!("preview environment {} already exists", env.id);
+        }
+        store.push(env.clone());
+        Ok(())
+    }
+
+    async fn find_by_id(&self, id: &Id) -> Result<Option<PreviewEnvironment>> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .iter()
+            .find(|e| e.id == *id)
+            .cloned())
+    }
+
+    async fn find_by_mr(&self, mr_id: &Id) -> Result<Vec<PreviewEnvironment>> {
+        let mut items: Vec<PreviewEnvironment> = self
+            .store
+            .lock()
+            .await
+            .iter()
+            .filter(|e| e.mr_id == *mr_id)
+            .cloned()
+            .collect();
+        items.sort_by_key(|e| std::cmp::Reverse(e.created_at));
+        Ok(items)
+    }
+
+    async fn find_by_workspace(&self, workspace_id: &Id) -> Result<Vec<PreviewEnvironment>> {
+        let mut items: Vec<PreviewEnvironment> = self
+            .store
+            .lock()
+            .await
+            .iter()
+            .filter(|e| e.workspace_id == *workspace_id)
+            .cloned()
+            .collect();
+        items.sort_by_key(|e| std::cmp::Reverse(e.created_at));
+        Ok(items)
+    }
+
+    async fn find_live_expired_before(&self, now: u64) -> Result<Vec<PreviewEnvironment>> {
+        let mut items: Vec<PreviewEnvironment> = self
+            .store
+            .lock()
+            .await
+            .iter()
+            .filter(|e| e.expires_at <= now && e.status.is_live())
+            .cloned()
+            .collect();
+        items.sort_by_key(|e| e.expires_at);
+        Ok(items)
+    }
+
+    async fn update(&self, env: &PreviewEnvironment) -> Result<()> {
+        let mut store = self.store.lock().await;
+        // Port contract: update fails when the row does not exist.
+        let slot = store
+            .iter_mut()
+            .find(|e| e.id == env.id)
+            .ok_or_else(|| anyhow::anyhow!("preview environment {} not found", env.id))?;
+        *slot = env.clone();
+        Ok(())
+    }
+
+    async fn delete(&self, id: &Id) -> Result<()> {
+        self.store.lock().await.retain(|e| e.id != *id);
+        Ok(())
+    }
+}
+
 #[async_trait]
 impl NetworkPeerRepository for MemNetworkPeerRepository {
     async fn register(&self, peer: &NetworkPeer) -> Result<()> {
@@ -3750,6 +3836,18 @@ impl NotificationRepository for MemNotificationRepository {
         let store = self.store.lock().await;
         let mut items: Vec<Notification> = store.iter().cloned().collect();
         items.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        items.truncate(limit);
+        Ok(items)
+    }
+
+    async fn list_since(&self, since: i64, limit: usize) -> Result<Vec<Notification>> {
+        let store = self.store.lock().await;
+        let mut items: Vec<Notification> = store
+            .iter()
+            .filter(|n| n.created_at >= since)
+            .cloned()
+            .collect();
+        items.sort_by_key(|n| std::cmp::Reverse(n.created_at));
         items.truncate(limit);
         Ok(items)
     }
@@ -5962,6 +6060,7 @@ fn test_state_inner(
         audit_broadcast_tx: broadcast::channel(64).0,
         notification_broadcast_tx: broadcast::channel(64).0,
         network_peers: Arc::new(MemNetworkPeerRepository::default()),
+        preview_environments: Arc::new(MemPreviewEnvironmentRepository::default()),
         dependencies: Arc::new(MemDependencyRepository::default()),
         breaking_changes: Arc::new(MemBreakingChangeRepository::default()),
         dependency_policies: Arc::new(MemDependencyPolicyRepository::default()),

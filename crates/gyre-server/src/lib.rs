@@ -43,6 +43,7 @@ pub mod mirror_sync;
 pub(crate) mod oidc;
 pub mod pr_hygiene;
 pub mod pre_accept;
+pub mod preview_env_gc;
 pub mod prompt_assembly;
 pub mod ralph_loop;
 pub mod rate_limit;
@@ -336,6 +337,10 @@ pub struct AppState {
     pub notification_broadcast_tx: broadcast::Sender<String>,
     /// WireGuard network peer registry.
     pub network_peers: Arc<dyn NetworkPeerRepository>,
+    /// Ephemeral preview environments (activity-dashboard.md §"Try it").
+    /// Durable store: rows survive restarts; teardown/TTL keep the row as
+    /// the audit record of what ran.
+    pub preview_environments: Arc<dyn gyre_ports::PreviewEnvironmentRepository>,
     /// Cross-repo dependency graph (M22.4).
     pub dependencies: Arc<dyn DependencyRepository>,
     /// Breaking change records (M22.4 — TASK-020).
@@ -2171,6 +2176,13 @@ pub fn build_state(
         network_peers: store!(
             dyn NetworkPeerRepository,
             mem::MemNetworkPeerRepository::default()
+        ),
+        // Ephemeral preview environments (activity-dashboard.md §"Try it"
+        // links) — durable rows through the port (durable-state invariant),
+        // never an in-memory AppState map.
+        preview_environments: store!(
+            dyn gyre_ports::PreviewEnvironmentRepository,
+            mem::MemPreviewEnvironmentRepository::default()
         ),
         dependencies: store!(
             dyn DependencyRepository,

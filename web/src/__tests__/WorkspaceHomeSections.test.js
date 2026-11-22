@@ -11,6 +11,7 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, waitFor, fireEvent } from '@testing-library/svelte';
+import { resetActivityStream } from '../lib/activityStream.svelte.js';
 
 // ── Mocks ─────────────────────────────────────────────────────────────────────
 
@@ -197,6 +198,10 @@ function setupDefaultMocks() {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // The activity sidebar renders the app-wide live activity stream (a
+  // module-level store shared across component instances, by design);
+  // reset it so each test starts from a clean feed.
+  resetActivityStream();
   setupDefaultMocks();
 });
 
