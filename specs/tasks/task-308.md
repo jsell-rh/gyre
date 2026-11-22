@@ -3,7 +3,7 @@ title: "SQLite as the default durable storage backend (with explicit in-memory o
 spec_ref: "Spec gap spec-f907eda3bd014fe546b838e2 / sqlite-default-storage / 4156114b8040"
 depends_on: []
 progress: not-started
-commits: []
+commits: ["87e0877842f7527a40bbcbe4951b07bcd341d076"]
 ---
 
 ## Required behavior
