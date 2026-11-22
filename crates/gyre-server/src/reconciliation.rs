@@ -446,8 +446,15 @@ pub struct ReconciliationSummary {
 
 /// Run reconciliation for one workspace after its meta-spec set changed.
 ///
-/// `changed_paths` are the meta-spec paths (set-entry `path` values, i.e.
-/// registry meta-spec names) whose pinned version changed in this update.
+/// `changed_meta_spec_ids` are the registry ids of the meta-specs whose
+/// pinned version or required flag changed in this update. The handler
+/// that triggers the wave already holds the resolved registry record, so
+/// the id is threaded through and re-resolved by id — a name lookup is a
+/// global scan over a column with no uniqueness constraint, and
+/// workspace-scoped meta-specs in different workspaces can share a name,
+/// so a name-keyed re-resolution could gate the wave on the wrong record
+/// (e.g. "not required; skipping" against a same-named sibling) and
+/// silently skip a real rollout.
 /// For each, every repo in the workspace is a reconciliation candidate
 /// (the workspace binding governs all repos in the workspace — §2), and
 /// §6 step 2 requires a task per repo: "For each repo, creates a
@@ -472,10 +479,10 @@ pub struct ReconciliationSummary {
 pub async fn run_reconciliation(
     state: &Arc<AppState>,
     workspace_id: &Id,
-    changed_paths: &[String],
+    changed_meta_spec_ids: &[Id],
 ) -> ReconciliationSummary {
     let mut summary = ReconciliationSummary::default();
-    if changed_paths.is_empty() {
+    if changed_meta_spec_ids.is_empty() {
         return summary;
     }
 
@@ -489,7 +496,7 @@ pub async fn run_reconciliation(
 
     info!(
         workspace_id = %ws_id,
-        changed = changed_paths.len(),
+        changed = changed_meta_spec_ids.len(),
         "reconciliation: controller started"
     );
 
@@ -516,9 +523,10 @@ pub async fn run_reconciliation(
         return summary;
     }
 
-    // Resolve each changed meta-spec path to its registry record (kind,
-    // name, new version). The path is the registry meta-spec name (the
-    // registry is the spec-content source of truth).
+    // Resolve each changed meta-spec id to its registry record (kind,
+    // name, new version) — by id, never by name (see the doc comment
+    // above: same-named meta-specs in different workspaces must not
+    // cross-gate the wave).
     //
     // §6 gates reconciliation on an APPROVED rollout: "when a meta-spec
     // change is approved and rolled out". Binding a spec that is still
@@ -534,19 +542,19 @@ pub async fn run_reconciliation(
     // owned by the stale-pin cascade (agent-runtime.md §2), not by blanket
     // workspace reconciliation.
     let mut changed_specs: Vec<gyre_domain::MetaSpec> = Vec::new();
-    for path in changed_paths {
-        match find_meta_spec_by_name(state, path).await {
+    for ms_id in changed_meta_spec_ids {
+        match state.meta_specs.get_by_id(ms_id).await {
             Ok(Some(ms)) => {
                 if !ms.required {
                     info!(
-                        meta_spec = %path,
+                        meta_spec_id = %ms_id,
                         "reconciliation: meta-spec is not required; spec-level bindings own its drift"
                     );
                     continue;
                 }
                 if ms.approval_status != gyre_domain::meta_spec::MetaSpecApprovalStatus::Approved {
                     info!(
-                        meta_spec = %path,
+                        meta_spec_id = %ms_id,
                         status = ms.approval_status.as_str(),
                         "reconciliation: changed meta-spec is not Approved yet; the approval trigger owns this rollout"
                     );
@@ -556,12 +564,12 @@ pub async fn run_reconciliation(
             }
             Ok(None) => {
                 warn!(
-                    meta_spec = %path,
+                    meta_spec_id = %ms_id,
                     "reconciliation: changed meta-spec not found in registry; skipping"
                 );
             }
             Err(e) => {
-                warn!(meta_spec = %path, error = %e, "reconciliation: registry lookup failed");
+                warn!(meta_spec_id = %ms_id, error = %e, "reconciliation: registry lookup failed");
             }
         }
     }
@@ -1300,8 +1308,12 @@ pub async fn maybe_auto_enqueue_reconciliation_mr(
     );
 }
 
-/// Look up a registry meta-spec by name (reconciliation triggers and the
-/// blast-radius endpoint key meta-specs by registry name).
+/// Look up a registry meta-spec by name (the blast-radius endpoint keys
+/// meta-specs by registry name, which comes from a spec path).
+/// Reconciliation triggers must NOT use this — they hold the resolved
+/// record and thread its id (`run_reconciliation` resolves by id): names
+/// are not unique across workspaces, so a name-keyed lookup can gate a
+/// wave on a same-named record in another workspace.
 pub(crate) async fn find_meta_spec_by_name(
     state: &Arc<AppState>,
     name: &str,
@@ -1432,17 +1444,45 @@ fn kind_rank(kind: &str) -> u8 {
 /// Resolve the effective (required, approved, visible) meta-spec snapshots
 /// for a workspace by id. Empty when the workspace does not exist or binds
 /// nothing — the conformance sweep's "nothing to conform to" skip.
+///
+/// Fail closed: a workspace-lookup or effective-set resolution ERROR
+/// propagates (with a warn log) instead of collapsing to an empty set —
+/// "cannot determine the required set" must never silently read as "no
+/// required meta-specs" on the enforcement signals that consume this
+/// (merge-time drift, the §10 conformance sweep, approval-time
+/// `InputContent.meta_spec_set_sha` stamping, the §3.2 agent context).
 pub async fn required_meta_spec_snapshots(
     state: &AppState,
     workspace_id: &Id,
-) -> Vec<gyre_domain::MetaSpecSnapshot> {
+) -> anyhow::Result<Vec<gyre_domain::MetaSpecSnapshot>> {
     let ws = match state.workspaces.find_by_id(workspace_id).await {
         Ok(Some(ws)) => ws,
-        _ => return Vec::new(),
+        // A workspace that does not exist genuinely binds nothing.
+        Ok(None) => return Ok(Vec::new()),
+        Err(e) => {
+            warn!(
+                workspace_id = %workspace_id,
+                error = %e,
+                "required meta-spec set: workspace lookup failed — failing closed"
+            );
+            return Err(anyhow::anyhow!(
+                "workspace lookup failed for required meta-spec set: {e}"
+            ));
+        }
     };
-    resolve_effective_meta_spec_set(state, &ws)
-        .await
-        .unwrap_or_default()
+    match resolve_effective_meta_spec_set(state, &ws).await {
+        Ok(set) => Ok(set),
+        Err(e) => {
+            warn!(
+                workspace_id = %workspace_id,
+                error = %e,
+                "required meta-spec set: effective-set resolution failed — failing closed"
+            );
+            Err(anyhow::anyhow!(
+                "effective meta-spec set resolution failed: {e}"
+            ))
+        }
+    }
 }
 
 /// SHA-256 over the canonical serialization of a meta-spec snapshot set:
@@ -1496,49 +1536,53 @@ pub struct TenantReconciliationSummary {
 /// via `run_reconciliation`, which creates the per-repo reconciliation
 /// tasks under that workspace's own rollout policy (§7).
 ///
-/// Only paths that resolve to a REQUIRED meta-spec propagate: optional
+/// Only entries that resolve to a REQUIRED meta-spec propagate: optional
 /// meta-specs reach code exclusively through spec-level bindings, whose
 /// drift is handled by the stale-pin cascade (agent-runtime.md §2), not by
 /// blanket workspace reconciliation.
+///
+/// `changed_meta_spec_ids` are registry ids — the triggering handler holds
+/// the resolved record and threads its id; name re-resolution is a global
+/// scan that can cross-gate on a same-named meta-spec in another workspace.
 pub async fn run_tenant_reconciliation(
     state: &Arc<AppState>,
     tenant_id: &Id,
-    changed_paths: &[String],
+    changed_meta_spec_ids: &[Id],
 ) -> TenantReconciliationSummary {
     let mut summary = TenantReconciliationSummary::default();
-    if changed_paths.is_empty() {
+    if changed_meta_spec_ids.is_empty() {
         return summary;
     }
 
-    // Only required paths propagate (see doc comment).
-    let mut propagating: Vec<String> = Vec::new();
-    for path in changed_paths {
-        match find_meta_spec_by_name(state, path).await {
+    // Only required entries propagate (see doc comment).
+    let mut propagating: Vec<Id> = Vec::new();
+    for ms_id in changed_meta_spec_ids {
+        match state.meta_specs.get_by_id(ms_id).await {
             Ok(Some(ms)) => {
                 if !ms.required {
                     info!(
-                        meta_spec = %path,
+                        meta_spec_id = %ms_id,
                         "tenant reconciliation: meta-spec is not required; spec-level bindings own its drift"
                     );
                     continue;
                 }
-                propagating.push(path.clone());
+                propagating.push(ms_id.clone());
             }
             Ok(None) => {
                 warn!(
-                    meta_spec = %path,
+                    meta_spec_id = %ms_id,
                     "tenant reconciliation: changed meta-spec not found in registry; skipping"
                 );
             }
             Err(e) => {
-                warn!(meta_spec = %path, error = %e, "tenant reconciliation: registry lookup failed");
+                warn!(meta_spec_id = %ms_id, error = %e, "tenant reconciliation: registry lookup failed");
             }
         }
     }
     if propagating.is_empty() {
         info!(
             tenant_id = %tenant_id,
-            "tenant reconciliation: no changed path is required at tenant scope; nothing to propagate"
+            "tenant reconciliation: no changed meta-spec is required at tenant scope; nothing to propagate"
         );
         return summary;
     }
@@ -1620,8 +1664,15 @@ pub async fn run_conformance_sweep(state: &Arc<AppState>) -> anyhow::Result<Swee
         // replacement for the retired KV set SHA. Required-flag flips and
         // meta-spec approvals change the governing set, so code produced
         // under a different set is drift.
-        let current_sha =
-            meta_spec_snapshot_sha(&required_meta_spec_snapshots(state, &ws.id).await);
+        //
+        // Fail closed: an unresolvable required set must NOT read as "no
+        // set bound" (the empty-SHA skip below) — that would silently
+        // disable drift detection for the outage. The error propagates:
+        // jobs.rs logs the failed sweep and the next hourly pass retries;
+        // a sweep that cannot determine desired state would misreport
+        // conformance for the affected workspaces.
+        let snaps = required_meta_spec_snapshots(state, &ws.id).await?;
+        let current_sha = meta_spec_snapshot_sha(&snaps);
         if current_sha.is_empty() {
             // No set bound — nothing to conform to (§10: only repos whose
             // workspace binds a meta-spec set are in scope).
@@ -2025,15 +2076,22 @@ async fn mr_recorded_meta_specs_used(
 ///   meta-specs were injected — §9 skips the check gracefully),
 /// - every currently-required meta-spec is matched at its current
 ///   version and content hash (pass).
+///
+/// Fail closed: a required-set resolution error propagates rather than
+/// reading as "no required meta-specs" — a store outage must not silently
+/// disable merge-time drift enforcement.
 pub async fn mr_meta_spec_drift(
     state: &AppState,
     mr: &gyre_domain::MergeRequest,
-) -> Option<MetaSpecDrift> {
-    let current = required_meta_spec_snapshots(state, &mr.workspace_id).await;
+) -> anyhow::Result<Option<MetaSpecDrift>> {
+    let current = required_meta_spec_snapshots(state, &mr.workspace_id).await?;
     if current.is_empty() {
-        return None;
+        return Ok(None);
     }
-    let produced = mr_recorded_meta_specs_used(state, mr).await?;
+    let produced = match mr_recorded_meta_specs_used(state, mr).await {
+        Some(used) => used,
+        None => return Ok(None),
+    };
 
     let mut drifted: Vec<gyre_domain::MetaSpecSnapshot> = Vec::new();
     for cur in &current {
@@ -2047,12 +2105,12 @@ pub async fn mr_meta_spec_drift(
         }
     }
     if drifted.is_empty() {
-        return None;
+        return Ok(None);
     }
-    Some(MetaSpecDrift {
+    Ok(Some(MetaSpecDrift {
         produced,
         current: drifted,
-    })
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -2224,7 +2282,11 @@ mod tests {
     /// The workspace's current effective-set SHA (registry model): the
     /// SHA over the required, approved, visible snapshots.
     async fn active_set_sha(state: &Arc<AppState>, ws_id: &str) -> String {
-        meta_spec_snapshot_sha(&required_meta_spec_snapshots(state, &Id::new(ws_id)).await)
+        meta_spec_snapshot_sha(
+            &required_meta_spec_snapshots(state, &Id::new(ws_id))
+                .await
+                .unwrap(),
+        )
     }
 
     async fn open_tasks_with_label(state: &Arc<AppState>, label: &str) -> Vec<gyre_domain::Task> {
@@ -2290,7 +2352,7 @@ mod tests {
         let _repo = make_repo(&state, "repo-1", "ws-recon-1").await;
         let ms = make_required_global_spec(&state, "backend-developer", 4).await;
 
-        let summary = run_reconciliation(&state, &ws.id, std::slice::from_ref(&ms.name)).await;
+        let summary = run_reconciliation(&state, &ws.id, std::slice::from_ref(&ms.id)).await;
 
         assert_eq!(summary.tasks_created, 1);
         let tasks = open_tasks_with_label(&state, RECONCILIATION_LABEL).await;
@@ -2323,7 +2385,7 @@ mod tests {
         let ws = make_workspace(&state, "ws-recon-empty").await;
         let ms = make_meta_spec(&state, "backend-developer", 2).await;
 
-        let summary = run_reconciliation(&state, &ws.id, std::slice::from_ref(&ms.name)).await;
+        let summary = run_reconciliation(&state, &ws.id, std::slice::from_ref(&ms.id)).await;
         assert_eq!(summary.tasks_created, 0);
         assert_eq!(
             open_tasks_with_label(&state, RECONCILIATION_LABEL)
@@ -2339,7 +2401,7 @@ mod tests {
         let ws = make_workspace(&state, "ws-recon-unknown").await;
         let _repo = make_repo(&state, "repo-u", "ws-recon-unknown").await;
 
-        let summary = run_reconciliation(&state, &ws.id, &["no-such-spec".to_string()]).await;
+        let summary = run_reconciliation(&state, &ws.id, &[Id::new("no-such-spec")]).await;
         assert_eq!(summary.tasks_created, 0);
     }
 
@@ -2352,11 +2414,11 @@ mod tests {
         let _repo = make_repo(&state, "repo-d", "ws-recon-dup").await;
         let ms = make_required_global_spec(&state, "backend-developer", 4).await;
 
-        let first = run_reconciliation(&state, &ws.id, std::slice::from_ref(&ms.name)).await;
+        let first = run_reconciliation(&state, &ws.id, std::slice::from_ref(&ms.id)).await;
         assert_eq!(first.tasks_created, 1);
 
         // Re-run with the same version → no new task.
-        let second = run_reconciliation(&state, &ws.id, std::slice::from_ref(&ms.name)).await;
+        let second = run_reconciliation(&state, &ws.id, std::slice::from_ref(&ms.id)).await;
         assert_eq!(second.tasks_created, 0);
         assert_eq!(second.tasks_skipped, 1);
         assert_eq!(
@@ -2375,7 +2437,7 @@ mod tests {
             })
             .await
             .unwrap();
-        let third = run_reconciliation(&state, &ws.id, std::slice::from_ref(&ms.name)).await;
+        let third = run_reconciliation(&state, &ws.id, std::slice::from_ref(&ms.id)).await;
         assert_eq!(third.tasks_created, 1);
         assert_eq!(
             open_tasks_with_label(&state, RECONCILIATION_LABEL)
@@ -2501,7 +2563,7 @@ mod tests {
         )
         .await;
 
-        let summary = run_reconciliation(&state, &ws.id, std::slice::from_ref(&ms.name)).await;
+        let summary = run_reconciliation(&state, &ws.id, std::slice::from_ref(&ms.id)).await;
 
         // All 3 tasks exist immediately — no deferral.
         assert_eq!(summary.tasks_created, 3);
@@ -2533,7 +2595,7 @@ mod tests {
         )
         .await;
 
-        let summary = run_reconciliation(&state, &ws.id, std::slice::from_ref(&ms.name)).await;
+        let summary = run_reconciliation(&state, &ws.id, std::slice::from_ref(&ms.id)).await;
 
         // First batch only: 2 of 3 tasks, the third deferred.
         assert_eq!(summary.tasks_created, 2);
@@ -2637,7 +2699,7 @@ mod tests {
         )
         .await;
 
-        let summary = run_reconciliation(&state, &ws.id, std::slice::from_ref(&ms.name)).await;
+        let summary = run_reconciliation(&state, &ws.id, std::slice::from_ref(&ms.id)).await;
 
         // §7 Background: tasks are created but left in Backlog, WITHOUT the
         // delegation signal — they cannot trigger agent spawning until the
@@ -2672,7 +2734,7 @@ mod tests {
         )
         .await;
 
-        run_reconciliation(&state, &ws.id, std::slice::from_ref(&ms.name)).await;
+        run_reconciliation(&state, &ws.id, std::slice::from_ref(&ms.id)).await;
 
         let tasks = open_tasks_with_label(&state, RECONCILIATION_LABEL).await;
         assert_eq!(tasks.len(), 1);
@@ -2701,7 +2763,7 @@ mod tests {
         )
         .await;
 
-        let summary = run_reconciliation(&state, &ws.id, std::slice::from_ref(&ms.name)).await;
+        let summary = run_reconciliation(&state, &ws.id, std::slice::from_ref(&ms.id)).await;
         assert_eq!(summary.tasks_created, 1);
         assert_eq!(
             pending_rollout_state(&state, "ws-switch").await.unwrap()["remaining"]
@@ -2758,7 +2820,7 @@ mod tests {
         )
         .await;
 
-        let summary = run_reconciliation(&state, &ws.id, std::slice::from_ref(&ms.name)).await;
+        let summary = run_reconciliation(&state, &ws.id, std::slice::from_ref(&ms.id)).await;
         assert_eq!(summary.tasks_created, 1);
 
         // Admin widens the batch; batch 1 completes.
@@ -2815,7 +2877,7 @@ mod tests {
         )
         .await;
 
-        let summary = run_reconciliation(&state, &ws.id, std::slice::from_ref(&ms.name)).await;
+        let summary = run_reconciliation(&state, &ws.id, std::slice::from_ref(&ms.id)).await;
         assert_eq!(summary.tasks_created, 1);
         assert_eq!(
             pending_rollout_state(&state, "ws-sw-bg").await.unwrap()["remaining"]
@@ -2893,7 +2955,7 @@ mod tests {
         )
         .await;
         let bg_summary =
-            run_reconciliation(&state, &ws.id, std::slice::from_ref(&bg_spec.name)).await;
+            run_reconciliation(&state, &ws.id, std::slice::from_ref(&bg_spec.id)).await;
         assert_eq!(bg_summary.tasks_created, 3);
         let parked = open_tasks_with_label(&state, RECONCILIATION_LABEL).await;
         assert_eq!(parked.len(), 3);
@@ -2913,8 +2975,7 @@ mod tests {
         )
         .await;
         let roll_spec = make_required_global_spec(&state, "code-reviewer", 2).await;
-        let summary =
-            run_reconciliation(&state, &ws.id, std::slice::from_ref(&roll_spec.name)).await;
+        let summary = run_reconciliation(&state, &ws.id, std::slice::from_ref(&roll_spec.id)).await;
         assert_eq!(summary.tasks_created, 1);
         assert_eq!(
             pending_rollout_state(&state, "ws-bg-hist").await.unwrap()["remaining"]
@@ -3067,7 +3128,7 @@ mod tests {
         .await;
 
         // Wave A: persona v4 → 1 task + 3 deferred (stored).
-        let a = run_reconciliation(&state, &ws.id, std::slice::from_ref(&persona.name)).await;
+        let a = run_reconciliation(&state, &ws.id, std::slice::from_ref(&persona.id)).await;
         assert_eq!(a.tasks_created, 1);
         assert_eq!(
             pending_rollout_state(&state, "ws-kvfail").await.unwrap()["remaining"]
@@ -3083,7 +3144,7 @@ mod tests {
         // failure instead of overwriting the stored remainder.
         kv.fail_reads
             .store(true, std::sync::atomic::Ordering::SeqCst);
-        let b = run_reconciliation(&state, &ws.id, std::slice::from_ref(&reviewer.name)).await;
+        let b = run_reconciliation(&state, &ws.id, std::slice::from_ref(&reviewer.id)).await;
         assert_eq!(b.tasks_created, 1);
         kv.fail_reads
             .store(false, std::sync::atomic::Ordering::SeqCst);
@@ -3152,13 +3213,13 @@ mod tests {
         .await;
 
         // Wave A: persona v4 → 1 task + 3 deferred.
-        let a = run_reconciliation(&state, &ws.id, std::slice::from_ref(&persona.name)).await;
+        let a = run_reconciliation(&state, &ws.id, std::slice::from_ref(&persona.id)).await;
         assert_eq!(a.tasks_created, 1);
 
         // Wave B triggers while wave A's rollout is in flight (its first
         // batch is still open): reviewer v2 → 1 task + 3 deferred. Must
         // extend, not clobber, wave A's remainder.
-        let b = run_reconciliation(&state, &ws.id, std::slice::from_ref(&reviewer.name)).await;
+        let b = run_reconciliation(&state, &ws.id, std::slice::from_ref(&reviewer.id)).await;
         assert_eq!(b.tasks_created, 1);
 
         let pending = pending_rollout_state(&state, "ws-overlap")
@@ -3247,7 +3308,7 @@ mod tests {
         )
         .await;
 
-        let first = run_reconciliation(&state, &ws.id, std::slice::from_ref(&ms.name)).await;
+        let first = run_reconciliation(&state, &ws.id, std::slice::from_ref(&ms.id)).await;
         assert_eq!(first.tasks_created, 1); // batch 1
         assert_eq!(
             pending_rollout_state(&state, "ws-retrig").await.unwrap()["remaining"]
@@ -3277,7 +3338,7 @@ mod tests {
             "wave A must have exactly one open task"
         );
 
-        let second = run_reconciliation(&state, &ws.id, std::slice::from_ref(&ms.name)).await;
+        let second = run_reconciliation(&state, &ws.id, std::slice::from_ref(&ms.id)).await;
         assert_eq!(second.tasks_created, 1); // one deferred repo, as batch 1
         assert_eq!(second.tasks_skipped, 1); // the already-open repo
 
@@ -3994,7 +4055,7 @@ mod tests {
         let _r3 = make_repo(&state, "repo-m3", "ws-recon-multi").await;
         let ms = make_required_global_spec(&state, "backend-developer", 4).await;
 
-        let s = run_reconciliation(&state, &ws.id, std::slice::from_ref(&ms.name)).await;
+        let s = run_reconciliation(&state, &ws.id, std::slice::from_ref(&ms.id)).await;
         let tasks = open_tasks_with_label(&state, RECONCILIATION_LABEL).await;
         assert_eq!(s.tasks_created, 3, "§6 step 2: task per affected repo");
         assert_eq!(tasks.len(), 3);
@@ -4023,9 +4084,9 @@ mod tests {
         let _repo2 = make_repo(&state, "repo-pb", "ws-recon-w2").await;
         let ms = make_required_global_spec(&state, "backend-developer", 4).await;
 
-        let s1 = run_reconciliation(&state, &ws1.id, std::slice::from_ref(&ms.name)).await;
+        let s1 = run_reconciliation(&state, &ws1.id, std::slice::from_ref(&ms.id)).await;
         assert_eq!(s1.tasks_created, 1);
-        let s2 = run_reconciliation(&state, &ws2.id, std::slice::from_ref(&ms.name)).await;
+        let s2 = run_reconciliation(&state, &ws2.id, std::slice::from_ref(&ms.id)).await;
         assert_eq!(
             s2.tasks_created, 1,
             "second workspace must get its own reconciliation task"
@@ -4082,7 +4143,7 @@ mod tests {
             .unwrap();
 
         // Two reconciliation tasks created (one per repo).
-        run_reconciliation(&state, &ws.id, std::slice::from_ref(&ms.name)).await;
+        run_reconciliation(&state, &ws.id, std::slice::from_ref(&ms.id)).await;
 
         let count_completed = |ws: gyre_domain::Workspace| {
             let state = state.clone();
@@ -4263,7 +4324,7 @@ mod tests {
         };
 
         // Wave 1: v4 → one task → complete → emit.
-        run_reconciliation(&state, &ws.id, std::slice::from_ref(&ms.name)).await;
+        run_reconciliation(&state, &ws.id, std::slice::from_ref(&ms.id)).await;
         complete_all_open().await;
         maybe_emit_reconciliation_completed(&state, &ws.id).await;
         assert_eq!(count_completed().await, 1, "wave 1 must emit exactly once");
@@ -4282,7 +4343,7 @@ mod tests {
             })
             .await
             .unwrap();
-        run_reconciliation(&state, &ws.id, std::slice::from_ref(&ms.name)).await;
+        run_reconciliation(&state, &ws.id, std::slice::from_ref(&ms.id)).await;
         let open = open_tasks_with_label(&state, RECONCILIATION_LABEL)
             .await
             .into_iter()
@@ -4679,7 +4740,7 @@ mod tests {
         )
         .await;
 
-        assert_eq!(mr_meta_spec_drift(&state, &mr).await, None);
+        assert_eq!(mr_meta_spec_drift(&state, &mr).await.unwrap(), None);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -4703,6 +4764,7 @@ mod tests {
 
         let drift = mr_meta_spec_drift(&state, &mr)
             .await
+            .expect("required-set resolution failed")
             .expect("drift expected");
         assert_eq!(drift.produced.len(), 1);
         assert_eq!(drift.produced[0].version, 1);
@@ -4749,6 +4811,7 @@ mod tests {
 
         let drift = mr_meta_spec_drift(&state, &mr)
             .await
+            .expect("required-set resolution failed")
             .expect("missing required meta-spec is drift");
         assert_eq!(drift.current.len(), 1);
     }
@@ -4774,7 +4837,7 @@ mod tests {
         );
         state.merge_requests.create(&mr).await.unwrap();
 
-        assert_eq!(mr_meta_spec_drift(&state, &mr).await, None);
+        assert_eq!(mr_meta_spec_drift(&state, &mr).await.unwrap(), None);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -4798,7 +4861,7 @@ mod tests {
         )
         .await;
 
-        assert_eq!(mr_meta_spec_drift(&state, &mr).await, None);
+        assert_eq!(mr_meta_spec_drift(&state, &mr).await.unwrap(), None);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -4826,7 +4889,7 @@ mod tests {
         mr.author_agent_id = Some(agent.id.clone());
         state.merge_requests.create(&mr).await.unwrap();
 
-        assert_eq!(mr_meta_spec_drift(&state, &mr).await, None);
+        assert_eq!(mr_meta_spec_drift(&state, &mr).await.unwrap(), None);
     }
 
     #[test]
@@ -4913,7 +4976,7 @@ mod tests {
         let _repo3 = make_repo(&state, "repo-ten-3", "ws-ten-other").await;
 
         let summary =
-            run_tenant_reconciliation(&state, &Id::new("default"), std::slice::from_ref(&ms.name))
+            run_tenant_reconciliation(&state, &Id::new("default"), std::slice::from_ref(&ms.id))
                 .await;
 
         assert_eq!(summary.workspaces_scanned, 2);
@@ -4951,7 +5014,7 @@ mod tests {
         let _repo1 = make_repo(&state, "repo-unb-1", "ws-unb-1").await;
 
         let summary =
-            run_tenant_reconciliation(&state, &Id::new("default"), std::slice::from_ref(&ms.name))
+            run_tenant_reconciliation(&state, &Id::new("default"), std::slice::from_ref(&ms.id))
                 .await;
         assert_eq!(summary.workspaces_scanned, 0);
         assert_eq!(summary.tasks_created, 0);

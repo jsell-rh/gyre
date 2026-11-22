@@ -4689,7 +4689,10 @@ async fn selection_meta_spec_drift_hold(
     };
 
     for mr in &members {
-        if let Some(drift) = crate::reconciliation::mr_meta_spec_drift(state, mr).await {
+        // Fail closed: a required-set resolution error propagates — a store
+        // outage must not silently disable merge-time drift enforcement
+        // (mr_meta_spec_drift errors rather than reading as "no drift").
+        if let Some(drift) = crate::reconciliation::mr_meta_spec_drift(state, mr).await? {
             let policy =
                 crate::merge_policy::merge_policy_or_default(state, &mr.workspace_id).await;
             if policy.require_current_meta_spec_set {
@@ -11093,6 +11096,7 @@ mod tests {
         .await;
         let drift = crate::reconciliation::mr_meta_spec_drift(&state, &mr)
             .await
+            .expect("required-set resolution failed")
             .expect("drift expected");
 
         record_meta_spec_drift_warning(&state, &mr, &drift).await;

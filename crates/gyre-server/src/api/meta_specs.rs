@@ -8803,7 +8803,12 @@ pub async fn update_meta_spec_registry(
         }
     }
     if newly_approved || required_newly_set {
-        let spec_path = ms.name.clone();
+        // Thread the resolved record's id — the reconciliation controllers
+        // re-resolve by id. A name-keyed re-resolution is a global scan over
+        // a column with no uniqueness constraint: workspace-scoped
+        // meta-specs in different workspaces can share a name, and on
+        // collision the wave could gate on the wrong record ("not required;
+        // skipping") and silently skip a real rollout.
         if ms.scope == MetaSpecScope::Tenant {
             // §8 Tenant-Scope Meta-Spec Changes: a tenant-level change fans
             // out to every workspace in the tenant. Each workspace
@@ -8813,12 +8818,12 @@ pub async fn update_meta_spec_registry(
                 let summary = crate::reconciliation::run_tenant_reconciliation(
                     &state,
                     &Id::new(scope_tenant),
-                    std::slice::from_ref(&spec_path),
+                    std::slice::from_ref(&ms.id),
                 )
                 .await;
                 tracing::info!(
                     tenant_id = %scope_tenant,
-                    meta_spec = %spec_path,
+                    meta_spec = %ms.name,
                     workspaces_scanned = summary.workspaces_scanned,
                     created = summary.tasks_created,
                     skipped = summary.tasks_skipped,
@@ -8846,12 +8851,12 @@ pub async fn update_meta_spec_registry(
                     let summary = crate::reconciliation::run_reconciliation(
                         &state,
                         &ws.id,
-                        std::slice::from_ref(&spec_path),
+                        std::slice::from_ref(&ms.id),
                     )
                     .await;
                     tracing::info!(
                         workspace_id = %ws.id,
-                        meta_spec = %spec_path,
+                        meta_spec = %ms.name,
                         created = summary.tasks_created,
                         skipped = summary.tasks_skipped,
                         "meta-spec change triggered reconciliation"

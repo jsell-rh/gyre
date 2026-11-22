@@ -52,6 +52,12 @@ pub struct SpecLedgerResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
     pub current_sha: String,
+    /// The spec's registry identity — content blob SHA plus meta-spec
+    /// binding set (agent-runtime.md §2). Equals `current_sha` when the
+    /// spec has no bindings. The SHA the approval ledger records and the
+    /// SHA a signing client records in `InputContent.spec_sha` when
+    /// approving with a user_content_signature (§2.2).
+    pub registry_sha: String,
     pub approval_mode: String,
     pub approval_status: String,
     pub linked_tasks: Vec<String>,
@@ -71,11 +77,12 @@ pub struct SpecLedgerResponse {
 impl From<SpecLedgerEntry> for SpecLedgerResponse {
     fn from(e: SpecLedgerEntry) -> Self {
         Self {
+            registry_sha: e.registry_sha(),
             path: e.path,
             title: e.title,
             owner: e.owner,
             kind: e.kind,
-            current_sha: e.current_sha,
+            current_sha: e.current_sha.clone(),
             approval_mode: e.approval_mode,
             approval_status: e.approval_status.to_string(),
             linked_tasks: e.linked_tasks,
@@ -770,18 +777,38 @@ pub async fn approve_spec(
                 // effective registry meta-spec set (§2.2, registry model):
                 // SHA-256 over the required+approved meta-spec snapshots
                 // visible from the workspace. When none apply, remains
-                // empty string (graceful fallback).
+                // empty string (graceful fallback). Fail closed on lookup
+                // errors: an unresolvable set must not stamp an empty SHA
+                // (under-reported signed authorization) — the same
+                // fail-open read class the bindings PUT and spawn gate
+                // reject.
                 let meta_spec_set_sha = crate::reconciliation::meta_spec_snapshot_sha(
                     &crate::reconciliation::required_meta_spec_snapshots(
                         &state,
                         &gyre_common::Id::new(&workspace_id),
                     )
-                    .await,
+                    .await
+                    .map_err(|e| {
+                        ApiError::Internal(anyhow::anyhow!(
+                            "failed to resolve workspace required meta-spec set for approval: {e}"
+                        ))
+                    })?,
                 );
 
+                // §2.4 context binding: the root records the SAME registry
+                // SHA the SpecApprovalEvent above records — content blob
+                // SHA plus meta-spec binding set (agent-runtime.md §2).
+                // resolve_task_binding_context feeds the newest approval
+                // event's spec_sha into verify_context_binding binding 3,
+                // which compares it against this field; recording the
+                // content SHA here while the event records the registry
+                // SHA would reject every attested push for a bound spec
+                // (the two SHAs are only equal when the spec is unbound).
+                // A signing client reads the registry SHA from
+                // GET /specs/:path (SpecLedgerResponse.registry_sha).
                 let input_content = gyre_common::InputContent {
                     spec_path: spec_path.clone(),
-                    spec_sha: req.sha.clone(),
+                    spec_sha: registry_sha.clone(),
                     workspace_id: workspace_id.clone(),
                     repo_id: repo_id.clone(),
                     persona_constraints,
@@ -2497,9 +2524,18 @@ pub async fn dry_run_constraints(
         }
     });
 
-    // Build a representative agent context from workspace state.
+    // Build a representative agent context from workspace state. Fail
+    // closed on lookup errors: an unresolvable required set must not
+    // preview as an empty SHA (which would falsely pass against an
+    // approval that stamped an empty set).
     let meta_spec_set_sha = crate::reconciliation::meta_spec_snapshot_sha(
-        &crate::reconciliation::required_meta_spec_snapshots(&state, &ws_id).await,
+        &crate::reconciliation::required_meta_spec_snapshots(&state, &ws_id)
+            .await
+            .map_err(|e| {
+                ApiError::Internal(anyhow::anyhow!(
+                    "failed to resolve workspace required meta-spec set: {e}"
+                ))
+            })?,
     );
 
     let agent_ctx = AgentContext {
@@ -6551,6 +6587,127 @@ specs:
             }
             _ => panic!("expected SignedInput, got DerivedInput"),
         }
+    }
+
+    /// task-302 review repair: the SpecApprovalEvent and the attestation
+    /// root must record ONE consistent SHA — the spec's REGISTRY SHA
+    /// (content blob SHA plus meta-spec binding set). At the prior base the
+    /// event recorded the registry SHA while the root minted in the same
+    /// handler recorded the content SHA (InputContent.spec_sha = req.sha),
+    /// so resolve_task_binding_context — which feeds the newest approval
+    /// event's spec_sha into verify_context_binding binding 3 and compares
+    /// it against the root's recorded SHA — never matched for a bound spec
+    /// and every attested push for a task referencing it was rejected.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn approve_spec_records_registry_sha_on_both_event_and_attestation_root() {
+        let (app, state) = app_with_spec();
+
+        // Bind the spec to one meta-spec version: the binding set is
+        // spec-registry metadata, so the registry SHA diverges from the
+        // content blob SHA.
+        let binding = gyre_domain::meta_spec::MetaSpecBinding {
+            id: gyre_common::Id::new("bind-root-1"),
+            spec_id: "system/design-principles.md".to_string(),
+            meta_spec_id: gyre_common::Id::new("ms-root-1"),
+            pinned_version: 1,
+            created_at: 1,
+        };
+        let mut bound = state
+            .spec_ledger
+            .find_by_path("system/design-principles.md")
+            .await
+            .unwrap()
+            .unwrap();
+        bound.bindings_sha = gyre_domain::meta_spec::canonical_bindings_sha(&[binding]);
+        state.spec_ledger.save(&bound).await.unwrap();
+
+        let registry_sha = bound.registry_sha();
+        assert_ne!(
+            registry_sha, bound.current_sha,
+            "a bound spec's registry SHA must differ from its content SHA"
+        );
+
+        // KeyBinding for the approver ("user:system" when using test-token).
+        let (pkcs8_bytes, pub_key) = generate_test_ed25519_keypair();
+        let kb = gyre_common::KeyBinding {
+            public_key: pub_key.clone(),
+            user_identity: "user:system".to_string(),
+            issuer: "http://localhost:3000".to_string(),
+            trust_anchor_id: "tenant-idp".to_string(),
+            issued_at: 1_700_000_000,
+            expires_at: u64::MAX,
+            user_signature: vec![10],
+            platform_countersign: vec![20],
+        };
+        state.key_bindings.store("default", &kb).await.unwrap();
+
+        // The signing client constructs the InputContent the server will
+        // build — spec_sha is the REGISTRY SHA (a real client reads it from
+        // GET /specs/:path as SpecLedgerResponse.registry_sha).
+        let input_content = gyre_common::InputContent {
+            spec_path: "system/design-principles.md".to_string(),
+            spec_sha: registry_sha.clone(),
+            workspace_id: String::new(), // ledger entry has workspace_id: None
+            repo_id: String::new(),      // ledger entry has repo_id: None
+            persona_constraints: vec![],
+            meta_spec_set_sha: String::new(),
+            scope: gyre_common::ScopeConstraint {
+                allowed_paths: vec![],
+                forbidden_paths: vec![],
+            },
+        };
+        let user_content_signature = sign_input_content(&pkcs8_bytes, &input_content);
+
+        let body = serde_json::json!({
+            "sha": "a".repeat(40),
+            "user_content_signature": user_content_signature
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/specs/system%2Fdesign-principles.md/approve")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        // The stored root records the registry SHA (not the content SHA).
+        let attestations = state
+            .chain_attestations
+            .find_by_repo("", 0, u64::MAX)
+            .await
+            .unwrap();
+        assert!(!attestations.is_empty());
+        let root_spec_sha = match &attestations[0].input {
+            gyre_common::AttestationInput::Signed(signed) => signed.content.spec_sha.clone(),
+            _ => panic!("expected SignedInput, got DerivedInput"),
+        };
+        assert_eq!(root_spec_sha, registry_sha);
+
+        // The push-time context binding resolves the SAME SHA for a task
+        // referencing this spec: resolve_task_binding_context returns the
+        // newest active approval event's spec_sha, which verify_context_
+        // binding binding 3 compares against the root's recorded SHA — the
+        // two must be equal for the attested push to verify.
+        let task_id = gyre_common::Id::new("task-root-sha-1");
+        let mut task =
+            gyre_domain::Task::new(task_id.clone(), "Implement design principles", 1700000000);
+        task.spec_path = Some("system/design-principles.md".to_string());
+        state.tasks.create(&task).await.unwrap();
+        let (task_spec_sha, _) =
+            crate::constraint_check::resolve_task_binding_context(&state, &task_id.to_string())
+                .await;
+        assert_eq!(
+            task_spec_sha.as_deref(),
+            Some(root_spec_sha.as_str()),
+            "the task binding context and the attestation root must record one \
+             consistent SHA (registry SHA)"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
