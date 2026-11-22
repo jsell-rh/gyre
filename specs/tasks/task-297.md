@@ -2,8 +2,8 @@
 title: "Gate all implementation work on approved specs"
 spec_ref: "Spec gap spec-41a92c20354c6a108e6074e3 / approval-single-trigger / 4a3f940495a8"
 depends_on: []
-progress: not-started
-commits: []
+progress: complete
+commits: ["f6a061eb4e0408cbdb7cf7a28bdda2ca12d8ff99", "69394abf5b8cd8913144f1f3cd84b1a03c57045b", "bb42b05c13f78e387cd5fa3d3f41ac17d4979124", "611bc5ffae121a96eb1becf6c233901e541d881f", "ae87cf5bb64387c932c827b613d3c8d99afaf2b0", "52397d1622d72bfe9f63fe42ca85484a124c1ae5", "6c7ce4091376fc85d674281dc7559842a3bed04e", "569ea13821554e618ee7446aecd69c72a35a8ce7", "d5662b9e702f3691db12a406b3d9e8b5c4363e6f"]
 ---
 
 ## Required behavior
@@ -61,3 +61,56 @@ Canonical spec: `specs/system/agent-runtime.md`. Source: `678a8ac3e3bfeafeb66cdb
     ]
   }
 ]
+
+## Shipped
+
+The single-trigger gates shipped in earlier rounds of this task are
+unchanged in behavior:
+
+- **Task-creation gate** — POST /api/v1/tasks and MCP `gyre_create_task`
+  reject `task_type=implementation` unless the `spec_ref` resolves to a
+  spec currently Approved in the approval ledger at exactly the pinned
+  path@sha; unapproved, Pending, invalidated, or unresolvable refs yield
+  4xx / `SPEC_APPROVAL_REQUIRED` before any task row is written.
+  Delegation/Coordination tasks and untyped push-hook tasks are
+  unaffected.
+- **Scheduler gate (defense in depth)** — the Phase-4 scan in
+  signal_chain.rs re-verifies each Backlog Implementation task's
+  spec_ref against the Approved ledger before spawning; on failure the
+  task stays Backlog with the `spec-approval-missing` skip label and a
+  logged reason (no agent record, no InProgress transition). The one
+  documented non-spec class — forge-filed cascade-test tasks
+  (cascade-test label AND no spec_ref, per agent-runtime.md §1 as
+  amended in round 69394abf) — is exempt; a task pinning any spec_ref is
+  always gated.
+- **Direct-spawn gate** — POST /api/v1/agents/spawn returns 403 for
+  non-scheduler callers requesting a worker bound to an Implementation
+  task; interrogation and other system-initiated spawns still succeed.
+
+### This round: formatting-only verification repair (f6a061eb)
+
+Candidate verification (checks.sh, exit 1) failed only the changed-lines
+rustfmt check on three files touched by the task-288 merge:
+api/spawn.rs (3724-3725), merge_processor.rs (4118-4121),
+signal_chain.rs (3107-3112). Commit f6a061eb applies `rustfmt` to those
+three files — joining the over-wrapped call chains and the two-element
+`vec![]` literal — with zero behavior change (3 insertions, 12
+deletions, all in the flagged regions). `rustfmt --check` is now clean
+and idempotent on all three files. No crate was rebuilt for this; no
+other check from the failing run was altered (clippy changed-lines,
+architecture lints, ABAC registry, and all script gates already passed
+in that run and are untouched by this commit).
+
+### Test evidence (prior rounds, behavior unchanged by f6a061eb)
+
+- `signal_chain::tests::scheduler_skips_unapproved_spec_and_spawns_approved_twin`
+- `signal_chain::tests::scheduler_stops_spawn_when_approval_invalidated_by_push`
+- `signal_chain::tests::cascade_label_does_not_bypass_spec_approval_gate`
+- `signal_chain::tests::scheduler_spawns_agent_for_cascade_test_task`
+- API integration coverage for the 4xx task-creation gate and the 403
+  direct-spawn gate (tests/api_integration.rs).
+
+For the independent verifier (gyre-server test compilation is outside
+this sandbox's budget): `cargo nextest run -p gyre-server signal_chain::`
+plus the task-creation / direct-spawn integration tests above, and the
+changed-lines rustfmt check that failed in run c98d76932dad471388e12011d0384d01.
