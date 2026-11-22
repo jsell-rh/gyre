@@ -3,7 +3,7 @@ title: "Meta-spec API at specced routes with scope-level admin auth"
 spec_ref: "Spec gap spec-41a92c20354c6a108e6074e3 / meta-spec-api-contract / 4a3f940495a8"
 depends_on: []
 progress: ready-for-review
-commits: ["7a24bf2c5a9f20a10b6f629650b8528da19465f4", "d280cff1bf06a1c0d5a15d10024d448cee3a842b", "c5a157de6c437f3f3c7f30156d88c46545fea89b"]
+commits: ["3ec711cdd10afe45b40ad5a8912b8967c0e66f58", "7a24bf2c5a9f20a10b6f629650b8528da19465f4", "d280cff1bf06a1c0d5a15d10024d448cee3a842b", "c5a157de6c437f3f3c7f30156d88c46545fea89b"]
 ---
 
 ## Required behavior
@@ -83,8 +83,9 @@ Canonical spec: `specs/system/agent-runtime.md`. Source: `678a8ac3e3bfeafeb66cdb
 ## Shipped
 
 Commits `c5a157de` (route move + scope-level write gate), `d280cff1`
-(review repair: cross-tenant Admin write containment), and `7a24bf2c`
-(verification repair: clippy lint fixes) implement the task.
+(review repair: cross-tenant Admin write containment), `7a24bf2c`
+(verification repair: clippy lint fixes), and `3ec711cd` (review repair:
+AC3 test-setup defect) implement the task.
 
 ### Route contract (agent-runtime §2 API table)
 
@@ -154,6 +155,19 @@ file is clean, and a minimal standalone clippy probe reproduces both
 warnings on the fixed pattern (evidence under
 /tmp/stage/review-evidence).
 
+### AC3 test-setup repair (`3ec711cd`)
+
+The F1 review finding: `workspace_owner_cannot_write_global_or_tenant_meta_spec`
+POSTs a Tenant-scoped entry with `scope_id "default"` as the system
+test-token and asserts CREATED, but the mem test state wires an empty
+tenant repository — `require_registry_scope`'s Tenant branch fails closed
+(404, "tenant 'default' not found") before the write gate, so the
+assertion failed whenever the test actually ran. The test now calls
+`bootstrap_default_tenant(&state)` in setup (the same pattern as
+`tenant_meta_spec_set_get_put_roundtrip` and the reconciliation tests).
+Production behavior is unchanged: a nonexistent scope tenant still fails
+closed; production materializes the row at startup (main.rs).
+
 ### Test evidence
 
 `registry_tests` (api/meta_specs.rs):
@@ -183,4 +197,7 @@ independent verifier — required probes:
 `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib registry_tests`,
 `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib rbac`, and
 `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib prompt_assembly` (full
-list in /tmp/stage/review-evidence/task-301-probes.md).
+list in /tmp/stage/review-evidence/task-301-probes.md). The AC3-repair
+probe specifically is
+`SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib registry_tests workspace_owner_cannot_write_global_or_tenant_meta_spec`
+(evidence: /tmp/stage/review-evidence/F1-fix-default-tenant-bootstrap.md).
