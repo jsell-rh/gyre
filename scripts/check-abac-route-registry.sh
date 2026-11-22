@@ -28,7 +28,11 @@
 # 088e7048, converting a hard CI failure into a silent grandfather. The
 # count must never rise; it must shrink as routes are moved into the
 # resolver (delete the entry when you register a route).
-FROZEN_EXEMPTION_COUNT=46
+# task-290 lowered the baseline to 38 (the file already sat at 42 entries
+# below the old frozen 46): the four spec-graph query endpoints
+# (stale-links, conflicts, :path/dependents, :path/dependencies) moved
+# into the resolver with real policy evaluation.
+FROZEN_EXEMPTION_COUNT=38
 # Baseline is the REAL resolver duplicate count in the non-test region of
 # abac_middleware.rs (task-171 review: the whole-file grep counted test
 # route fixtures as resolver duplicates, tripping this guard on every run
