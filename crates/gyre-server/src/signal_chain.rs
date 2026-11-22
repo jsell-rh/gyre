@@ -3101,6 +3101,95 @@ mod tests {
         );
     }
 
+    /// Cascade-test EXECUTION link (task-280, dependency-graph.md §Cascade
+    /// Testing): a cascade-test task created by trigger_cascade_tests —
+    /// with no human or orchestrator action beyond the policy gates — is
+    /// picked up by the worker-spawn cycle and an agent is actually
+    /// spawned for it, tied to the dependent repo and the task. Pre-fix
+    /// this failed: the task was created with task_type unset and the
+    /// scheduler skips untyped tasks ("untyped → never spawned").
+    #[tokio::test]
+    async fn scheduler_spawns_agent_for_cascade_test_task() {
+        let state = chain_state().await;
+
+        // repo r-1 depends on repo r-2 (same workspace, ws-1).
+        let edge = gyre_domain::DependencyEdge::new(
+            Id::new("dep-edge-1"),
+            Id::new("r-1"),
+            Id::new("r-2"),
+            gyre_domain::DependencyType::Code,
+            "Cargo.toml",
+            "target-crate",
+            gyre_domain::DetectionMethod::CargoToml,
+            0,
+        );
+        state.dependencies.save(&edge).await.unwrap();
+
+        // require_cascade_tests enabled in both merged and dependent
+        // workspace (they are the same workspace here).
+        let policy = gyre_domain::DependencyPolicy {
+            require_cascade_tests: true,
+            ..Default::default()
+        };
+        state
+            .dependency_policies
+            .set_for_workspace(&Id::new("ws-1"), &policy)
+            .await
+            .unwrap();
+
+        // A merge lands in r-2 → the forge files the cascade-test task
+        // for the dependent repo r-1.
+        crate::merge_processor::trigger_cascade_tests(
+            &state,
+            "r-2",
+            "r-2",
+            "abc123def4567890",
+            &Id::new("ws-1"),
+        )
+        .await;
+
+        // The filed task carries the spawnable task_type at creation.
+        let tasks = state.tasks.list_by_repo(&Id::new("r-1")).await.unwrap();
+        assert_eq!(tasks.len(), 1, "one cascade task for the dependent repo");
+        let cascade_task = &tasks[0];
+        assert!(cascade_task.labels.iter().any(|l| l == "cascade-test"));
+        assert_eq!(cascade_task.task_type, Some(TaskType::Implementation));
+
+        // The next scheduler cycle — no human or orchestrator action —
+        // spawns the worker agent that runs the dependent repo's tests.
+        scheduler_run_once(&state).await.unwrap();
+
+        let after = state
+            .tasks
+            .find_by_id(&cascade_task.id)
+            .await
+            .unwrap()
+            .expect("cascade task survives");
+        assert_eq!(
+            after.status,
+            TaskStatus::InProgress,
+            "worker-spawn cycle claims the cascade-test task"
+        );
+        let worker_id = after
+            .assigned_to
+            .as_ref()
+            .expect("cascade test task assigned to a spawned agent");
+        let worker = state
+            .agents
+            .find_by_id(worker_id)
+            .await
+            .unwrap()
+            .expect("cascade test agent record exists");
+        assert_eq!(worker.current_task_id, Some(cascade_task.id.clone()));
+        // The agent is tied to the DEPENDENT repo (r-1) through its
+        // worktree — the repo whose tests it must run.
+        let wts = state.worktrees.find_by_agent(&worker.id).await.unwrap();
+        assert!(
+            wts.iter().any(|wt| wt.repository_id == Id::new("r-1")),
+            "cascade test agent works in the dependent repo"
+        );
+    }
+
     /// Phase 4 precondition: Archived repos never spawn workers — the task
     /// stays Backlog (queuing, not rejection; unarchiving resumes).
     #[tokio::test]

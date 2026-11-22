@@ -198,3 +198,30 @@ pub enum BreakingChangeBehavior {
     /// Breaking change merges silently. Dependent orchestrators notified.
     Notify,
 }
+
+/// Durable record of one cascade test run (dependency-graph.md §Cascade
+/// Testing).
+///
+/// Created by `report_cascade_test_result` when the agent executing a
+/// cascade-test task completes (passed) or fails (with details). Persisted
+/// through the `CascadeTestResultRepository` port so outcomes survive a
+/// server restart — cascade results are records, not just one-shot
+/// workspace events.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CascadeTestResult {
+    pub id: Id,
+    /// The dependent repo whose test suite ran against the new version.
+    pub dependent_repo_id: Id,
+    /// The repo whose merge triggered the cascade test.
+    pub merged_repo_id: Id,
+    /// The merge commit SHA of the merged repo that triggered the run.
+    pub merge_commit_sha: String,
+    /// The cascade-test task the run executed under.
+    pub cascade_task_id: Id,
+    /// Whether the dependent repo's tests passed against the new version.
+    pub passed: bool,
+    /// Failure details when `passed` is false (test output, error reason).
+    pub failure_details: Option<String>,
+    /// Unix timestamp when the result was recorded.
+    pub recorded_at: u64,
+}

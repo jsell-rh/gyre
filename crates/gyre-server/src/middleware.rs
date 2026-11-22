@@ -335,6 +335,7 @@ mod tests {
             dependencies: base.dependencies.clone(),
             breaking_changes: base.breaking_changes.clone(),
             dependency_policies: base.dependency_policies.clone(),
+            cascade_test_results: base.cascade_test_results.clone(),
             process_registry: base.process_registry.clone(),
             spawned_backends: base.spawned_backends.clone(),
             agent_logs: base.agent_logs.clone(),
