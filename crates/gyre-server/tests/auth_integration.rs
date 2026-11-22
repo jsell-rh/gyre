@@ -69,6 +69,74 @@ async fn create_workspace(base: &str, client: &reqwest::Client, name: &str) -> S
     ws["id"].as_str().unwrap().to_string()
 }
 
+/// Start a server with the global token, also returning the state handle
+/// so callers can seed the durable spec-approval state the implementation
+/// task-create gate resolves (agent-runtime.md §1).
+async fn start_server_with_state() -> (
+    String,
+    reqwest::Client,
+    std::sync::Arc<gyre_server::AppState>,
+) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let base_url = format!("http://127.0.0.1:{port}");
+
+    // Explicit in-memory opt-in (architecture.md §Storage): the default
+    // (unset) backend is now durable SQLite at the platform default
+    // data path — a test run must never touch the operator's real
+    // database file (and concurrent test processes sharing that one
+    // file corrupt each other's writes). Idempotent and race-free
+    // (Once-guarded); this state-returning variant was missed when the
+    // durable default landed (start_server opted in from the start).
+    gyre_server::select_in_memory_storage();
+    let state = build_state(GLOBAL_TOKEN, &base_url, None);
+    abac_middleware::seed_builtin_policies(&state)
+        .await
+        .expect("seed built-in policies");
+    let app = build_router(state.clone());
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let client = reqwest::Client::new();
+    (base_url, client, state)
+}
+
+/// Seed an approved spec version — the durable state POST
+/// /api/v1/specs/:path/approve leaves behind — so the implementation
+/// task-create gate (agent-runtime.md §1: spec approval is the single
+/// trigger) accepts tasks pinning `path@sha`.
+async fn seed_approved_spec(state: &std::sync::Arc<gyre_server::AppState>, path: &str, sha: &str) {
+    let entry = gyre_domain::SpecLedgerEntry {
+        path: path.to_string(),
+        title: path.to_string(),
+        owner: "test".to_string(),
+        kind: None,
+        current_sha: sha.to_string(),
+        approval_mode: "single".to_string(),
+        approval_status: gyre_domain::ApprovalStatus::Approved,
+        linked_tasks: vec![],
+        linked_mrs: vec![],
+        drift_status: "clean".to_string(),
+        created_at: 0,
+        updated_at: 0,
+        repo_id: None,
+        workspace_id: None,
+    };
+    state.spec_ledger.save(&entry).await.unwrap();
+    let apr = gyre_domain::SpecApproval::new(
+        gyre_common::Id::new(uuid::Uuid::new_v4().to_string()),
+        path,
+        sha,
+        "user:test",
+    );
+    state.spec_approvals.create(&apr).await.unwrap();
+    state
+        .spec_approvals
+        .approve(&apr.id, 0)
+        .await
+        .unwrap()
+        .expect("freshly created approval row must transition to Approved");
+}
+
 /// Start a server with a pre-seeded user + API key.
 /// Returns (base_url, client, raw_api_key) where raw_api_key has `gyre_` prefix.
 async fn start_server_with_api_key() -> (String, reqwest::Client, String) {
@@ -337,7 +405,7 @@ async fn agent_token_rejected_on_admin_only_endpoint() {
 
 #[tokio::test]
 async fn token_revoked_after_agent_complete() {
-    let (base, client) = start_server().await;
+    let (base, client, state) = start_server_with_state().await;
     let auth = format!("Bearer {GLOBAL_TOKEN}");
 
     // Create a workspace, repo and task for the spawn.
@@ -354,10 +422,22 @@ async fn token_revoked_after_agent_complete() {
         .unwrap();
     let repo_id = repo_resp["id"].as_str().unwrap().to_string();
 
+    // agent-runtime.md §1: the task-create gate requires an approved
+    // spec_ref pinned by SHA for implementation tasks.
+    seed_approved_spec(
+        &state,
+        "specs/test/revoke.md",
+        "dd44dd44dd44dd44dd44dd44dd44dd44dd44dd44",
+    )
+    .await;
     let task_resp: serde_json::Value = client
         .post(format!("{base}/api/v1/tasks"))
         .header("Authorization", &auth)
-        .json(&serde_json::json!({"title": "revoke-task", "task_type": "implementation"}))
+        .json(&serde_json::json!({
+            "title": "revoke-task",
+            "task_type": "implementation",
+            "spec_ref": "specs/test/revoke.md@dd44dd44dd44dd44dd44dd44dd44dd44dd44dd44"
+        }))
         .send()
         .await
         .unwrap()

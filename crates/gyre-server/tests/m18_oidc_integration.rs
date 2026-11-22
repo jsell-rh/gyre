@@ -12,7 +12,11 @@ use gyre_server::{abac_middleware, build_router, build_state};
 
 const GLOBAL_TOKEN: &str = "m18-test-global-token";
 
-async fn start_server() -> (String, reqwest::Client) {
+async fn start_server() -> (
+    String,
+    reqwest::Client,
+    std::sync::Arc<gyre_server::AppState>,
+) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let base_url = format!("http://127.0.0.1:{port}");
@@ -26,11 +30,48 @@ async fn start_server() -> (String, reqwest::Client) {
     abac_middleware::seed_builtin_policies(&state)
         .await
         .expect("seed built-in policies");
-    let app = build_router(state);
+    let app = build_router(state.clone());
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
     let client = reqwest::Client::new();
-    (base_url, client)
+    (base_url, client, state)
+}
+
+/// Seed an approved spec version — the durable state POST
+/// /api/v1/specs/:path/approve leaves behind — so the implementation
+/// task-create gate (agent-runtime.md §1: spec approval is the single
+/// trigger) accepts tasks pinning `path@sha`.
+async fn seed_approved_spec(state: &std::sync::Arc<gyre_server::AppState>, path: &str, sha: &str) {
+    let entry = gyre_domain::SpecLedgerEntry {
+        path: path.to_string(),
+        title: path.to_string(),
+        owner: "test".to_string(),
+        kind: None,
+        current_sha: sha.to_string(),
+        approval_mode: "single".to_string(),
+        approval_status: gyre_domain::ApprovalStatus::Approved,
+        linked_tasks: vec![],
+        linked_mrs: vec![],
+        drift_status: "clean".to_string(),
+        created_at: 0,
+        updated_at: 0,
+        repo_id: None,
+        workspace_id: None,
+    };
+    state.spec_ledger.save(&entry).await.unwrap();
+    let apr = gyre_domain::SpecApproval::new(
+        gyre_common::Id::new(uuid::Uuid::new_v4().to_string()),
+        path,
+        sha,
+        "user:test",
+    );
+    state.spec_approvals.create(&apr).await.unwrap();
+    state
+        .spec_approvals
+        .approve(&apr.id, 0)
+        .await
+        .unwrap()
+        .expect("freshly created approval row must transition to Approved");
 }
 
 /// Create a workspace via the API and return its id.
@@ -56,7 +97,7 @@ async fn create_workspace(base: &str, client: &reqwest::Client, name: &str) -> S
 
 #[tokio::test]
 async fn oidc_discovery_document_is_valid() {
-    let (base, client) = start_server().await;
+    let (base, client, _state) = start_server().await;
     let resp = client
         .get(format!("{base}/.well-known/openid-configuration"))
         .send()
@@ -84,7 +125,7 @@ async fn oidc_discovery_document_is_valid() {
 
 #[tokio::test]
 async fn oidc_discovery_requires_no_auth() {
-    let (base, client) = start_server().await;
+    let (base, client, _state) = start_server().await;
     // No Authorization header — must still return 200.
     let resp = client
         .get(format!("{base}/.well-known/openid-configuration"))
@@ -96,7 +137,7 @@ async fn oidc_discovery_requires_no_auth() {
 
 #[tokio::test]
 async fn jwks_endpoint_returns_ed25519_key() {
-    let (base, client) = start_server().await;
+    let (base, client, _state) = start_server().await;
     let resp = client
         .get(format!("{base}/.well-known/jwks.json"))
         .send()
@@ -121,7 +162,7 @@ async fn jwks_endpoint_returns_ed25519_key() {
 
 #[tokio::test]
 async fn spawn_returns_jwt_token() {
-    let (base, client) = start_server().await;
+    let (base, client, state) = start_server().await;
 
     // Create workspace, repo and task.
     let ws_id = create_workspace(&base, &client, "m18-ws").await;
@@ -137,10 +178,18 @@ async fn spawn_returns_jwt_token() {
         .unwrap();
     let repo_id = repo["id"].as_str().unwrap();
 
+    // agent-runtime.md §1: the task-create gate requires an approved
+    // spec_ref pinned by SHA for implementation tasks.
+    seed_approved_spec(
+        &state,
+        "specs/test/m18.md",
+        "ee55ee55ee55ee55ee55ee55ee55ee55ee55ee55",
+    )
+    .await;
     let task: serde_json::Value = client
         .post(format!("{base}/api/v1/tasks"))
         .header("Authorization", format!("Bearer {GLOBAL_TOKEN}"))
-        .json(&serde_json::json!({"title": "M18 task", "description": "", "priority": "medium", "status": "todo", "task_type": "implementation"}))
+        .json(&serde_json::json!({"title": "M18 task", "description": "", "priority": "medium", "status": "todo", "task_type": "implementation", "spec_ref": "specs/test/m18.md@ee55ee55ee55ee55ee55ee55ee55ee55ee55ee55"}))
         .send()
         .await
         .unwrap()
@@ -180,7 +229,7 @@ async fn spawn_returns_jwt_token() {
 
 #[tokio::test]
 async fn jwt_token_authenticates_api_calls() {
-    let (base, client) = start_server().await;
+    let (base, client, state) = start_server().await;
 
     // Setup workspace/repo/task.
     let ws_id = create_workspace(&base, &client, "jwt-auth-ws").await;
@@ -196,10 +245,18 @@ async fn jwt_token_authenticates_api_calls() {
         .unwrap();
     let repo_id = repo["id"].as_str().unwrap();
 
+    // agent-runtime.md §1: the task-create gate requires an approved
+    // spec_ref pinned by SHA for implementation tasks.
+    seed_approved_spec(
+        &state,
+        "specs/test/m18-jwt.md",
+        "ef56ef56ef56ef56ef56ef56ef56ef56ef56ef56",
+    )
+    .await;
     let task: serde_json::Value = client
         .post(format!("{base}/api/v1/tasks"))
         .header("Authorization", format!("Bearer {GLOBAL_TOKEN}"))
-        .json(&serde_json::json!({"title": "jwt auth task", "description": "", "priority": "medium", "status": "todo", "task_type": "implementation"}))
+        .json(&serde_json::json!({"title": "jwt auth task", "description": "", "priority": "medium", "status": "todo", "task_type": "implementation", "spec_ref": "specs/test/m18-jwt.md@ef56ef56ef56ef56ef56ef56ef56ef56ef56ef56"}))
         .send()
         .await
         .unwrap()
@@ -244,7 +301,7 @@ async fn jwt_token_authenticates_api_calls() {
 
 #[tokio::test]
 async fn token_info_for_jwt_agent_token() {
-    let (base, client) = start_server().await;
+    let (base, client, state) = start_server().await;
 
     // Setup and spawn.
     let ws_id = create_workspace(&base, &client, "info-ws").await;
@@ -260,10 +317,18 @@ async fn token_info_for_jwt_agent_token() {
         .unwrap();
     let repo_id = repo["id"].as_str().unwrap();
 
+    // agent-runtime.md §1: the task-create gate requires an approved
+    // spec_ref pinned by SHA for implementation tasks.
+    seed_approved_spec(
+        &state,
+        "specs/test/m18-info.md",
+        "f057f057f057f057f057f057f057f057f057f057",
+    )
+    .await;
     let task: serde_json::Value = client
         .post(format!("{base}/api/v1/tasks"))
         .header("Authorization", format!("Bearer {GLOBAL_TOKEN}"))
-        .json(&serde_json::json!({"title": "info task", "description": "", "priority": "low", "status": "todo", "task_type": "implementation"}))
+        .json(&serde_json::json!({"title": "info task", "description": "", "priority": "low", "status": "todo", "task_type": "implementation", "spec_ref": "specs/test/m18-info.md@f057f057f057f057f057f057f057f057f057f057"}))
         .send()
         .await
         .unwrap()
@@ -342,7 +407,7 @@ async fn token_info_for_jwt_agent_token() {
 
 #[tokio::test]
 async fn token_info_for_global_token() {
-    let (base, client) = start_server().await;
+    let (base, client, _state) = start_server().await;
     let resp = client
         .get(format!("{base}/api/v1/auth/token-info"))
         .header("Authorization", format!("Bearer {GLOBAL_TOKEN}"))
@@ -359,7 +424,7 @@ async fn token_info_for_global_token() {
 
 #[tokio::test]
 async fn jwt_revoked_after_agent_complete() {
-    let (base, client) = start_server().await;
+    let (base, client, state) = start_server().await;
 
     let ws_id = create_workspace(&base, &client, "revoke-ws").await;
     let repo: serde_json::Value = client
@@ -374,10 +439,18 @@ async fn jwt_revoked_after_agent_complete() {
         .unwrap();
     let repo_id = repo["id"].as_str().unwrap();
 
+    // agent-runtime.md §1: the task-create gate requires an approved
+    // spec_ref pinned by SHA for implementation tasks.
+    seed_approved_spec(
+        &state,
+        "specs/test/m18-revoke.md",
+        "f158f158f158f158f158f158f158f158f158f158",
+    )
+    .await;
     let task: serde_json::Value = client
         .post(format!("{base}/api/v1/tasks"))
         .header("Authorization", format!("Bearer {GLOBAL_TOKEN}"))
-        .json(&serde_json::json!({"title": "revoke task", "description": "", "priority": "medium", "status": "todo", "task_type": "implementation"}))
+        .json(&serde_json::json!({"title": "revoke task", "description": "", "priority": "medium", "status": "todo", "task_type": "implementation", "spec_ref": "specs/test/m18-revoke.md@f158f158f158f158f158f158f158f158f158f158"}))
         .send()
         .await
         .unwrap()

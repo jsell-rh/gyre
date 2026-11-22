@@ -427,6 +427,17 @@ async fn run_workspace_orchestrator(
         task.repo_id = dep_repo.id.clone();
         task.workspace_id = dep_repo.workspace_id.clone();
         task.spec_path = Some(link.source_path.clone());
+        // Pin the approved SOURCE spec version (agent-runtime.md §1 Phase
+        // 2), mirroring the delegation leg's pin above: the coordination's
+        // review sub-task (task_type=Implementation) inherits this pinned
+        // ref, so the Phase-4 single-trigger scheduler gate resolves it to
+        // the Approved ledger entry at exactly this SHA and the legitimate
+        // chain passes. Without the pin the review sub-task would carry no
+        // spec_ref and stay Backlog behind the gate forever — there is no
+        // path that re-pins existing tasks. The pinned ref is the
+        // authorization for the work (the approved change that triggered
+        // the coordination), not the dependent's own spec_path.
+        task.spec_ref = Some(format!("{spec_path}@{spec_sha}"));
         task.description = Some(format!(
             "Dependency {} changed (approved as {spec_path}@{spec_sha}). Assess impact: documentation updates, spec amendments, or re-implementation as needed (agent-runtime.md §1 Phase 2).",
             link.source_path
@@ -768,6 +779,18 @@ pub async fn scheduler_run_once(state: &Arc<AppState>) -> anyhow::Result<()> {
 /// cycle spawns the task successfully.
 const BUDGET_EXHAUSTED_LABEL: &str = "budget-exhausted";
 
+/// Task label flagging a Backlog Implementation task whose spec_ref does
+/// not resolve to a currently-Approved spec version at the pinned SHA
+/// (agent-runtime.md §1 The Signal Chain: spec approval is the single
+/// trigger — "There is no other trigger. The SpecApproved event is the
+/// universal starting signal."). Defense in depth behind the
+/// task-creation gate: an approval invalidated by a later push must stop
+/// the spawn. The task stays Backlog with this observable skip label and
+/// a logged reason — no agent record, no InProgress transition. Cleared
+/// when a later cycle spawns the task successfully (e.g. after
+/// re-approval).
+const SPEC_APPROVAL_MISSING_LABEL: &str = "spec-approval-missing";
+
 /// Exponential backoff between worker spawn attempts, in seconds
 /// (agent-runtime.md §1 Phase 7 "Spawn failure": 3 retries at 1s / 5s /
 /// 30s, then the task is Blocked with a priority-1 notification).
@@ -801,6 +824,73 @@ async fn spawn_implementation_workers(state: &Arc<AppState>) {
     for task in backlog {
         if task.task_type != Some(TaskType::Implementation) {
             continue; // Delegation/Coordination → orchestrators; untyped → never spawned
+        }
+        // Spec-approval gate (agent-runtime.md §1 The Signal Chain —
+        // defense in depth behind the task-creation gate): before claiming
+        // the task and spawning a worker, a task that pins a spec_ref must
+        // still resolve to a currently-Approved ledger entry at exactly the
+        // pinned SHA. An approval invalidated by a later push (or a task
+        // inserted into storage without one) stops the spawn here: the
+        // task stays Backlog with the spec-approval-missing skip label and
+        // a logged reason — no agent record, no InProgress transition.
+        //
+        // The ONE exemption (agent-runtime.md §1, amended for the
+        // dependency-graph.md §Cascade Testing reconciliation): a
+        // forge-filed cascade-test execution task carries no spec_ref — it
+        // implements no spec; it runs the dependent repo's test suite
+        // against the merged version and reports the result, triggered by
+        // the workspace's require_cascade_tests policy (the human
+        // authorization for that class of work) plus the merge itself.
+        // The exemption is bounded to exactly those system-filed tasks:
+        // it requires BOTH the cascade-test label AND the absence of a
+        // spec_ref, because both task-creation surfaces (REST + MCP)
+        // reject task_type=implementation without an approved spec_ref
+        // regardless of labels and task_type is immutable after creation
+        // — so "Implementation + no spec_ref + cascade-test label" is
+        // reachable only through trigger_cascade_tests. A task that pins
+        // ANY spec_ref is always gated; the label alone never bypasses an
+        // unapproved or invalidated approval.
+        let spec_gate = match task.spec_ref.as_deref() {
+            Some(spec_ref) => {
+                crate::api::gates::verify_implementation_spec_ref(state, spec_ref).await
+            }
+            None if task
+                .labels
+                .iter()
+                .any(|l| l == crate::merge_processor::CASCADE_TEST_LABEL) =>
+            {
+                Ok(())
+            }
+            None => Err("the task carries no spec_ref (path@sha)".to_string()),
+        };
+        if let Err(reason) = spec_gate {
+            // Flag the FRESHEST row (the same stale-snapshot defense as the
+            // budget flag below): persisting the scan snapshot could revert
+            // a concurrent status change while merely adding the label.
+            match state.tasks.find_by_id(&task.id).await {
+                Ok(Some(current))
+                    if current.status == TaskStatus::Backlog
+                        && current.task_type == Some(TaskType::Implementation)
+                        && !current
+                            .labels
+                            .iter()
+                            .any(|l| l == SPEC_APPROVAL_MISSING_LABEL) =>
+                {
+                    let mut flagged = current;
+                    flagged.labels.push(SPEC_APPROVAL_MISSING_LABEL.to_string());
+                    flagged.updated_at = now;
+                    let _ = state.tasks.update(&flagged).await;
+                }
+                _ => {}
+            }
+            tracing::info!(
+                task_id = %task.id,
+                spec_ref = ?task.spec_ref,
+                reason,
+                "signal-chain: spec not approved at the pinned SHA; worker spawn skipped, \
+                 task left Backlog (agent-runtime.md §1 single-trigger)"
+            );
+            continue;
         }
         let Some(repo) = resolve_task_repo(state, &task).await else {
             continue;
@@ -942,8 +1032,11 @@ async fn spawn_implementation_workers(state: &Arc<AppState>) {
             continue;
         }
         claimed.updated_at = now;
-        // Clear the budget flag: this cycle is spending budget on the task.
-        claimed.labels.retain(|l| l != BUDGET_EXHAUSTED_LABEL);
+        // Clear the budget and spec-approval skip flags: this cycle is
+        // spending budget on the task against a verified approval.
+        claimed
+            .labels
+            .retain(|l| l != BUDGET_EXHAUSTED_LABEL && l != SPEC_APPROVAL_MISSING_LABEL);
         if let Err(e) = state.tasks.update(&claimed).await {
             tracing::warn!(task_id = %task.id, "signal-chain: worker claim persist failed: {e}");
             continue;
@@ -2161,6 +2254,11 @@ pub fn spawn_task_scheduler(state: Arc<AppState>) {
 mod tests {
     use super::*;
 
+    /// The approved blob SHA of `specs/system/auth.md` in the chain fixture
+    /// (a 40-char hex git blob SHA, the form approve_spec validates and the
+    /// chain pins into spec_refs).
+    const APPROVED_SHA: &str = "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c";
+
     // Registry semantics: distinct locks per scope, stable identity across
     // calls, no cross-contamination between workspaces/repos.
     #[tokio::test]
@@ -2350,14 +2448,20 @@ mod tests {
             persona.approval_status = gyre_domain::PersonaApprovalStatus::Approved;
             state.personas.create(&persona).await.unwrap();
         }
+        // Production parity for the single-trigger gate (agent-runtime.md
+        // §1): the chain below runs AFTER a spec approval, so the registry
+        // entry is Approved at the approved blob SHA and the durable
+        // approval ledger carries the matching active row — the exact
+        // state POST /api/v1/specs/:path/approve leaves behind.
+        crate::mem::seed_approved_spec(&state, "specs/system/auth.md", APPROVED_SHA).await;
         let entry = gyre_domain::SpecLedgerEntry {
             path: "specs/system/auth.md".to_string(),
             title: "Auth".to_string(),
             owner: "owner".to_string(),
             kind: None,
-            current_sha: "abc123".to_string(),
+            current_sha: APPROVED_SHA.to_string(),
             approval_mode: "single".to_string(),
-            approval_status: ApprovalStatus::Pending,
+            approval_status: ApprovalStatus::Approved,
             linked_tasks: vec![],
             linked_mrs: vec![],
             drift_status: "clean".to_string(),
@@ -2395,7 +2499,7 @@ mod tests {
         serde_json::json!({
             "repo_id": "r-1",
             "spec_path": "specs/system/auth.md",
-            "spec_sha": "abc123",
+            "spec_sha": APPROVED_SHA,
             "approved_by": "user:alice",
             "approval_id": "approval-1",
             "workspace_id": "ws-1",
@@ -2457,9 +2561,10 @@ mod tests {
             Some("specs/system/auth.md"),
             "spec_path is the bare path (list_by_spec_path match key)"
         );
+        let pinned_ref = format!("specs/system/auth.md@{APPROVED_SHA}");
         assert_eq!(
             delegation.spec_ref.as_deref(),
-            Some("specs/system/auth.md@abc123"),
+            Some(pinned_ref.as_str()),
             "spec_ref pins the approved blob"
         );
         assert_eq!(delegation.assigned_to.as_ref(), Some(&orch[0].id));
@@ -2472,6 +2577,15 @@ mod tests {
             .expect("coordination task created for dependent repo r-2");
         assert_eq!(coordination.repo_id, Id::new("r-2"));
         assert_eq!(coordination.workspace_id, Id::new("ws-1"));
+        // task-297 review repair: the coordination task pins the approved
+        // source spec_ref (path@sha), so the review sub-task its assessment
+        // creates inherits an Approved pinned ref and passes the Phase-4
+        // single-trigger gate instead of stalling Backlog forever.
+        assert_eq!(
+            coordination.spec_ref.as_deref(),
+            Some(pinned_ref.as_str()),
+            "coordination task pins the approved source spec version"
+        );
     }
 
     // Phase 2 routing: a SpecApproved without a workspace scope must not
@@ -2587,6 +2701,7 @@ mod tests {
             .iter()
             .find(|t| t.task_type == Some(TaskType::Delegation))
             .expect("delegation task exists");
+        let pinned_ref = format!("specs/system/auth.md@{APPROVED_SHA}");
         assert_eq!(
             delegation.status,
             TaskStatus::Done,
@@ -2616,7 +2731,7 @@ mod tests {
             assert_eq!(sub.spec_path.as_deref(), Some("specs/system/auth.md"));
             assert_eq!(
                 sub.spec_ref.as_deref(),
-                Some("specs/system/auth.md@abc123"),
+                Some(pinned_ref.as_str()),
                 "sub-task pins the approved spec blob"
             );
         }
@@ -2638,10 +2753,19 @@ mod tests {
         // a just-decomposed spec flows straight to an agent.
         scheduler_run_once(&state).await.unwrap();
         let after = state.tasks.list().await.unwrap();
+        // Scope each sub-task assertion to its parent task: the same
+        // first cycle also processed the Coordination task for r-2, whose
+        // review sub-task is a second Implementation twin. The mem
+        // store's list order is a HashMap iteration (nondeterministic),
+        // so an unscoped `find` over task_type == Implementation flips
+        // between the two twins per process seed.
         let sub = after
             .iter()
-            .find(|t| t.task_type == Some(TaskType::Implementation))
-            .expect("implementation sub-task exists");
+            .find(|t| {
+                t.parent_task_id.as_ref() == Some(&delegation.id)
+                    && t.task_type == Some(TaskType::Implementation)
+            })
+            .expect("delegation implementation sub-task exists");
         assert_eq!(
             sub.status,
             TaskStatus::InProgress,
@@ -2692,6 +2816,47 @@ mod tests {
                     && e.properties["new_status"] == "InProgress"),
             "worker claim must record task.status_changed: {events:?}"
         );
+
+        // task-297 review repair: the coordination leg of the SAME
+        // legitimate chain no longer stalls behind the single-trigger
+        // gate. The Coordination task pins the approved source spec_ref
+        // (path@sha) at creation, so the review sub-task its assessment
+        // creates inherits the pinned approved ref, passes the Phase-4
+        // gate, and spawns a worker — at the base it stayed Backlog with
+        // the spec-approval-missing label forever (no recovery path).
+        let coordination = after
+            .iter()
+            .find(|t| t.task_type == Some(TaskType::Coordination))
+            .expect("coordination task exists");
+        let review_sub = after
+            .iter()
+            .find(|t| {
+                t.parent_task_id.as_ref() == Some(&coordination.id)
+                    && t.task_type == Some(TaskType::Implementation)
+            })
+            .expect("coordination review sub-task exists");
+        assert_eq!(
+            review_sub.spec_ref.as_deref(),
+            Some(pinned_ref.as_str()),
+            "review sub-task inherits the coordination task's pinned approved spec_ref"
+        );
+        assert_eq!(
+            review_sub.status,
+            TaskStatus::InProgress,
+            "coordination review sub-task claimed by the Phase-4 worker path, \
+             not held Backlog behind the spec-approval gate"
+        );
+        assert!(
+            review_sub.assigned_to.is_some(),
+            "coordination review sub-task assigned to a spawned worker agent"
+        );
+        assert!(
+            !review_sub
+                .labels
+                .iter()
+                .any(|l| l == "spec-approval-missing"),
+            "coordination review sub-task carries no spec-approval-missing label"
+        );
     }
 
     // Phase 2 coordination processing: the scheduler runs the repo
@@ -2728,6 +2893,39 @@ mod tests {
         );
         assert_eq!(review_subs[0].repo_id, Id::new("r-2"));
         assert_eq!(review_subs[0].task_type, Some(TaskType::Implementation));
+        // task-297 review repair: the coordination task pins the approved
+        // source spec_ref at creation and the review sub-task inherits it,
+        // so the Phase-4 single-trigger gate resolves it to the Approved
+        // ledger entry — the coordination leg of the legitimate chain
+        // spawns instead of stalling Backlog forever.
+        let pinned_ref = format!("specs/system/auth.md@{APPROVED_SHA}");
+        assert_eq!(
+            review_subs[0].spec_ref.as_deref(),
+            Some(pinned_ref.as_str()),
+            "review sub-task inherits the coordination task's pinned approved spec_ref"
+        );
+
+        // The next cycle's Phase-4 scan claims the review sub-task and
+        // spawns a worker for it (not the spec-approval-missing skip).
+        scheduler_run_once(&state).await.unwrap();
+        let after = state.tasks.list().await.unwrap();
+        let review = after
+            .iter()
+            .find(|t| t.id == review_subs[0].id)
+            .expect("review sub-task persists");
+        assert_eq!(
+            review.status,
+            TaskStatus::InProgress,
+            "coordination review sub-task claimed by the Phase-4 worker path"
+        );
+        assert!(
+            review.assigned_to.is_some(),
+            "coordination review sub-task assigned to a spawned worker agent"
+        );
+        assert!(
+            !review.labels.iter().any(|l| l == "spec-approval-missing"),
+            "coordination review sub-task carries no spec-approval-missing label"
+        );
     }
 
     // The scheduler ignores tasks without a task_type (pre-approval
@@ -2735,15 +2933,225 @@ mod tests {
 
     // ── Phase 4 (task-118): worker agent spawning ──────────────────────────
 
-    /// Helper: a Backlog Implementation task in repo r-1 (workspace ws-1).
+    /// Helper: a Backlog Implementation task in repo r-1 (workspace ws-1),
+    /// pinned to the fixture's approved spec version (agent-runtime.md §1:
+    /// the scheduler only spawns Implementation tasks whose spec_ref
+    /// resolves to a currently-Approved ledger entry at the pinned SHA).
     async fn impl_task(state: &Arc<crate::AppState>, id: &str) -> Task {
         let mut t = Task::new(Id::new(id), "Implement thing", 0);
         t.task_type = Some(TaskType::Implementation);
         t.workspace_id = Id::new("ws-1");
         t.repo_id = Id::new("r-1");
         t.spec_path = Some("specs/system/auth.md".to_string());
+        t.spec_ref = Some(format!("specs/system/auth.md@{APPROVED_SHA}"));
         state.tasks.create(&t).await.unwrap();
         t
+    }
+
+    /// agent-runtime.md §1 The Signal Chain — scheduler gate (defense in
+    /// depth behind the task-creation gate): a Backlog Implementation
+    /// task inserted directly into storage with a spec_ref whose spec has
+    /// NO Approved ledger entry at that SHA is never spawned — one cycle
+    /// creates zero agent records for it and leaves it Backlog with the
+    /// observable skip label — while a twin task referencing an approved
+    /// spec spawns exactly one worker.
+    #[tokio::test]
+    async fn scheduler_skips_unapproved_spec_and_spawns_approved_twin() {
+        let state = chain_state().await;
+
+        // Twin A — unapproved: the registry entry is Pending and no
+        // approval ledger row exists (the verification-intent scenario:
+        // inserted directly into task storage).
+        let pending_sha = "9".repeat(40);
+        let mut unapproved = Task::new(Id::new("impl-unapproved"), "Unapproved", 0);
+        unapproved.task_type = Some(TaskType::Implementation);
+        unapproved.workspace_id = Id::new("ws-1");
+        unapproved.repo_id = Id::new("r-1");
+        unapproved.spec_path = Some("specs/system/pending.md".to_string());
+        unapproved.spec_ref = Some(format!("specs/system/pending.md@{pending_sha}"));
+        state.tasks.create(&unapproved).await.unwrap();
+        let pending_entry = gyre_domain::SpecLedgerEntry {
+            path: "specs/system/pending.md".to_string(),
+            title: "Pending".to_string(),
+            owner: "owner".to_string(),
+            kind: None,
+            current_sha: pending_sha,
+            approval_mode: "single".to_string(),
+            approval_status: ApprovalStatus::Pending,
+            linked_tasks: vec![],
+            linked_mrs: vec![],
+            drift_status: "clean".to_string(),
+            created_at: 0,
+            updated_at: 0,
+            repo_id: Some("r-1".to_string()),
+            workspace_id: Some("ws-1".to_string()),
+        };
+        state.spec_ledger.save(&pending_entry).await.unwrap();
+
+        // Twin B — approved: the fixture's approved spec version.
+        let approved = impl_task(&state, "impl-approved").await;
+
+        scheduler_run_once(&state).await.unwrap();
+
+        // Twin A: no agent record, no claim, observable skip label.
+        let after = state
+            .tasks
+            .find_by_id(&unapproved.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            after.status,
+            TaskStatus::Backlog,
+            "unapproved-spec task stays Backlog (single trigger)"
+        );
+        assert!(after.assigned_to.is_none(), "no agent spawned");
+        assert!(
+            after.labels.iter().any(|l| l == "spec-approval-missing"),
+            "unapproved-spec task carries the observable skip label: {:?}",
+            after.labels
+        );
+        let agents = state.agents.list().await.unwrap();
+        assert!(
+            agents
+                .iter()
+                .all(|a| a.current_task_id != Some(unapproved.id.clone())),
+            "zero agent records exist for the unapproved-spec task"
+        );
+
+        // Twin B: exactly one worker spawned and assigned.
+        let after = state.tasks.find_by_id(&approved.id).await.unwrap().unwrap();
+        assert_eq!(
+            after.status,
+            TaskStatus::InProgress,
+            "approved-spec twin is claimed by the Phase 4 worker path"
+        );
+        let workers: Vec<_> = agents
+            .iter()
+            .filter(|a| a.current_task_id == Some(approved.id.clone()))
+            .collect();
+        assert_eq!(workers.len(), 1, "exactly one worker for the approved twin");
+    }
+
+    /// agent-runtime.md §1 — an approval invalidated by a LATER PUSH must
+    /// stop the spawn: the task's spec_ref pins the approved SHA, the push
+    /// moves the registry entry onto a new blob (Pending) and revokes the
+    /// approval rows; the scheduler must not spawn the worker.
+    #[tokio::test]
+    async fn scheduler_stops_spawn_when_approval_invalidated_by_push() {
+        let state = chain_state().await;
+        let task = impl_task(&state, "impl-invalidated").await;
+
+        // The later push: registry sync resets the entry (Pending, new
+        // blob SHA) and the post-receive hook revokes every approval row
+        // for the path.
+        let mut entry = state
+            .spec_ledger
+            .find_by_path("specs/system/auth.md")
+            .await
+            .unwrap()
+            .unwrap();
+        entry.current_sha = "1".repeat(40);
+        entry.approval_status = ApprovalStatus::Pending;
+        state.spec_ledger.save(&entry).await.unwrap();
+        state
+            .spec_approvals
+            .revoke_all_for_path(
+                "specs/system/auth.md",
+                "system:spec-lifecycle",
+                "spec file modified in push",
+                1,
+            )
+            .await
+            .unwrap();
+
+        scheduler_run_once(&state).await.unwrap();
+
+        let after = state.tasks.find_by_id(&task.id).await.unwrap().unwrap();
+        assert_eq!(
+            after.status,
+            TaskStatus::Backlog,
+            "invalidated approval stops the spawn — task stays Backlog"
+        );
+        assert!(after.assigned_to.is_none(), "no agent spawned");
+        assert!(
+            after.labels.iter().any(|l| l == "spec-approval-missing"),
+            "invalidated-approval task carries the skip label: {:?}",
+            after.labels
+        );
+        let agents = state.agents.list().await.unwrap();
+        assert!(
+            agents
+                .iter()
+                .all(|a| a.current_task_id != Some(task.id.clone())),
+            "zero agent records exist for the invalidated-approval task"
+        );
+    }
+
+    /// Reconciliation boundary (agent-runtime.md §1, amended for
+    /// dependency-graph.md §Cascade Testing): the cascade-test label
+    /// exempts ONLY the forge-filed execution tasks that carry no
+    /// spec_ref. A task that pins a spec_ref is always gated — the label
+    /// alone must never bypass an unapproved or invalidated approval
+    /// (otherwise any caller with an approved spec could pre-label a
+    /// task and keep spawning after a later push invalidated the
+    /// approval, defeating the defense-in-depth re-check).
+    #[tokio::test]
+    async fn cascade_label_does_not_bypass_spec_approval_gate() {
+        let state = chain_state().await;
+
+        // A task carrying the cascade-test label BUT pinning a spec_ref
+        // whose approval has been invalidated by a later push (registry
+        // entry moved to a new blob, approval rows revoked).
+        let task = impl_task(&state, "impl-cascade-labeled").await;
+        let mut labeled = state.tasks.find_by_id(&task.id).await.unwrap().unwrap();
+        labeled
+            .labels
+            .push(crate::merge_processor::CASCADE_TEST_LABEL.to_string());
+        state.tasks.update(&labeled).await.unwrap();
+
+        let mut entry = state
+            .spec_ledger
+            .find_by_path("specs/system/auth.md")
+            .await
+            .unwrap()
+            .unwrap();
+        entry.current_sha = "1".repeat(40);
+        entry.approval_status = ApprovalStatus::Pending;
+        state.spec_ledger.save(&entry).await.unwrap();
+        state
+            .spec_approvals
+            .revoke_all_for_path(
+                "specs/system/auth.md",
+                "system:spec-lifecycle",
+                "spec file modified in push",
+                1,
+            )
+            .await
+            .unwrap();
+
+        scheduler_run_once(&state).await.unwrap();
+
+        let after = state.tasks.find_by_id(&task.id).await.unwrap().unwrap();
+        assert_eq!(
+            after.status,
+            TaskStatus::Backlog,
+            "the cascade-test label does not exempt a spec-pinned task — \
+             invalidated approval still stops the spawn"
+        );
+        assert!(after.assigned_to.is_none(), "no agent spawned");
+        assert!(
+            after.labels.iter().any(|l| l == "spec-approval-missing"),
+            "labeled-but-spec-pinned task carries the skip label: {:?}",
+            after.labels
+        );
+        let agents = state.agents.list().await.unwrap();
+        assert!(
+            agents
+                .iter()
+                .all(|a| a.current_task_id != Some(task.id.clone())),
+            "zero agent records exist for the labeled-but-unapproved task"
+        );
     }
 
     /// Phase 4 acceptance: the scheduler detects a Backlog Implementation
@@ -2903,12 +3311,14 @@ mod tests {
         dep.task_type = Some(TaskType::Implementation);
         dep.workspace_id = Id::new("ws-1");
         dep.repo_id = Id::new("r-1");
+        dep.spec_ref = Some(format!("specs/system/auth.md@{APPROVED_SHA}"));
         state.tasks.create(&dep).await.unwrap();
 
         let mut task = Task::new(Id::new("impl-dep"), "Dependent", 0);
         task.task_type = Some(TaskType::Implementation);
         task.workspace_id = Id::new("ws-1");
         task.repo_id = Id::new("r-1");
+        task.spec_ref = Some(format!("specs/system/auth.md@{APPROVED_SHA}"));
         task.depends_on.push(dep.id.clone());
         state.tasks.create(&task).await.unwrap();
 
@@ -2954,6 +3364,7 @@ mod tests {
         first.repo_id = Id::new("r-1");
         first.parent_task_id = Some(parent.clone());
         first.order = Some(0);
+        first.spec_ref = Some(format!("specs/system/auth.md@{APPROVED_SHA}"));
         state.tasks.create(&first).await.unwrap();
 
         let mut second = Task::new(Id::new("ord-1"), "Second", 0);
@@ -2962,6 +3373,7 @@ mod tests {
         second.repo_id = Id::new("r-1");
         second.parent_task_id = Some(parent.clone());
         second.order = Some(1);
+        second.spec_ref = Some(format!("specs/system/auth.md@{APPROVED_SHA}"));
         state.tasks.create(&second).await.unwrap();
 
         scheduler_run_once(&state).await.unwrap();
@@ -3257,6 +3669,7 @@ mod tests {
         dep.task_type = Some(TaskType::Implementation);
         dep.workspace_id = Id::new("ws-1");
         dep.repo_id = Id::new("r-1");
+        dep.spec_ref = Some(format!("specs/system/auth.md@{APPROVED_SHA}"));
         state.tasks.create(&dep).await.unwrap();
         let mut gated = state.tasks.find_by_id(&task.id).await.unwrap().unwrap();
         gated.depends_on = vec![dep.id.clone()];
