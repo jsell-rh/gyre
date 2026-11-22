@@ -619,6 +619,15 @@ export const api = {
   repoDependencies: (id) => request(`/repos/${id}/dependencies`),
   repoDependents: (id) => request(`/repos/${id}/dependents`),
   repoBlastRadius: (id) => request(`/repos/${id}/blast-radius`),
+  // Cascade test results for merges in a repo, from the durable
+  // CascadeTestResult store (task-281) — [{ id, dependent_repo_id,
+  // merged_repo_id, merge_commit_sha, cascade_task_id, passed,
+  // failure_details, recorded_at }], newest first; [] when none have run.
+  cascadeTestResults: (id) => request(`/repos/${id}/cascade-test-results`),
+  // Trigger cascade tests for the repo's dependents (same policy gating
+  // as the merge path) — { repo_id, triggered, skipped }.
+  triggerCascadeTests: (id) =>
+    request(`/repos/${id}/cascade-tests/trigger`, { method: 'POST' }),
   staleDependencies: (wsId) => request(`/dependencies/stale${wsId ? '?workspace_id=' + encodeURIComponent(wsId) : ''}`),
   breakingChanges: () => request('/dependencies/breaking'),
   acknowledgeBreakingChange: (id) =>
