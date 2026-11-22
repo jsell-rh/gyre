@@ -2347,6 +2347,79 @@
       "heading": [
         "Dogfooding"
       ]
+    },
+    "backlog/c2ad988fa981b60eae143fd1": {
+      "file": "specs/system/meta-spec-reconciliation.md",
+      "heading": [
+        "Meta-Spec Reconciliation",
+        "Design",
+        "1. Meta-Specs as First-Class Versioned Artifacts"
+      ]
+    },
+    "backlog/815f40a82746fafd22856e09": {
+      "file": "specs/system/meta-spec-reconciliation.md",
+      "heading": [
+        "Meta-Spec Reconciliation",
+        "Design",
+        "2. Meta-Spec Sets: Workspace-Level Binding"
+      ]
+    },
+    "backlog/3662e9dd04c597d5db7d61f0": {
+      "file": "specs/system/meta-spec-reconciliation.md",
+      "heading": [
+        "Meta-Spec Reconciliation",
+        "Design",
+        "4. Blast Radius Computation"
+      ]
+    },
+    "backlog/649ed86870daac6de2032d54": {
+      "file": "specs/system/meta-spec-reconciliation.md",
+      "heading": [
+        "Meta-Spec Reconciliation",
+        "Design",
+        "6. Reconciliation: The Slow Rollout",
+        "Flow"
+      ]
+    },
+    "backlog/a854e91085ee72f68e6ca854": {
+      "file": "specs/system/meta-spec-reconciliation.md",
+      "heading": [
+        "Meta-Spec Reconciliation",
+        "What This Does NOT Do"
+      ]
+    },
+    "backlog/d0c7637a52d62fe7a81b940e": {
+      "file": "specs/system/meta-spec-reconciliation.md",
+      "heading": [
+        "Meta-Spec Reconciliation",
+        "Design",
+        "9. Merge Gate Behavior"
+      ]
+    },
+    "backlog/8dc04f90bec1c77e6b42f252": {
+      "file": "specs/system/meta-spec-reconciliation.md",
+      "heading": [
+        "Meta-Spec Reconciliation",
+        "Design",
+        "10. Conformance Sweeps (Steady State)"
+      ]
+    },
+    "backlog/0f67c6dbc5bb328a54047724": {
+      "file": "specs/system/meta-spec-reconciliation.md",
+      "heading": [
+        "Meta-Spec Reconciliation",
+        "Design",
+        "6. Reconciliation: The Slow Rollout",
+        "The Reconciliation Controller"
+      ]
+    },
+    "backlog/4ec94a54317e88be7eb5b60b": {
+      "file": "specs/system/meta-spec-reconciliation.md",
+      "heading": [
+        "Meta-Spec Reconciliation",
+        "Design",
+        "11. Observability"
+      ]
     }
   },
   "bindings": {
@@ -3221,6 +3294,29 @@
     ],
     "Spec gap spec-8986fd94925aed0eaae2d366 / dogfooding-platform-orchestration / 644cb4b53ccb": [
       "backlog/69fff34a83938a4731034172"
+    ],
+    "Spec gap spec-556a0b49e9f2803bf0e2ff3d / meta-spec-registry-parity / b288723d2f73": [
+      "backlog/c2ad988fa981b60eae143fd1"
+    ],
+    "Spec gap spec-556a0b49e9f2803bf0e2ff3d / repo-scope-set-cascade-and-injection / b288723d2f73": [
+      "backlog/815f40a82746fafd22856e09"
+    ],
+    "Spec gap spec-556a0b49e9f2803bf0e2ff3d / blast-radius-provenance / b288723d2f73": [
+      "backlog/3662e9dd04c597d5db7d61f0"
+    ],
+    "Spec gap spec-556a0b49e9f2803bf0e2ff3d / reconciliation-candidate-scoping / b288723d2f73": [
+      "backlog/649ed86870daac6de2032d54",
+      "backlog/a854e91085ee72f68e6ca854"
+    ],
+    "Spec gap spec-556a0b49e9f2803bf0e2ff3d / merge-gate-drift-policy / b288723d2f73": [
+      "backlog/d0c7637a52d62fe7a81b940e"
+    ],
+    "Spec gap spec-556a0b49e9f2803bf0e2ff3d / conformance-sweep-convergence / b288723d2f73": [
+      "backlog/8dc04f90bec1c77e6b42f252",
+      "backlog/0f67c6dbc5bb328a54047724"
+    ],
+    "Spec gap spec-556a0b49e9f2803bf0e2ff3d / meta-spec-observability-surfaces / b288723d2f73": [
+      "backlog/4ec94a54317e88be7eb5b60b"
     ]
   }
 }
