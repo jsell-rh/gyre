@@ -2,8 +2,8 @@
 title: "Adopt the specced Svelte 5 + shadcn-svelte web UI stack, replacing the bespoke component library"
 spec_ref: "Spec gap spec-f907eda3bd014fe546b838e2 / shadcn-svelte-ui-stack / 4156114b8040"
 depends_on: []
-progress: ready-for-review
-commits: ["ae5d3eb45e44bf40a01680b674fd2b821d6c9496", "4d5e209b474cc94fd5b4f26ba3144b742df9e55d"]
+progress: not-started
+commits: []
 ---
 
 ## Required behavior
@@ -73,96 +73,3 @@ Canonical spec: `specs/development/architecture.md`. Source: `678a8ac3e3bfeafeb6
     ]
   }
 ]
-
-## Shipped
-
-The shadcn-svelte half of the architecture.md §Tech Stack requirement is
-implemented (commit 4d5e209b, retained through this round's merge repair);
-the Rust-half canonical conflict remains an open controller escalation
-(see the end of this section).
-
-### Implementation (shadcn-svelte foundations and component migration)
-
-- `web/package.json` declares and the build genuinely uses `tailwindcss` ^4
-  + `@tailwindcss/vite` (wired into `web/vite.config.js`), `bits-ui`,
-  `clsx`, `tailwind-merge`, `class-variance-authority`, `tw-animate-css`.
-  `web/src/app.css` is the Tailwind entry stylesheet imported first by
-  `web/src/main.js`; it carries the shadcn token set with the Red Hat brand
-  palette as theme values (exact mirror of the design-system.css palette).
-  `web/component.json`-style generation config (`web/components.json`)
-  follows the shadcn-svelte convention; generated components live under
-  `web/src/lib/components/ui/{button,badge,card,table,tabs,dialog,
-  accordion,toast,skeleton}/`; `web/src/lib/utils.js` provides `cn()`.
-- The reusable primitives in `web/src/lib/*.svelte` are shadcn-svelte
-  components behind the existing consumed contracts, so `web/src/
-  components/*` and all views keep working: Button and Modal/Dialog are
-  built on bits-ui primitives (Button.Root; Dialog Root/Overlay/Content/
-  Title/Close with focus trap, focus restore, Escape, scroll lock); Badge,
-  Card, Table, Tabs, AccordionItem, Toast and Skeleton are cva-variant +
-  Tailwind-utility components. Tabs and AccordionItem keep the WAI-ARIA
-  manual-activation / controlled-item implementations because their
-  consumed contracts (caller-rendered tab panels with `tab-{id}`/
-  `tabpanel-{id}` aria wiring; standalone controlled accordion items with
-  caller-visible heading/body ids) cannot be satisfied by bits-ui's
-  content-registration model — documented in each component. The bespoke
-  `.btn`/`.card`/`.badge`-style scoped class layers are retired from
-  component styling (legacy class names remain only as inert DOM hooks
-  that tests and parent-scoped CSS target); the Red Hat brand identity is
-  preserved as the shadcn theme token values.
-
-### This round: merge repair (rebase category)
-
-The published head (ec5da78f) conflicted with current main (73c504f2,
-task-301 Meta-spec API). Resolved as merge commit d88b8fe0, preserving the
-retained implementation: the task-309 branch is web-only, main's delta is
-server/docs plus the `web/src/lib/api.js` route rename
-(`/meta-specs-registry` -> `/meta-specs`), so the merge takes main's
-server side unchanged (byte-identical to main for crates/docs/scripts —
-no Rust source was hand-merged) and keeps the branch's shadcn web source,
-with api.js aligned to the merged server's routes. Committed `web/dist`
-is main's coherent build (the assignment base); the executor restores
-dist from base and final integration rebuilds and publishes it remotely.
-
-### Test evidence
-
-- Focused probe on the merged tree: `npx vitest run
-  src/__tests__/ShadcnUiStack.test.js` — 7/7 passed (Button renders cva
-  variant classes on the bits-ui primitive, not the retired
-  `btn btn-{variant}` layer; Badge/Modal render shadcn/bits-ui
-  structures; Tailwind pipeline genuinely wired).
-- Full web suite on the merged tree: `cd web && npm test` (after
-  `npm ci`) — 128 files / 2596 tests passed, 41 skipped.
-- Production build from the merged source (`npx vite build --outDir
-  /tmp/dist-check`) succeeds; committed `web/dist` untouched.
-- Visual e2e: the merge's only web/src delta is api.js route-name
-  strings, which the explorer-visual specs never intercept (no
-  meta-spec references in web/tests/e2e), so the rendering surface is
-  identical to the previously verified ec5da78f state (16/16 with
-  existing baselines; a deliberate `--update-snapshots` rerun produced
-  zero baseline changes — prior round's review evidence). The
-  dist-serving visual run belongs to final integration after the remote
-  dist rebuild.
-- Evidence artifacts: /tmp/stage/review-evidence/task-309/ (notes.md,
-  shadcn-probe.txt, merge-commit-stat.txt).
-
-### Deferred to verifier / integration
-
-- Full functional e2e (`tests/e2e/app.spec.js`) and the standard server
-  suite for the merge commit: run in the independent verifier (the merge
-  introduces zero Rust source changes relative to main, which is already
-  CI-verified there; no cargo build was run in this sandbox per the
-  4 GiB budget).
-- `web/dist` rebuild + publication, then `SKIP_WEB_BUILD=1 cargo build
-  -p gyre-server` serving the migrated UI.
-- Environment notes from the prior round remain: check-web-tests.sh
-  fails on the assignment base too in-sandbox (npm arg forwarding); the
-  in-sandbox DOM probe's 2 lens-toggle failures are pre-existing on base.
-
-### Rust-half escalation (open, not closed)
-
-architecture.md's "(server, CLI, agent runtime)" parenthetical conflicts
-with canonical specs/system/agent-runtime.md (Node.js in-container agent
-image, agent-runner.mjs entrypoint). This task makes no code change and
-no coverage claim for that half; the section's Rust-half disposition
-remains a controller spec-lifecycle ruling (feedback id
-2a696c7f5c2ffc02e88742ae).
