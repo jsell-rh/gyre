@@ -970,25 +970,28 @@ pub fn api_router() -> Router<Arc<AppState>> {
             get(meta_specs::get_workspace_meta_spec_preview_status)
                 .delete(meta_specs::delete_workspace_meta_spec_preview),
         )
-        // Meta-spec registry CRUD (agent-runtime spec §2)
-        // NOTE: /:id/versions must be registered before /:id to prevent axum from
-        // matching "versions" as an id segment.
+        // Meta-spec registry CRUD (agent-runtime spec §2) — served at the
+        // specced flat routes (single entity type; scope via query/body per
+        // the spec's flat-route note). Coexists with the `:path/blast-radius`
+        // route above and the static `/preview` segments: matchit
+        // prioritizes the static segment, and the distinct child segments
+        // (`versions` vs `blast-radius`) keep the `:id` routes disjoint.
         .route(
-            "/api/v1/meta-specs-registry",
+            "/api/v1/meta-specs",
             get(meta_specs::list_meta_specs_registry).post(meta_specs::create_meta_spec_registry),
         )
         .route(
-            "/api/v1/meta-specs-registry/:id",
+            "/api/v1/meta-specs/:id",
             get(meta_specs::get_meta_spec_registry)
                 .put(meta_specs::update_meta_spec_registry)
                 .delete(meta_specs::delete_meta_spec_registry),
         )
         .route(
-            "/api/v1/meta-specs-registry/:id/versions",
+            "/api/v1/meta-specs/:id/versions",
             get(meta_specs::list_meta_spec_versions),
         )
         .route(
-            "/api/v1/meta-specs-registry/:id/versions/:version",
+            "/api/v1/meta-specs/:id/versions/:version",
             get(meta_specs::get_meta_spec_version),
         )
         // Spec-level meta-spec bindings (agent-runtime spec §2)

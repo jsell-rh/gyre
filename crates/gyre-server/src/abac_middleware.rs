@@ -779,15 +779,11 @@ impl ResourceResolver {
                     None,
                 ),
                 // ── Meta-specs ─────────────────────────────────────────────
-                RouteResourceMapping::api("/api/v1/meta-specs-registry", "meta_spec", None),
-                RouteResourceMapping::api("/api/v1/meta-specs-registry/:id", "meta_spec", None),
+                RouteResourceMapping::api("/api/v1/meta-specs", "meta_spec", None),
+                RouteResourceMapping::api("/api/v1/meta-specs/:id", "meta_spec", None),
+                RouteResourceMapping::api("/api/v1/meta-specs/:id/versions", "meta_spec", None),
                 RouteResourceMapping::api(
-                    "/api/v1/meta-specs-registry/:id/versions",
-                    "meta_spec",
-                    None,
-                ),
-                RouteResourceMapping::api(
-                    "/api/v1/meta-specs-registry/:id/versions/:version",
+                    "/api/v1/meta-specs/:id/versions/:version",
                     "meta_spec",
                     None,
                 ),
@@ -957,12 +953,9 @@ const REPOS_PATH_PREFIX: &str = "/api/v1/repos/";
 /// A parent-scoped prefix is `/api/v1/<collection>/...` where the leading
 /// `<collection>` segment (plural) names the entity its `:id` addresses:
 /// `workspaces` → `workspace`, `repos` → `repo`, `merge-requests` →
-/// `merge_request`, `agents` → `agent`. Singularization is mechanical
-/// (plural `-ies` → `-y`, else strip the plural `-s`; hyphens are the URL
-/// form of underscores) except for compound collection names that name a
-/// registry OF another entity type (`meta-specs-registry` addresses
-/// `meta_spec` entities, so its `:id` is a meta_spec id, not a
-/// "meta_spec_registry" id).
+/// `merge_request`, `agents` → `agent`, `meta-specs` → `meta_spec`.
+/// Singularization is mechanical (plural `-ies` → `-y`, else strip the
+/// plural `-s`; hyphens are the URL form of underscores).
 ///
 /// Returns `None` when the pattern is not a `/api/v1/<collection>/...`
 /// route (missing or param-valued collection segment) — such routes carry
@@ -973,9 +966,6 @@ fn prefix_entity_type(pattern: &str) -> Option<String> {
     let collection = rest.split('/').next()?;
     if collection.is_empty() || collection.starts_with(':') {
         return None;
-    }
-    if collection == "meta-specs-registry" {
-        return Some("meta_spec".to_string());
     }
     let singular = if let Some(stem) = collection.strip_suffix("ies") {
         format!("{stem}y")
