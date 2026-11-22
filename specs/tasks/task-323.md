@@ -3,7 +3,7 @@ title: "Provision the Pass 2 toolchains in the server container image: rust-anal
 spec_ref: "Spec gap spec-b89674dbcb695eb34e8d5e15 / server-image-pass2-toolchains / d96599f10659"
 depends_on: []
 progress: ready-for-review
-commits: []
+commits: ["c148189a"]
 ---
 
 ## Required behavior
@@ -53,7 +53,7 @@ Canonical spec: `specs/system/lsp-call-graph.md`. Source: `8546a781f772f05c823bb
       {
         "file": "crates/gyre-adapters/src/call_graph_rust.rs",
         "quote": "extract_with_binary(repo_path, find_rust_analyzer()).await",
-        "detail": "The Rust driver resolves the rust-analyzer binary only via RUST_ANALYZER_BIN/PATH discovery; with no rust-analyzer in the server image and no RUST_ANALYZER_BIN set, find_rust_analyzer returns None and the run degrades to zero edges - the prerequisite is genuinely load-bearing, not hypothetical."
+        "detail": "The Rust driver resolves the rust-analyzer binary only via RUST_ANALYZER_BIN/PATH discovery; with no rust-analyzer in the server image and no RUST_ANALYZER_BIN set, find_rust_analyzer returns None and the run degrades to zero edges — the prerequisite is genuinely load-bearing, not hypothetical."
       }
     ]
   }
@@ -65,7 +65,7 @@ The server container image (root Dockerfile) now ships all four specced Pass 2
 toolchains; no driver code or adapter discovery logic was changed — the image
 satisfies the existing discovery contracts.
 
-### Behavior shipped (Dockerfile)
+### Behavior shipped (Dockerfile, commit c148189a)
 
 - New `rust-analyzer` stage: `FROM rust:1.87-slim` (same pinned base as the
   builder stage) + `rustup component add rust-analyzer`, binary copied to
@@ -89,11 +89,14 @@ satisfies the existing discovery contracts.
 - The stale "Rust/TS toolchains are task-073/075 scope" comment is replaced
   with the shipped state; Go/pyright wiring and the non-root user are
   unchanged.
+- docs/server-config.md documents the new RUST_ANALYZER_BIN /
+  TS_CALLGRAPH_SERVER / TS_CALLGRAPH_TSSERVER image wiring; coverage row
+  §11 (Prerequisites) is `implemented` with the source evidence above.
 
 ### Test evidence
 
-- TypeScript Pass 2 executed end-to-end in this sandbox with the exact image
-  wiring (pinned npm -g install of typescript@5.8.3 +
+- TypeScript Pass 2 executed end-to-end in the implement sandbox with the
+  exact image wiring (pinned npm -g install of typescript@5.8.3 +
   typescript-language-server@4.3.4, bin symlink to lib/cli.mjs,
   TS_CALLGRAPH_SERVER/TS_CALLGRAPH_TSSERVER set to the Dockerfile's values):
   the real driver `scripts/ts-callgraph.mjs` on a fixture repo with one known
@@ -101,11 +104,11 @@ satisfies the existing discovery contracts.
   `{"from":"src/app.compute","to":"src/math.add"}` (exit 0). npm's own
   global layout was confirmed identical to the Dockerfile's symlink/lib-dir
   wiring, and `typescript-language-server --version` -> 4.3.4,
-  `tsc --version` -> 5.8.3. Probe transcript and the fixture are in
-  /tmp/stage/review-evidence (README.md, probes.log, ts-probe-out.json).
+  `tsc --version` -> 5.8.3. Probe transcript and the fixture were saved to
+  the round's /tmp/stage/review-evidence (retained controller-side).
 - Docker build and the in-image rust-analyzer/TS executions are deferred to
-  remote verification: docker is not installed in this sandbox and its
-  network allowlist blocks static.rust-lang.org, crates.io and
+  remote verification: docker is not installed in the implement sandbox and
+  its network allowlist blocks static.rust-lang.org, crates.io and
   release-assets.githubusercontent.com (a real rust-analyzer binary could
   not be fetched locally; the system rustup home is root-owned without the
   component). These are infrastructure restrictions, not code defects. Exact
@@ -113,7 +116,15 @@ satisfies the existing discovery contracts.
   the ENV paths, `/app/scripts` listing, the in-image TS driver run, and the
   in-image Rust Pass 2 run (server push path or `cargo test -p gyre-adapters
   real_rust_analyzer_extracts_known_call_edges` with RUST_ANALYZER_BIN from
-  the built image) — are recorded in /tmp/stage/review-evidence/README.md.
+  the built image) — are recorded in the round's review-evidence README.
 - The graceful-degradation contract is untouched: where a toolchain is
   absent (e.g. bare-metal hosts), Pass 2 still warns and returns zero edges
   rather than failing a push.
+
+### Finalization round (no code changes)
+
+- This round only restored the checkpoint after an executor contract
+  restore: the production fix at c148189a is preserved unchanged (Dockerfile,
+  docs, coverage). The task file's frontmatter (progress, commit
+  attribution) and this Shipped section were re-applied; no Rust files were
+  added by this task, so no formatting pass was required.
