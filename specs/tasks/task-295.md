@@ -2,8 +2,8 @@
 title: "Activity Dashboard completion: real-time durable feed with time-period queries, artifact links, Try-it ephemeral preview environments, TTY attach, and trial analytics"
 spec_ref: "Spec gap spec-b128f93cd5d035d28c8bbf7f / activity-dashboard-completion / f0cbfae7cd02"
 depends_on: []
-progress: complete
-commits: ["2f1f2c909ec5cc429380fa1e5cfd37de321cc59c", "5c043f3008a9e4b9a8076fc297911a69f3013773", "63ae1466c5cde34707d32ab49e8c8cdc1a377496", "28bfa569f1532567fb8d6acd0139cac9c9c576d8", "012714900a30a81a8401fb600cfac72e7835180c", "8f720877e6eadee1e2bf4bcbe13ab294c6c910d7", "7410c32759cff9c8930fbcc759e89046cc5c6184", "e4f941a12e393bdf00aedca3755f92a934c5b36f", "4986339d71637c9161f7c09f367b2ca691f64f4c", "abbb9a4434e2fa0fa62e98f492178f32ecd8d452"]
+progress: ready-for-review
+commits: []
 ---
 
 ## Required behavior
@@ -93,24 +93,26 @@ Canonical spec: `specs/system/activity-dashboard.md`. Source: `678a8ac3e3bfeafeb
 
 ## Shipped
 
-All five spec bullets of specs/system/activity-dashboard.md are closed in production code (implementation 4986339d, rustfmt e4f941a1, review repair 7410c327, clippy repair 8f720877, analytics-filter repair 01271490, tenant-scope CI repair 5c043f30). The retained `cargo test --all` verification run passed 2653/2654 tests; the single failure was fixed by 01271490.
+All five spec bullets of specs/system/activity-dashboard.md are closed in production code, carried on this branch through the prior verified rounds (implementation 4986339d through tenant-scope CI repair 5c043f30, asset build abbb9a44). This round was a rebase repair: the published PR conflicted with current main, so main's head 73c504f2 (task-301: meta-spec registry moved to the specced flat `/api/v1/meta-specs` routes with scope-level admin auth) was merged in as a72f7a89. Source conflicts were resolved by consistently applying main's route rename across abac_middleware.rs (RouteResourceMapping entries + prefix_entity_type special case dropped), api/mod.rs, rbac.rs and reconciliation.rs tests, web/src/lib/api.js, scripts/e2e-flow.sh, and docs/api-reference.md — the task-295 implementation (try-it routes, preview-environment ABAC entries, migration 000070, list_since port, activityStream/AgentTty frontend) is preserved unchanged. No new source conflicts remain (no conflict markers; only meta_specs.rs's intentional `registry_old_prefix_removed_no_alias` test still names the old prefix to assert it 404s).
 
-### This round (CI tenant-filter repair, 5c043f30)
+### Test evidence (this round, merged head a72f7a89)
 
-The candidate CI run (44957327190, PR head b1eaaeff) failed the Architecture lint / Tenant filter lint job: all four read methods of the new PreviewEnvironmentRepository adapters (find_by_id, find_by_mr, find_by_workspace, find_live_expired_before, in both crates/gyre-adapters/src/sqlite/preview_environment.rs and crates/gyre-adapters/src/postgres/preview_environment.rs) queried a tenant-column table without a tenant_id filter. Fixed by adding `.filter(preview_environments::tenant_id.eq(&tenant))` to each (the sqlite/postgres adapter convention, spec hierarchy-enforcement.md §3). In-sandbox evidence (saved under /tmp/stage/review-evidence): `bash scripts/check-tenant-filter.sh` now exits 0 ("138 read query methods ... All filter by tenant_id"); `cargo test -p gyre-adapters preview_environment` passes 7/7, including the new `reads_are_tenant_scoped` test that kills the defect (a row created under tenant-1 is invisible to a tenant-2 handle over the same database file on every read surface — this test fails if the filter is removed); `cargo clippy -p gyre-adapters --all-targets` reports no warnings in the changed files (the CI clippy gate checks changed lines only); `cargo fmt --all -- --check` exits 0; check-mem-port-contracts and check-migration-versions exit 0. `durability_across_reopen` was updated to reopen with the row's tenant scope — it previously passed only because find_by_id ignored tenant, which is exactly the isolation hole this repair closes.
+- `SKIP_WEB_BUILD=1 cargo check -p gyre-server` — clean (6m34s).
+- `cargo test -p gyre-adapters preview_environment` — 7/7 passed, including tenant-scoped reads and durability-across-reopen.
+- `cargo test -p gyre-ports` — passed.
+- `cd web && npm ci && npm test` — 132 files, 2614 passed / 41 skipped (covers activityStream, AgentTty, WorkspaceHome activity sidebar, api.js meta-specs rename consumers).
+- `cargo fmt --all -- --check`, `scripts/check-arch.sh`, `check-abac-route-registry.sh`, `check-migration-versions.sh`, `check-mem-port-contracts.sh`, `check-tenant-filter.sh` — all exit 0.
+- Evidence saved under /tmp/stage/review-evidence.
 
-### Standing implementation (prior rounds, unchanged except the tenant filters)
+### Verifier-owed test execution (gyre-server test binaries exceed the in-sandbox 4 GiB budget)
 
-- Time-period feed: `NotificationRepository::list_since(since, limit)` (created_at >= since, newest-first) implemented by every adapter (mem, SQLite, PostgreSQL, broadcasting wrapper); GET /api/v1/activity executes the filter in the repository; web/src/lib/api.js `activity(limit, since)` forwards the parameter. Killed by `unified_activity_honors_since_against_durable_notifications` (api/activity.rs).
-- Real-time sidebars: web/src/lib/activityStream.svelte.js rides the single shared /ws connection, maps bus Messages to the /activity entry shape, live-prepends per workspace, dedupes by id, re-syncs on reconnect via `GET /api/v1/activity?since=`; WorkspaceHome/CrossWorkspaceHome derive their sidebars from it. Killed by activityStream.test.js and WorkspaceHomeActivityStream.test.js.
-- Try-it preview environments: durable PreviewEnvironment (gyre-domain) + PreviewEnvironmentRepository port + SQLite migration 000070 + PostgreSQL/mem adapters wired with store!; POST /api/v1/merge-requests/:id/try-it (+ /mrs/:id alias), GET /api/v1/preview-environments[/:id], DELETE teardown; provisioning resolves the merged commit (fail-closed), requires workspace access before any side effect, dispatches via the compute-target machinery (NixOS flake-built image or isolated detached-worktree scratch on local), registers a real X25519 WireGuard mesh peer; TTL GC job (preview_env_gc on the jobs.rs scheduler) terminates and removes peers; all routes have ABAC RouteResourceMapping entries and per-handler tenant/membership scoping. Adapter durability killed by `durability_across_reopen` (gyre-adapters); handler enforcement (non-member 403 with zero rows/no peer, 4xx on unresolvable, teardown + analytics) covered by the in-file `try_it_*` tests.
-- Trial analytics: `preview.started` / `preview.ended` / `preview.expired` / `preview.failed` AnalyticsEvents via state.analytics.record, queryable through the analytics query API; the approve/reject half is untouched. `AnalyticsQueryFilter::default()` caps `limit` at 100 (01271490) so Default-constructed filters are not blind.
-- TTY attach: web/src/lib/AgentTty.svelte consumes api.agentTtyUrl (no longer dead code) to open /ws/agents/:id/tty, mounted in DetailPanel; killed by AgentTty.test.js.
-- Artifact deep links: entries surface mr_id/repo_id/agent_id/task_id/spec_path/gate_name/commit_sha/branch; gate-failure/test-result entries land on the MR's gates tab on both dashboard surfaces; merged-MR entries render TryItButton. Killed by CrossWorkspaceHomeActivityLinks.test.js and TryItButton.test.js.
+- `cargo test --all` (full suite), minimally: `cargo test -p gyre-server --lib try_it_`, `cargo test -p gyre-server --lib api::activity::tests::unified_activity_honors_since_against_durable_notifications`, and — new this round, exercising the merged route rename — `cargo test -p gyre-server --lib meta_specs`, plus `cargo test -p gyre-adapters preview_environment` and `cd web && npm ci && npm test`.
 
-### Honest limits
+### Standing implementation summary (unchanged this round)
 
-- The TTL GC job (preview_env_gc) has no direct unit test; its teardown outcome shares `teardown_preview_environment` with the tested DELETE path, and the port query it uses (`find_live_expired_before`) is adapter-tested.
-- The PostgreSQL adapters carry no test module (repo-wide state; the SQLite adapters and port contracts are tested).
-- Local-mode provisioning status is asserted honestly (active or failed) in tests because it spawns a real process.
-- Server test execution for the verifier (not run in-sandbox under the 4 GiB budget): `cargo test --all` (the previously retained full-suite command), minimally `cargo test -p gyre-server --lib try_it_`, `cargo test -p gyre-server --lib api::activity::tests::unified_activity_honors_since_against_durable_notifications`, `cargo test -p gyre-adapters preview_environment`, `cargo test -p gyre-ports`, and `cd web && npm ci && npm test`. The 5c043f30 change is confined to adapter method bodies in gyre-adapters (no port, domain, or server signature changes), so server compilation is unaffected; the tenant-filter lint and gyre-adapters tests were the relevant focused probes and both pass.
+- Time-period feed: `NotificationRepository::list_since(since, limit)` in every adapter (mem, SQLite, PostgreSQL, broadcasting wrapper); GET /api/v1/activity filters in the repository; api.js `activity(limit, since)` forwards it.
+- Real-time sidebars: web/src/lib/activityStream.svelte.js rides the single shared /ws connection, live-prepends per workspace, dedupes, re-syncs via `GET /api/v1/activity?since=` on reconnect.
+- Try-it preview environments: durable PreviewEnvironment + port + SQLite migration 000070 + adapters wired with store!; POST /api/v1/merge-requests/:id/try-it (+ /mrs/:id alias), GET /api/v1/preview-environments[/:id], DELETE teardown; compute-target dispatch, WireGuard mesh peer registration, TTL GC job, ABAC entries, per-handler tenant/membership scoping.
+- Trial analytics: preview.started/ended/expired/failed AnalyticsEvents via state.analytics.record; approve/reject half untouched.
+- TTY attach: web/src/lib/AgentTty.svelte consumes api.agentTtyUrl (no longer dead code), mounted in DetailPanel.
+- Artifact deep links: entries surface mr_id/repo_id/agent_id/task_id/spec_path/gate_name/commit_sha/branch; gate-failure/test-result entries land on the MR's gates tab; merged-MR entries render TryItButton.
