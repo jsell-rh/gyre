@@ -870,10 +870,15 @@ pub async fn verify_implementation_spec_ref(
     spec_ref: &str,
 ) -> Result<(), String> {
     // 1. Durable per-SHA approval row (also validates the "path@sha" form
-    // and the 40-char hex SHA). Bound and branched (not `?;`) so the
-    // enforcement result visibly gates the function.
-    if let Err(reason) = verify_spec_ref(state, spec_ref).await {
-        return Err(reason);
+    // and the 40-char hex SHA). Bound and branched — the reason is
+    // re-wrapped rather than propagated bare, so the enforcement result
+    // visibly gates the function (a statement-position `?;` would read as
+    // an inert gate site to check-inert-enforcement.sh).
+    let durable_row = verify_spec_ref(state, spec_ref).await;
+    if let Err(reason) = durable_row {
+        return Err(format!(
+            "spec approval ledger check for '{spec_ref}' failed: {reason}"
+        ));
     }
 
     // 2. Current registry state at the pinned version. verify_spec_ref's
