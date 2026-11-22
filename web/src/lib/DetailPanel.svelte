@@ -1442,6 +1442,165 @@
     }
   }
 
+  // ── Meta-spec bindings panel (agent-runtime.md §2 Spec-Level Binding) ──
+  // The Edit tab's bindings panel: lists available meta-specs from the
+  // registry, shows required ones pre-selected and locked (they inject via
+  // prompt-assembly band 2 regardless and cannot be removed from the set),
+  // and lets the author select optional ones and their pinned versions.
+  // Saving PUTs the full desired set to the bindings endpoint — a changed
+  // set updates the spec's registry SHA and resets its approval to Pending
+  // (the stale-pin re-approval cascade).
+  let bindingsLoading = $state(false);
+  let bindingsError = $state(null);
+  let availableMetaSpecs = $state([]);
+  let specBindings = $state([]); // the currently-saved binding set
+  let bindingSelection = $state({}); // meta_spec_id -> pinned_version
+  let bindingsDirty = $state(false);
+  let bindingsSaving = $state(false);
+  let bindingsLoadedFor = $state(null);
+
+  $effect(() => {
+    // Load once per spec entity when the Edit tab is active. Tracks
+    // entity.id so switching specs reloads but keystrokes do not. The API
+    // path is normalized (leading "specs/" stripped): the ledger and the
+    // bindings side table key the BARE path, while Explorer entries carry
+    // the prefixed id — calling with the raw id would silently return an
+    // empty set and 404 the save.
+    if (entity?.type === 'spec' && activeTab === 'edit' && bindingsLoadedFor !== entity.id) {
+      bindingsLoadedFor = entity.id;
+      loadSpecBindings(specBindingsPath());
+    }
+  });
+
+  /** The spec's ledger/API path for the bindings endpoints: entity ids may
+   * carry a leading "specs/" prefix (Explorer entries pass
+   * specRef.split('@')[0] = 'specs/system/auth.md') while the API route
+   * already includes /specs/ and the ledger keys the bare path — the same
+   * normalization every other spec call in this component applies. */
+  function specBindingsPath() {
+    return (entity?.id ?? '').replace(/^specs\//, '');
+  }
+
+  async function loadSpecBindings(path) {
+    bindingsLoading = true;
+    bindingsError = null;
+    try {
+      const current = await api.getSpecMetaSpecBindings(path);
+      specBindings = current ?? [];
+      // Registry listing for the panel's "available meta-specs": the flat
+      // registry listing is Admin-only (tenant-wide governance), so a
+      // non-Admin author falls back to the workspace-scoped listing — the
+      // exact set this spec's workspace may bind (Global + tenant +
+      // workspace), served to workspace members with the same gate the
+      // bindings save uses. Bound entries the listing does not cover are
+      // resolved per-binding so they can still be shown and unbound.
+      let registry = [];
+      try {
+        registry = await api.getMetaSpecs();
+      } catch {
+        registry = [];
+      }
+      if (registry.length === 0 && specWorkspaceId) {
+        try {
+          registry = await api.getWorkspaceMetaSpecs(specWorkspaceId);
+        } catch {
+          registry = [];
+        }
+      }
+      const covered = new Set(registry.map((m) => m.id));
+      const missing = specBindings.filter((b) => !covered.has(b.meta_spec_id));
+      if (missing.length > 0) {
+        const looked = await Promise.all(
+          missing.map((b) => api.getMetaSpec(b.meta_spec_id).catch(() => null))
+        );
+        registry = registry.concat(looked.filter(Boolean));
+      }
+      availableMetaSpecs = registry ?? [];
+      const sel = {};
+      for (const b of specBindings) sel[b.meta_spec_id] = b.pinned_version;
+      // Required meta-specs are pre-selected at their current version and
+      // locked: band 2 injects them regardless, and the saved set reflects
+      // the effective prompt.
+      for (const ms of availableMetaSpecs) {
+        if (ms.required && !(ms.id in sel)) sel[ms.id] = ms.version;
+      }
+      bindingSelection = sel;
+      bindingsDirty = false;
+    } catch (e) {
+      bindingsError = e.message ?? String(e);
+    } finally {
+      bindingsLoading = false;
+    }
+  }
+
+  /** Display rows: registry entries plus bound-but-unlisted ids (a
+   * meta-spec deleted from the registry still shows so it can be
+   * unbound). */
+  const bindingRows = $derived.by(() => {
+    const rows = [];
+    const seen = new Set();
+    for (const ms of availableMetaSpecs) {
+      seen.add(ms.id);
+      rows.push({
+        id: ms.id,
+        name: ms.name,
+        kind: ms.kind,
+        version: ms.version,
+        required: Boolean(ms.required),
+      });
+    }
+    for (const b of specBindings) {
+      if (!seen.has(b.meta_spec_id)) {
+        rows.push({
+          id: b.meta_spec_id,
+          name: b.meta_spec_id,
+          kind: null,
+          version: b.pinned_version,
+          required: false,
+        });
+      }
+    }
+    return rows;
+  });
+
+  function toggleBinding(row, checked) {
+    if (row.required) return; // locked: required meta-specs cannot be removed
+    const sel = { ...bindingSelection };
+    if (checked) {
+      sel[row.id] = row.version; // default pin: the current version
+    } else {
+      delete sel[row.id];
+    }
+    bindingSelection = sel;
+    bindingsDirty = true;
+  }
+
+  function setPinnedVersion(id, version) {
+    bindingSelection = { ...bindingSelection, [id]: version };
+    bindingsDirty = true;
+  }
+
+  async function saveSpecBindings() {
+    if (!entity || bindingsSaving) return;
+    bindingsSaving = true;
+    try {
+      const bindings = Object.entries(bindingSelection).map(([meta_spec_id, pinned_version]) => ({
+        meta_spec_id,
+        pinned_version,
+      }));
+      // Normalized path (see specBindingsPath): the save PUTs against the
+      // bare ledger path, matching the GET.
+      const saved = await api.putSpecMetaSpecBindings(specBindingsPath(), bindings);
+      specBindings = saved ?? [];
+      bindingsDirty = false;
+      toastSuccess($t('detail_panel.bindings_saved'));
+    } catch (e) {
+      toastError($t('detail_panel.bindings_save_failed', { values: { error: e.message ?? e } }));
+    } finally {
+      bindingsSaving = false;
+    }
+  }
+
   // Helpers for spec tabs
   function specStatusColor(s) {
     if (s === 'approved')   return 'success';
@@ -3570,6 +3729,81 @@
                 </Button>
               </div>
             {/if}
+
+            <!-- Meta-spec bindings panel (agent-runtime.md §2): required
+                 meta-specs pre-selected and locked; optional ones selectable
+                 with pinned versions. Saving PUTs the full binding set — a
+                 changed set resets the spec's approval to Pending. -->
+            <section class="bindings-panel" aria-label={$t('detail_panel.bindings_title')}>
+              <h4 class="bindings-title">{$t('detail_panel.bindings_title')}</h4>
+              <p class="bindings-hint">{$t('detail_panel.bindings_hint')}</p>
+              {#if bindingsLoading}
+                <Skeleton width="100%" height="80px" />
+              {:else if bindingsError}
+                <p class="bindings-error" role="alert">{bindingsError}</p>
+              {:else if bindingRows.length === 0}
+                <p class="bindings-empty">{$t('detail_panel.bindings_empty')}</p>
+              {:else}
+                <ul class="bindings-list">
+                  {#each bindingRows as row (row.id)}
+                    {@const selected = bindingSelection[row.id] != null}
+                    {@const isRequired = row.required}
+                    <li class="binding-row" class:binding-row-required={isRequired}>
+                      <label class="binding-select-label">
+                        <input
+                          type="checkbox"
+                          checked={selected}
+                          disabled={isRequired}
+                          onchange={(e) => toggleBinding(row, e.target.checked)}
+                          aria-label={$t('detail_panel.bindings_toggle_aria', { values: { name: row.name } })}
+                        />
+                        <span class="binding-name">{row.name}</span>
+                        {#if row.kind}<span class="binding-kind">{row.kind}</span>{/if}
+                        {#if isRequired}
+                          <span class="binding-required-badge" title={$t('detail_panel.bindings_required_title')}>{$t('detail_panel.bindings_required')}</span>
+                        {/if}
+                      </label>
+                      {#if selected}
+                        <label class="binding-version-label">
+                          <span>{$t('detail_panel.bindings_pinned_version')}</span>
+                          {#if isRequired || row.version == null}
+                            <!-- Locked at the current version: required
+                                 meta-specs always inject at their latest
+                                 approved version (band 2). -->
+                            <select value={bindingSelection[row.id]} disabled aria-label={$t('detail_panel.bindings_version_aria', { values: { name: row.name } })}>
+                              <option value={bindingSelection[row.id]}>{bindingSelection[row.id]}</option>
+                            </select>
+                          {:else}
+                            <select
+                              value={bindingSelection[row.id]}
+                              onchange={(e) => setPinnedVersion(row.id, Number(e.target.value))}
+                              aria-label={$t('detail_panel.bindings_version_aria', { values: { name: row.name } })}
+                            >
+                              {#each Array(row.version) as _, i}
+                                {@const v = i + 1}
+                                <option value={v}>{v}{#if v === row.version} — {$t('detail_panel.bindings_current')}{/if}</option>
+                              {/each}
+                            </select>
+                          {/if}
+                        </label>
+                      {/if}
+                    </li>
+                  {/each}
+                </ul>
+                <div class="bindings-save-bar">
+                  <Button
+                    variant="primary"
+                    onclick={() => saveSpecBindings()}
+                    disabled={!bindingsDirty || bindingsSaving}
+                  >
+                    {bindingsSaving ? $t('detail_panel.saving') : $t('detail_panel.bindings_save')}
+                  </Button>
+                  {#if bindingsDirty}
+                    <span class="bindings-dirty-note">{$t('detail_panel.bindings_dirty_note')}</span>
+                  {/if}
+                </div>
+              {/if}
+            </section>
           {/if}
         </div>
 
@@ -5949,6 +6183,116 @@
     justify-content: flex-end;
     padding: var(--space-3) var(--space-4);
     border-top: 1px solid var(--color-border);
+  }
+
+  /* Meta-spec bindings panel (Edit tab) */
+  .bindings-panel {
+    margin: var(--space-3) var(--space-4) var(--space-4);
+    padding: var(--space-3);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+    background: var(--color-bg-secondary, var(--color-bg));
+  }
+
+  .bindings-title {
+    margin: 0 0 var(--space-1);
+    font-size: var(--text-md);
+    font-weight: 600;
+    color: var(--color-text);
+  }
+
+  .bindings-hint {
+    margin: 0 0 var(--space-2);
+    font-size: var(--text-sm);
+    color: var(--color-text-muted);
+  }
+
+  .bindings-error {
+    margin: 0;
+    font-size: var(--text-sm);
+    color: var(--color-danger, #b00020);
+  }
+
+  .bindings-empty {
+    margin: 0;
+    font-size: var(--text-sm);
+    color: var(--color-text-muted);
+  }
+
+  .bindings-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .binding-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-3);
+    flex-wrap: wrap;
+  }
+
+  .binding-row-required .binding-name {
+    font-weight: 600;
+  }
+
+  .binding-select-label {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    min-width: 0;
+  }
+
+  .binding-name {
+    overflow-wrap: anywhere;
+  }
+
+  .binding-kind {
+    font-size: var(--text-xs);
+    padding: 0 var(--space-1);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+    color: var(--color-text-muted);
+    white-space: nowrap;
+  }
+
+  .binding-required-badge {
+    font-size: var(--text-xs);
+    padding: 0 var(--space-1);
+    border-radius: var(--radius-sm);
+    background: var(--color-primary, #4f46e5);
+    color: var(--color-text-inverse, #fff);
+    white-space: nowrap;
+  }
+
+  .binding-version-label {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    font-size: var(--text-sm);
+    color: var(--color-text-muted);
+    white-space: nowrap;
+  }
+
+  .binding-version-label select {
+    font-size: var(--text-sm);
+  }
+
+  .bindings-save-bar {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: var(--space-2);
+    margin-top: var(--space-3);
+  }
+
+  .bindings-dirty-note {
+    font-size: var(--text-sm);
+    color: var(--color-warning, #b45309);
   }
 
   /* Progress tab */

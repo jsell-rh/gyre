@@ -825,11 +825,6 @@ pub fn api_router() -> Router<Arc<AppState>> {
                 .put(trust_anchors::update_trust_anchor)
                 .delete(trust_anchors::delete_trust_anchor),
         )
-        // Tenant-level meta-spec sets (meta-spec-reconciliation.md §8)
-        .route(
-            "/api/v1/tenants/:id/meta-specs/set",
-            get(meta_specs::get_tenant_meta_spec_set).put(meta_specs::put_tenant_meta_spec_set),
-        )
         // Workspaces (M22.1)
         .route(
             "/api/v1/workspaces",
@@ -858,11 +853,6 @@ pub fn api_router() -> Router<Arc<AppState>> {
             "/api/v1/workspaces/:workspace_id/merge-requests",
             get(merge_requests::list_workspace_mrs),
         )
-        // Meta-spec sets (M32)
-        .route(
-            "/api/v1/workspaces/:id/meta-spec-set",
-            get(meta_specs::get_meta_spec_set).put(meta_specs::put_meta_spec_set),
-        )
         // Workspace merge policy (meta-spec-reconciliation.md §9)
         .route(
             "/api/v1/workspaces/:id/merge-policy",
@@ -872,6 +862,13 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route(
             "/api/v1/workspaces/:id/meta-specs/rollout-policy",
             get(meta_specs::get_rollout_policy).put(meta_specs::put_rollout_policy),
+        )
+        // Workspace-scoped meta-spec listing for the spec-bindings panel
+        // (agent-runtime.md §2 — available meta-specs from the tenant and
+        // workspace registries, scoped to what this workspace may bind).
+        .route(
+            "/api/v1/workspaces/:id/meta-specs",
+            get(meta_specs::list_workspace_meta_specs),
         )
         // Orchestrator lifecycle (platform-model.md §3, task-093)
         .route(

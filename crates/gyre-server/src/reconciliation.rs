@@ -25,7 +25,6 @@
 //! cheap"). Agent spawning from reconciliation tasks happens through the
 //! normal signal chain (`task_type: delegation` → repo orchestrator).
 
-use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use gyre_common::{Id, Notification, NotificationType};
@@ -35,7 +34,6 @@ use gyre_domain::{
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
-use crate::api::meta_specs::{MetaSpecSet, TenantMetaSpecSet};
 use crate::AppState;
 
 /// Current wall-clock in milliseconds. Used for wave ids: successive waves
@@ -365,15 +363,20 @@ pub async fn emit_meta_spec_changed(
             let workspaces = state.workspaces.list().await.unwrap_or_default();
             let mut emitted = false;
             for ws in &workspaces {
-                let binds = resolve_effective_meta_spec_set(state, ws)
-                    .await
-                    .map(|s| {
-                        s.personas.values().any(|e| e.path == meta_spec.name)
-                            || s.principles.iter().any(|e| e.path == meta_spec.name)
-                            || s.standards.iter().any(|e| e.path == meta_spec.name)
-                            || s.process.iter().any(|e| e.path == meta_spec.name)
-                    })
-                    .unwrap_or(false);
+                // Registry model: a workspace-level binding is the required
+                // flag — the change is relevant to workspaces the meta-spec
+                // is required-visible from (Global → all; Tenant → its
+                // tenant; Workspace → its own workspace).
+                let binds = meta_spec.required
+                    && match meta_spec.scope {
+                        gyre_domain::MetaSpecScope::Global => true,
+                        gyre_domain::MetaSpecScope::Tenant => {
+                            ws.tenant_id.as_str() == meta_spec.scope_id.as_deref().unwrap_or("")
+                        }
+                        gyre_domain::MetaSpecScope::Workspace => {
+                            ws.id.as_str() == meta_spec.scope_id.as_deref().unwrap_or("")
+                        }
+                    };
                 if binds {
                     emitted = true;
                     state
@@ -443,8 +446,15 @@ pub struct ReconciliationSummary {
 
 /// Run reconciliation for one workspace after its meta-spec set changed.
 ///
-/// `changed_paths` are the meta-spec paths (set-entry `path` values, i.e.
-/// registry meta-spec names) whose pinned version changed in this update.
+/// `changed_meta_spec_ids` are the registry ids of the meta-specs whose
+/// pinned version or required flag changed in this update. The handler
+/// that triggers the wave already holds the resolved registry record, so
+/// the id is threaded through and re-resolved by id — a name lookup is a
+/// global scan over a column with no uniqueness constraint, and
+/// workspace-scoped meta-specs in different workspaces can share a name,
+/// so a name-keyed re-resolution could gate the wave on the wrong record
+/// (e.g. "not required; skipping" against a same-named sibling) and
+/// silently skip a real rollout.
 /// For each, every repo in the workspace is a reconciliation candidate
 /// (the workspace binding governs all repos in the workspace — §2), and
 /// §6 step 2 requires a task per repo: "For each repo, creates a
@@ -469,10 +479,10 @@ pub struct ReconciliationSummary {
 pub async fn run_reconciliation(
     state: &Arc<AppState>,
     workspace_id: &Id,
-    changed_paths: &[String],
+    changed_meta_spec_ids: &[Id],
 ) -> ReconciliationSummary {
     let mut summary = ReconciliationSummary::default();
-    if changed_paths.is_empty() {
+    if changed_meta_spec_ids.is_empty() {
         return summary;
     }
 
@@ -486,7 +496,7 @@ pub async fn run_reconciliation(
 
     info!(
         workspace_id = %ws_id,
-        changed = changed_paths.len(),
+        changed = changed_meta_spec_ids.len(),
         "reconciliation: controller started"
     );
 
@@ -513,10 +523,10 @@ pub async fn run_reconciliation(
         return summary;
     }
 
-    // Resolve each changed meta-spec path to its registry record (kind,
-    // name, new version). The set entry `path` is the registry meta-spec
-    // name (the registry is the spec-content source of truth; the set
-    // pins `name@sha`).
+    // Resolve each changed meta-spec id to its registry record (kind,
+    // name, new version) — by id, never by name (see the doc comment
+    // above: same-named meta-specs in different workspaces must not
+    // cross-gate the wave).
     //
     // §6 gates reconciliation on an APPROVED rollout: "when a meta-spec
     // change is approved and rolled out". Binding a spec that is still
@@ -525,13 +535,26 @@ pub async fn run_reconciliation(
     // approval trigger would fire a second wave for the same logical
     // rollout (double-trigger). The approval transition owns the
     // reconciliation for never-approved content.
+    //
+    // Registry model: only REQUIRED meta-specs reconcile workspaces —
+    // workspace-level binding is the required flag. Optional meta-specs
+    // reach code exclusively through spec-level bindings, whose drift is
+    // owned by the stale-pin cascade (agent-runtime.md §2), not by blanket
+    // workspace reconciliation.
     let mut changed_specs: Vec<gyre_domain::MetaSpec> = Vec::new();
-    for path in changed_paths {
-        match find_meta_spec_by_name(state, path).await {
+    for ms_id in changed_meta_spec_ids {
+        match state.meta_specs.get_by_id(ms_id).await {
             Ok(Some(ms)) => {
+                if !ms.required {
+                    info!(
+                        meta_spec_id = %ms_id,
+                        "reconciliation: meta-spec is not required; spec-level bindings own its drift"
+                    );
+                    continue;
+                }
                 if ms.approval_status != gyre_domain::meta_spec::MetaSpecApprovalStatus::Approved {
                     info!(
-                        meta_spec = %path,
+                        meta_spec_id = %ms_id,
                         status = ms.approval_status.as_str(),
                         "reconciliation: changed meta-spec is not Approved yet; the approval trigger owns this rollout"
                     );
@@ -541,12 +564,12 @@ pub async fn run_reconciliation(
             }
             Ok(None) => {
                 warn!(
-                    meta_spec = %path,
+                    meta_spec_id = %ms_id,
                     "reconciliation: changed meta-spec not found in registry; skipping"
                 );
             }
             Err(e) => {
-                warn!(meta_spec = %path, error = %e, "reconciliation: registry lookup failed");
+                warn!(meta_spec_id = %ms_id, error = %e, "reconciliation: registry lookup failed");
             }
         }
     }
@@ -1285,51 +1308,13 @@ pub async fn maybe_auto_enqueue_reconciliation_mr(
     );
 }
 
-/// Diff two meta-spec sets and return the paths whose pinned version changed.
-///
-/// A path is "changed" when its SHA differs between the old and new set, or
-/// when it appears only in the new set (newly bound). Removals are not
-/// reconciliation triggers (unbinding a spec does not invalidate code
-/// produced under it while it was active — no new version to align to).
-pub fn diff_meta_spec_set(
-    old: &crate::api::meta_specs::MetaSpecSet,
-    new: &crate::api::meta_specs::MetaSpecSet,
-) -> Vec<String> {
-    use crate::api::meta_specs::MetaSpecSet;
-
-    fn entries(set: &MetaSpecSet) -> BTreeMap<String, String> {
-        let mut m: BTreeMap<String, String> = set
-            .personas
-            .values()
-            .map(|e| (e.path.clone(), e.sha.clone()))
-            .collect();
-        // Two personas may pin the same spec path — keep the first pin.
-        for e in set
-            .principles
-            .iter()
-            .chain(&set.standards)
-            .chain(&set.process)
-        {
-            m.entry(e.path.clone()).or_insert_with(|| e.sha.clone());
-        }
-        m
-    }
-
-    let old_entries = entries(old);
-    let new_entries = entries(new);
-
-    new_entries
-        .into_iter()
-        .filter(|(path, new_sha)| match old_entries.get(path) {
-            Some(old_sha) => old_sha != new_sha,
-            None => true,
-        })
-        .map(|(path, _)| path)
-        .collect()
-}
-
-/// Look up a registry meta-spec by name (set entries pin `name@sha`).
-async fn find_meta_spec_by_name(
+/// Look up a registry meta-spec by name (the blast-radius endpoint keys
+/// meta-specs by registry name, which comes from a spec path).
+/// Reconciliation triggers must NOT use this — they hold the resolved
+/// record and thread its id (`run_reconciliation` resolves by id): names
+/// are not unique across workspaces, so a name-keyed lookup can gate a
+/// wave on a same-named record in another workspace.
+pub(crate) async fn find_meta_spec_by_name(
     state: &Arc<AppState>,
     name: &str,
 ) -> anyhow::Result<Option<gyre_domain::MetaSpec>> {
@@ -1339,187 +1324,193 @@ async fn find_meta_spec_by_name(
 }
 
 // ---------------------------------------------------------------------------
-// §8 — Tenant-scope meta-spec changes (inheritance + propagation)
+// Registry-model effective-set resolution
+// (meta-spec-reconciliation.md amendments row: the workspace/tenant
+// meta-spec-set KV model is replaced by registry required flags plus
+// spec-level bindings)
 // ---------------------------------------------------------------------------
 
-/// All meta-spec paths pinned anywhere in a workspace set (any section).
-fn workspace_set_paths(set: &MetaSpecSet) -> BTreeSet<String> {
-    let mut paths: BTreeSet<String> = set.personas.values().map(|e| e.path.clone()).collect();
-    paths.extend(set.principles.iter().map(|e| e.path.clone()));
-    paths.extend(set.standards.iter().map(|e| e.path.clone()));
-    paths.extend(set.process.iter().map(|e| e.path.clone()));
-    paths
-}
-
-/// All meta-spec paths pinned anywhere in a tenant set (any section).
-fn tenant_set_paths(set: &TenantMetaSpecSet) -> BTreeSet<String> {
-    let mut paths: BTreeSet<String> = set.personas.values().map(|e| e.path.clone()).collect();
-    paths.extend(set.principles.iter().map(|e| e.path.clone()));
-    paths.extend(set.standards.iter().map(|e| e.path.clone()));
-    paths.extend(set.process.iter().map(|e| e.path.clone()));
-    paths
-}
-
-/// Resolve a workspace's EFFECTIVE meta-spec set (§8): tenant defaults merged
-/// with the workspace's own overrides — the workspace pin wins on conflict.
+/// Resolve the registry's effective meta-spec set for a workspace: every
+/// REQUIRED, APPROVED meta-spec visible from the workspace —
+/// - Global scope (org-wide mandatory),
+/// - Tenant scope matching the workspace's tenant (tenant inheritance, §8),
+/// - Workspace scope matching the workspace itself.
 ///
-/// Merge rule (deterministic, canonical-serializable):
-/// - `personas`: tenant entries whose path is pinned anywhere in the
-///   workspace set, or whose role key is rebound by the workspace set, are
-///   dropped; the workspace's persona map is then overlaid on the survivors.
-/// - `principles`/`standards`/`process`: the workspace's entries come first,
-///   followed by the tenant entries whose path the workspace does not pin.
+/// Returned as `{meta_spec_id, kind, content_hash, version}` snapshots —
+/// the tuple shape the amendments row specces for snapshot data exchanged
+/// on the drift path (the retired set model exchanged `path@sha` pin
+/// strings instead). Unapproved entries are excluded
+/// (fail-closed, same rule as prompt-assembly bands 1–2): a required
+/// meta-spec pending re-approval is not injected and not conformed to
+/// until a human approves it — which is also the §6 trigger that
+/// reconciles the wave in.
 ///
-/// Consistency guarantee: if `!workspace_overrides_path(tenant, ws, P)`, the
-/// merged set binds `P` exactly as the tenant set does (no workspace persona
-/// key collision removed a tenant pin of `P`, and the workspace pins `P`
-/// nowhere) — so "not overridden" always means "inherits the tenant pin".
-pub fn merge_meta_spec_sets(tenant: &TenantMetaSpecSet, workspace: &MetaSpecSet) -> MetaSpecSet {
-    let ws_paths = workspace_set_paths(workspace);
-
-    let mut personas = BTreeMap::new();
-    for (key, entry) in &tenant.personas {
-        if ws_paths.contains(&entry.path) || workspace.personas.contains_key(key) {
-            continue;
-        }
-        personas.insert(key.clone(), entry.clone());
-    }
-    for (key, entry) in &workspace.personas {
-        personas.insert(key.clone(), entry.clone());
-    }
-
-    let merge_vec =
-        |ws_entries: &[crate::api::meta_specs::MetaSpecPinnedEntry],
-         t_entries: &[crate::api::meta_specs::MetaSpecPinnedEntry]| {
-            let mut out = ws_entries.to_vec();
-            for e in t_entries {
-                if !ws_paths.contains(&e.path) {
-                    out.push(e.clone());
-                }
-            }
-            out
-        };
-
-    MetaSpecSet {
-        workspace_id: workspace.workspace_id.clone(),
-        personas,
-        principles: merge_vec(&workspace.principles, &tenant.principles),
-        standards: merge_vec(&workspace.standards, &tenant.standards),
-        process: merge_vec(&workspace.process, &tenant.process),
-    }
-}
-
-/// Whether a workspace overrides a tenant-level default for `path` (§8):
-/// the workspace's own meta-spec set governs that meta-spec, so tenant
-/// propagation skips it (unless the tenant admin forces the change).
-///
-/// A workspace overrides `path` when its own set pins `path` in any section,
-/// OR when it rebinds a tenant persona role whose pin is `path` (the role
-/// rebinding drops the tenant's pin of `path` from the effective set — see
-/// `merge_meta_spec_sets`).
-pub fn workspace_overrides_path(
-    tenant: &TenantMetaSpecSet,
-    workspace: &MetaSpecSet,
-    path: &str,
-) -> bool {
-    if workspace_set_paths(workspace).contains(path) {
-        return true;
-    }
-    tenant
-        .personas
-        .iter()
-        .any(|(key, e)| e.path == path && workspace.personas.contains_key(key))
-}
-
-/// Load a workspace's own meta-spec set (empty set if none is bound).
-/// Corrupt stored JSON is an error — silently treating it as an empty set
-/// would flip the effective-set SHA and false-drift all provenance.
-async fn load_workspace_set(state: &AppState, workspace_id: &Id) -> anyhow::Result<MetaSpecSet> {
-    match state.meta_spec_sets.get(workspace_id).await? {
-        Some(json) => Ok(serde_json::from_str(&json)?),
-        None => Ok(MetaSpecSet::default()),
-    }
-}
-
-/// Load a tenant's meta-spec set (empty set if none is bound).
-async fn load_tenant_set(state: &AppState, tenant_id: &Id) -> anyhow::Result<TenantMetaSpecSet> {
-    match state.tenant_meta_spec_sets.get(tenant_id).await? {
-        Some(json) => Ok(serde_json::from_str(&json)?),
-        None => Ok(TenantMetaSpecSet::default()),
-    }
-}
-
-/// Resolve a workspace's effective meta-spec set (§8 inheritance): tenant
-/// defaults merged with the workspace's own overrides. Public so API
-/// handlers and the SHA computation share one resolution rule.
+/// Deterministic order (kind rank, then name) so the derived SHA and the
+/// rendered context are stable across repeated resolution.
 pub async fn resolve_effective_meta_spec_set(
     state: &AppState,
     workspace: &gyre_domain::Workspace,
-) -> anyhow::Result<MetaSpecSet> {
-    let ws_set = load_workspace_set(state, &workspace.id).await?;
-    let tenant_set = load_tenant_set(state, &workspace.tenant_id).await?;
-    let mut effective = merge_meta_spec_sets(&tenant_set, &ws_set);
-    effective.workspace_id = workspace.id.to_string();
-    Ok(effective)
+) -> anyhow::Result<Vec<gyre_domain::MetaSpecSnapshot>> {
+    let specs = effective_required_meta_specs(state, workspace).await?;
+    Ok(specs.iter().map(meta_spec_snapshot).collect())
 }
 
-/// Diff two tenant meta-spec sets and return the paths whose pinned version
-/// changed (same semantics as `diff_meta_spec_set`: new or re-pinned entries
-/// are changes; removals are not propagation triggers).
-pub fn diff_tenant_meta_spec_set(old: &TenantMetaSpecSet, new: &TenantMetaSpecSet) -> Vec<String> {
-    fn entries(set: &TenantMetaSpecSet) -> BTreeMap<String, String> {
-        let mut m: BTreeMap<String, String> = set
-            .personas
-            .values()
-            .map(|e| (e.path.clone(), e.sha.clone()))
-            .collect();
-        for e in set
-            .principles
-            .iter()
-            .chain(&set.standards)
-            .chain(&set.process)
-        {
-            m.entry(e.path.clone()).or_insert_with(|| e.sha.clone());
-        }
-        m
+/// Full-registry-record variant of [`resolve_effective_meta_spec_set`]:
+/// the same required+approved+visible resolution, returning the complete
+/// `MetaSpec` records (prompt content included) for consumers that render
+/// the set (the `{{meta_spec_context}}` LLM prompt variable).
+pub(crate) async fn effective_required_meta_specs(
+    state: &AppState,
+    workspace: &gyre_domain::Workspace,
+) -> anyhow::Result<Vec<gyre_domain::MetaSpec>> {
+    use gyre_domain::meta_spec::{MetaSpecApprovalStatus, MetaSpecScope};
+    use gyre_ports::MetaSpecFilter;
+
+    let mut specs: Vec<gyre_domain::MetaSpec> = Vec::new();
+
+    // Global (org-wide) required meta-specs.
+    specs.extend(
+        state
+            .meta_specs
+            .list(&MetaSpecFilter {
+                scope: Some(MetaSpecScope::Global),
+                required: Some(true),
+                ..Default::default()
+            })
+            .await?,
+    );
+    // Tenant-scoped required meta-specs for this workspace's tenant (§8
+    // tenant inheritance).
+    specs.extend(
+        state
+            .meta_specs
+            .list(&MetaSpecFilter {
+                scope: Some(MetaSpecScope::Tenant),
+                scope_id: Some(workspace.tenant_id.to_string()),
+                required: Some(true),
+                ..Default::default()
+            })
+            .await?,
+    );
+    // Workspace-scoped required meta-specs.
+    specs.extend(
+        state
+            .meta_specs
+            .list(&MetaSpecFilter {
+                scope: Some(MetaSpecScope::Workspace),
+                scope_id: Some(workspace.id.to_string()),
+                required: Some(true),
+                ..Default::default()
+            })
+            .await?,
+    );
+
+    // Fail-closed approval gate (same rule as prompt assembly): a required
+    // meta-spec that is not Approved is not part of the effective set.
+    specs.retain(|ms| ms.approval_status == MetaSpecApprovalStatus::Approved);
+
+    specs.sort_by(|a, b| {
+        kind_rank(a.kind.as_str())
+            .cmp(&kind_rank(b.kind.as_str()))
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    Ok(specs)
+}
+
+/// Snapshot of a meta-spec at its current version — the
+/// `{meta_spec_id, kind, content_hash, version}` tuple shape.
+pub(crate) fn meta_spec_snapshot(ms: &gyre_domain::MetaSpec) -> gyre_domain::MetaSpecSnapshot {
+    gyre_domain::MetaSpecSnapshot {
+        meta_spec_id: ms.id.to_string(),
+        kind: ms.kind.as_str().to_string(),
+        content_hash: ms.content_hash.clone(),
+        version: ms.version,
     }
-
-    let old_entries = entries(old);
-    let new_entries = entries(new);
-
-    new_entries
-        .into_iter()
-        .filter(|(path, new_sha)| match old_entries.get(path) {
-            Some(old_sha) => old_sha != new_sha,
-            None => true,
-        })
-        .map(|(path, _)| path)
-        .collect()
 }
 
-/// Emit the `tenant_meta_spec_set_updated` domain event (§11): a tenant's
-/// meta-spec set binding changed. Fired by the tenant set-update handler on
-/// every successful PUT that changes the binding. Tenant-scoped (the scope
-/// is the authenticated caller's tenant, carried directly — no fabricated
-/// workspace identity): the audience — the tenant's workspaces — is
-/// enumerated by the propagation run that follows; per-workspace events
-/// come from `run_reconciliation`.
-pub async fn emit_tenant_meta_spec_set_updated(
-    state: &Arc<AppState>,
-    tenant_id: &Id,
-    changed_paths: &[String],
-) {
-    state
-        .emit_tenant_event(
-            tenant_id.clone(),
-            gyre_common::message::Destination::Broadcast,
-            gyre_common::message::MessageKind::Custom("tenant_meta_spec_set_updated".to_string()),
-            Some(serde_json::json!({
-                "tenant_id": tenant_id.to_string(),
-                "changed": changed_paths,
-            })),
-        )
-        .await;
+/// Kind ordering for deterministic effective-set serialization
+/// (persona → principle → standard → process, same rank prompt assembly
+/// uses so a human reading both surfaces sees the same order).
+fn kind_rank(kind: &str) -> u8 {
+    match kind {
+        "meta:persona" => 0,
+        "meta:principle" => 1,
+        "meta:standard" => 2,
+        "meta:process" => 3,
+        _ => 4,
+    }
+}
+
+/// Resolve the effective (required, approved, visible) meta-spec snapshots
+/// for a workspace by id. Empty when the workspace does not exist or binds
+/// nothing — the conformance sweep's "nothing to conform to" skip.
+///
+/// Fail closed: a workspace-lookup or effective-set resolution ERROR
+/// propagates (with a warn log) instead of collapsing to an empty set —
+/// "cannot determine the required set" must never silently read as "no
+/// required meta-specs" on the enforcement signals that consume this
+/// (merge-time drift, the §10 conformance sweep, approval-time
+/// `InputContent.meta_spec_set_sha` stamping, the §3.2 agent context).
+pub async fn required_meta_spec_snapshots(
+    state: &AppState,
+    workspace_id: &Id,
+) -> anyhow::Result<Vec<gyre_domain::MetaSpecSnapshot>> {
+    let ws = match state.workspaces.find_by_id(workspace_id).await {
+        Ok(Some(ws)) => ws,
+        // A workspace that does not exist genuinely binds nothing.
+        Ok(None) => return Ok(Vec::new()),
+        Err(e) => {
+            warn!(
+                workspace_id = %workspace_id,
+                error = %e,
+                "required meta-spec set: workspace lookup failed — failing closed"
+            );
+            return Err(anyhow::anyhow!(
+                "workspace lookup failed for required meta-spec set: {e}"
+            ));
+        }
+    };
+    match resolve_effective_meta_spec_set(state, &ws).await {
+        Ok(set) => Ok(set),
+        Err(e) => {
+            warn!(
+                workspace_id = %workspace_id,
+                error = %e,
+                "required meta-spec set: effective-set resolution failed — failing closed"
+            );
+            Err(anyhow::anyhow!(
+                "effective meta-spec set resolution failed: {e}"
+            ))
+        }
+    }
+}
+
+/// SHA-256 over the canonical serialization of a meta-spec snapshot set:
+/// one `{meta_spec_id}\t{kind}\t{content_hash}\t{version}` line per
+/// snapshot, sorted — the registry-model effective-set hash (the retired
+/// KV set-model hash over stored set JSON is gone). Recorded at spec
+/// approval time
+/// (`InputContent.meta_spec_set_sha`) and compared by the §3.2 constraint
+/// (`agent.meta_spec_set_sha == input.meta_spec_set_sha`) and the §10
+/// conformance sweep.
+pub fn meta_spec_snapshot_sha(snaps: &[gyre_domain::MetaSpecSnapshot]) -> String {
+    use sha2::{Digest, Sha256};
+    if snaps.is_empty() {
+        return String::new();
+    }
+    let mut lines: Vec<String> = snaps
+        .iter()
+        .map(|s| {
+            format!(
+                "{}\t{}\t{}\t{}",
+                s.meta_spec_id, s.kind, s.content_hash, s.version
+            )
+        })
+        .collect();
+    lines.sort();
+    let mut hasher = Sha256::new();
+    hasher.update(lines.join("\n").as_bytes());
+    format!("{:x}", hasher.finalize())
 }
 
 /// Result summary of one tenant-scope reconciliation run.
@@ -1527,60 +1518,71 @@ pub async fn emit_tenant_meta_spec_set_updated(
 pub struct TenantReconciliationSummary {
     /// Workspaces in the tenant that were evaluated for propagation.
     pub workspaces_scanned: usize,
-    /// Workspaces skipped entirely because they override every changed
-    /// meta-spec (their own rollout policy governs; §8 step 3).
-    pub workspaces_skipped_override: usize,
-    /// Workspaces skipped because their own meta-spec set could not be read
-    /// (storage error or corrupt JSON). The override gate never fails open:
-    /// an unreadable set is not "no overrides", so the workspace is left to
-    /// its own §6 rollout until the set is readable again.
-    pub workspaces_skipped_error: usize,
     /// Reconciliation tasks created this run (summed across workspaces).
     pub tasks_created: usize,
     /// Repos already covered by an existing open reconciliation task.
     pub tasks_skipped: usize,
 }
 
-/// Run tenant-scope reconciliation (§8): propagate changed tenant-level
-/// meta-spec pins to the tenant's workspaces.
+/// Run tenant-scope reconciliation (§8): propagate a changed tenant-scoped
+/// meta-spec to the tenant's workspaces.
 ///
-/// For each workspace in the tenant:
-/// - paths the workspace overrides (its own set pins them) are skipped —
-///   each workspace's rollout policy is applied individually (§8 step 3) —
-///   unless `force` (tenant-admin override for urgent compliance-driven
-///   changes, §8 step 4);
-/// - a workspace whose own set cannot be read (storage error or corrupt
-///   JSON) is skipped entirely — the override gate never fails open, so an
-///   unreadable set is not treated as "no overrides";
-/// - the remaining changed paths go through `run_reconciliation`, which
-///   creates the per-repo reconciliation tasks for that workspace
-///   (§8 step 2: per-workspace reconciliation plans).
+/// Registry model (amendments row): a Tenant-scoped required meta-spec
+/// binds every workspace in its tenant — there is no per-workspace
+/// override surface anymore (the retired KV set model's workspace pins are
+/// gone; a workspace that wants its own rules creates a Workspace-scoped
+/// meta-spec, which is a different registry record and reconciles through
+/// its own triggers). Each workspace in the tenant reconciles autonomously
+/// via `run_reconciliation`, which creates the per-repo reconciliation
+/// tasks under that workspace's own rollout policy (§7).
 ///
-/// Only paths the tenant set actually pins propagate: §6 reconciles repos
-/// bound to the changed meta-spec, and a tenant-scoped path no set pins
-/// binds nothing (the blast radius is empty — §8 step 1).
+/// Only entries that resolve to a REQUIRED meta-spec propagate: optional
+/// meta-specs reach code exclusively through spec-level bindings, whose
+/// drift is handled by the stale-pin cascade (agent-runtime.md §2), not by
+/// blanket workspace reconciliation.
+///
+/// `changed_meta_spec_ids` are registry ids — the triggering handler holds
+/// the resolved record and threads its id; name re-resolution is a global
+/// scan that can cross-gate on a same-named meta-spec in another workspace.
 pub async fn run_tenant_reconciliation(
     state: &Arc<AppState>,
     tenant_id: &Id,
-    changed_paths: &[String],
-    force: bool,
+    changed_meta_spec_ids: &[Id],
 ) -> TenantReconciliationSummary {
     let mut summary = TenantReconciliationSummary::default();
-    if changed_paths.is_empty() {
+    if changed_meta_spec_ids.is_empty() {
         return summary;
     }
 
-    let tenant_set = load_tenant_set(state, tenant_id).await.unwrap_or_default();
-    let bound_paths = tenant_set_paths(&tenant_set);
-    // Only tenant-bound paths propagate (see doc comment).
-    let propagating: Vec<&String> = changed_paths
-        .iter()
-        .filter(|p| bound_paths.contains(*p))
-        .collect();
+    // Only required entries propagate (see doc comment).
+    let mut propagating: Vec<Id> = Vec::new();
+    for ms_id in changed_meta_spec_ids {
+        match state.meta_specs.get_by_id(ms_id).await {
+            Ok(Some(ms)) => {
+                if !ms.required {
+                    info!(
+                        meta_spec_id = %ms_id,
+                        "tenant reconciliation: meta-spec is not required; spec-level bindings own its drift"
+                    );
+                    continue;
+                }
+                propagating.push(ms_id.clone());
+            }
+            Ok(None) => {
+                warn!(
+                    meta_spec_id = %ms_id,
+                    "tenant reconciliation: changed meta-spec not found in registry; skipping"
+                );
+            }
+            Err(e) => {
+                warn!(meta_spec_id = %ms_id, error = %e, "tenant reconciliation: registry lookup failed");
+            }
+        }
+    }
     if propagating.is_empty() {
         info!(
             tenant_id = %tenant_id,
-            "tenant reconciliation: no changed path is bound by the tenant set; nothing to propagate"
+            "tenant reconciliation: no changed meta-spec is required at tenant scope; nothing to propagate"
         );
         return summary;
     }
@@ -1597,58 +1599,12 @@ pub async fn run_tenant_reconciliation(
         tenant_id = %tenant_id,
         workspaces = workspaces.len(),
         changed = propagating.len(),
-        force,
         "tenant reconciliation: controller started"
     );
 
     for ws in &workspaces {
         summary.workspaces_scanned += 1;
-        // Never fail open the override gate (standing repo rule): a workspace
-        // set that cannot be loaded is not "no overrides" — an empty-set
-        // fallback would drop the workspace's pins and let tenant
-        // propagation (including force) stomp a workspace that chose its own
-        // version. Fail closed: skip the workspace; its own §6 rollout
-        // governs until the set is readable again.
-        let ws_set = match load_workspace_set(state, &ws.id).await {
-            Ok(set) => set,
-            Err(e) => {
-                summary.workspaces_skipped_error += 1;
-                warn!(
-                    workspace_id = %ws.id,
-                    error = %e,
-                    "tenant reconciliation: failed to load workspace meta-spec set; skipping workspace (fail closed)"
-                );
-                continue;
-            }
-        };
-
-        let mut apply: Vec<String> = Vec::new();
-        let mut overridden: Vec<&String> = Vec::new();
-        for path in &propagating {
-            if !force && workspace_overrides_path(&tenant_set, &ws_set, path) {
-                overridden.push(path);
-            } else {
-                apply.push((*path).clone());
-            }
-        }
-
-        if !overridden.is_empty() {
-            // §8 step 3: the workspace's own rollout policy governs the
-            // overridden paths — it reconciles them when IT updates its own
-            // binding (the §6 set-diff trigger), not on tenant propagation.
-            summary.workspaces_skipped_override += 1;
-            info!(
-                workspace_id = %ws.id,
-                overridden = overridden.len(),
-                "tenant reconciliation: workspace overrides changed meta-spec(s); skipping per its rollout policy"
-            );
-        }
-
-        if apply.is_empty() {
-            continue;
-        }
-
-        let s = run_reconciliation(state, &ws.id, &apply).await;
+        let s = run_reconciliation(state, &ws.id, &propagating).await;
         summary.tasks_created += s.tasks_created;
         summary.tasks_skipped += s.tasks_skipped;
     }
@@ -1656,8 +1612,6 @@ pub async fn run_tenant_reconciliation(
     info!(
         tenant_id = %tenant_id,
         scanned = summary.workspaces_scanned,
-        skipped_override = summary.workspaces_skipped_override,
-        skipped_error = summary.workspaces_skipped_error,
         created = summary.tasks_created,
         dedup_skipped = summary.tasks_skipped,
         "tenant reconciliation: controller finished"
@@ -1687,11 +1641,12 @@ pub struct SweepSummary {
 ///
 /// For each workspace with a bound meta-spec set, compare the active set
 /// SHA (SHA-256 of the set JSON — same algorithm as
-/// `compute_meta_spec_set_sha`) against the `meta_spec_set_sha` recorded in
-/// recent authorization provenance (`chain_attestations` for the workspace's
-/// repos). Provenance recording a different SHA means the code was produced
-/// under a superseded meta-spec set: ensure a drift-review task exists and
-/// notify workspace members (`MetaSpecDrift`).
+/// `meta_spec_snapshot_sha` over the registry's effective set) against the
+/// `meta_spec_set_sha` recorded in recent authorization provenance
+/// (`chain_attestations` for the workspace's repos). Provenance recording a
+/// different SHA means the code was produced under a superseded meta-spec
+/// set: ensure a drift-review task exists and notify workspace members
+/// (`MetaSpecDrift`).
 ///
 /// Database queries only — no agent spawns (§10).
 pub async fn run_conformance_sweep(state: &Arc<AppState>) -> anyhow::Result<SweepSummary> {
@@ -1704,11 +1659,20 @@ pub async fn run_conformance_sweep(state: &Arc<AppState>) -> anyhow::Result<Swee
     let existing_tasks = state.tasks.list().await.unwrap_or_default();
 
     for ws in &workspaces {
-        // Desired state: the workspace's current EFFECTIVE meta-spec set SHA
-        // (own bindings plus inherited tenant defaults, §8) — inheritance
-        // changes the governing set, so code produced under the pre-inheritance
-        // set is drift.
-        let current_sha = crate::compute_meta_spec_set_sha(state, &ws.id).await;
+        // Desired state: the registry's current effective (required,
+        // approved, visible) meta-spec set SHA — the registry-model
+        // replacement for the retired KV set SHA. Required-flag flips and
+        // meta-spec approvals change the governing set, so code produced
+        // under a different set is drift.
+        //
+        // Fail closed: an unresolvable required set must NOT read as "no
+        // set bound" (the empty-SHA skip below) — that would silently
+        // disable drift detection for the outage. The error propagates:
+        // jobs.rs logs the failed sweep and the next hourly pass retries;
+        // a sweep that cannot determine desired state would misreport
+        // conformance for the affected workspaces.
+        let snaps = required_meta_spec_snapshots(state, &ws.id).await?;
+        let current_sha = meta_spec_snapshot_sha(&snaps);
         if current_sha.is_empty() {
             // No set bound — nothing to conform to (§10: only repos whose
             // workspace binds a meta-spec set are in scope).
@@ -1888,22 +1852,21 @@ async fn notify_drift_members(
             recipients.push(member.user_id.clone());
         }
     }
-    // The effective set's pinned specs are the specs the code drifted
-    // from — their owners (ledger `owner` field) are routing recipients.
+    // The effective set's meta-specs are the rules the code drifted
+    // from — their creators (registry `created_by` field) are routing
+    // recipients (the registry replacement for the retired set model's
+    // pinned-spec owners).
     if let Ok(effective) = resolve_effective_meta_spec_set(state, ws).await {
-        let pinned_paths: Vec<&str> = effective
-            .personas
-            .values()
-            .map(|e| e.path.as_str())
-            .chain(effective.principles.iter().map(|e| e.path.as_str()))
-            .chain(effective.standards.iter().map(|e| e.path.as_str()))
-            .chain(effective.process.iter().map(|e| e.path.as_str()))
-            .collect();
-        for path in pinned_paths {
-            let owner = match state.spec_ledger.find_by_path(path).await {
-                Ok(Some(entry)) => entry.owner,
+        for snap in &effective {
+            let ms = match state
+                .meta_specs
+                .get_by_id(&Id::new(&snap.meta_spec_id))
+                .await
+            {
+                Ok(Some(ms)) => ms,
                 _ => continue,
             };
+            let owner = ms.created_by;
             for owner_id in crate::notifications::resolve_owner_ref(state, &ws.id, &owner).await {
                 if seen.insert(owner_id.as_str().to_string()) {
                     recipients.push(owner_id);
@@ -1996,24 +1959,38 @@ fn record_drift_metrics(state: &AppState, workspace_id: &str, drifted_repos: &[S
 /// (`require_current_meta_spec_set`).
 pub const META_SPEC_DRIFT_GATE_ID: &str = "meta-spec-drift";
 
-/// A detected meta-spec set drift for one MR (§9).
+/// A detected meta-spec drift for one MR (§9).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetaSpecDrift {
-    /// Meta-spec set SHA recorded in the MR's provenance attestation —
+    /// The meta-spec usage recorded for the MR's author agent (the same
+    /// `meta_specs_used` array the merge attestation persists at merge
+    /// time), as `{meta_spec_id, kind, content_hash, version}` snapshots —
     /// the set under which the code was produced.
-    pub produced_set_sha: String,
-    /// The workspace's current meta-spec set SHA.
-    pub current_set_sha: String,
+    pub produced: Vec<gyre_domain::MetaSpecSnapshot>,
+    /// Currently-required meta-spec snapshots NOT matched by the recorded
+    /// usage (missing entirely, or recorded at an older version/content
+    /// hash than currently required).
+    pub current: Vec<gyre_domain::MetaSpecSnapshot>,
 }
 
-/// Format the drift warning exactly as §9 specifies:
-/// `[WARN] meta-spec-drift: code produced under meta-spec set {old_sha},
-/// current is {new_sha}. Reconciliation may be needed.`
+/// Format the drift warning for the §9 gate result:
+/// `[WARN] meta-spec-drift: code produced under meta-specs {produced},
+/// current requires {current}. Reconciliation may be needed.`
+///
+/// Snapshot labels render as `{kind}:{meta_spec_id}@v{version}`.
 pub fn format_meta_spec_drift_warning(drift: &MetaSpecDrift) -> String {
+    fn labels(snaps: &[gyre_domain::MetaSpecSnapshot]) -> String {
+        snaps
+            .iter()
+            .map(|s| s.label())
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
     format!(
-        "[WARN] meta-spec-drift: code produced under meta-spec set {}, current is {}. \
+        "[WARN] meta-spec-drift: code produced under meta-specs [{}], current requires [{}]. \
          Reconciliation may be needed.",
-        drift.produced_set_sha, drift.current_set_sha
+        labels(&drift.produced),
+        labels(&drift.current)
     )
 }
 
@@ -2023,122 +2000,117 @@ pub fn format_meta_spec_drift_warning(drift: &MetaSpecDrift) -> String {
 /// surface a recorded drift warning gate result without re-deriving it from
 /// provenance. Returns `None` for any other output.
 pub fn parse_meta_spec_drift_warning(output: &str) -> Option<MetaSpecDrift> {
-    let rest = output.strip_prefix("[WARN] meta-spec-drift: code produced under meta-spec set ")?;
-    let (produced_set_sha, rest) = rest.split_once(", current is ")?;
-    let current_set_sha = rest.strip_suffix(". Reconciliation may be needed.")?;
-    if produced_set_sha.is_empty() || current_set_sha.is_empty() {
+    let rest = output.strip_prefix("[WARN] meta-spec-drift: code produced under meta-specs [")?;
+    let (produced, rest) = rest.split_once("], current requires [")?;
+    let current = rest.strip_suffix("]. Reconciliation may be needed.")?;
+
+    fn parse_labels(list: &str) -> Vec<gyre_domain::MetaSpecSnapshot> {
+        list.split(", ")
+            .filter(|l| !l.is_empty())
+            .filter_map(|label| {
+                // {kind}:{meta_spec_id}@v{version}. Kinds carry a colon
+                // themselves ("meta:persona") while meta-spec ids do not,
+                // so the kind/id split runs from the RIGHT — a left split
+                // would eat the kind's namespace prefix into the id and
+                // break the round-trip.
+                let (kind_id, version) = label.rsplit_once("@v")?;
+                let version: u32 = version.parse().ok()?;
+                let (kind, id) = kind_id.rsplit_once(':')?;
+                Some(gyre_domain::MetaSpecSnapshot {
+                    meta_spec_id: id.to_string(),
+                    kind: kind.to_string(),
+                    content_hash: String::new(),
+                    version,
+                })
+            })
+            .collect()
+    }
+
+    if produced.is_empty() && current.is_empty() {
         return None;
     }
     Some(MetaSpecDrift {
-        produced_set_sha: produced_set_sha.to_string(),
-        current_set_sha: current_set_sha.to_string(),
+        produced: parse_labels(produced),
+        current: parse_labels(current),
     })
 }
 
-/// Extract a non-empty `meta_spec_set_sha` from an attestation's signed input.
-fn signed_meta_spec_set_sha(att: &gyre_common::Attestation) -> Option<&str> {
-    match &att.input {
-        gyre_common::AttestationInput::Signed(si) => {
-            Some(si.content.meta_spec_set_sha.as_str()).filter(|s| !s.is_empty())
-        }
-        gyre_common::AttestationInput::Derived(_) => None,
-    }
-}
-
-/// Resolve the meta-spec set SHA under which an MR's code was produced.
-///
-/// Looks up the MR's authorization provenance the same way the merge-time
-/// attestation note does: by the source branch head commit first, then by the
-/// author agent's current task. The recorded SHA comes from the chain's root
-/// `SignedInput` (the work authorization). Returns `None` when the MR has no
-/// attestation or the attestation records no set SHA — §9 skips the check
-/// gracefully in that case.
-pub async fn mr_attestation_meta_spec_set_sha(
+/// Resolve the meta-spec usage recorded for an MR's author agent: the
+/// `meta_specs_used` array of the agent's spawn-time prompt-set record —
+/// the same array the merge attestation persists at merge time. Returns
+/// `None` when the MR has no author agent or no prompt-set record (the
+/// agent was spawned before prompt assembly, or nothing was injected —
+/// §9 skips the check gracefully in that case).
+async fn mr_recorded_meta_specs_used(
     state: &AppState,
     mr: &gyre_domain::MergeRequest,
-) -> Option<String> {
-    let attestation = find_mr_attestation(state, mr).await?;
-    attestation_recorded_set_sha(state, &attestation).await
+) -> Option<Vec<gyre_domain::MetaSpecSnapshot>> {
+    let author_id = mr.author_agent_id.as_ref()?;
+    let record = crate::prompt_assembly::load_prompt_set_record(state, author_id.as_str()).await?;
+    Some(
+        record
+            .meta_specs_used
+            .iter()
+            .map(|used| gyre_domain::MetaSpecSnapshot {
+                meta_spec_id: used.id.to_string(),
+                kind: used.kind.clone(),
+                content_hash: used.content_hash.clone(),
+                version: used.version,
+            })
+            .collect(),
+    )
 }
 
-/// Find the provenance attestation for an MR (commit first, task fallback).
-async fn find_mr_attestation(
-    state: &AppState,
-    mr: &gyre_domain::MergeRequest,
-) -> Option<gyre_common::Attestation> {
-    // By source branch head commit — the commit the agent produced.
-    if let Ok(Some(repo)) = state.repos.find_by_id(&mr.repository_id).await {
-        if let Some(source_sha) =
-            crate::git_refs::resolve_ref(&repo.path, &format!("refs/heads/{}", mr.source_branch))
-                .await
-        {
-            if let Ok(Some(att)) = state.chain_attestations.find_by_commit(&source_sha).await {
-                return Some(att);
-            }
-        }
-    }
-
-    // Fallback: the author agent's current task.
-    if let Some(ref author_id) = mr.author_agent_id {
-        if let Ok(Some(agent)) = state.agents.find_by_id(author_id).await {
-            if let Some(ref task_id) = agent.current_task_id {
-                if let Ok(atts) = state
-                    .chain_attestations
-                    .find_by_task(task_id.as_str())
-                    .await
-                {
-                    if let Some(leaf) = atts.iter().max_by_key(|a| a.metadata.chain_depth) {
-                        return Some(leaf.clone());
-                    }
-                }
-            }
-        }
-    }
-
-    None
-}
-
-/// Read the recorded meta-spec set SHA from an attestation, walking to the
-/// chain's root `SignedInput` when the found node is derived.
-async fn attestation_recorded_set_sha(
-    state: &AppState,
-    att: &gyre_common::Attestation,
-) -> Option<String> {
-    if let Some(sha) = signed_meta_spec_set_sha(att) {
-        return Some(sha.to_string());
-    }
-    // load_chain returns root → leaf; the root carries the work authorization.
-    let chain = state.chain_attestations.load_chain(&att.id).await.ok()?;
-    chain
-        .iter()
-        .find_map(signed_meta_spec_set_sha)
-        .map(|sha| sha.to_string())
-}
-
-/// §9 merge-gate drift evaluation for one MR.
+/// §9 merge-gate drift evaluation for one MR (registry model).
 ///
-/// Compares the meta-spec set SHA recorded in the MR's provenance attestation
-/// against the workspace's current set SHA. Returns `None` (no drift) when:
-/// - the workspace has no meta-spec set bound (nothing to conform to),
-/// - the MR has no attestation, or the attestation records no set SHA
-///   (produced before any set was bound — §9 skips the check gracefully),
-/// - the recorded SHA matches the current set (pass).
+/// Compares the merge-attestation `meta_specs_used` array — resolved from
+/// the author agent's spawn-time prompt-set record — against the
+/// workspace's CURRENT required meta-spec versions
+/// (`resolve_effective_meta_spec_set`). A currently-required meta-spec
+/// that the recorded usage is missing, or that it recorded at an older
+/// version or different content hash, is drift: the attestation was
+/// recorded against an older required version. Returns `None` (no drift)
+/// when:
+/// - the workspace has no required meta-specs (nothing to conform to),
+/// - the MR has no author-agent prompt-set record (produced before any
+///   meta-specs were injected — §9 skips the check gracefully),
+/// - every currently-required meta-spec is matched at its current
+///   version and content hash (pass).
+///
+/// Fail closed: a required-set resolution error propagates rather than
+/// reading as "no required meta-specs" — a store outage must not silently
+/// disable merge-time drift enforcement.
 pub async fn mr_meta_spec_drift(
     state: &AppState,
     mr: &gyre_domain::MergeRequest,
-) -> Option<MetaSpecDrift> {
-    let current_set_sha = crate::compute_meta_spec_set_sha(state, &mr.workspace_id).await;
-    if current_set_sha.is_empty() {
-        return None;
+) -> anyhow::Result<Option<MetaSpecDrift>> {
+    let current = required_meta_spec_snapshots(state, &mr.workspace_id).await?;
+    if current.is_empty() {
+        return Ok(None);
     }
-    let produced_set_sha = mr_attestation_meta_spec_set_sha(state, mr).await?;
-    if produced_set_sha == current_set_sha {
-        return None;
+    let produced = match mr_recorded_meta_specs_used(state, mr).await {
+        Some(used) => used,
+        None => return Ok(None),
+    };
+
+    let mut drifted: Vec<gyre_domain::MetaSpecSnapshot> = Vec::new();
+    for cur in &current {
+        let matched = produced.iter().any(|p| {
+            p.meta_spec_id == cur.meta_spec_id
+                && p.version == cur.version
+                && p.content_hash == cur.content_hash
+        });
+        if !matched {
+            drifted.push(cur.clone());
+        }
     }
-    Some(MetaSpecDrift {
-        produced_set_sha,
-        current_set_sha,
-    })
+    if drifted.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(MetaSpecDrift {
+        produced,
+        current: drifted,
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -2148,7 +2120,6 @@ pub async fn mr_meta_spec_drift(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::meta_specs::MetaSpecPinnedEntry;
     use crate::mem::test_state;
     use gyre_common::message::MessageKind;
     use gyre_domain::meta_spec::{MetaSpec, MetaSpecApprovalStatus, MetaSpecKind, MetaSpecScope};
@@ -2239,44 +2210,83 @@ mod tests {
         ms
     }
 
-    fn pin(path: &str, sha: &str) -> MetaSpecPinnedEntry {
-        MetaSpecPinnedEntry {
-            path: path.to_string(),
-            sha: sha.to_string(),
-        }
+    /// Create a REQUIRED approved meta-spec (registry model): a required
+    /// flag on a meta-spec visible from a scope is what puts it in the
+    /// workspaces' effective set — the replacement for the retired KV
+    /// set binding.
+    async fn make_required_spec(
+        state: &Arc<AppState>,
+        scope: MetaSpecScope,
+        scope_id: Option<String>,
+        name: &str,
+        version: u32,
+        created_by: &str,
+    ) -> MetaSpec {
+        let prompt = format!("prompt for {name} v{version}");
+        let ms = MetaSpec {
+            id: Id::new(uuid::Uuid::new_v4().to_string()),
+            kind: MetaSpecKind::Persona,
+            name: name.to_string(),
+            scope,
+            scope_id,
+            prompt,
+            version,
+            content_hash: sha256_hex(&format!("prompt for {name} v{version}")),
+            required: true,
+            approval_status: MetaSpecApprovalStatus::Approved,
+            approved_by: Some("admin".to_string()),
+            approved_at: Some(now()),
+            approved_content_hash: Some(sha256_hex(&format!("prompt for {name} v{version}"))),
+            created_by: created_by.to_string(),
+            created_at: now(),
+            updated_at: now(),
+        };
+        state.meta_specs.create(&ms).await.unwrap();
+        ms
     }
 
-    fn make_set(
-        ws_id: &str,
-        entries: Vec<MetaSpecPinnedEntry>,
-    ) -> crate::api::meta_specs::MetaSpecSet {
-        // Distinct persona keys per entry: a single reused key would make the
-        // map collapse to the last entry, silently dropping the others (the
-        // set-diff test would then pass by disappearance, not comparison).
-        let mut personas = std::collections::BTreeMap::new();
-        for (i, e) in entries.into_iter().enumerate() {
-            personas.insert(format!("role-{i}"), e);
-        }
-        crate::api::meta_specs::MetaSpecSet {
-            workspace_id: ws_id.to_string(),
-            personas,
-            principles: vec![],
-            standards: vec![],
-            process: vec![],
-        }
-    }
-
-    async fn put_set(
+    /// A required approved meta-spec scoped to this workspace — the
+    /// per-workspace effective-set binding.
+    async fn require_for_ws(
         state: &Arc<AppState>,
         ws_id: &str,
-        set: &crate::api::meta_specs::MetaSpecSet,
-    ) {
-        let json = serde_json::to_string(set).unwrap();
-        state
-            .meta_spec_sets
-            .upsert(&Id::new(ws_id), &json)
-            .await
-            .unwrap();
+        name: &str,
+        version: u32,
+    ) -> MetaSpec {
+        make_required_spec(
+            state,
+            MetaSpecScope::Workspace,
+            Some(ws_id.to_string()),
+            name,
+            version,
+            "admin",
+        )
+        .await
+    }
+
+    /// A required APPROVED Global meta-spec — the registry-model form of
+    /// the workspace-level binding the §6/§7 mechanics tests exercise.
+    /// The retired set-PUT bound optional specs via path pins; under the
+    /// amendments row only REQUIRED meta-specs reconcile workspaces
+    /// (optional ones reach code exclusively through spec-level bindings,
+    /// whose drift the stale-pin cascade owns), so these tests bind via
+    /// the required flag instead.
+    async fn make_required_global_spec(
+        state: &Arc<AppState>,
+        name: &str,
+        version: u32,
+    ) -> MetaSpec {
+        make_required_spec(state, MetaSpecScope::Global, None, name, version, "admin").await
+    }
+
+    /// The workspace's current effective-set SHA (registry model): the
+    /// SHA over the required, approved, visible snapshots.
+    async fn active_set_sha(state: &Arc<AppState>, ws_id: &str) -> String {
+        meta_spec_snapshot_sha(
+            &required_meta_spec_snapshots(state, &Id::new(ws_id))
+                .await
+                .unwrap(),
+        )
     }
 
     async fn open_tasks_with_label(state: &Arc<AppState>, label: &str) -> Vec<gyre_domain::Task> {
@@ -2340,9 +2350,9 @@ mod tests {
         let state = test_state();
         let ws = make_workspace(&state, "ws-recon-1").await;
         let _repo = make_repo(&state, "repo-1", "ws-recon-1").await;
-        let ms = make_meta_spec(&state, "backend-developer", 4).await;
+        let ms = make_required_global_spec(&state, "backend-developer", 4).await;
 
-        let summary = run_reconciliation(&state, &ws.id, std::slice::from_ref(&ms.name)).await;
+        let summary = run_reconciliation(&state, &ws.id, std::slice::from_ref(&ms.id)).await;
 
         assert_eq!(summary.tasks_created, 1);
         let tasks = open_tasks_with_label(&state, RECONCILIATION_LABEL).await;
@@ -2375,7 +2385,7 @@ mod tests {
         let ws = make_workspace(&state, "ws-recon-empty").await;
         let ms = make_meta_spec(&state, "backend-developer", 2).await;
 
-        let summary = run_reconciliation(&state, &ws.id, std::slice::from_ref(&ms.name)).await;
+        let summary = run_reconciliation(&state, &ws.id, std::slice::from_ref(&ms.id)).await;
         assert_eq!(summary.tasks_created, 0);
         assert_eq!(
             open_tasks_with_label(&state, RECONCILIATION_LABEL)
@@ -2391,7 +2401,7 @@ mod tests {
         let ws = make_workspace(&state, "ws-recon-unknown").await;
         let _repo = make_repo(&state, "repo-u", "ws-recon-unknown").await;
 
-        let summary = run_reconciliation(&state, &ws.id, &["no-such-spec".to_string()]).await;
+        let summary = run_reconciliation(&state, &ws.id, &[Id::new("no-such-spec")]).await;
         assert_eq!(summary.tasks_created, 0);
     }
 
@@ -2402,13 +2412,13 @@ mod tests {
         let state = test_state();
         let ws = make_workspace(&state, "ws-recon-dup").await;
         let _repo = make_repo(&state, "repo-d", "ws-recon-dup").await;
-        let ms = make_meta_spec(&state, "backend-developer", 4).await;
+        let ms = make_required_global_spec(&state, "backend-developer", 4).await;
 
-        let first = run_reconciliation(&state, &ws.id, std::slice::from_ref(&ms.name)).await;
+        let first = run_reconciliation(&state, &ws.id, std::slice::from_ref(&ms.id)).await;
         assert_eq!(first.tasks_created, 1);
 
         // Re-run with the same version → no new task.
-        let second = run_reconciliation(&state, &ws.id, std::slice::from_ref(&ms.name)).await;
+        let second = run_reconciliation(&state, &ws.id, std::slice::from_ref(&ms.id)).await;
         assert_eq!(second.tasks_created, 0);
         assert_eq!(second.tasks_skipped, 1);
         assert_eq!(
@@ -2427,7 +2437,7 @@ mod tests {
             })
             .await
             .unwrap();
-        let third = run_reconciliation(&state, &ws.id, std::slice::from_ref(&ms.name)).await;
+        let third = run_reconciliation(&state, &ws.id, std::slice::from_ref(&ms.id)).await;
         assert_eq!(third.tasks_created, 1);
         assert_eq!(
             open_tasks_with_label(&state, RECONCILIATION_LABEL)
@@ -2540,7 +2550,7 @@ mod tests {
         for i in 0..3 {
             make_repo(&state, &format!("repo-imm-{i}"), "ws-imm").await;
         }
-        let ms = make_meta_spec(&state, "backend-developer", 4).await;
+        let ms = make_required_global_spec(&state, "backend-developer", 4).await;
         set_policy(
             &state,
             "ws-imm",
@@ -2553,7 +2563,7 @@ mod tests {
         )
         .await;
 
-        let summary = run_reconciliation(&state, &ws.id, std::slice::from_ref(&ms.name)).await;
+        let summary = run_reconciliation(&state, &ws.id, std::slice::from_ref(&ms.id)).await;
 
         // All 3 tasks exist immediately — no deferral.
         assert_eq!(summary.tasks_created, 3);
@@ -2572,7 +2582,7 @@ mod tests {
         for i in 0..3 {
             make_repo(&state, &format!("repo-roll-{i}"), "ws-roll").await;
         }
-        let ms = make_meta_spec(&state, "backend-developer", 4).await;
+        let ms = make_required_global_spec(&state, "backend-developer", 4).await;
         set_policy(
             &state,
             "ws-roll",
@@ -2585,7 +2595,7 @@ mod tests {
         )
         .await;
 
-        let summary = run_reconciliation(&state, &ws.id, std::slice::from_ref(&ms.name)).await;
+        let summary = run_reconciliation(&state, &ws.id, std::slice::from_ref(&ms.id)).await;
 
         // First batch only: 2 of 3 tasks, the third deferred.
         assert_eq!(summary.tasks_created, 2);
@@ -2676,7 +2686,7 @@ mod tests {
         for i in 0..2 {
             make_repo(&state, &format!("repo-bg-{i}"), "ws-bg").await;
         }
-        let ms = make_meta_spec(&state, "backend-developer", 4).await;
+        let ms = make_required_global_spec(&state, "backend-developer", 4).await;
         set_policy(
             &state,
             "ws-bg",
@@ -2689,7 +2699,7 @@ mod tests {
         )
         .await;
 
-        let summary = run_reconciliation(&state, &ws.id, std::slice::from_ref(&ms.name)).await;
+        let summary = run_reconciliation(&state, &ws.id, std::slice::from_ref(&ms.id)).await;
 
         // §7 Background: tasks are created but left in Backlog, WITHOUT the
         // delegation signal — they cannot trigger agent spawning until the
@@ -2711,7 +2721,7 @@ mod tests {
         let state = test_state();
         let ws = make_workspace(&state, "ws-prio").await;
         make_repo(&state, "repo-prio", "ws-prio").await;
-        let ms = make_meta_spec(&state, "backend-developer", 4).await;
+        let ms = make_required_global_spec(&state, "backend-developer", 4).await;
         set_policy(
             &state,
             "ws-prio",
@@ -2724,7 +2734,7 @@ mod tests {
         )
         .await;
 
-        run_reconciliation(&state, &ws.id, std::slice::from_ref(&ms.name)).await;
+        run_reconciliation(&state, &ws.id, std::slice::from_ref(&ms.id)).await;
 
         let tasks = open_tasks_with_label(&state, RECONCILIATION_LABEL).await;
         assert_eq!(tasks.len(), 1);
@@ -2740,7 +2750,7 @@ mod tests {
         for i in 0..3 {
             make_repo(&state, &format!("repo-sw-{i}"), "ws-switch").await;
         }
-        let ms = make_meta_spec(&state, "backend-developer", 4).await;
+        let ms = make_required_global_spec(&state, "backend-developer", 4).await;
         set_policy(
             &state,
             "ws-switch",
@@ -2753,7 +2763,7 @@ mod tests {
         )
         .await;
 
-        let summary = run_reconciliation(&state, &ws.id, std::slice::from_ref(&ms.name)).await;
+        let summary = run_reconciliation(&state, &ws.id, std::slice::from_ref(&ms.id)).await;
         assert_eq!(summary.tasks_created, 1);
         assert_eq!(
             pending_rollout_state(&state, "ws-switch").await.unwrap()["remaining"]
@@ -2797,7 +2807,7 @@ mod tests {
         for i in 0..4 {
             make_repo(&state, &format!("repo-bs-{i}"), "ws-bsize").await;
         }
-        let ms = make_meta_spec(&state, "backend-developer", 4).await;
+        let ms = make_required_global_spec(&state, "backend-developer", 4).await;
         set_policy(
             &state,
             "ws-bsize",
@@ -2810,7 +2820,7 @@ mod tests {
         )
         .await;
 
-        let summary = run_reconciliation(&state, &ws.id, std::slice::from_ref(&ms.name)).await;
+        let summary = run_reconciliation(&state, &ws.id, std::slice::from_ref(&ms.id)).await;
         assert_eq!(summary.tasks_created, 1);
 
         // Admin widens the batch; batch 1 completes.
@@ -2854,7 +2864,7 @@ mod tests {
         for i in 0..3 {
             make_repo(&state, &format!("repo-swb-{i}"), "ws-sw-bg").await;
         }
-        let ms = make_meta_spec(&state, "backend-developer", 4).await;
+        let ms = make_required_global_spec(&state, "backend-developer", 4).await;
         set_policy(
             &state,
             "ws-sw-bg",
@@ -2867,7 +2877,7 @@ mod tests {
         )
         .await;
 
-        let summary = run_reconciliation(&state, &ws.id, std::slice::from_ref(&ms.name)).await;
+        let summary = run_reconciliation(&state, &ws.id, std::slice::from_ref(&ms.id)).await;
         assert_eq!(summary.tasks_created, 1);
         assert_eq!(
             pending_rollout_state(&state, "ws-sw-bg").await.unwrap()["remaining"]
@@ -2932,7 +2942,7 @@ mod tests {
             make_repo(&state, &format!("repo-bg-hist-{i}"), "ws-bg-hist").await;
         }
         // Background wave parks 3 inert Backlog tasks (no task_type).
-        let bg_spec = make_meta_spec(&state, "backend-developer", 4).await;
+        let bg_spec = make_required_global_spec(&state, "backend-developer", 4).await;
         set_policy(
             &state,
             "ws-bg-hist",
@@ -2945,7 +2955,7 @@ mod tests {
         )
         .await;
         let bg_summary =
-            run_reconciliation(&state, &ws.id, std::slice::from_ref(&bg_spec.name)).await;
+            run_reconciliation(&state, &ws.id, std::slice::from_ref(&bg_spec.id)).await;
         assert_eq!(bg_summary.tasks_created, 3);
         let parked = open_tasks_with_label(&state, RECONCILIATION_LABEL).await;
         assert_eq!(parked.len(), 3);
@@ -2964,9 +2974,8 @@ mod tests {
             },
         )
         .await;
-        let roll_spec = make_meta_spec(&state, "code-reviewer", 2).await;
-        let summary =
-            run_reconciliation(&state, &ws.id, std::slice::from_ref(&roll_spec.name)).await;
+        let roll_spec = make_required_global_spec(&state, "code-reviewer", 2).await;
+        let summary = run_reconciliation(&state, &ws.id, std::slice::from_ref(&roll_spec.id)).await;
         assert_eq!(summary.tasks_created, 1);
         assert_eq!(
             pending_rollout_state(&state, "ws-bg-hist").await.unwrap()["remaining"]
@@ -3104,8 +3113,8 @@ mod tests {
         for i in 0..4 {
             make_repo(&state, &format!("repo-kv-{i}"), "ws-kvfail").await;
         }
-        let persona = make_meta_spec(&state, "backend-developer", 4).await;
-        let reviewer = make_meta_spec(&state, "code-reviewer", 2).await;
+        let persona = make_required_global_spec(&state, "backend-developer", 4).await;
+        let reviewer = make_required_global_spec(&state, "code-reviewer", 2).await;
         set_policy(
             &state,
             "ws-kvfail",
@@ -3119,7 +3128,7 @@ mod tests {
         .await;
 
         // Wave A: persona v4 → 1 task + 3 deferred (stored).
-        let a = run_reconciliation(&state, &ws.id, std::slice::from_ref(&persona.name)).await;
+        let a = run_reconciliation(&state, &ws.id, std::slice::from_ref(&persona.id)).await;
         assert_eq!(a.tasks_created, 1);
         assert_eq!(
             pending_rollout_state(&state, "ws-kvfail").await.unwrap()["remaining"]
@@ -3135,7 +3144,7 @@ mod tests {
         // failure instead of overwriting the stored remainder.
         kv.fail_reads
             .store(true, std::sync::atomic::Ordering::SeqCst);
-        let b = run_reconciliation(&state, &ws.id, std::slice::from_ref(&reviewer.name)).await;
+        let b = run_reconciliation(&state, &ws.id, std::slice::from_ref(&reviewer.id)).await;
         assert_eq!(b.tasks_created, 1);
         kv.fail_reads
             .store(false, std::sync::atomic::Ordering::SeqCst);
@@ -3189,8 +3198,8 @@ mod tests {
         for i in 0..4 {
             make_repo(&state, &format!("repo-ov-{i}"), "ws-overlap").await;
         }
-        let persona = make_meta_spec(&state, "backend-developer", 4).await;
-        let reviewer = make_meta_spec(&state, "code-reviewer", 2).await;
+        let persona = make_required_global_spec(&state, "backend-developer", 4).await;
+        let reviewer = make_required_global_spec(&state, "code-reviewer", 2).await;
         set_policy(
             &state,
             "ws-overlap",
@@ -3204,13 +3213,13 @@ mod tests {
         .await;
 
         // Wave A: persona v4 → 1 task + 3 deferred.
-        let a = run_reconciliation(&state, &ws.id, std::slice::from_ref(&persona.name)).await;
+        let a = run_reconciliation(&state, &ws.id, std::slice::from_ref(&persona.id)).await;
         assert_eq!(a.tasks_created, 1);
 
         // Wave B triggers while wave A's rollout is in flight (its first
         // batch is still open): reviewer v2 → 1 task + 3 deferred. Must
         // extend, not clobber, wave A's remainder.
-        let b = run_reconciliation(&state, &ws.id, std::slice::from_ref(&reviewer.name)).await;
+        let b = run_reconciliation(&state, &ws.id, std::slice::from_ref(&reviewer.id)).await;
         assert_eq!(b.tasks_created, 1);
 
         let pending = pending_rollout_state(&state, "ws-overlap")
@@ -3286,7 +3295,7 @@ mod tests {
         for i in 0..3 {
             make_repo(&state, &format!("repo-rt-{i}"), "ws-retrig").await;
         }
-        let ms = make_meta_spec(&state, "backend-developer", 4).await;
+        let ms = make_required_global_spec(&state, "backend-developer", 4).await;
         set_policy(
             &state,
             "ws-retrig",
@@ -3299,7 +3308,7 @@ mod tests {
         )
         .await;
 
-        let first = run_reconciliation(&state, &ws.id, std::slice::from_ref(&ms.name)).await;
+        let first = run_reconciliation(&state, &ws.id, std::slice::from_ref(&ms.id)).await;
         assert_eq!(first.tasks_created, 1); // batch 1
         assert_eq!(
             pending_rollout_state(&state, "ws-retrig").await.unwrap()["remaining"]
@@ -3329,7 +3338,7 @@ mod tests {
             "wave A must have exactly one open task"
         );
 
-        let second = run_reconciliation(&state, &ws.id, std::slice::from_ref(&ms.name)).await;
+        let second = run_reconciliation(&state, &ws.id, std::slice::from_ref(&ms.id)).await;
         assert_eq!(second.tasks_created, 1); // one deferred repo, as batch 1
         assert_eq!(second.tasks_skipped, 1); // the already-open repo
 
@@ -3495,34 +3504,64 @@ mod tests {
         );
     }
 
-    // -- §6: set diffing (trigger condition) ---------------------------------
+    // -- §10: effective-set SHA canonicalization ----------------------------
 
+    /// The effective-set SHA (`meta_spec_snapshot_sha`) hashes a sorted
+    /// canonical serialization of the snapshot tuples: the same set of
+    /// snapshots must always produce the same SHA regardless of the order
+    /// the registry resolution returned them in (a nondeterministic order
+    /// would false-drift every provenance record between two approvals of
+    /// identical state), while a genuinely different version or content
+    /// hash must move the SHA — the invariant must not be trivially "SHA
+    /// never moves". Registry-model replacement for the retired
+    /// `identical_reput_keeps_set_sha_stable` KV-set test.
     #[tokio::test(flavor = "multi_thread")]
-    async fn set_diff_detects_version_changes() {
-        let old = make_set("ws", vec![pin("backend-developer", "a1")]);
-        let new = make_set("ws", vec![pin("backend-developer", "a1")]);
-        assert!(
-            diff_meta_spec_set(&old, &new).is_empty(),
-            "same set → no changes"
-        );
+    async fn effective_set_sha_is_canonical_and_sensitive() {
+        fn snap(id: &str, version: u32, hash: &str) -> gyre_domain::MetaSpecSnapshot {
+            gyre_domain::MetaSpecSnapshot {
+                meta_spec_id: id.to_string(),
+                kind: "meta:persona".to_string(),
+                content_hash: hash.to_string(),
+                version,
+            }
+        }
+        let set = vec![
+            snap("ms-a", 1, "ha1"),
+            snap("ms-b", 2, "hb2"),
+            snap("ms-c", 3, "hc3"),
+        ];
+        let sha1 = meta_spec_snapshot_sha(&set);
+        assert!(!sha1.is_empty());
 
-        let new = make_set("ws", vec![pin("backend-developer", "b2")]);
+        // Same snapshots in a different order → same SHA (canonical sort).
+        let mut reordered = set.clone();
+        reordered.reverse();
         assert_eq!(
-            diff_meta_spec_set(&old, &new),
-            vec!["backend-developer".to_string()]
+            meta_spec_snapshot_sha(&reordered),
+            sha1,
+            "snapshot order must not leak into the effective-set SHA"
         );
 
-        // Newly bound entry counts as changed; the identical
-        // backend-developer pin (a1 → a1) does not.
-        let new = make_set(
-            "ws",
-            vec![pin("backend-developer", "a1"), pin("security", "c3")],
+        // A newer version of one entry → different SHA.
+        let bumped: Vec<_> = set
+            .iter()
+            .map(|s| {
+                let mut s = s.clone();
+                if s.meta_spec_id == "ms-b" {
+                    s.version = 3;
+                    s.content_hash = "hb3".to_string();
+                }
+                s
+            })
+            .collect();
+        assert_ne!(
+            meta_spec_snapshot_sha(&bumped),
+            sha1,
+            "a version/content change must change the effective-set SHA"
         );
-        assert_eq!(diff_meta_spec_set(&old, &new), vec!["security".to_string()]);
 
-        // Removal is not a trigger.
-        let new = make_set("ws", vec![]);
-        assert!(diff_meta_spec_set(&old, &new).is_empty());
+        // No required meta-specs → empty SHA (the sweep's skip condition).
+        assert_eq!(meta_spec_snapshot_sha(&[]), "");
     }
 
     // -- §10: conformance sweep detects drift --------------------------------
@@ -3586,11 +3625,11 @@ mod tests {
         let ws = make_workspace(&state, "ws-sweep-1").await;
         let repo = make_repo(&state, "repo-s1", "ws-sweep-1").await;
 
-        // Bind a meta-spec set — this is the desired state.
-        let set = make_set("ws-sweep-1", vec![pin("backend-developer", "a1")]);
-        put_set(&state, "ws-sweep-1", &set).await;
-        let active_sha = crate::compute_meta_spec_set_sha(&state, &ws.id).await;
+        // Bind a required meta-spec — this is the desired state.
+        let ms = require_for_ws(&state, "ws-sweep-1", "backend-developer", 1).await;
+        let active_sha = active_set_sha(&state, "ws-sweep-1").await;
         assert!(!active_sha.is_empty());
+        let _ = ms;
 
         // Provenance under an OLD set SHA → drift.
         let old_att = sample_attestation(repo.id.as_str(), "ws-sweep-1", "deadbeef", now());
@@ -3693,8 +3732,7 @@ mod tests {
                 .await;
         let repo = make_repo(&state, "repo-chan", "ws-sweep-chan").await;
 
-        let set = make_set("ws-sweep-chan", vec![pin("backend-developer", "a1")]);
-        put_set(&state, "ws-sweep-chan", &set).await;
+        require_for_ws(&state, "ws-sweep-chan", "backend-developer", 1).await;
 
         // Provenance under an OLD set SHA → drift.
         let old_att = sample_attestation(repo.id.as_str(), "ws-sweep-chan", "deadbeef", now());
@@ -3783,8 +3821,18 @@ mod tests {
         let ws = make_workspace(&state, "ws-sweep-own").await;
         let repo = make_repo(&state, "repo-sown", "ws-sweep-own").await;
 
-        let set = make_set("ws-sweep-own", vec![pin("backend-developer", "a1")]);
-        put_set(&state, "ws-sweep-own", &set).await;
+        // Required meta-spec whose registry creator (`created_by`) names a
+        // plain Viewer member — the registry-model owner reference (the
+        // retired set model read the pinned spec's ledger owner instead).
+        make_required_spec(
+            &state,
+            MetaSpecScope::Workspace,
+            Some("ws-sweep-own".to_string()),
+            "backend-developer",
+            1,
+            "user:owner-viewer",
+        )
+        .await;
 
         // Provenance under an OLD set SHA → drift.
         let old_att = sample_attestation(repo.id.as_str(), "ws-sweep-own", "deadbeef", now());
@@ -3815,25 +3863,6 @@ mod tests {
             .create(&membership)
             .await
             .unwrap();
-
-        // Ledger entry for the pinned spec naming that owner.
-        let entry = gyre_domain::SpecLedgerEntry {
-            path: "backend-developer".to_string(),
-            title: "Backend Developer persona".to_string(),
-            owner: "user:owner-viewer".to_string(),
-            kind: Some("meta:persona".to_string()),
-            current_sha: "a1".to_string(),
-            approval_mode: "human_only".to_string(),
-            approval_status: gyre_domain::ApprovalStatus::Approved,
-            linked_tasks: vec![],
-            linked_mrs: vec![],
-            drift_status: "clean".to_string(),
-            created_at: 1_000_000,
-            updated_at: 1_000_000,
-            repo_id: None,
-            workspace_id: Some("ws-sweep-own".to_string()),
-        };
-        state.spec_ledger.save(&entry).await.unwrap();
 
         run_conformance_sweep(&state).await.unwrap();
 
@@ -3866,9 +3895,9 @@ mod tests {
         let ws = make_workspace(&state, "ws-sweep-2").await;
         let repo = make_repo(&state, "repo-s2", "ws-sweep-2").await;
 
-        let set = make_set("ws-sweep-2", vec![pin("backend-developer", "a1")]);
-        put_set(&state, "ws-sweep-2", &set).await;
-        let active_sha = crate::compute_meta_spec_set_sha(&state, &ws.id).await;
+        require_for_ws(&state, "ws-sweep-2", "backend-developer", 1).await;
+        let active_sha = active_set_sha(&state, "ws-sweep-2").await;
+        let _ = ws;
 
         // Provenance under the CURRENT set SHA → no drift.
         let att = sample_attestation(repo.id.as_str(), "ws-sweep-2", &active_sha, now());
@@ -3906,8 +3935,7 @@ mod tests {
         let _ws = make_workspace(&state, "ws-sweep-4").await;
         let repo = make_repo(&state, "repo-s4", "ws-sweep-4").await;
 
-        let set = make_set("ws-sweep-4", vec![pin("backend-developer", "a1")]);
-        put_set(&state, "ws-sweep-4", &set).await;
+        require_for_ws(&state, "ws-sweep-4", "backend-developer", 1).await;
 
         // Provenance recorded before any set was bound (empty SHA) — cannot
         // assert drift against an unknown baseline.
@@ -3918,17 +3946,23 @@ mod tests {
         assert_eq!(summary.drift_detected, 0);
     }
 
-    // -- End-to-end: set update triggers reconciliation ----------------------
+    // -- End-to-end: required-flag change triggers reconciliation ------------
 
+    /// Registry-model replacement for the retired set-PUT trigger: flipping
+    /// a meta-spec's required flag to true (the amendments-row replacement
+    /// for `PUT /workspaces/{id}/meta-spec-set`) drives the same
+    /// reconciliation wave the old set-PUT drove. Killing test for the
+    /// `required_newly_set` trigger in `update_meta_spec`: delete that
+    /// branch and the first assertion fails.
     #[tokio::test(flavor = "multi_thread")]
-    async fn set_update_via_api_triggers_reconciliation() {
+    async fn required_flag_flip_via_api_triggers_reconciliation() {
         use axum::{body::Body, Router};
         use http::{Request, StatusCode};
         use tower::ServiceExt;
 
         let state = test_state();
         // Create the workspace via the API (member role wiring for
-        // notifications comes from the membership below).
+        // notifications comes from the membership machinery).
         let app: Router = crate::api::api_router().with_state(state.clone());
 
         let ws_body = serde_json::json!({"name": "ws-e2e", "slug": "ws-e2e"});
@@ -3955,23 +3989,20 @@ mod tests {
         let ws_id = ws_json["id"].as_str().unwrap().to_string();
 
         make_repo(&state, "repo-e2e", &ws_id).await;
-        make_meta_spec(&state, "backend-developer", 4).await;
+        // APPROVED meta-spec, not yet required.
+        let ms = make_meta_spec(&state, "backend-developer", 4).await;
 
-        // PUT the set with a first binding.
+        // First required flip -> reconciliation task created.
         let resp = app
             .clone()
             .oneshot(
                 Request::builder()
                     .method("PUT")
-                    .uri(format!("/api/v1/workspaces/{ws_id}/meta-spec-set"))
+                    .uri(format!("/api/v1/meta-specs/{}", ms.id.as_str()))
                     .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        serde_json::json!({
-                            "personas": { "backend": { "path": "backend-developer", "sha": "a1" } },
-                            "principles": [], "standards": [], "process": []
-                        })
-                        .to_string(),
+                        serde_json::json!({"required": true}).to_string(),
                     ))
                     .unwrap(),
             )
@@ -3979,25 +4010,25 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
 
-        // First binding → reconciliation task created.
         let tasks = open_tasks_with_label(&state, RECONCILIATION_LABEL).await;
-        assert_eq!(tasks.len(), 1, "set binding should trigger reconciliation");
+        assert_eq!(
+            tasks.len(),
+            1,
+            "required flip should trigger reconciliation"
+        );
         assert_eq!(tasks[0].workspace_id.as_str(), ws_id);
 
-        // Re-PUT the identical set → no new task (no version change).
+        // Re-PUT required=true when it is already true -> no new task (the
+        // trigger is the transition, not the value).
         let resp = app
             .oneshot(
                 Request::builder()
                     .method("PUT")
-                    .uri(format!("/api/v1/workspaces/{ws_id}/meta-spec-set"))
+                    .uri(format!("/api/v1/meta-specs/{}", ms.id.as_str()))
                     .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        serde_json::json!({
-                            "personas": { "backend": { "path": "backend-developer", "sha": "a1" } },
-                            "principles": [], "standards": [], "process": []
-                        })
-                        .to_string(),
+                        serde_json::json!({"required": true}).to_string(),
                     ))
                     .unwrap(),
             )
@@ -4009,155 +4040,8 @@ mod tests {
                 .await
                 .len(),
             1,
-            "identical re-PUT must not create a second task"
+            "an identical required re-PUT must not create a second task"
         );
-    }
-
-    // -- §10/§9: identical set re-PUT must not flip the set SHA -----------
-
-    /// `compute_meta_spec_set_sha` hashes the stored JSON bytes. The sweep
-    /// (§10) compares that hash against provenance records, and the §9 merge
-    /// gate compares `agent.meta_spec_set_sha == input.meta_spec_set_sha`.
-    /// If serializing the same set twice produced different bytes (e.g. a
-    /// HashMap's per-instance key order), an identical re-PUT would rewrite
-    /// the stored JSON under a new SHA and false-drift every provenance
-    /// record. This test pins the canonical-serialization invariant.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn identical_reput_keeps_set_sha_stable() {
-        use axum::{body::Body, Router};
-        use http::{Request, StatusCode};
-        use tower::ServiceExt;
-
-        let state = test_state();
-        let app: Router = crate::api::api_router().with_state(state.clone());
-
-        // Create a workspace via the API.
-        let resp = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/v1/workspaces")
-                    .header("authorization", "Bearer test-token")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        serde_json::json!({"name": "ws-sha", "slug": "ws-sha"}).to_string(),
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::CREATED);
-        let ws_json: serde_json::Value = serde_json::from_slice(
-            &axum::body::to_bytes(resp.into_body(), usize::MAX)
-                .await
-                .unwrap(),
-        )
-        .unwrap();
-        let ws_id = ws_json["id"].as_str().unwrap().to_string();
-        let ws_id = Id::new(&ws_id);
-
-        // Multiple personas: HashMap ordering is per-instance random, so a
-        // multi-entry set is what exposes nondeterministic serialization.
-        let put_body = serde_json::json!({
-            "personas": {
-                "backend":  {"path": "backend-developer", "sha": "a1"},
-                "frontend": {"path": "frontend-developer", "sha": "b2"},
-                "sre":      {"path": "sre-operator", "sha": "c3"}
-            },
-            "principles": [], "standards": [], "process": []
-        });
-        let put = |app: Router, ws: Id| {
-            let body = put_body.to_string();
-            async move {
-                app.oneshot(
-                    Request::builder()
-                        .method("PUT")
-                        .uri(format!("/api/v1/workspaces/{}/meta-spec-set", ws.as_str()))
-                        .header("authorization", "Bearer test-token")
-                        .header("content-type", "application/json")
-                        .body(Body::from(body))
-                        .unwrap(),
-                )
-                .await
-                .unwrap()
-            }
-        };
-
-        let r1 = put(app.clone(), ws_id.clone()).await;
-        assert_eq!(r1.status(), StatusCode::OK);
-        let sha1 = crate::compute_meta_spec_set_sha(&state, &ws_id).await;
-        assert!(!sha1.is_empty());
-
-        // Identical re-PUT: same entries (deliberately supplied in the same
-        // JSON object order; key order in the REQUEST must not matter
-        // either, since deserialization into BTreeMap canonicalizes).
-        let r2 = put(app.clone(), ws_id.clone()).await;
-        assert_eq!(r2.status(), StatusCode::OK);
-        let sha2 = crate::compute_meta_spec_set_sha(&state, &ws_id).await;
-        assert_eq!(sha1, sha2, "identical re-PUT must not change the set SHA");
-
-        // Re-PUT with the SAME entries in a DIFFERENT request key order:
-        // still identical after deserialization → same SHA.
-        let reordered = serde_json::json!({
-            "personas": {
-                "sre":      {"path": "sre-operator", "sha": "c3"},
-                "backend":  {"path": "backend-developer", "sha": "a1"},
-                "frontend": {"path": "frontend-developer", "sha": "b2"}
-            },
-            "principles": [], "standards": [], "process": []
-        });
-        let r3 = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri(format!(
-                        "/api/v1/workspaces/{}/meta-spec-set",
-                        ws_id.as_str()
-                    ))
-                    .header("authorization", "Bearer test-token")
-                    .header("content-type", "application/json")
-                    .body(Body::from(reordered.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(r3.status(), StatusCode::OK);
-        let sha3 = crate::compute_meta_spec_set_sha(&state, &ws_id).await;
-        assert_eq!(
-            sha1, sha3,
-            "request key order must not leak into the stored set SHA"
-        );
-
-        // A genuinely different set (one pinned SHA changed) must change
-        // the SHA — the invariant must not be trivially "SHA never moves".
-        let changed = serde_json::json!({
-            "personas": {
-                "backend":  {"path": "backend-developer", "sha": "a9"},
-                "frontend": {"path": "frontend-developer", "sha": "b2"},
-                "sre":      {"path": "sre-operator", "sha": "c3"}
-            },
-            "principles": [], "standards": [], "process": []
-        });
-        let r4 = app
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri(format!(
-                        "/api/v1/workspaces/{}/meta-spec-set",
-                        ws_id.as_str()
-                    ))
-                    .header("authorization", "Bearer test-token")
-                    .header("content-type", "application/json")
-                    .body(Body::from(changed.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(r4.status(), StatusCode::OK);
-        let sha4 = crate::compute_meta_spec_set_sha(&state, &ws_id).await;
-        assert_ne!(sha1, sha4, "a changed pin must change the set SHA");
     }
 
     // -- §6 step 2: task per repo, scoped per workspace ----------------------
@@ -4169,9 +4053,9 @@ mod tests {
         let _r1 = make_repo(&state, "repo-m1", "ws-recon-multi").await;
         let _r2 = make_repo(&state, "repo-m2", "ws-recon-multi").await;
         let _r3 = make_repo(&state, "repo-m3", "ws-recon-multi").await;
-        let ms = make_meta_spec(&state, "backend-developer", 4).await;
+        let ms = make_required_global_spec(&state, "backend-developer", 4).await;
 
-        let s = run_reconciliation(&state, &ws.id, std::slice::from_ref(&ms.name)).await;
+        let s = run_reconciliation(&state, &ws.id, std::slice::from_ref(&ms.id)).await;
         let tasks = open_tasks_with_label(&state, RECONCILIATION_LABEL).await;
         assert_eq!(s.tasks_created, 3, "§6 step 2: task per affected repo");
         assert_eq!(tasks.len(), 3);
@@ -4198,11 +4082,11 @@ mod tests {
         let _repo1 = make_repo(&state, "repo-pa", "ws-recon-w1").await;
         let ws2 = make_workspace(&state, "ws-recon-w2").await;
         let _repo2 = make_repo(&state, "repo-pb", "ws-recon-w2").await;
-        let ms = make_meta_spec(&state, "backend-developer", 4).await;
+        let ms = make_required_global_spec(&state, "backend-developer", 4).await;
 
-        let s1 = run_reconciliation(&state, &ws1.id, std::slice::from_ref(&ms.name)).await;
+        let s1 = run_reconciliation(&state, &ws1.id, std::slice::from_ref(&ms.id)).await;
         assert_eq!(s1.tasks_created, 1);
-        let s2 = run_reconciliation(&state, &ws2.id, std::slice::from_ref(&ms.name)).await;
+        let s2 = run_reconciliation(&state, &ws2.id, std::slice::from_ref(&ms.id)).await;
         assert_eq!(
             s2.tasks_created, 1,
             "second workspace must get its own reconciliation task"
@@ -4239,7 +4123,7 @@ mod tests {
         let ws = make_workspace(&state, "ws-wave").await;
         make_repo(&state, "repo-w1", "ws-wave").await;
         make_repo(&state, "repo-w2", "ws-wave").await;
-        let ms = make_meta_spec(&state, "backend-developer", 4).await;
+        let ms = make_required_global_spec(&state, "backend-developer", 4).await;
 
         // Member so the completion notification path is exercised end-to-end.
         let membership = WorkspaceMembership {
@@ -4259,7 +4143,7 @@ mod tests {
             .unwrap();
 
         // Two reconciliation tasks created (one per repo).
-        run_reconciliation(&state, &ws.id, std::slice::from_ref(&ms.name)).await;
+        run_reconciliation(&state, &ws.id, std::slice::from_ref(&ms.id)).await;
 
         let count_completed = |ws: gyre_domain::Workspace| {
             let state = state.clone();
@@ -4394,7 +4278,7 @@ mod tests {
         let state = test_state();
         let ws = make_workspace(&state, "ws-wave2").await;
         make_repo(&state, "repo-w2", "ws-wave2").await;
-        let ms = make_meta_spec(&state, "backend-developer", 4).await;
+        let ms = make_required_global_spec(&state, "backend-developer", 4).await;
 
         let count_completed = || {
             let state = state.clone();
@@ -4440,7 +4324,7 @@ mod tests {
         };
 
         // Wave 1: v4 → one task → complete → emit.
-        run_reconciliation(&state, &ws.id, std::slice::from_ref(&ms.name)).await;
+        run_reconciliation(&state, &ws.id, std::slice::from_ref(&ms.id)).await;
         complete_all_open().await;
         maybe_emit_reconciliation_completed(&state, &ws.id).await;
         assert_eq!(count_completed().await, 1, "wave 1 must emit exactly once");
@@ -4459,7 +4343,7 @@ mod tests {
             })
             .await
             .unwrap();
-        run_reconciliation(&state, &ws.id, std::slice::from_ref(&ms.name)).await;
+        run_reconciliation(&state, &ws.id, std::slice::from_ref(&ms.id)).await;
         let open = open_tasks_with_label(&state, RECONCILIATION_LABEL)
             .await
             .into_iter()
@@ -4661,20 +4545,44 @@ mod tests {
         .unwrap();
         let ws_id = ws_json["id"].as_str().unwrap().to_string();
 
-        // Bind a set — changed_paths is non-empty (new binding) → event fires.
+        // Registry model (amendments row): the retired set-PUT's binding
+        // change is a required-flag flip on a Workspace-scoped meta-spec —
+        // false→true is the transition that emits meta_spec_set_updated to
+        // the meta-spec's own workspace. Seed an APPROVED optional
+        // Workspace-scoped entry for that workspace (the state a set
+        // binding used to start from).
+        let prompt = "prompt for setevent-backend v1";
+        let ms = MetaSpec {
+            id: Id::new(uuid::Uuid::new_v4().to_string()),
+            kind: MetaSpecKind::Persona,
+            name: "setevent-backend".to_string(),
+            scope: MetaSpecScope::Workspace,
+            scope_id: Some(ws_id.clone()),
+            prompt: prompt.to_string(),
+            version: 1,
+            content_hash: sha256_hex(prompt),
+            required: false,
+            approval_status: MetaSpecApprovalStatus::Approved,
+            approved_by: Some("admin".to_string()),
+            approved_at: Some(now()),
+            approved_content_hash: Some(sha256_hex(prompt)),
+            created_by: "admin".to_string(),
+            created_at: now(),
+            updated_at: now(),
+        };
+        state.meta_specs.create(&ms).await.unwrap();
+
+        // Flip required → the binding-change event fires (changed_paths is
+        // non-empty: the meta-spec newly binds the workspace).
         let resp = app
             .oneshot(
                 Request::builder()
                     .method("PUT")
-                    .uri(format!("/api/v1/workspaces/{ws_id}/meta-spec-set"))
+                    .uri(format!("/api/v1/meta-specs/{}", ms.id.as_str()))
                     .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        serde_json::json!({
-                            "personas": { "backend": { "path": "backend-developer", "sha": "a1" } },
-                            "principles": [], "standards": [], "process": []
-                        })
-                        .to_string(),
+                        serde_json::json!({"required": true}).to_string(),
                     ))
                     .unwrap(),
             )
@@ -4697,7 +4605,7 @@ mod tests {
         assert_eq!(
             msgs.len(),
             1,
-            "set binding change must emit meta_spec_set_updated"
+            "required flip (the set-binding change) must emit meta_spec_set_updated"
         );
         let payload = msgs[0].payload.as_ref().unwrap();
         assert_eq!(
@@ -4705,22 +4613,20 @@ mod tests {
             1,
             "event payload must name the changed spec"
         );
+        assert_eq!(payload["changed"][0], ms.name);
 
-        // Identical re-PUT: no version change → no additional event.
+        // Identical re-PUT (already required — no false→true transition):
+        // no additional event.
         let app2: Router = crate::api::api_router().with_state(state.clone());
         let resp = app2
             .oneshot(
                 Request::builder()
                     .method("PUT")
-                    .uri(format!("/api/v1/workspaces/{ws_id}/meta-spec-set"))
+                    .uri(format!("/api/v1/meta-specs/{}", ms.id.as_str()))
                     .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        serde_json::json!({
-                            "personas": { "backend": { "path": "backend-developer", "sha": "a1" } },
-                            "principles": [], "standards": [], "process": []
-                        })
-                        .to_string(),
+                        serde_json::json!({"required": true}).to_string(),
                     ))
                     .unwrap(),
             )
@@ -4742,27 +4648,49 @@ mod tests {
         assert_eq!(
             msgs.len(),
             1,
-            "identical re-PUT must not emit another event"
+            "an identical required re-PUT must not emit another event"
         );
     }
 
     // -- §9: merge-gate drift evaluation -------------------------------------
 
-    /// Create an MR whose author agent's current task carries the given
-    /// provenance attestation (the task-based lookup path — the commit-based
-    /// path needs a real git repo on disk).
-    async fn make_mr_with_task_attestation(
+    /// Create an MR whose author agent has a spawn-time prompt-set record
+    /// recording `used` as the meta-specs it ran under — the merge-time
+    /// `meta_specs_used` source (registry model; the retired set model read
+    /// the recorded set SHA off a provenance attestation instead).
+    async fn make_mr_with_prompt_set(
         state: &Arc<AppState>,
         mr_id: &str,
         ws_id: &str,
         repo: &Repository,
-        att: gyre_common::Attestation,
+        used: Vec<gyre_domain::MetaSpecSnapshot>,
     ) -> gyre_domain::MergeRequest {
         let mut agent = gyre_domain::Agent::new(Id::new(format!("agent-{mr_id}")), "author", now());
         agent.workspace_id = Id::new(ws_id);
-        agent.current_task_id = Some(Id::new(att.metadata.task_id.clone()));
         state.agents.create(&agent).await.unwrap();
-        state.chain_attestations.save(&att).await.unwrap();
+        crate::prompt_assembly::store_prompt_set_record(
+            state,
+            &crate::prompt_assembly::AgentPromptSetRecord {
+                agent_id: agent.id.clone(),
+                task_id: Id::new(format!("task-{mr_id}")),
+                spec_path: None,
+                set_sha: String::new(),
+                assembled_at: now(),
+                meta_specs_used: used
+                    .iter()
+                    .map(|s| gyre_domain::MetaSpecUsed {
+                        id: Id::new(&s.meta_spec_id),
+                        kind: s.kind.clone(),
+                        content_hash: s.content_hash.clone(),
+                        version: s.version,
+                        required: true,
+                        scope: String::new(),
+                    })
+                    .collect(),
+                rendered_prompt: None,
+            },
+        )
+        .await;
 
         let mut mr = gyre_domain::MergeRequest::new(
             Id::new(mr_id),
@@ -4778,70 +4706,126 @@ mod tests {
         mr
     }
 
-    fn drift_test_set(ws_id: &str) -> crate::api::meta_specs::MetaSpecSet {
-        make_set(ws_id, vec![pin("backend-developer", "a1")])
+    /// A used-entry snapshot for the meta-spec `ms` at an explicit version
+    /// and content hash (the spawn-time record of what the agent ran
+    /// under — an older version for the drift cases).
+    fn used_snapshot(
+        ms: &MetaSpec,
+        version: u32,
+        content_hash: &str,
+    ) -> gyre_domain::MetaSpecSnapshot {
+        gyre_domain::MetaSpecSnapshot {
+            meta_spec_id: ms.id.to_string(),
+            kind: ms.kind.as_str().to_string(),
+            content_hash: content_hash.to_string(),
+            version,
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn drift_check_matching_set_sha_passes() {
+    async fn drift_check_usage_matching_current_required_versions_passes() {
         let state = test_state();
-        let ws = make_workspace(&state, "ws-drift-1").await;
+        let _ws = make_workspace(&state, "ws-drift-1").await;
         let repo = make_repo(&state, "repo-drift-1", "ws-drift-1").await;
-        put_set(&state, "ws-drift-1", &drift_test_set("ws-drift-1")).await;
-        let current = crate::compute_meta_spec_set_sha(&state, &ws.id).await;
-        assert!(!current.is_empty());
+        let ms = require_for_ws(&state, "ws-drift-1", "backend-developer", 2).await;
 
-        // Provenance under the CURRENT set SHA → no drift (§9 pass case).
-        let att = sample_attestation(repo.id.as_str(), "ws-drift-1", &current, now());
-        let mr =
-            make_mr_with_task_attestation(&state, "mr-drift-1", "ws-drift-1", &repo, att).await;
+        // Recorded usage at the CURRENT required version and content hash
+        // → no drift (§9 pass case).
+        let mr = make_mr_with_prompt_set(
+            &state,
+            "mr-drift-1",
+            "ws-drift-1",
+            &repo,
+            vec![meta_spec_snapshot(&ms)],
+        )
+        .await;
 
-        assert_eq!(mr_meta_spec_drift(&state, &mr).await, None);
+        assert_eq!(mr_meta_spec_drift(&state, &mr).await.unwrap(), None);
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn drift_check_mismatched_set_sha_reports_drift() {
+    async fn drift_check_older_recorded_version_reports_drift() {
         let state = test_state();
-        let ws = make_workspace(&state, "ws-drift-2").await;
+        let _ws = make_workspace(&state, "ws-drift-2").await;
         let repo = make_repo(&state, "repo-drift-2", "ws-drift-2").await;
-        put_set(&state, "ws-drift-2", &drift_test_set("ws-drift-2")).await;
-        let current = crate::compute_meta_spec_set_sha(&state, &ws.id).await;
+        let ms = require_for_ws(&state, "ws-drift-2", "backend-developer", 2).await;
 
-        // Provenance under an OLD set SHA → drift.
-        let att = sample_attestation(repo.id.as_str(), "ws-drift-2", "deadbeef", now());
-        let mr =
-            make_mr_with_task_attestation(&state, "mr-drift-2", "ws-drift-2", &repo, att).await;
+        // Recorded usage pinned to v1 with the old content hash while v2 is
+        // required → the attestation was recorded against an older required
+        // version: drift.
+        let mr = make_mr_with_prompt_set(
+            &state,
+            "mr-drift-2",
+            "ws-drift-2",
+            &repo,
+            vec![used_snapshot(&ms, 1, "old-hash")],
+        )
+        .await;
 
         let drift = mr_meta_spec_drift(&state, &mr)
             .await
+            .expect("required-set resolution failed")
             .expect("drift expected");
-        assert_eq!(drift.produced_set_sha, "deadbeef");
-        assert_eq!(drift.current_set_sha, current);
+        assert_eq!(drift.produced.len(), 1);
+        assert_eq!(drift.produced[0].version, 1);
+        assert_eq!(drift.current.len(), 1);
+        assert_eq!(drift.current[0].meta_spec_id, ms.id.to_string());
+        assert_eq!(drift.current[0].version, 2);
+        assert_eq!(drift.current[0].content_hash, ms.content_hash);
 
-        // The warning matches the §9 format exactly and round-trips.
+        // The warning matches the §9 format exactly and round-trips (the
+        // parser reconstructs ids/versions; content hashes do not render).
         let warning = format_meta_spec_drift_warning(&drift);
         assert!(
-            warning.starts_with(
-                "[WARN] meta-spec-drift: code produced under meta-spec set deadbeef, current is "
-            ),
+            warning.starts_with("[WARN] meta-spec-drift: code produced under meta-specs ["),
             "warning must follow the §9 format: {warning}"
         );
+        assert!(warning.contains(&format!("{}@v1", ms.id.as_str())));
+        assert!(warning.contains(&format!("{}@v2", ms.id.as_str())));
         assert!(warning.ends_with(". Reconciliation may be needed."));
-        assert_eq!(
-            parse_meta_spec_drift_warning(&warning).as_ref(),
-            Some(&drift)
-        );
+        let parsed = parse_meta_spec_drift_warning(&warning).expect("round-trip");
+        assert_eq!(parsed.produced[0].meta_spec_id, ms.id.to_string());
+        assert_eq!(parsed.produced[0].version, 1);
+        assert_eq!(parsed.current[0].meta_spec_id, ms.id.to_string());
+        assert_eq!(parsed.current[0].version, 2);
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn drift_check_mr_without_attestation_skips_gracefully() {
+    async fn drift_check_missing_required_spec_reports_drift() {
+        // A currently-required meta-spec the recorded usage lacks entirely
+        // (the agent ran before it was required) is drift too.
+        let state = test_state();
+        let _ws = make_workspace(&state, "ws-drift-2b").await;
+        let repo = make_repo(&state, "repo-drift-2b", "ws-drift-2b").await;
+        require_for_ws(&state, "ws-drift-2b", "backend-developer", 1).await;
+
+        // Usage records a DIFFERENT meta-spec: the required one is missing.
+        let other = gyre_domain::MetaSpecSnapshot {
+            meta_spec_id: "unrelated-ms".to_string(),
+            kind: "meta:principle".to_string(),
+            content_hash: "h".to_string(),
+            version: 1,
+        };
+        let mr =
+            make_mr_with_prompt_set(&state, "mr-drift-2b", "ws-drift-2b", &repo, vec![other]).await;
+
+        let drift = mr_meta_spec_drift(&state, &mr)
+            .await
+            .expect("required-set resolution failed")
+            .expect("missing required meta-spec is drift");
+        assert_eq!(drift.current.len(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn drift_check_mr_without_author_agent_skips_gracefully() {
         let state = test_state();
         let _ws = make_workspace(&state, "ws-drift-3").await;
         let repo = make_repo(&state, "repo-drift-3", "ws-drift-3").await;
-        put_set(&state, "ws-drift-3", &drift_test_set("ws-drift-3")).await;
+        require_for_ws(&state, "ws-drift-3", "backend-developer", 1).await;
 
-        // MR with no author agent and no attestation — the check must skip
-        // without crashing (§9: "MRs without attestation skip the check").
+        // MR with no author agent and no prompt-set record — the check must
+        // skip without crashing (§9: "MRs without attestation skip the
+        // check").
         let mr = gyre_domain::MergeRequest::new(
             Id::new("mr-drift-3"),
             repo.id.clone(),
@@ -4853,37 +4837,59 @@ mod tests {
         );
         state.merge_requests.create(&mr).await.unwrap();
 
-        assert_eq!(mr_meta_spec_drift(&state, &mr).await, None);
+        assert_eq!(mr_meta_spec_drift(&state, &mr).await.unwrap(), None);
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn drift_check_workspace_without_set_skips() {
+    async fn drift_check_workspace_without_required_specs_skips() {
         let state = test_state();
         let _ws = make_workspace(&state, "ws-drift-4").await;
         let repo = make_repo(&state, "repo-drift-4", "ws-drift-4").await;
-        // No set bound — nothing to conform to.
+        // No required meta-specs — nothing to conform to.
 
-        let att = sample_attestation(repo.id.as_str(), "ws-drift-4", "deadbeef", now());
-        let mr =
-            make_mr_with_task_attestation(&state, "mr-drift-4", "ws-drift-4", &repo, att).await;
+        let mr = make_mr_with_prompt_set(
+            &state,
+            "mr-drift-4",
+            "ws-drift-4",
+            &repo,
+            vec![gyre_domain::MetaSpecSnapshot {
+                meta_spec_id: "anything".to_string(),
+                kind: "meta:persona".to_string(),
+                content_hash: "x".to_string(),
+                version: 1,
+            }],
+        )
+        .await;
 
-        assert_eq!(mr_meta_spec_drift(&state, &mr).await, None);
+        assert_eq!(mr_meta_spec_drift(&state, &mr).await.unwrap(), None);
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn drift_check_empty_recorded_sha_skips() {
+    async fn drift_check_mr_without_prompt_set_record_skips() {
         let state = test_state();
         let _ws = make_workspace(&state, "ws-drift-5").await;
         let repo = make_repo(&state, "repo-drift-5", "ws-drift-5").await;
-        put_set(&state, "ws-drift-5", &drift_test_set("ws-drift-5")).await;
+        require_for_ws(&state, "ws-drift-5", "backend-developer", 1).await;
 
-        // Provenance recorded before any set was bound (empty SHA) — cannot
-        // assert drift against an unknown baseline, same rule as the sweep.
-        let att = sample_attestation(repo.id.as_str(), "ws-drift-5", "", now());
-        let mr =
-            make_mr_with_task_attestation(&state, "mr-drift-5", "ws-drift-5", &repo, att).await;
+        // Author agent spawned before prompt assembly (no stored record) —
+        // the check skips gracefully, same rule as the sweep's empty-SHA
+        // skip.
+        let mut agent = gyre_domain::Agent::new(Id::new("agent-drift-5"), "author", now());
+        agent.workspace_id = Id::new("ws-drift-5");
+        state.agents.create(&agent).await.unwrap();
+        let mut mr = gyre_domain::MergeRequest::new(
+            Id::new("mr-drift-5"),
+            repo.id.clone(),
+            Id::new("ws-drift-5"),
+            "MR no record",
+            "feat/z",
+            "main",
+            now(),
+        );
+        mr.author_agent_id = Some(agent.id.clone());
+        state.merge_requests.create(&mr).await.unwrap();
 
-        assert_eq!(mr_meta_spec_drift(&state, &mr).await, None);
+        assert_eq!(mr_meta_spec_drift(&state, &mr).await.unwrap(), None);
     }
 
     #[test]
@@ -4892,47 +4898,21 @@ mod tests {
         assert_eq!(parse_meta_spec_drift_warning(""), None);
         assert_eq!(
             parse_meta_spec_drift_warning(
-                "[WARN] meta-spec-drift: code produced under meta-spec set , current is x. Reconciliation may be needed."
+                "[WARN] meta-spec-drift: code produced under meta-specs [], current requires []. Reconciliation may be needed."
             ),
             None,
-            "empty produced SHA must not parse"
+            "an all-empty drift must not parse"
+        );
+        assert_eq!(
+            parse_meta_spec_drift_warning(
+                "[WARN] meta-spec-drift: code produced under meta-spec set deadbeef, current is x. Reconciliation may be needed."
+            ),
+            None,
+            "the retired set-SHA format must not parse (no silent alias)"
         );
     }
+
     // -- §8: tenant-scope meta-spec changes -----------------------------------
-
-    fn make_tenant_set(
-        tenant_id: &str,
-        entries: Vec<MetaSpecPinnedEntry>,
-    ) -> crate::api::meta_specs::TenantMetaSpecSet {
-        let mut personas = std::collections::BTreeMap::new();
-        for (i, e) in entries.into_iter().enumerate() {
-            // Distinct key namespace from the workspace-set helper's
-            // `role-{i}`: a tenant role and a workspace role that happen to
-            // share a key name are a genuine rebinding (workspace wins), not
-            // something the test data should trip by accident.
-            personas.insert(format!("tenant-role-{i}"), e);
-        }
-        crate::api::meta_specs::TenantMetaSpecSet {
-            tenant_id: tenant_id.to_string(),
-            personas,
-            principles: vec![],
-            standards: vec![],
-            process: vec![],
-        }
-    }
-
-    async fn put_tenant_set(
-        state: &Arc<AppState>,
-        tenant_id: &str,
-        set: &crate::api::meta_specs::TenantMetaSpecSet,
-    ) {
-        let json = serde_json::to_string(set).unwrap();
-        state
-            .tenant_meta_spec_sets
-            .upsert(&Id::new(tenant_id), &json)
-            .await
-            .unwrap();
-    }
 
     async fn make_workspace_in_tenant(
         state: &Arc<AppState>,
@@ -4968,49 +4948,41 @@ mod tests {
             .collect()
     }
 
-    /// §8: a tenant-level meta-spec change propagates to every workspace in
-    /// the tenant that does not override it, creating per-repo reconciliation
-    /// tasks in each (per-workspace reconciliation plans).
+    /// §8 (registry model): a tenant-scoped REQUIRED meta-spec change
+    /// propagates to every workspace in its tenant, creating per-repo
+    /// reconciliation tasks in each. A workspace in ANOTHER tenant is never
+    /// in the blast radius. (The retired set model's per-workspace override
+    /// pins are gone: a workspace that wants its own rules creates a
+    /// Workspace-scoped meta-spec, a different registry record.)
     #[tokio::test(flavor = "multi_thread")]
-    async fn tenant_reconciliation_creates_tasks_for_inheriting_workspaces() {
+    async fn tenant_reconciliation_creates_tasks_for_tenant_workspaces() {
         let state = test_state();
-        let ms = make_meta_spec(&state, "backend-developer", 4).await;
-        put_tenant_set(
+        let ms = make_required_spec(
             &state,
-            "default",
-            &make_tenant_set("default", vec![pin("backend-developer", "a1")]),
+            MetaSpecScope::Tenant,
+            Some("default".to_string()),
+            "backend-developer",
+            4,
+            "admin",
         )
         .await;
 
         let _ws1 = make_workspace_in_tenant(&state, "ws-ten-1", "default").await;
         let _repo1 = make_repo(&state, "repo-ten-1", "ws-ten-1").await;
-        // A workspace whose own set pins a DIFFERENT spec: it does not
-        // override the changed path, so it inherits and reconciles too.
         let _ws2 = make_workspace_in_tenant(&state, "ws-ten-2", "default").await;
         let _repo2 = make_repo(&state, "repo-ten-2", "ws-ten-2").await;
-        put_set(
-            &state,
-            "ws-ten-2",
-            &make_set("ws-ten-2", vec![pin("other-spec", "zz")]),
-        )
-        .await;
         // A workspace in ANOTHER tenant is never in the blast radius.
         let _ws3 = make_workspace_in_tenant(&state, "ws-ten-other", "other-tenant").await;
         let _repo3 = make_repo(&state, "repo-ten-3", "ws-ten-other").await;
 
-        let summary = run_tenant_reconciliation(
-            &state,
-            &Id::new("default"),
-            std::slice::from_ref(&ms.name),
-            false,
-        )
-        .await;
+        let summary =
+            run_tenant_reconciliation(&state, &Id::new("default"), std::slice::from_ref(&ms.id))
+                .await;
 
         assert_eq!(summary.workspaces_scanned, 2);
-        assert_eq!(summary.workspaces_skipped_override, 0);
         assert_eq!(
             summary.tasks_created, 2,
-            "one task per repo in each inheriting workspace"
+            "one task per repo in each tenant workspace"
         );
 
         let tasks1 = reconciliation_tasks_for_workspace(&state, "ws-ten-1").await;
@@ -5029,176 +5001,21 @@ mod tests {
         );
     }
 
-    /// §8 step 3: a workspace that overrides the changed meta-spec with its
-    /// own pin is skipped — its own rollout policy governs.
+    /// §8 blast radius (registry model): only REQUIRED paths propagate —
+    /// an optional meta-spec reaches code exclusively through spec-level
+    /// bindings, whose drift the stale-pin cascade owns, so tenant
+    /// reconciliation ignores it.
     #[tokio::test(flavor = "multi_thread")]
-    async fn tenant_reconciliation_skips_overriding_workspace() {
-        let state = test_state();
-        let ms = make_meta_spec(&state, "backend-developer", 4).await;
-        put_tenant_set(
-            &state,
-            "default",
-            &make_tenant_set("default", vec![pin("backend-developer", "a1")]),
-        )
-        .await;
-
-        let _ws1 = make_workspace_in_tenant(&state, "ws-ovr-1", "default").await;
-        let _repo1 = make_repo(&state, "repo-ovr-1", "ws-ovr-1").await;
-        // This workspace pins the changed path itself → override.
-        put_set(
-            &state,
-            "ws-ovr-1",
-            &make_set("ws-ovr-1", vec![pin("backend-developer", "old-sha")]),
-        )
-        .await;
-        // ...and a sibling that inherits.
-        let _ws2 = make_workspace_in_tenant(&state, "ws-ovr-2", "default").await;
-        let _repo2 = make_repo(&state, "repo-ovr-2", "ws-ovr-2").await;
-
-        let summary = run_tenant_reconciliation(
-            &state,
-            &Id::new("default"),
-            std::slice::from_ref(&ms.name),
-            false,
-        )
-        .await;
-
-        assert_eq!(summary.workspaces_scanned, 2);
-        assert_eq!(summary.workspaces_skipped_override, 1);
-        assert_eq!(
-            summary.tasks_created, 1,
-            "only the non-overriding workspace reconciles"
-        );
-
-        let tasks1 = reconciliation_tasks_for_workspace(&state, "ws-ovr-1").await;
-        assert!(
-            tasks1.is_empty(),
-            "overriding workspace must be skipped by tenant propagation"
-        );
-        let tasks2 = reconciliation_tasks_for_workspace(&state, "ws-ovr-2").await;
-        assert_eq!(tasks2.len(), 1);
-    }
-
-    /// §8 step 4: the tenant-admin force flag bypasses the workspace-level
-    /// rollout policy — urgent compliance-driven changes reach overriding
-    /// workspaces too.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn tenant_reconciliation_force_bypasses_workspace_override() {
-        let state = test_state();
-        let ms = make_meta_spec(&state, "backend-developer", 4).await;
-        put_tenant_set(
-            &state,
-            "default",
-            &make_tenant_set("default", vec![pin("backend-developer", "a1")]),
-        )
-        .await;
-
-        let _ws1 = make_workspace_in_tenant(&state, "ws-force-1", "default").await;
-        let _repo1 = make_repo(&state, "repo-force-1", "ws-force-1").await;
-        put_set(
-            &state,
-            "ws-force-1",
-            &make_set("ws-force-1", vec![pin("backend-developer", "old-sha")]),
-        )
-        .await;
-
-        let summary = run_tenant_reconciliation(
-            &state,
-            &Id::new("default"),
-            std::slice::from_ref(&ms.name),
-            true,
-        )
-        .await;
-
-        assert_eq!(summary.workspaces_scanned, 1);
-        assert_eq!(
-            summary.workspaces_skipped_override, 0,
-            "force must not count the override as a skip"
-        );
-        assert_eq!(
-            summary.tasks_created, 1,
-            "force propagates past the override"
-        );
-        let tasks1 = reconciliation_tasks_for_workspace(&state, "ws-force-1").await;
-        assert_eq!(tasks1.len(), 1);
-        assert_eq!(
-            tasks1[0].title,
-            "Align code with updated meta:persona backend-developer v4"
-        );
-    }
-
-    /// §8 step 3 fail-closed: a workspace whose own set cannot be read
-    /// (storage error / corrupt JSON) is NOT treated as "no overrides" —
-    /// an empty-set fallback would drop its pins and let tenant
-    /// propagation (including force) stomp a workspace that chose its own
-    /// version. The workspace is skipped; its own §6 rollout governs.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn tenant_reconciliation_fails_closed_on_unreadable_workspace_set() {
-        let state = test_state();
-        let ms = make_meta_spec(&state, "backend-developer", 4).await;
-        put_tenant_set(
-            &state,
-            "default",
-            &make_tenant_set("default", vec![pin("backend-developer", "a1")]),
-        )
-        .await;
-
-        let _ws1 = make_workspace_in_tenant(&state, "ws-err-1", "default").await;
-        let _repo1 = make_repo(&state, "repo-err-1", "ws-err-1").await;
-        // Corrupt stored set: the override gate must not decode-fail-open
-        // into "this workspace overrides nothing".
-        state
-            .meta_spec_sets
-            .upsert(&Id::new("ws-err-1"), "{not valid json")
-            .await
-            .unwrap();
-
-        // force=true is the strongest case: an urgent compliance change must
-        // still not reach a workspace whose override state is unknown.
-        let summary = run_tenant_reconciliation(
-            &state,
-            &Id::new("default"),
-            std::slice::from_ref(&ms.name),
-            true,
-        )
-        .await;
-
-        assert_eq!(summary.workspaces_scanned, 1);
-        assert_eq!(
-            summary.workspaces_skipped_error, 1,
-            "unreadable workspace set must be counted as skipped, not decoded as empty"
-        );
-        assert_eq!(
-            summary.tasks_created, 0,
-            "override gate must fail closed — no propagation to a workspace with unknown overrides, even with force"
-        );
-        assert!(reconciliation_tasks_for_workspace(&state, "ws-err-1")
-            .await
-            .is_empty());
-    }
-
-    /// §8 step 1 (blast radius): only paths the tenant set pins propagate —
-    /// a tenant-scoped change nothing binds has an empty blast radius.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn tenant_reconciliation_ignores_unbound_paths() {
+    async fn tenant_reconciliation_ignores_non_required_paths() {
         let state = test_state();
         let ms = make_meta_spec(&state, "unbound-spec", 2).await;
-        put_tenant_set(
-            &state,
-            "default",
-            &make_tenant_set("default", vec![pin("backend-developer", "a1")]),
-        )
-        .await;
+        assert!(!ms.required);
         let _ws1 = make_workspace_in_tenant(&state, "ws-unb-1", "default").await;
         let _repo1 = make_repo(&state, "repo-unb-1", "ws-unb-1").await;
 
-        let summary = run_tenant_reconciliation(
-            &state,
-            &Id::new("default"),
-            std::slice::from_ref(&ms.name),
-            false,
-        )
-        .await;
+        let summary =
+            run_tenant_reconciliation(&state, &Id::new("default"), std::slice::from_ref(&ms.id))
+                .await;
         assert_eq!(summary.workspaces_scanned, 0);
         assert_eq!(summary.tasks_created, 0);
         assert!(reconciliation_tasks_for_workspace(&state, "ws-unb-1")
@@ -5206,65 +5023,98 @@ mod tests {
             .is_empty());
     }
 
-    /// §8 step 1: the blast-radius endpoint reports every workspace whose
-    /// EFFECTIVE set binds the spec — inheriting (non-overriding) workspaces
-    /// via tenant inheritance, overriding ones via their own binding, and
-    /// never a workspace outside the tenant.
+    /// §8 blast radius: the endpoint reports every workspace the meta-spec
+    /// is required-visible from — a Tenant-scoped required meta-spec
+    /// affects its tenant's workspaces, never a workspace outside the
+    /// tenant — plus workspaces owning specs bound to it via spec-level
+    /// bindings.
     #[tokio::test(flavor = "multi_thread")]
-    async fn blast_radius_includes_all_non_overriding_workspaces() {
+    async fn blast_radius_covers_required_scopes_and_spec_bindings() {
         use axum::{body::Body, Router};
         use tower::ServiceExt;
 
         let state = test_state();
-        put_tenant_set(
+        let ms = make_required_spec(
             &state,
-            "default",
-            &make_tenant_set("default", vec![pin("backend-developer", "a1")]),
+            MetaSpecScope::Tenant,
+            Some("default".to_string()),
+            "backend-developer",
+            1,
+            "admin",
         )
         .await;
 
-        // No own set: inherits the tenant default.
+        // Same-tenant workspace: affected via the tenant required flag.
         let _ws_a = make_workspace_in_tenant(&state, "ws-br-a", "default").await;
         let _repo_a = make_repo(&state, "repo-br-a", "ws-br-a").await;
-        // Overrides the path with its own pin.
-        let _ws_b = make_workspace_in_tenant(&state, "ws-br-b", "default").await;
-        let _repo_b = make_repo(&state, "repo-br-b", "ws-br-b").await;
-        put_set(
-            &state,
-            "ws-br-b",
-            &make_set("ws-br-b", vec![pin("backend-developer", "own-sha")]),
-        )
-        .await;
-        // Own set pinning a different spec: still inherits the changed path.
-        let _ws_c = make_workspace_in_tenant(&state, "ws-br-c", "default").await;
-        let _repo_c = make_repo(&state, "repo-br-c", "ws-br-c").await;
-        put_set(
-            &state,
-            "ws-br-c",
-            &make_set("ws-br-c", vec![pin("other-spec", "zz")]),
-        )
-        .await;
-        // Different tenant, no sets: never affected.
+        // Different tenant, nothing required-visible: never affected.
         let _ws_d = make_workspace_in_tenant(&state, "ws-br-d", "other-tenant").await;
         let _repo_d = make_repo(&state, "repo-br-d", "ws-br-d").await;
 
-        let app: Router = crate::api::api_router().with_state(state.clone());
-        let resp = app
-            .oneshot(
-                http::Request::builder()
-                    .uri("/api/v1/meta-specs/backend-developer/blast-radius")
-                    .header("authorization", "Bearer test-token")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+        // A spec-level binding drags its owning workspace in: an optional
+        // meta-spec bound to a spec whose ledger entry lives in ws-br-c.
+        let optional = make_meta_spec(&state, "bound-optional", 1).await;
+        let _ws_c = make_workspace_in_tenant(&state, "ws-br-c", "default").await;
+        let _repo_c = make_repo(&state, "repo-br-c", "ws-br-c").await;
+        state
+            .meta_spec_bindings
+            .create(&gyre_domain::MetaSpecBinding {
+                id: Id::new(uuid::Uuid::new_v4().to_string()),
+                spec_id: "specs/system/bound.md".to_string(),
+                meta_spec_id: optional.id.clone(),
+                pinned_version: 1,
+                created_at: now(),
+            })
             .await
             .unwrap();
-        assert_eq!(resp.status(), http::StatusCode::OK);
-        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        state
+            .spec_ledger
+            .save(&gyre_domain::SpecLedgerEntry {
+                bindings_sha: String::new(),
+                path: "specs/system/bound.md".to_string(),
+                title: "Bound spec".to_string(),
+                owner: "user:admin".to_string(),
+                kind: None,
+                current_sha: "a1".to_string(),
+                approval_mode: "human_only".to_string(),
+                approval_status: gyre_domain::ApprovalStatus::Approved,
+                linked_tasks: vec![],
+                linked_mrs: vec![],
+                drift_status: "clean".to_string(),
+                created_at: 1_000_000,
+                updated_at: 1_000_000,
+                repo_id: None,
+                workspace_id: Some("ws-br-c".to_string()),
+            })
             .await
             .unwrap();
-        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
 
+        let app: Router = crate::api::api_router().with_state(state.clone());
+        let check = |name: &str| {
+            let app = app.clone();
+            let name = name.to_string();
+            async move {
+                let resp = app
+                    .oneshot(
+                        http::Request::builder()
+                            .uri(format!("/api/v1/meta-specs/{name}/blast-radius"))
+                            .header("authorization", "Bearer test-token")
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(resp.status(), http::StatusCode::OK);
+                let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                serde_json::from_slice(&bytes).unwrap()
+            }
+        };
+
+        // The required tenant meta-spec: same-tenant workspace affected
+        // (required_tenant), cross-tenant workspace not.
+        let json: serde_json::Value = check("backend-developer").await;
         let affected: Vec<String> = json["affected_workspaces"]
             .as_array()
             .unwrap()
@@ -5273,21 +5123,12 @@ mod tests {
             .collect();
         assert!(
             affected.contains(&"ws-br-a".to_string()),
-            "inheriting workspace (no own set) must be in the blast radius"
-        );
-        assert!(
-            affected.contains(&"ws-br-b".to_string()),
-            "overriding workspace binds the spec via its own pin"
-        );
-        assert!(
-            affected.contains(&"ws-br-c".to_string()),
-            "non-overriding workspace with its own set must be in the blast radius"
+            "tenant-scoped required meta-spec must affect its tenant's workspaces"
         );
         assert!(
             !affected.contains(&"ws-br-d".to_string()),
             "workspace in another tenant must not be affected"
         );
-
         let repos = json["affected_repos"].as_array().unwrap();
         let reason_for = |rid: &str| {
             repos
@@ -5298,191 +5139,198 @@ mod tests {
         };
         assert_eq!(
             reason_for("repo-br-a").as_deref(),
-            Some("tenant_inheritance"),
-            "workspace without its own pin is affected via tenant inheritance"
-        );
-        assert_eq!(
-            reason_for("repo-br-c").as_deref(),
-            Some("tenant_inheritance"),
-            "workspace not overriding the path is affected via tenant inheritance"
-        );
-        assert_eq!(
-            reason_for("repo-br-b").as_deref(),
-            Some("workspace_binding"),
-            "overriding workspace is affected via its own binding"
+            Some("required_tenant"),
+            "tenant-scoped required meta-spec affects via required_tenant"
         );
         assert!(reason_for("repo-br-d").is_none());
+
+        // The optional meta-spec: only the binding workspace is affected,
+        // via spec_binding.
+        let json: serde_json::Value = check("bound-optional").await;
+        let affected: Vec<String> = json["affected_workspaces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|w| w["id"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(
+            affected,
+            vec!["ws-br-c".to_string()],
+            "an optional meta-spec reaches code only through spec-level bindings"
+        );
+        assert_eq!(
+            json["affected_repos"][0]["reason"].as_str(),
+            Some("spec_binding")
+        );
+        let _ = ms;
     }
 
-    /// §8 inheritance merge semantics: tenant defaults with workspace
-    /// overrides — workspace pin wins on conflict, non-conflicting tenant
-    /// defaults survive.
+    /// §8 effective-set resolution (registry model): the effective set is
+    /// the union of Global, Tenant (this workspace's tenant only), and
+    /// Workspace-scoped required APPROVED meta-specs — non-required and
+    /// non-approved entries are excluded.
     #[tokio::test(flavor = "multi_thread")]
-    async fn effective_set_merges_tenant_defaults_with_overrides() {
+    async fn effective_set_unions_required_specs_across_scopes() {
         let state = test_state();
-        let tenant = make_tenant_set(
-            "default",
-            vec![pin("backend-developer", "t1"), pin("reviewer", "t2")],
-        );
-        put_tenant_set(&state, "default", &tenant).await;
         let ws = make_workspace_in_tenant(&state, "ws-merge-1", "default").await;
-        put_set(
+
+        let global = make_required_spec(
             &state,
-            "ws-merge-1",
-            &make_set(
-                "ws-merge-1",
-                vec![pin("backend-developer", "w9"), pin("custom-spec", "w1")],
-            ),
+            MetaSpecScope::Global,
+            None,
+            "global-standard",
+            1,
+            "admin",
         )
         .await;
-        let effective = resolve_effective_meta_spec_set(&state, &ws).await.unwrap();
-
-        // Workspace override wins for the same path...
-        assert_eq!(
-            effective
-                .personas
-                .values()
-                .find(|e| e.path == "backend-developer"),
-            Some(&pin("backend-developer", "w9"))
-        );
-        // ...tenant defaults the workspace does not pin survive...
-        assert_eq!(
-            effective.personas.values().find(|e| e.path == "reviewer"),
-            Some(&pin("reviewer", "t2"))
-        );
-        // ...and the workspace's own extra bindings are kept.
-        assert_eq!(
-            effective
-                .personas
-                .values()
-                .find(|e| e.path == "custom-spec"),
-            Some(&pin("custom-spec", "w1"))
-        );
-
-        // A workspace with NO set of its own inherits the tenant defaults.
-        let ws2 = make_workspace_in_tenant(&state, "ws-merge-2", "default").await;
-        let effective2 = resolve_effective_meta_spec_set(&state, &ws2).await.unwrap();
-        assert_eq!(
-            effective2
-                .personas
-                .values()
-                .find(|e| e.path == "backend-developer"),
-            Some(&pin("backend-developer", "t1"))
-        );
-        assert_eq!(effective2.workspace_id, "ws-merge-2");
-
-        // Override predicate matches the merge: the overridden path is
-        // governed by the workspace, the inherited one by the tenant.
-        let ws1_set = serde_json::from_str::<crate::api::meta_specs::MetaSpecSet>(
-            &state.meta_spec_sets.get(&ws.id).await.unwrap().unwrap(),
+        let tenant = make_required_spec(
+            &state,
+            MetaSpecScope::Tenant,
+            Some("default".to_string()),
+            "tenant-persona",
+            1,
+            "admin",
         )
-        .unwrap();
-        assert!(workspace_overrides_path(
-            &tenant,
-            &ws1_set,
-            "backend-developer"
-        ));
-        assert!(!workspace_overrides_path(&tenant, &ws1_set, "reviewer"));
+        .await;
+        let own = require_for_ws(&state, "ws-merge-1", "own-process", 1).await;
+        // The kind must differ from the two personas so the ordering
+        // assertion below actually exercises the kind rank (the helpers
+        // default to Persona; this entry is a process).
+        let mut own_process = own.clone();
+        own_process.kind = MetaSpecKind::Process;
+        state.meta_specs.update(&own_process).await.unwrap();
+        // Another tenant's required meta-spec must not leak in.
+        let _other = make_required_spec(
+            &state,
+            MetaSpecScope::Tenant,
+            Some("other-tenant".to_string()),
+            "other-tenant-persona",
+            1,
+            "admin",
+        )
+        .await;
+        // Optional and pending entries are excluded.
+        let _optional = make_meta_spec(&state, "optional-persona", 1).await;
+        let mut pending = require_for_ws(&state, "ws-merge-1", "pending-standard", 1).await;
+        pending.approval_status = MetaSpecApprovalStatus::Pending;
+        state.meta_specs.update(&pending).await.unwrap();
+
+        let effective = resolve_effective_meta_spec_set(&state, &ws).await.unwrap();
+        let ids: Vec<String> = effective.iter().map(|s| s.meta_spec_id.clone()).collect();
+        assert!(ids.contains(&global.id.to_string()));
+        assert!(ids.contains(&tenant.id.to_string()));
+        assert!(ids.contains(&own.id.to_string()));
+        assert!(
+            !ids.iter().any(|id| id == "other-tenant-persona"),
+            "a tenant set must not leak across tenants"
+        );
+        assert_eq!(
+            effective.len(),
+            3,
+            "optional and non-approved meta-specs are not part of the effective set"
+        );
+
+        // Deterministic ordering by kind then name: persona sorts before
+        // standard before process.
+        let kinds: Vec<&str> = effective.iter().map(|s| s.kind.as_str()).collect();
+        assert_eq!(
+            kinds,
+            vec!["meta:persona", "meta:persona", "meta:process"],
+            "effective set sorts by kind rank then name"
+        );
     }
 
     /// §8: the effective-set SHA (§9 constraint / §10 sweep input) reflects
-    /// inheritance — a workspace with no own set hashes the merged tenant
-    /// defaults, a workspace override changes the SHA, and a workspace with
-    /// neither set stays unbound (empty SHA, skip).
+    /// the registry's required set — a workspace with no required meta-specs
+    /// stays unbound (empty SHA, skip), a required meta-spec visible from
+    /// the workspace binds it, and a version bump moves the SHA.
     #[tokio::test(flavor = "multi_thread")]
-    async fn effective_set_sha_reflects_inheritance() {
+    async fn effective_set_sha_reflects_registry_required_set() {
         let state = test_state();
-        let ws1 = make_workspace_in_tenant(&state, "ws-sha-1", "default").await;
-        let ws2 = make_workspace_in_tenant(&state, "ws-sha-2", "other-tenant").await;
+        let _ws1 = make_workspace_in_tenant(&state, "ws-sha-1", "default").await;
+        let _ws2 = make_workspace_in_tenant(&state, "ws-sha-2", "other-tenant").await;
 
-        // Neither workspace has any set: both unbound.
-        assert!(crate::compute_meta_spec_set_sha(&state, &ws1.id)
-            .await
-            .is_empty());
-        assert!(crate::compute_meta_spec_set_sha(&state, &ws2.id)
-            .await
-            .is_empty());
+        // Neither workspace has required meta-specs: both unbound.
+        assert!(active_set_sha(&state, "ws-sha-1").await.is_empty());
+        assert!(active_set_sha(&state, "ws-sha-2").await.is_empty());
 
-        // A tenant set binds ws1 (same tenant) but not ws2 (other tenant).
-        put_tenant_set(
+        // A tenant-scoped required meta-spec binds ws1 (same tenant) but
+        // not ws2 (other tenant).
+        let ms = make_required_spec(
             &state,
-            "default",
-            &make_tenant_set("default", vec![pin("backend-developer", "a1")]),
+            MetaSpecScope::Tenant,
+            Some("default".to_string()),
+            "backend-developer",
+            1,
+            "admin",
         )
         .await;
-        let sha1 = crate::compute_meta_spec_set_sha(&state, &ws1.id).await;
+        let sha1 = active_set_sha(&state, "ws-sha-1").await;
         assert!(
             !sha1.is_empty(),
-            "inherited tenant defaults must bind the workspace"
+            "a required meta-spec visible from the workspace must bind it"
         );
         assert!(
-            crate::compute_meta_spec_set_sha(&state, &ws2.id)
-                .await
-                .is_empty(),
-            "a tenant set must not leak across tenants"
+            active_set_sha(&state, "ws-sha-2").await.is_empty(),
+            "a tenant-scoped required meta-spec must not leak across tenants"
         );
 
-        // A workspace override changes the effective SHA.
-        put_set(
-            &state,
-            "ws-sha-1",
-            &make_set("ws-sha-1", vec![pin("backend-developer", "b2")]),
-        )
-        .await;
-        let sha1_overridden = crate::compute_meta_spec_set_sha(&state, &ws1.id).await;
+        // A version bump changes the effective SHA.
+        let bumped = MetaSpec {
+            version: 2,
+            prompt: "prompt for backend-developer v2".to_string(),
+            content_hash: sha256_hex("prompt for backend-developer v2"),
+            ..ms.clone()
+        };
+        state.meta_specs.update(&bumped).await.unwrap();
+        let sha1_bumped = active_set_sha(&state, "ws-sha-1").await;
         assert_ne!(
-            sha1, sha1_overridden,
-            "an override must change the effective SHA"
+            sha1, sha1_bumped,
+            "a required meta-spec version bump must change the effective SHA"
         );
     }
 
-    /// §8: GET /workspaces/{id}/meta-spec-set returns the EFFECTIVE set —
-    /// tenant defaults merged with workspace overrides.
+    /// Amendments-row retirement: the workspace and tenant meta-spec-set
+    /// endpoints are gone — 404 for every method, no silent alias.
     #[tokio::test(flavor = "multi_thread")]
-    async fn workspace_get_meta_spec_set_returns_effective_set() {
+    async fn retired_meta_spec_set_endpoints_return_404() {
         use axum::{body::Body, Router};
+        use http::{Method, StatusCode};
         use tower::ServiceExt;
 
         let state = test_state();
-        put_tenant_set(
-            &state,
-            "default",
-            &make_tenant_set("default", vec![pin("reviewer", "t2")]),
-        )
-        .await;
-        let _ws = make_workspace_in_tenant(&state, "ws-get-1", "default").await;
-
         let app: Router = crate::api::api_router().with_state(state.clone());
-        let resp = app
-            .oneshot(
-                http::Request::builder()
-                    .uri("/api/v1/workspaces/ws-get-1/meta-spec-set")
-                    .header("authorization", "Bearer test-token")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), http::StatusCode::OK);
-        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        let paths: Vec<&str> = json["personas"]
-            .as_object()
-            .unwrap()
-            .values()
-            .map(|e| e["path"].as_str().unwrap())
-            .collect();
-        assert!(
-            paths.contains(&"reviewer"),
-            "workspace with no own set must see the inherited tenant default"
-        );
+
+        for (method, uri) in [
+            (Method::GET, "/api/v1/workspaces/whatever/meta-spec-set"),
+            (Method::PUT, "/api/v1/workspaces/whatever/meta-spec-set"),
+            (Method::GET, "/api/v1/tenants/default/meta-specs/set"),
+            (Method::PUT, "/api/v1/tenants/default/meta-specs/set"),
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    http::Request::builder()
+                        .method(method.clone())
+                        .uri(uri)
+                        .header("authorization", "Bearer test-token")
+                        .header("content-type", "application/json")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::NOT_FOUND,
+                "{method} {uri} must be retired (404, no silent alias)"
+            );
+        }
     }
 
-    /// §8: approving a Tenant-scoped meta-spec triggers per-workspace
-    /// reconciliation through the tenant controller — inheriting workspaces
-    /// reconcile, overriding ones are skipped, and `force` reaches them.
+    /// §8 (registry model): approving a Tenant-scoped REQUIRED meta-spec
+    /// triggers per-workspace reconciliation through the tenant controller
+    /// — every workspace in the tenant reconciles.
     #[tokio::test(flavor = "multi_thread")]
     async fn tenant_spec_approval_triggers_per_workspace_reconciliation() {
         use axum::{body::Body, Router};
@@ -5493,14 +5341,13 @@ mod tests {
 
         let app: Router = crate::api::api_router().with_state(state.clone());
 
-        // Create a workspace with a repo (via API: tenant of the caller,
-        // "default") and one overriding workspace.
+        // Create two workspaces with repos via the API (tenant of the
+        // caller, "default").
         async fn create_ws_with_repo(
             app: &Router,
             state: &Arc<AppState>,
             slug: &str,
             repo_id: &str,
-            override_pin: bool,
         ) -> String {
             use tower::ServiceExt;
             let resp = app
@@ -5527,21 +5374,13 @@ mod tests {
             };
             let ws_id = ws_json["id"].as_str().unwrap().to_string();
             let _repo = make_repo(state, repo_id, &ws_id).await;
-            if override_pin {
-                put_set(
-                    state,
-                    &ws_id,
-                    &make_set(&ws_id, vec![pin("secure-worker", "own-sha")]),
-                )
-                .await;
-            }
             ws_id
         }
 
-        let ws_appr_1 = create_ws_with_repo(&app, &state, "ws-appr-1", "repo-appr-1", false).await;
-        let ws_appr_2 = create_ws_with_repo(&app, &state, "ws-appr-2", "repo-appr-2", true).await;
+        let ws_appr_1 = create_ws_with_repo(&app, &state, "ws-appr-1", "repo-appr-1").await;
+        let ws_appr_2 = create_ws_with_repo(&app, &state, "ws-appr-2", "repo-appr-2").await;
 
-        // Create a Tenant-scoped meta-spec (Pending).
+        // Create a Tenant-scoped REQUIRED meta-spec (Pending).
         let resp = app
             .clone()
             .oneshot(
@@ -5556,6 +5395,7 @@ mod tests {
                             "name": "secure-worker",
                             "scope": "Tenant",
                             "scope_id": "default",
+                            "required": true,
                             "prompt": "Be secure."
                         })
                         .to_string(),
@@ -5573,39 +5413,20 @@ mod tests {
         };
         let ms_id = ms_json["id"].as_str().unwrap().to_string();
         assert_eq!(ms_json["scope"], "Tenant");
+        assert_eq!(ms_json["required"], true);
 
-        // Bind it in the tenant set. The set PUT propagates, but the spec is
-        // still Pending — the approval transition owns the wave (§6).
-        let resp = app
-            .clone()
-            .oneshot(
-                http::Request::builder()
-                    .method("PUT")
-                    .uri("/api/v1/tenants/default/meta-specs/set")
-                    .header("authorization", "Bearer test-token")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        serde_json::json!({
-                            "personas": { "worker": {"path": "secure-worker", "sha": "s1"} },
-                            "principles": [], "standards": [], "process": []
-                        })
-                        .to_string(),
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), http::StatusCode::OK);
+        // Creating a required PENDING meta-spec must not roll out: §6 gates
+        // the rollout on approval, so the approval transition owns the
+        // wave.
         assert!(
             open_tasks_with_label(&state, RECONCILIATION_LABEL)
                 .await
                 .is_empty(),
-            "a Pending bind is not a rollout; the approval owns the wave"
+            "a Pending required meta-spec is not a rollout; the approval owns the wave"
         );
 
         // Approve → per-workspace reconciliation through the tenant
-        // controller: the inheriting workspace reconciles, the overriding
-        // one is skipped.
+        // controller: every tenant workspace reconciles.
         let resp = app
             .clone()
             .oneshot(
@@ -5624,65 +5445,30 @@ mod tests {
         assert_eq!(resp.status(), http::StatusCode::OK);
 
         let tasks = open_tasks_with_label(&state, RECONCILIATION_LABEL).await;
-        assert_eq!(
-            tasks.len(),
-            1,
-            "only the non-overriding workspace reconciles"
-        );
-        assert_eq!(tasks[0].workspace_id.as_str(), ws_appr_1);
+        assert_eq!(tasks.len(), 2, "every tenant workspace reconciles");
+        let ws_ids: Vec<String> = tasks
+            .iter()
+            .map(|t| t.workspace_id.as_str().to_string())
+            .collect();
+        assert!(ws_ids.contains(&ws_appr_1));
+        assert!(ws_ids.contains(&ws_appr_2));
         assert_eq!(
             tasks[0].title,
             "Align code with updated meta:persona secure-worker v1"
         );
-
-        // Approve new content WITH force: the overriding workspace is
-        // reached too (tenant-admin override, §8 step 4).
-        let resp = app
-            .oneshot(
-                http::Request::builder()
-                    .method("PUT")
-                    .uri(format!("/api/v1/meta-specs/{ms_id}"))
-                    .header("authorization", "Bearer test-token")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        serde_json::json!({
-                            "prompt": "Be very secure.",
-                            "approval_status": "Approved",
-                            "force": true
-                        })
-                        .to_string(),
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), http::StatusCode::OK);
-
-        let tasks = open_tasks_with_label(&state, RECONCILIATION_LABEL).await;
-        let overriding: Vec<&gyre_domain::Task> = tasks
-            .iter()
-            .filter(|t| t.workspace_id.as_str() == ws_appr_2)
-            .collect();
-        assert_eq!(
-            overriding.len(),
-            1,
-            "force must propagate the urgent change past the workspace override"
-        );
-        assert_eq!(
-            overriding[0].title,
-            "Align code with updated meta:persona secure-worker v2"
-        );
     }
 
-    /// §8 trigger (set-diff path): PUTting a tenant set that pins an
-    /// APPROVED meta-spec propagates through the tenant controller — the
-    /// inheriting workspace gets a reconciliation task, the overriding one
-    /// is skipped, and a removal-only re-PUT creates nothing (removals are
-    /// not propagation triggers). This is the killing test for the
-    /// `run_tenant_reconciliation` call in `put_tenant_meta_spec_set`:
-    /// delete that call and the first assertion fails.
+    /// §8 trigger (required-flag path, registry model): flipping an
+    /// APPROVED meta-spec to required propagates through the tenant
+    /// controller — the inheriting workspace gets a reconciliation task —
+    /// while a removal (required true→false) creates nothing (removals
+    /// were never propagation triggers in the old model either). This is
+    /// the killing test for the `required_newly_set` trigger in
+    /// `update_meta_spec`: delete that branch and the first assertion
+    /// fails. Registry-model replacement for the retired tenant-set PUT
+    /// propagation test.
     #[tokio::test(flavor = "multi_thread")]
-    async fn tenant_set_put_propagates_approved_pins_to_inheriting_workspaces() {
+    async fn required_flip_propagates_to_tenant_workspaces() {
         use axum::{body::Body, Router};
         use tower::ServiceExt;
 
@@ -5690,39 +5476,39 @@ mod tests {
         crate::bootstrap_default_tenant(&state).await;
         let app: Router = crate::api::api_router().with_state(state.clone());
 
-        // APPROVED meta-spec: pinning it in the tenant set is a rollout
-        // (unlike a Pending bind, whose wave the approval transition owns).
-        let ms = make_meta_spec(&state, "backend-developer", 4).await;
-
-        // Inheriting workspace (no set of its own) with a repo.
-        let _ws1 = make_workspace_in_tenant(&state, "ws-put-1", "default").await;
-        let _repo1 = make_repo(&state, "repo-put-1", "ws-put-1").await;
-        // Overriding workspace: its own rollout policy governs the path.
-        let _ws2 = make_workspace_in_tenant(&state, "ws-put-2", "default").await;
-        let _repo2 = make_repo(&state, "repo-put-2", "ws-put-2").await;
-        put_set(
+        // APPROVED Tenant-scoped meta-spec, not yet required: flipping it
+        // to required is a rollout (unlike a Pending creation, whose wave
+        // the approval transition owns).
+        let ms = make_required_spec(
             &state,
-            "ws-put-2",
-            &make_set("ws-put-2", vec![pin("backend-developer", "own-sha")]),
+            MetaSpecScope::Tenant,
+            Some("default".to_string()),
+            "backend-developer",
+            4,
+            "admin",
         )
         .await;
+        // Reset to not-required directly (the flip under test goes through
+        // the API below).
+        let mut base = ms.clone();
+        base.required = false;
+        state.meta_specs.update(&base).await.unwrap();
 
-        // PUT the tenant set pinning the APPROVED spec — the set-diff
-        // trigger must propagate without any approval transition.
+        let _ws1 = make_workspace_in_tenant(&state, "ws-put-1", "default").await;
+        let _repo1 = make_repo(&state, "repo-put-1", "ws-put-1").await;
+
+        // Flip required through the API — the trigger must propagate
+        // without any approval transition.
         let resp = app
             .clone()
             .oneshot(
                 http::Request::builder()
                     .method("PUT")
-                    .uri("/api/v1/tenants/default/meta-specs/set")
+                    .uri(format!("/api/v1/meta-specs/{}", ms.id.as_str()))
                     .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        serde_json::json!({
-                            "personas": { "worker": {"path": "backend-developer", "sha": "a1"} },
-                            "principles": [], "standards": [], "process": []
-                        })
-                        .to_string(),
+                        serde_json::json!({"required": true}).to_string(),
                     ))
                     .unwrap(),
             )
@@ -5734,7 +5520,7 @@ mod tests {
         assert_eq!(
             tasks1.len(),
             1,
-            "tenant-set PUT pinning an APPROVED spec must create a reconciliation task in the inheriting workspace"
+            "required flip on an APPROVED tenant meta-spec must create a reconciliation task in the tenant workspace"
         );
         assert_eq!(
             tasks1[0].title,
@@ -5743,32 +5529,23 @@ mod tests {
                 ms.name, ms.version
             )
         );
-        assert!(
-            reconciliation_tasks_for_workspace(&state, "ws-put-2")
-                .await
-                .is_empty(),
-            "the PUT trigger must skip the overriding workspace like the approval trigger does"
-        );
 
-        // A fresh inheriting workspace added after the PUT: it has no task
-        // yet, so dedup cannot mask a spurious trigger below.
+        // A fresh workspace added after the flip: it has no task yet, so
+        // dedup cannot mask a spurious trigger below.
         let _ws3 = make_workspace_in_tenant(&state, "ws-put-3", "default").await;
         let _repo3 = make_repo(&state, "repo-put-3", "ws-put-3").await;
 
-        // Removal-only re-PUT (pin deleted, nothing added): removals are not
-        // propagation triggers — no new tasks anywhere.
+        // Removal (required true→false): removals are not propagation
+        // triggers — no new tasks anywhere.
         let resp = app
             .oneshot(
                 http::Request::builder()
                     .method("PUT")
-                    .uri("/api/v1/tenants/default/meta-specs/set")
+                    .uri(format!("/api/v1/meta-specs/{}", ms.id.as_str()))
                     .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        serde_json::json!({
-                            "personas": {}, "principles": [], "standards": [], "process": []
-                        })
-                        .to_string(),
+                        serde_json::json!({"required": false}).to_string(),
                     ))
                     .unwrap(),
             )
@@ -5779,12 +5556,14 @@ mod tests {
             reconciliation_tasks_for_workspace(&state, "ws-put-3")
                 .await
                 .is_empty(),
-            "a removal-only re-PUT must not propagate"
+            "a required removal must not propagate"
         );
         assert_eq!(
-            reconciliation_tasks_for_workspace(&state, "ws-put-1").await.len(),
+            reconciliation_tasks_for_workspace(&state, "ws-put-1")
+                .await
+                .len(),
             1,
-            "the removal-only re-PUT must not fire a second wave for the already-reconciled workspace"
+            "the required removal must not fire a second wave for the already-reconciled workspace"
         );
     }
 }

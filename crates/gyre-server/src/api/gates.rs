@@ -829,6 +829,37 @@ pub async fn verify_spec_ref(state: &AppState, spec_ref: &str) -> Result<(), Str
         ));
     }
 
+    // Registry-metadata invalidation (agent-runtime.md §2 Spec-Level
+    // Binding): the spec's binding set is registry metadata covered by the
+    // registry SHA recorded in the approval ledger — a pin update resets
+    // the ledger entry to Pending, so an approval row for the content SHA
+    // alone no longer authorizes a merge until a human re-approves at the
+    // new registry SHA. Content-edit invalidation (push resets Pending)
+    // flows through the same gate. A ledger lookup error fails CLOSED —
+    // degrading to the row-only check would let a merge pass while the
+    // spec's approval state is unknown (same fail-open read class as the
+    // review F1 finding). Specs absent from the ledger keep the row-only
+    // check below (no registry entry to consult).
+    match state.spec_ledger.find_by_path(path).await {
+        Ok(Some(entry)) => {
+            use gyre_domain::spec_ledger::ApprovalStatus;
+            if entry.approval_status != ApprovalStatus::Approved {
+                return Err(format!(
+                    "spec '{path}' approval status is '{}' — the recorded approval no \
+                 longer authorizes this spec version; re-approval required",
+                    entry.approval_status
+                ));
+            }
+        }
+        Ok(None) => {}
+        Err(e) => {
+            return Err(format!(
+                "spec ledger lookup for '{path}' failed: {e} — cannot verify the \
+                 spec's approval state"
+            ));
+        }
+    }
+
     // Approval status per SHA (agent-gates.md §Spec Approval Ledger): query
     // the exact (spec_path, spec_sha) version — the forge's step-8 check —
     // rather than loading every approval for the path. An entry is active
@@ -868,6 +899,37 @@ pub async fn verify_signed_spec_ref(state: &AppState, spec_ref: &str) -> Result<
         return Err(format!(
             "spec_ref SHA '{sha}' is not a valid 40-char hex SHA"
         ));
+    }
+
+    // Registry-metadata invalidation (agent-runtime.md §2 Spec-Level
+    // Binding): the spec's binding set is registry metadata covered by the
+    // registry SHA recorded in the approval ledger — a pin update resets
+    // the ledger entry to Pending, so an approval row for the content SHA
+    // alone no longer authorizes a merge until a human re-approves at the
+    // new registry SHA. Content-edit invalidation (push resets Pending)
+    // flows through the same gate. A ledger lookup error fails CLOSED —
+    // degrading to the row-only check would let a merge pass while the
+    // spec's approval state is unknown (same fail-open read class as the
+    // review F1 finding). Specs absent from the ledger keep the row-only
+    // check below (no registry entry to consult).
+    match state.spec_ledger.find_by_path(path).await {
+        Ok(Some(entry)) => {
+            use gyre_domain::spec_ledger::ApprovalStatus;
+            if entry.approval_status != ApprovalStatus::Approved {
+                return Err(format!(
+                    "spec '{path}' approval status is '{}' — the recorded approval no \
+                 longer authorizes this spec version; re-approval required",
+                    entry.approval_status
+                ));
+            }
+        }
+        Ok(None) => {}
+        Err(e) => {
+            return Err(format!(
+                "spec ledger lookup for '{path}' failed: {e} — cannot verify the \
+                 spec's approval state"
+            ));
+        }
     }
 
     let for_sha = state
@@ -2359,6 +2421,102 @@ type = "PsychicReview"
                 .await
                 .is_err(),
             "Pending version must not verify even though a sibling SHA is approved"
+        );
+    }
+
+    /// agent-runtime.md §2 (Spec-Level Binding / Stale Pin Detection),
+    /// registry-metadata invalidation: the binding set is spec-registry
+    /// metadata covered by the registry SHA the approval ledger records, so
+    /// a pin update resets the spec-ledger entry to Pending while the
+    /// approval row for the content SHA stays active. That exact state
+    /// (active — even signed — approval row + Pending ledger status) must
+    /// NOT verify at the forge: the recorded approval no longer authorizes
+    /// the spec until a human re-approves it at the new registry SHA. Kill
+    /// test for the stored-status denial in verify_spec_ref and
+    /// verify_signed_spec_ref — removing the ledger-status check leaves
+    /// this test red, because the approval row alone would pass.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn verify_spec_ref_denies_pending_ledger_despite_active_approval_row() {
+        let state = test_state();
+        let sha = "7".repeat(40);
+        let spec_path = "system/pin-updated.md";
+
+        // The pre-pin-update approval: an active, signed row for the
+        // content SHA (so a denial can only come from the ledger status,
+        // not from a missing/unsigned approval row).
+        let approval_id = gyre_common::Id::new("apr-8");
+        let mut approval =
+            gyre_domain::SpecApproval::new(approval_id.clone(), spec_path, &sha, "user:test");
+        approval.signature = Some("sigstore-bundle".to_string());
+        state.spec_approvals.create(&approval).await.unwrap();
+        state
+            .spec_approvals
+            .approve(&approval_id, 1700000100)
+            .await
+            .unwrap()
+            .expect("entry exists");
+        let rows = state
+            .spec_approvals
+            .find_by_spec_sha(spec_path, &sha)
+            .await
+            .unwrap();
+        assert!(
+            rows.iter().any(|a| a.is_active()),
+            "fixture: the approval row for the content SHA is active"
+        );
+
+        // Ledger entry for the same spec (registry metadata + approval
+        // status). Approved → the spec_ref verifies on both gates.
+        let mut ledger_entry = gyre_domain::SpecLedgerEntry {
+            bindings_sha: String::new(),
+            path: spec_path.to_string(),
+            title: "Pin-updated".to_string(),
+            owner: "user:admin".to_string(),
+            kind: None,
+            current_sha: sha.clone(),
+            approval_mode: "human_only".to_string(),
+            approval_status: gyre_domain::ApprovalStatus::Approved,
+            linked_tasks: vec![],
+            linked_mrs: vec![],
+            drift_status: "clean".to_string(),
+            created_at: 1,
+            updated_at: 1,
+            repo_id: None,
+            workspace_id: None,
+        };
+        state.spec_ledger.save(&ledger_entry).await.unwrap();
+        let spec_ref = format!("{spec_path}@{sha}");
+        assert!(
+            verify_spec_ref(&state, &spec_ref).await.is_ok(),
+            "control: Approved ledger + active approval row must verify"
+        );
+        assert!(
+            verify_signed_spec_ref(&state, &spec_ref).await.is_ok(),
+            "control: Approved ledger + signed active approval row must verify"
+        );
+
+        // The pin-update state: the ledger entry is reset to Pending while
+        // the approval row for the content SHA remains active. Both gates
+        // must deny — the stored approval no longer authorizes the spec.
+        ledger_entry.approval_status = gyre_domain::ApprovalStatus::Pending;
+        state.spec_ledger.save(&ledger_entry).await.unwrap();
+        assert!(
+            verify_spec_ref(&state, &spec_ref).await.is_err(),
+            "Pending ledger status must deny even though the content SHA has \
+             an active approval row — re-approval required after a pin update"
+        );
+        assert!(
+            verify_signed_spec_ref(&state, &spec_ref).await.is_err(),
+            "Pending ledger status must deny the signed gate too — the row's \
+             signature does not resurrect a superseded approval"
+        );
+
+        // Human re-approval restores verification through the same row.
+        ledger_entry.approval_status = gyre_domain::ApprovalStatus::Approved;
+        state.spec_ledger.save(&ledger_entry).await.unwrap();
+        assert!(
+            verify_spec_ref(&state, &spec_ref).await.is_ok(),
+            "re-approval must restore verification"
         );
     }
 

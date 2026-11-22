@@ -85,10 +85,12 @@ pub struct GraphDependencyEdge {
 /// (meta-spec-reconciliation.md §9).
 #[derive(Serialize)]
 pub struct MetaSpecDriftWarning {
-    /// Meta-spec set SHA under which the MR's code was produced.
-    pub produced_set_sha: String,
-    /// The workspace's current meta-spec set SHA when the drift was recorded.
-    pub current_set_sha: String,
+    /// Meta-spec snapshot labels (`{kind}:{id}@v{version}`) recorded for the
+    /// MR's author agent (the `meta_specs_used` array).
+    pub produced: Vec<String>,
+    /// Snapshot labels of currently-required meta-specs not matched by the
+    /// recorded usage.
+    pub current: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -348,8 +350,12 @@ pub async fn get_queue_graph(
                 .and_then(|r| r.output.as_deref())
                 .and_then(crate::reconciliation::parse_meta_spec_drift_warning)
                 .map(|d| MetaSpecDriftWarning {
-                    produced_set_sha: d.produced_set_sha,
-                    current_set_sha: d.current_set_sha,
+                    // Snapshot labels ("{kind}:{id}@v{version}") recorded for
+                    // the MR's author agent.
+                    produced: d.produced.iter().map(|s| s.label()).collect(),
+                    // Snapshot labels of required meta-specs not matched by
+                    // the recorded usage.
+                    current: d.current.iter().map(|s| s.label()).collect(),
                 });
             nodes.push(GraphNode {
                 mr_id: mr.id.to_string(),
