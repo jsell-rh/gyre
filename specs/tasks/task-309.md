@@ -2,8 +2,8 @@
 title: "Adopt the specced Svelte 5 + shadcn-svelte web UI stack, replacing the bespoke component library"
 spec_ref: "Spec gap spec-f907eda3bd014fe546b838e2 / shadcn-svelte-ui-stack / 4156114b8040"
 depends_on: []
-progress: not-started
-commits: []
+progress: complete
+commits: ["f863a10dd81d4fb9e8e6ede73714c0f6f1e8b127", "9a56ebdfc15a3a9023d1356d21953d977f51c293", "ae5d3eb45e44bf40a01680b674fd2b821d6c9496", "4d5e209b474cc94fd5b4f26ba3144b742df9e55d"]
 ---
 
 ## Required behavior
@@ -73,3 +73,82 @@ Canonical spec: `specs/development/architecture.md`. Source: `678a8ac3e3bfeafeb6
     ]
   }
 ]
+
+## Shipped
+
+The shadcn-svelte half of the architecture.md §Tech Stack requirement is
+implemented (commit 4d5e209b) and preserved through two merge repairs
+(d88b8fe0, then this round's 76110a31 against main 50575cf6). The
+Rust-half canonical conflict remains an open controller escalation (see
+the end of this section).
+
+### Implementation (retained, commit 4d5e209b)
+
+- `web/package.json` declares and the build genuinely uses `tailwindcss`
+  ^4 + `@tailwindcss/vite`, `bits-ui`, `clsx`, `tailwind-merge`,
+  `class-variance-authority`, `tw-animate-css`. `web/src/app.css` is the
+  Tailwind entry stylesheet imported first by `web/src/main.js`; it
+  carries the shadcn token set with the Red Hat brand palette as theme
+  values. `web/components.json` follows the shadcn-svelte generation
+  convention; generated components live under
+  `web/src/lib/components/ui/{button,badge,card,table,tabs,dialog,
+  accordion,toast,skeleton}/`; `web/src/lib/utils.js` provides `cn()`.
+- The reusable primitives in `web/src/lib/*.svelte` are shadcn-svelte
+  components behind the existing consumed contracts (Button and
+  Modal/Dialog on bits-ui primitives; Badge, Card, Table, Tabs,
+  AccordionItem, Toast, Skeleton as cva-variant + Tailwind-utility
+  components), so `web/src/components/*` and all views keep working. The
+  bespoke `.btn`/`.card`/`.badge` class layer is retired from component
+  styling (legacy class names remain only as inert DOM hooks); the Red
+  Hat brand identity is preserved as the shadcn theme token values.
+  Verification probes: `web/src/__tests__/ShadcnUiStack.test.js` asserts
+  the cva/bits-ui rendering and the wired Tailwind pipeline.
+
+### This round: merge repair against current main (50575cf6, task-281)
+
+Merge commit 76110a31 resolves the DIRTY merge state. Source conflicts
+(web/src/components/ImpactAnalysisModal.svelte, web/src/lib/api.js,
+web/src/__tests__/ImpactAnalysisModal.test.js) were resolved preserving
+both sides: main's task-281 per-dependent cascade test status on top of
+the shadcn component tree. crates/ resolved identical to main (the
+branch carries no Rust delta). The web/dist conflicts were resolved by
+regenerating the bundle from the merged source rather than taking
+either side's stale build — the staged resolution had taken main's
+bespoke-CSS dist verbatim, which would have regressed the migrated UI;
+the committed dist now serves the Tailwind v4 build including task-281's
+features (evidence under /tmp/stage/review-evidence).
+
+### Test evidence
+
+- `cd web && npm ci && npx vitest run` (merged tree): 128 test files,
+  2599 tests passed, 41 skipped, 0 failed — includes the shadcn stack
+  probes (ShadcnUiStack, Modal, Toast, AccordionItem/Scoping) and the
+  merged task-285/281 ImpactAnalysisModal suite (23 tests).
+- Corroborating probe (verification intent): with `import './app.css'`
+  removed from main.js, `npm run build` emits CSS with no
+  `tailwindcss v4` marker and no shadcn theme tokens (unstyled output) —
+  the UI genuinely depends on the Tailwind pipeline, not dead config.
+  Restored afterwards; dist rebuilt from the intact source.
+
+### Deferred to verifier / integration
+
+- Playwright e2e (`cd web && npm run test:e2e`): the webServer boots
+  `cargo run -p gyre-server`, a large Rust build that must run in the
+  independent verifier per the 4 GiB budget. No visual baselines were
+  changed this round: main's task-281 touched no web/tests files, and
+  the explorer-visual baselines were already regenerated for the
+  shadcn restyle in the prior verified round. If task-281's modal
+  changes shift pixels in any screenshot, regenerate deliberately
+  (functional assertions are the anchor).
+- `SKIP_WEB_BUILD=1 cargo build -p gyre-server` serving the committed
+  web/dist (dist regenerated this round from the merged source).
+
+### Rust-half escalation (open, not closed)
+
+architecture.md's '(server, CLI, agent runtime)' Rust parenthetical
+conflicts with canonical specs/system/agent-runtime.md (Node.js
+in-container agent image, agent-runner.mjs entrypoint on the Claude
+Agent SDK, Nix-pinned Node.js). This task makes no code change and no
+coverage claim for that half; it remains an open controller
+spec-lifecycle escalation (review feedback id
+2a696c7f5c2ffc02e88742ae:rust-agent-runtime-reading-mischaracterized).
