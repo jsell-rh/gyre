@@ -3,7 +3,7 @@ title: "Spec Links — repo-scoped graph (?repo= filter) and authorization for t
 spec_ref: "Spec gap spec-10bdced21a063f819b1baabd / spec-links-graph-repo-filter / 5a915155d9bc"
 depends_on: []
 progress: ready-for-review
-commits: ["f96b5a402e5f52ebf1f69775a5d3d139c591551a", "b675ee0a9a52376f8c02ebcf46eee511f68a59e2", "8cced7f4dbee6f4adf043625ebb2c58858c3a7f2", "b364363f552463b375105d46fd5f60d091633b38"]
+commits: ["8cced7f4dbee6f4adf043625ebb2c58858c3a7f2", "b675ee0a9a52376f8c02ebcf46eee511f68a59e2", "f96b5a402e5f52ebf1f69775a5d3d139c591551a"]
 ---
 
 ## Required behavior
