@@ -2,8 +2,8 @@
 title: "SQLite as the default durable storage backend (with explicit in-memory opt-in and stateless harness migration)"
 spec_ref: "Spec gap spec-f907eda3bd014fe546b838e2 / sqlite-default-storage / 4156114b8040"
 depends_on: []
-progress: ready-for-review
-commits: ["b650a175b7240c163bb7ecd896d60031ee264328", "87e0877842f7527a40bbcbe4951b07bcd341d076"]
+progress: not-started
+commits: []
 ---
 
 ## Required behavior
@@ -73,83 +73,3 @@ Canonical spec: `specs/development/architecture.md`. Source: `678a8ac3e3bfeafeb6
     ]
   }
 ]
-
-## Shipped
-
-SQLite is now the default durable storage backend, with an explicit `memory`
-sentinel for stateless runs and every in-process/process-level harness migrated
-to an explicit opt-in. Implementation: commit 87e08778; formatting repair from
-verification run 3b0a9f748dfb437ead09614227e5fbb8 (rustfmt on the storage
-selection code, no behavior change): commit b650a175.
-
-### Behavior
-
-- `crates/gyre-server/src/lib.rs`: backend selection is a `StorageSelection`
-  enum resolved from `GYRE_DATABASE_URL` — `memory` → in-memory (filtered out
-  before the sqlite-path branch so the sentinel is never parsed as a file
-  path), `postgres://`/`postgresql://` → PgStorage, `sqlite://<path>`/bare
-  path → SqliteStorage at that path (both unchanged from before), and **unset
-  → durable SqliteStorage at the platform default data path** via the
-  `dirs`-based `default_sqlite_db_path()` (`$XDG_DATA_HOME/gyre/gyre.db`,
-  default `~/.local/share/gyre/gyre.db` on Linux; `~/Library/Application
-  Support` on macOS; `%APPDATA%` on Windows — always absolute, parent dirs
-  auto-created, path logged at startup). `SqliteStorage::new` runs the Diesel
-  migrations, and every port wires through the unchanged `store!`/
-  `store_shared!` macros, so the default deployment persists all entities
-  across restarts with zero operator configuration. The in-memory
-  policy-store/workspace-store/meta-spec-binding/judgment-ledger sharing
-  semantics are preserved verbatim under the sentinel (both `pg_db` and
-  `sqlite_db` are `None` exactly as before).
-- New `gyre_server::select_in_memory_storage()` (Once-guarded env sentinel) is
-  the in-process opt-in used by test harnesses.
-
-### Harness migration
-
-- All in-process harnesses calling `build_state` opt in explicitly: the
-  integration test binaries under `crates/gyre-server/tests/` call
-  `select_in_memory_storage()` (api_integration, auth_integration,
-  conversation_integration, e2e_ralph_loop, explorer_ws_integration,
-  git_integration, graph_integration, m18_oidc_integration,
-  message_size_and_key_rotation, spec_enforcement, task134_review_probe) or set
-  `GYRE_DATABASE_URL=memory` directly; the pre-existing sqlite-exercising
-  binaries (dependency_persistence, message_persistence, search_wiring,
-  scim_*, task107_*, task163/164, tenant_isolation, workspace_scoping,
-  abac_middleware, hierarchy_cascade) already point the variable at isolated
-  temp files. The in-crate unit suites (api/attestations.rs,
-  gate_executor.rs, merge_attestation.rs) use `select_in_memory_storage()`
-  via their `test_state()` helpers. No test run touches the operator's real
-  default data path or the working tree.
-- `web/playwright.config.js` webServer.env sets `GYRE_DATABASE_URL: 'memory'`
-  (controller review feedback
-  df78f83918d8549c48c15ea5:playwright-e2e-in-memory-optin);
-  `.github/workflows/e2e.yml` drives this same config. Audited all other
-  harnesses: `scripts/e2e-flow.sh` requires an externally started server and
-  spawns no server binary — playwright is the only process-level spawner.
-- `docs/server-config.md` and `README.md` document the new default, the
-  `memory` sentinel, and the default data path.
-
-### Test evidence
-
-- New `crates/gyre-server/tests/default_sqlite_storage.rs` (isolated temp
-  dirs, XDG_DATA_HOME redirected so the "default path" is a temp dir):
-  `unset_env_boots_durable_sqlite_at_default_path` (workspace survives a full
-  state rebuild, gyre.db exists at the default path),
-  `memory_sentinel_is_stateless` (no durable backend, state lost across
-  rebuild, no file at the default path), `explicit_sqlite_url_selects_that_path`
-  (explicit URL selects that exact path, durable). Plus
-  `storage_selection_matrix` unit test in lib.rs (sentinel filtered before the
-  sqlite branch; postgres/postgresql spellings; sqlite:// and bare paths;
-  unset → absolute default path).
-- Verification run 3b0a9f748dfb437ead09614227e5fbb8: every gate passed except
-  rustfmt on three changed lines of lib.rs; repaired in b650a175
-  (formatting-only). Post-fix `cargo fmt -p gyre-server -- --check` exit 0
-  (see /tmp/stage/review-evidence/rustfmt-repair.md and
-  rustfmt-check-after-fix.log).
-- Deferred to the independent verifier (large gyre-server test compilation is
-  excluded from this sandbox by the 4 GiB budget): run
-  `cargo test -p gyre-server --test default_sqlite_storage`,
-  `cargo test -p gyre-server --lib`, and the real-binary persistence
-  round-trip (boot with GYRE_DATABASE_URL unset, POST /api/v1/workspaces,
-  stop, restart, GET by id; plus GYRE_DATABASE_URL=memory statelessness and
-  the playwright e2e no-durable-file probe). Acceptance checkboxes remain
-  unticked pending that verification.

@@ -1,0 +1,28 @@
+# Review — task-308 (SQLite as the default durable storage backend)
+
+Spec: `specs/development/architecture.md` §Storage ("SQLite as the default (simple, vertical scaling, zero ops)"); gap `df78f83918d8549c48c15ea5`.
+Candidate under review: `df9fce63` (branch `pipeline/task-308/96f87a68b0cf4ae9bf109b80dd541f64-2`, base `0f95668d`; product commits `87e08778` implementation, `b650a175` rustfmt repair).
+Verdict: **approved** — no findings. Full evidence under `/tmp/stage/review-evidence/` (summary.md).
+
+## Probes run (checkout at candidate `df9fce63`; the working tree carries only a stage-machinery reset of `specs/tasks/task-308.md`, which is not part of the candidate — the candidate commit itself carries the commit attribution and Shipped notes)
+
+- `/tmp/stage/bin/cargo check -p gyre-server --tests` → exit 0 (9m25s; type-checks the lib and every test target, including the new `default_sqlite_storage.rs` and all sentinel call sites).
+- `cargo fmt -p gyre-server -- --check` → exit 0 (the round-2 formatting repair is clean).
+- `scripts/check-relative-path-defaults.sh`, `check-arch.sh`, `check-fabricated-scope-defaults.sh`, `check-scope-literal-defaults.sh`, `check-in-memory-state-stores.sh`, `check-lossy-secret-conversion.sh` → all exit 0.
+- `dirs` 7.0.0 scratch probe: `data_dir()` respects `XDG_DATA_HOME` and falls back to `$HOME/.local/share`, always absolute — the default-path mechanism and the test's XDG redirection are sound.
+- Exhaustive grep of every `build_state` call site outside production and of every harness that spawns the server binary.
+
+## Verified (round 2, fresh)
+
+1. **Default durable SQLite (AC 1).** `StorageSelection::resolve` maps unset `GYRE_DATABASE_URL` to `SqliteDefault(default_sqlite_db_path())` — `dirs::data_dir()/gyre/gyre.db` (XDG data home on Linux, Application Support on macOS, %APPDATA% on Windows), always absolute, parent dirs auto-created, `SqliteStorage::new` runs the Diesel migrations (sqlite/mod.rs:133-137), path logged at startup (`tracing::info!`, telemetry initialized in main.rs before `build_state`). Fail-loud on an undeterminable data dir with an operator remediation message.
+2. **Explicit in-memory opt-in (AC 2).** The `memory` sentinel is filtered out BEFORE the sqlite-path branch (never parsed as a file path); under it both `pg_db` and `sqlite_db` are `None`, so the unchanged `store!`/`store_shared!` macros fall to the mem implementations — the in-memory policy-store/workspace-store/meta-spec-binding/judgment-ledger sharing semantics are preserved verbatim. `select_in_memory_storage()` (Once-guarded) is the in-process opt-in.
+3. **No backend-selection regression (AC 3).** `postgres://`/`postgresql://` and `sqlite://<path>`/bare-path URLs resolve exactly as before (diff is a pure refactor of the same filters into the enum); `storage_selection_matrix` unit test pins the matrix including sentinel-before-sqlite ordering and default-path absoluteness.
+4. **Harness migration complete (AC 4).** Every in-process `build_state` caller opts in: the sentinel binaries (api_integration, auth_integration, conversation_integration, e2e_ralph_loop, explorer_ws_integration, git_integration, graph_integration, m18_oidc_integration, spec_enforcement, task134_review_probe, plus the in-crate attestations/gate_executor/merge_attestation suites via `test_state()`); `message_size_and_key_rotation` sets `memory` directly under its ENV_LOCK; the sqlite-exercising binaries (abac_middleware, hierarchy_cascade, scim_*, tenant_isolation, workspace_scoping, dependency/message_persistence, search_wiring, task107_*, task163/164) point the variable at isolated `tempfile::tempdir()` files. No other crate calls `build_state`. Process-level audit: `web/playwright.config.js` webServer.env sets `GYRE_DATABASE_URL: 'memory'` (both CI and local commands); `.github/workflows/e2e.yml` drives that same config; `scripts/e2e-flow.sh` spawns nothing (info line only, requires an external server); the dom-probe/visual configs have no webServer — playwright is the only spawner and it opts in.
+5. **Docs accurate (AC 5).** `docs/server-config.md` and `README.md` document the durable default, the default data path per platform, and the `memory` sentinel; no stale "unset = in-memory" claim remains anywhere in docs/.
+6. **Tests are kill-capable, not theater.** `default_sqlite_storage.rs` redirects `XDG_DATA_HOME` to a temp dir and asserts `state.storage.is_some()/is_none()` (the health-probe handle is Some exactly when a durable backend was constructed), persistence across a full state rebuild under unset env, statelessness and no-file-at-default-path under the sentinel, and explicit-path durability — each assertion fails if the corresponding production behavior is removed. `cargo check --tests` proves the whole suite compiles against the new API.
+
+## Deferred to the independent verifier (gyre-server build/test compilation is rejected by the sandbox's 4 GiB build wrapper — recorded in review-evidence/summary.md)
+
+`cargo test -p gyre-server --test default_sqlite_storage`; `cargo test -p gyre-server --lib`; `cargo test -p gyre-server` (all binaries); the real-binary round-trip (unset env + redirected HOME: POST /api/v1/workspaces → stop → restart → GET by id = 200 from the default-path gyre.db; `memory` → 404 + no file); playwright e2e twice with reuseExistingServer asserting no gyre.db at the default data path; workspace-wide `cargo test --all`.
+
+Note (non-blocking, recorded separately): `scripts/check-task-commit-attribution.sh` fails when run against the working tree only because the stage machinery reset `specs/tasks/task-308.md` to `commits: []`; the candidate commit `df9fce63` itself lists both product commits (`87e08778`, `b650a175`) in its frontmatter.
