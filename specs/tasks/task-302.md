@@ -3,7 +3,7 @@ title: "Spec bindings as registry metadata with re-approval cascade, UI panel, a
 spec_ref: "Spec gap spec-41a92c20354c6a108e6074e3 / bindings-registry-cascade / 4a3f940495a8"
 depends_on: [task-301]
 progress: ready-for-review
-commits: ["4d3ed96b7a6960b5faedefa5a9163091075a1e6f", "e68a426e306a876263f63298af11b33996bdf072"]
+commits: ["e68a426e306a876263f63298af11b33996bdf072", "4d3ed96b7a6960b5faedefa5a9163091075a1e6f"]
 ---
 
 ## Required behavior
