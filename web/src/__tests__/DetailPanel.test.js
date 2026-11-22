@@ -941,4 +941,46 @@ describe('Spec edit tab — meta-spec bindings panel (agent-runtime.md §2)', ()
     expect(bindings[0].meta_spec_id).toBe('ms-req');
     expect(bindings[0].pinned_version).toBe(3);
   });
+
+  // A non-Admin spec author (Developer member — allowed to save bindings)
+  // cannot call the Admin-only flat registry listing, so the panel falls
+  // back to the workspace-scoped listing: the same bindable set, with
+  // required meta-specs still pre-selected and locked.
+  it('falls back to the workspace-scoped listing when the Admin-only registry listing is forbidden', async () => {
+    const entity = {
+      ...specEntityWithRepo,
+      data: { ...specEntityWithRepo.data, workspace_id: 'ws-1' },
+    };
+    const fetchMock = vi.fn(async (url, opts) => {
+      const u = String(url);
+      if (u.includes('/meta-spec-bindings')) {
+        return { ok: true, status: 200, json: async () => currentBindings };
+      }
+      // Workspace-scoped listing (checked before the flat listing —
+      // its URL also contains "/meta-specs").
+      if (u.includes('/workspaces/ws-1/meta-specs')) {
+        return { ok: true, status: 200, json: async () => registry };
+      }
+      // Flat registry listing: Admin-only → 403 for a Developer author.
+      if (u.includes('/meta-specs')) {
+        return { ok: false, status: 403, json: async () => ({ error: 'forbidden' }) };
+      }
+      return { ok: true, status: 200, json: async () => ({ content: '# Auth\n\nBody.\n', current_sha: 'sha-1' }) };
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    render(DetailPanel, { props: { entity } });
+    await fireEvent.click(screen.getByRole('tab', { name: /edit/i }));
+    // The panel resolves available meta-specs from the workspace listing:
+    // required pre-selected and locked, the bound optional entry selected.
+    await screen.findByRole('checkbox', { name: /bind meta-spec security-standard/i });
+    const requiredCheck = screen.getByRole('checkbox', { name: /bind meta-spec security-standard/i });
+    expect(requiredCheck.checked).toBe(true);
+    expect(requiredCheck.disabled).toBe(true);
+    expect(screen.getByRole('checkbox', { name: /bind meta-spec backend-developer/i }).checked).toBe(true);
+    // Both surfaces were exercised: the flat listing first (403, caught),
+    // then the workspace-scoped fallback.
+    const called = fetchMock.mock.calls.map((c) => String(c[0]));
+    expect(called.some((u) => u.endsWith('/api/v1/meta-specs'))).toBe(true);
+    expect(called.some((u) => u.includes('/api/v1/workspaces/ws-1/meta-specs'))).toBe(true);
+  });
 });

@@ -1474,19 +1474,33 @@
     try {
       const current = await api.getSpecMetaSpecBindings(path);
       specBindings = current ?? [];
-      // Best-effort registry listing (Admin-gated): a non-admin author
-      // still sees and can edit their current bindings — fall back to
-      // per-binding lookups for names/kinds/versions.
+      // Registry listing for the panel's "available meta-specs": the flat
+      // registry listing is Admin-only (tenant-wide governance), so a
+      // non-Admin author falls back to the workspace-scoped listing — the
+      // exact set this spec's workspace may bind (Global + tenant +
+      // workspace), served to workspace members with the same gate the
+      // bindings save uses. Bound entries the listing does not cover are
+      // resolved per-binding so they can still be shown and unbound.
       let registry = [];
       try {
         registry = await api.getMetaSpecs();
       } catch {
-        if (specBindings.length > 0) {
-          const looked = await Promise.all(
-            specBindings.map((b) => api.getMetaSpec(b.meta_spec_id).catch(() => null))
-          );
-          registry = looked.filter(Boolean);
+        registry = [];
+      }
+      if (registry.length === 0 && specWorkspaceId) {
+        try {
+          registry = await api.getWorkspaceMetaSpecs(specWorkspaceId);
+        } catch {
+          registry = [];
         }
+      }
+      const covered = new Set(registry.map((m) => m.id));
+      const missing = specBindings.filter((b) => !covered.has(b.meta_spec_id));
+      if (missing.length > 0) {
+        const looked = await Promise.all(
+          missing.map((b) => api.getMetaSpec(b.meta_spec_id).catch(() => null))
+        );
+        registry = registry.concat(looked.filter(Boolean));
       }
       availableMetaSpecs = registry ?? [];
       const sel = {};

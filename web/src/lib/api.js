@@ -483,6 +483,16 @@ export const api = {
   getMetaSpecVersions: (id) => request(`/meta-specs/${id}/versions`),
   getMetaSpecVersion: (id, ver) => request(`/meta-specs/${id}/versions/${ver}`),
   getMetaSpecBlastRadius: (path) => request(`/meta-specs/${encodeURIComponent(path)}/blast-radius`),
+  // Workspace-scoped meta-spec listing (agent-runtime §2 bindings panel):
+  // the meta-specs bindable FROM this workspace (Global + tenant + the
+  // workspace's own), for authors without the Admin role the flat registry
+  // listing requires.
+  getWorkspaceMetaSpecs: (workspaceId, params = {}) => {
+    const qs = new URLSearchParams(params).toString();
+    return request(
+      `/workspaces/${encodeURIComponent(workspaceId)}/meta-specs${qs ? '?' + qs : ''}`
+    );
+  },
   // NOTE: the workspace/tenant meta-spec-set endpoints are retired
   // (meta-spec-reconciliation.md amendments row) — required flags and
   // spec-level bindings via the /meta-specs and

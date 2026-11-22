@@ -835,15 +835,27 @@ pub async fn verify_spec_ref(state: &AppState, spec_ref: &str) -> Result<(), Str
     // the ledger entry to Pending, so an approval row for the content SHA
     // alone no longer authorizes a merge until a human re-approves at the
     // new registry SHA. Content-edit invalidation (push resets Pending)
-    // flows through the same gate. Specs absent from the ledger keep the
-    // row-only check below (no registry entry to consult).
-    if let Ok(Some(entry)) = state.spec_ledger.find_by_path(path).await {
-        use gyre_domain::spec_ledger::ApprovalStatus;
-        if entry.approval_status != ApprovalStatus::Approved {
-            return Err(format!(
-                "spec '{path}' approval status is '{}' — the recorded approval no \
+    // flows through the same gate. A ledger lookup error fails CLOSED —
+    // degrading to the row-only check would let a merge pass while the
+    // spec's approval state is unknown (same fail-open read class as the
+    // review F1 finding). Specs absent from the ledger keep the row-only
+    // check below (no registry entry to consult).
+    match state.spec_ledger.find_by_path(path).await {
+        Ok(Some(entry)) => {
+            use gyre_domain::spec_ledger::ApprovalStatus;
+            if entry.approval_status != ApprovalStatus::Approved {
+                return Err(format!(
+                    "spec '{path}' approval status is '{}' — the recorded approval no \
                  longer authorizes this spec version; re-approval required",
-                entry.approval_status
+                    entry.approval_status
+                ));
+            }
+        }
+        Ok(None) => {}
+        Err(e) => {
+            return Err(format!(
+                "spec ledger lookup for '{path}' failed: {e} — cannot verify the \
+                 spec's approval state"
             ));
         }
     }
@@ -895,15 +907,27 @@ pub async fn verify_signed_spec_ref(state: &AppState, spec_ref: &str) -> Result<
     // the ledger entry to Pending, so an approval row for the content SHA
     // alone no longer authorizes a merge until a human re-approves at the
     // new registry SHA. Content-edit invalidation (push resets Pending)
-    // flows through the same gate. Specs absent from the ledger keep the
-    // row-only check below (no registry entry to consult).
-    if let Ok(Some(entry)) = state.spec_ledger.find_by_path(path).await {
-        use gyre_domain::spec_ledger::ApprovalStatus;
-        if entry.approval_status != ApprovalStatus::Approved {
-            return Err(format!(
-                "spec '{path}' approval status is '{}' — the recorded approval no \
+    // flows through the same gate. A ledger lookup error fails CLOSED —
+    // degrading to the row-only check would let a merge pass while the
+    // spec's approval state is unknown (same fail-open read class as the
+    // review F1 finding). Specs absent from the ledger keep the row-only
+    // check below (no registry entry to consult).
+    match state.spec_ledger.find_by_path(path).await {
+        Ok(Some(entry)) => {
+            use gyre_domain::spec_ledger::ApprovalStatus;
+            if entry.approval_status != ApprovalStatus::Approved {
+                return Err(format!(
+                    "spec '{path}' approval status is '{}' — the recorded approval no \
                  longer authorizes this spec version; re-approval required",
-                entry.approval_status
+                    entry.approval_status
+                ));
+            }
+        }
+        Ok(None) => {}
+        Err(e) => {
+            return Err(format!(
+                "spec ledger lookup for '{path}' failed: {e} — cannot verify the \
+                 spec's approval state"
             ));
         }
     }

@@ -754,8 +754,19 @@ pub(crate) async fn spawn_agent_core(
         // the spec resets it to Pending). Tasks whose spec is not in the
         // registry cannot be evaluated and are not gated here.
         if let Some(spec_path) = task.spec_path.as_deref() {
-            if let Ok(Some(entry)) = state.spec_ledger.find_by_path(spec_path).await {
-                use gyre_domain::spec_ledger::ApprovalStatus;
+            use gyre_domain::spec_ledger::ApprovalStatus;
+            // Fail closed on a ledger lookup error: degrading to "no gate"
+            // would let a worker spawn for a spec whose approval state
+            // could not be determined (same fail-open read class as the
+            // review F1 finding on the bindings PUT).
+            let entry = state
+                .spec_ledger
+                .find_by_path(spec_path)
+                .await
+                .map_err(|e| {
+                    ApiError::Internal(anyhow::anyhow!("spec ledger lookup for '{spec_path}': {e}"))
+                })?;
+            if let Some(entry) = entry {
                 if entry.approval_status != ApprovalStatus::Approved {
                     return Err(ApiError::Conflict(format!(
                         "spec '{spec_path}' approval status is '{}' — re-approve the \

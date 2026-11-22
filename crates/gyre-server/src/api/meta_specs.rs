@@ -8437,6 +8437,97 @@ pub async fn list_meta_specs_registry(
 }
 
 // ---------------------------------------------------------------------------
+// GET /api/v1/workspaces/:id/meta-specs
+// ---------------------------------------------------------------------------
+
+/// Workspace-scoped meta-spec listing for the spec-bindings panel
+/// (agent-runtime.md §2 Spec-Level Binding: "The UI shows available
+/// meta-specs from the tenant and workspace registries").
+///
+/// The flat registry listing (`GET /api/v1/meta-specs`) is Admin-only — it
+/// enumerates tenant-wide governance across every workspace. But the
+/// bindings PUT is deliberately available to Developer members of the
+/// owning workspace, so without a scoped listing a non-Admin author could
+/// save bindings yet never discover bindable meta-specs or see required
+/// ones pre-selected. This surface closes that gap with the same
+/// containment the PUT enforces: the workspace must be inside the caller's
+/// tenant and the caller must be an Owner/Admin/Developer member (or a
+/// global Admin); agent tokens carry no user identity and are rejected.
+///
+/// Returns the meta-specs bindable FROM this workspace — exactly the set
+/// the PUT's visibility rule accepts: Global entries, Tenant entries for
+/// the workspace's tenant, and Workspace entries scoped to this workspace.
+/// Entries scoped to other workspaces are never listed (binding them is
+/// rejected as a cross-workscope prompt-injection leak).
+pub async fn list_workspace_meta_specs(
+    State(state): State<Arc<AppState>>,
+    auth: AuthenticatedAgent,
+    Path(workspace_id): Path<String>,
+    Query(q): Query<ListMetaSpecsQuery>,
+) -> Result<Json<Vec<MetaSpec>>, ApiError> {
+    let workspace = load_workspace_for_caller(&state, &auth, &workspace_id).await?;
+
+    // Membership gate mirrors the spec-bindings PUT: the listing feeds the
+    // same panel whose save gate is Owner/Admin/Developer membership of the
+    // owning workspace (or the global Admin role).
+    if !auth.roles.contains(&UserRole::Admin) {
+        let user_id = auth.user_id.as_ref().ok_or_else(|| {
+            ApiError::Forbidden("agent tokens cannot list workspace meta-specs".to_string())
+        })?;
+        let member = state
+            .workspace_memberships
+            .find_by_user_and_workspace(user_id, &workspace.id)
+            .await
+            .map_err(ApiError::Internal)?;
+        match member.map(|m| m.role) {
+            Some(gyre_domain::WorkspaceRole::Owner)
+            | Some(gyre_domain::WorkspaceRole::Admin)
+            | Some(gyre_domain::WorkspaceRole::Developer) => {}
+            _ => {
+                return Err(ApiError::Forbidden(format!(
+                    "listing workspace meta-specs requires Developer membership in workspace '{workspace_id}'"
+                )));
+            }
+        }
+    }
+
+    let kind = match q.kind.as_deref() {
+        None => None,
+        Some(k) => Some(parse_kind(k)?),
+    };
+
+    // The bindable set: Global + the workspace's tenant + the workspace
+    // itself. Each registry entry has exactly one scope, so the three lists
+    // are disjoint — no dedup needed.
+    let mut results = Vec::new();
+    for (scope, scope_id) in [
+        (MetaSpecScope::Global, None),
+        (
+            MetaSpecScope::Tenant,
+            Some(workspace.tenant_id.as_str().to_string()),
+        ),
+        (MetaSpecScope::Workspace, Some(workspace.id.to_string())),
+    ] {
+        results.extend(
+            state
+                .meta_specs
+                .list(&MetaSpecFilter {
+                    scope: Some(scope),
+                    scope_id,
+                    kind: kind.clone(),
+                    required: q.required,
+                })
+                .await
+                .map_err(ApiError::Internal)?,
+        );
+    }
+    results.sort_by(|a, b| {
+        (a.kind.as_str(), a.name.as_str()).cmp(&(b.kind.as_str(), b.name.as_str()))
+    });
+    Ok(Json(results))
+}
+
+// ---------------------------------------------------------------------------
 // POST /api/v1/meta-specs
 // ---------------------------------------------------------------------------
 
@@ -9044,18 +9135,31 @@ pub struct SetSpecBindingEntry {
 /// meta-spec must additionally be visible from that workspace: Global
 /// meta-specs always qualify, Workspace-scoped ones only in their own
 /// workspace.
+///
+/// The target spec must already be registered in the spec ledger: the
+/// binding set is recorded on the ledger entry and covered by its registry
+/// SHA, so a lookup error fails the PUT (never a silent fail-open that
+/// persists bindings no registry SHA covers) and an unregistered path is
+/// rejected outright — bindings attached to a spec the registry does not
+/// know would permanently escape every approval.
 pub async fn put_spec_meta_spec_bindings(
     State(state): State<Arc<AppState>>,
     auth: AuthenticatedAgent,
     Path(spec_path): Path<String>,
     Json(req): Json<SetSpecBindingsRequest>,
 ) -> Result<(StatusCode, Json<Vec<gyre_domain::MetaSpecBinding>>), ApiError> {
-    let spec_ws: Option<String> = state
+    let mut ledger_entry = state
         .spec_ledger
         .find_by_path(&spec_path)
         .await
         .map_err(ApiError::Internal)?
-        .and_then(|e| e.workspace_id);
+        .ok_or_else(|| {
+            ApiError::NotFound(format!(
+                "spec '{spec_path}' is not registered in the spec ledger; meta-spec bindings \
+                 are registry metadata and require a registered spec"
+            ))
+        })?;
+    let spec_ws: Option<String> = ledger_entry.workspace_id.clone();
 
     let is_global_admin = auth.roles.contains(&gyre_domain::UserRole::Admin);
     if !is_global_admin {
@@ -9137,6 +9241,56 @@ pub async fn put_spec_meta_spec_bindings(
         }
     }
 
+    // Build the replacement set before mutating anything — validation is
+    // complete, so the rows are fully determined up front.
+    let created: Vec<gyre_domain::MetaSpecBinding> = req
+        .bindings
+        .iter()
+        .map(|entry| gyre_domain::MetaSpecBinding {
+            id: Id::new(uuid::Uuid::new_v4().to_string()),
+            spec_id: spec_path.clone(),
+            meta_spec_id: Id::new(&entry.meta_spec_id),
+            pinned_version: entry.pinned_version,
+            created_at: now,
+        })
+        .collect();
+
+    // The binding set is spec-registry metadata covered by the registry SHA
+    // recorded in the approval ledger (agent-runtime.md §2 Spec-Level
+    // Binding + Stale Pin Detection: "Human updates the pin → spec metadata
+    // changes → spec SHA changes → spec needs re-approval"). A changed
+    // binding set updates the ledger entry's `bindings_sha` (producing a new
+    // registry SHA) and invalidates the prior approval exactly as a content
+    // edit does: approval_status resets to Pending, so no worker agent
+    // spawns for tasks referencing this spec and no merge passes the
+    // approval gate until a human re-approves — which re-fires the existing
+    // SpecApproved → orchestrator → delegation cascade under the new pins.
+    //
+    // The ledger write runs FIRST, fail-closed: if a later step fails, the
+    // approval is already invalidated (a human must re-approve) — never the
+    // reverse, where a new binding set is persisted while the prior
+    // approval stays valid and agents run under an approval that no longer
+    // covers the injected meta-spec content. The ledger entry was loaded
+    // above with hard-fail semantics (lookup error or unregistered spec
+    // rejects the PUT), so there is no fail-open path around this write.
+    let new_bindings_sha = gyre_domain::meta_spec::canonical_bindings_sha(&created);
+    if ledger_entry.bindings_sha != new_bindings_sha {
+        let prior_status = ledger_entry.approval_status.clone();
+        ledger_entry.bindings_sha = new_bindings_sha;
+        ledger_entry.updated_at = now;
+        ledger_entry.approval_status = gyre_domain::spec_ledger::ApprovalStatus::Pending;
+        state.spec_ledger.save(&ledger_entry).await.map_err(|e| {
+            ApiError::Internal(anyhow::anyhow!(
+                "failed to record spec binding set in the registry ledger: {e}"
+            ))
+        })?;
+        tracing::info!(
+            spec_path = %spec_path,
+            prior_status = %prior_status,
+            "spec meta-spec bindings changed: registry SHA updated, approval invalidated (re-approval required)"
+        );
+    }
+
     // Replace the binding set: delete existing, insert the new set.
     let existing = state
         .meta_spec_bindings
@@ -9150,22 +9304,12 @@ pub async fn put_spec_meta_spec_bindings(
             .await
             .map_err(ApiError::Internal)?;
     }
-
-    let mut created = Vec::with_capacity(req.bindings.len());
-    for entry in req.bindings {
-        let binding = gyre_domain::MetaSpecBinding {
-            id: Id::new(uuid::Uuid::new_v4().to_string()),
-            spec_id: spec_path.clone(),
-            meta_spec_id: Id::new(&entry.meta_spec_id),
-            pinned_version: entry.pinned_version,
-            created_at: now,
-        };
+    for binding in &created {
         state
             .meta_spec_bindings
-            .create(&binding)
+            .create(binding)
             .await
             .map_err(ApiError::Internal)?;
-        created.push(binding);
     }
 
     // Pin updates clear the stale-pin dedup keys for this spec so a subsequent
@@ -9177,36 +9321,6 @@ pub async fn put_spec_meta_spec_bindings(
             if key.starts_with(&prefix) {
                 let _ = state.kv_store.kv_remove("meta_spec_stale_pins", &key).await;
             }
-        }
-    }
-
-    // The binding set is spec-registry metadata covered by the registry SHA
-    // recorded in the approval ledger (agent-runtime.md §2 Spec-Level
-    // Binding + Stale Pin Detection: "Human updates the pin → spec metadata
-    // changes → spec SHA changes → spec needs re-approval"). A changed
-    // binding set updates the ledger entry's `bindings_sha` (producing a new
-    // registry SHA) and invalidates the prior approval exactly as a content
-    // edit does: approval_status resets to Pending, so no worker agent
-    // spawns for tasks referencing this spec and no merge passes the
-    // approval gate until a human re-approves — which re-fires the existing
-    // SpecApproved → orchestrator → delegation cascade under the new pins.
-    if let Ok(Some(mut entry)) = state.spec_ledger.find_by_path(&spec_path).await {
-        let new_bindings_sha = gyre_domain::meta_spec::canonical_bindings_sha(&created);
-        if entry.bindings_sha != new_bindings_sha {
-            let prior_status = entry.approval_status.clone();
-            entry.bindings_sha = new_bindings_sha;
-            entry.updated_at = now;
-            entry.approval_status = gyre_domain::spec_ledger::ApprovalStatus::Pending;
-            if let Err(e) = state.spec_ledger.save(&entry).await {
-                return Err(ApiError::Internal(anyhow::anyhow!(
-                    "failed to record spec binding set in the registry ledger: {e}"
-                )));
-            }
-            tracing::info!(
-                spec_path = %spec_path,
-                prior_status = %prior_status,
-                "spec meta-spec bindings changed: registry SHA updated, approval invalidated (re-approval required)"
-            );
         }
     }
 
@@ -10117,6 +10231,28 @@ mod registry_tests {
         let state = test_state();
         let app = crate::api::api_router().with_state(state.clone());
 
+        // The target spec must be registered in the ledger: bindings are
+        // registry metadata recorded on the ledger entry (an unregistered
+        // path is rejected — see `spec_bindings_reject_spec_absent_from_ledger`).
+        let entry = gyre_domain::SpecLedgerEntry {
+            bindings_sha: String::new(),
+            path: "specs/system/auth.md".to_string(),
+            title: "Auth".to_string(),
+            owner: "user:admin".to_string(),
+            kind: None,
+            current_sha: "a".repeat(40),
+            approval_mode: "human_only".to_string(),
+            approval_status: gyre_domain::ApprovalStatus::Approved,
+            linked_tasks: vec![],
+            linked_mrs: vec![],
+            drift_status: "clean".to_string(),
+            created_at: 1,
+            updated_at: 1,
+            repo_id: None,
+            workspace_id: None,
+        };
+        state.spec_ledger.save(&entry).await.unwrap();
+
         // Create a meta-spec (admin) and bump it to v2.
         let resp = app
             .clone()
@@ -10431,6 +10567,328 @@ mod registry_tests {
 
         // Sanity: the entry mutations above did not lose the content SHA.
         assert_eq!(unbound.current_sha, "a".repeat(40));
+    }
+
+    /// Review F1 (None case of the fail-open ledger read): the bindings PUT
+    /// must reject a spec absent from the spec ledger. Previously the
+    /// binding rows persisted with no ledger entry to cover them — an
+    /// approval granted after the spec was later registered covered content
+    /// only, while band 3 injected the bound prompts, so the bindings
+    /// permanently escaped the agent-runtime.md §2 "stored in the spec
+    /// registry alongside other spec metadata" contract.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn spec_bindings_reject_spec_absent_from_ledger() {
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // A Global meta-spec to bind.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/meta-specs")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"kind":"meta:standard","name":"unregistered-std","scope":"Global","prompt":"v1"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let ms_id = body_json(resp).await["id"].as_str().unwrap().to_string();
+
+        // PUT against a path with NO ledger entry → 404 (the static admin
+        // token bypasses the membership gate, so this is exactly the
+        // global-Admin-with-unregistered-path case the review flagged).
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/specs/system%2Funregistered.md/meta-spec-bindings")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(
+                        r#"{{"bindings":[{{"meta_spec_id":"{ms_id}","pinned_version":1}}]}}"#
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "bindings must not attach to a spec the registry does not know"
+        );
+
+        // Nothing persisted: GET returns an empty set, not the rejected rows.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/specs/system%2Funregistered.md/meta-spec-bindings")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(body_json(resp).await.as_array().unwrap().len(), 0);
+    }
+
+    /// Workspace-scoped meta-spec listing (agent-runtime.md §2 bindings
+    /// panel: "The UI shows available meta-specs from the tenant and
+    /// workspace registries"): a Developer member sees exactly the bindable
+    /// set — Global, own-tenant, and own-workspace entries — never another
+    /// workspace's; a non-member Developer and an agent token are rejected;
+    /// an unknown workspace 404s.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn workspace_meta_spec_listing_scopes_to_membership() {
+        use crate::auth::test_helpers::{make_test_state_with_jwt, sign_test_jwt};
+        use gyre_domain::meta_spec::{
+            MetaSpec, MetaSpecApprovalStatus, MetaSpecKind, MetaSpecScope,
+        };
+
+        let state = make_test_state_with_jwt();
+
+        // Two workspaces in the caller's tenant.
+        for (id, name, slug) in [
+            ("ws-list-a", "List A", "list-a"),
+            ("ws-list-b", "List B", "list-b"),
+        ] {
+            state
+                .workspaces
+                .create(&gyre_domain::Workspace::new(
+                    gyre_common::Id::new(id),
+                    gyre_common::Id::new("default"),
+                    name.to_string(),
+                    slug.to_string(),
+                    1000,
+                ))
+                .await
+                .unwrap();
+        }
+
+        // Meta-specs: Global (required), Tenant(default), one scoped to
+        // ws-list-a, and one scoped to ws-list-b (must stay invisible from
+        // ws-list-a — binding it is a cross-workscope leak).
+        let mk = |id: &str,
+                  name: &str,
+                  scope: MetaSpecScope,
+                  scope_id: Option<String>,
+                  required: bool| {
+            MetaSpec {
+                id: gyre_common::Id::new(id),
+                kind: MetaSpecKind::Standard,
+                name: name.to_string(),
+                scope,
+                scope_id,
+                prompt: format!("{name} content"),
+                version: 1,
+                content_hash: format!("{name}-h1"),
+                required,
+                approval_status: MetaSpecApprovalStatus::Approved,
+                approved_by: None,
+                approved_at: None,
+                approved_content_hash: None,
+                created_by: "system".to_string(),
+                created_at: 1000,
+                updated_at: 1000,
+            }
+        };
+        state
+            .meta_specs
+            .create(&mk(
+                "ms-list-global",
+                "list-global",
+                MetaSpecScope::Global,
+                None,
+                true,
+            ))
+            .await
+            .unwrap();
+        state
+            .meta_specs
+            .create(&mk(
+                "ms-list-tenant",
+                "list-tenant",
+                MetaSpecScope::Tenant,
+                Some("default".to_string()),
+                false,
+            ))
+            .await
+            .unwrap();
+        state
+            .meta_specs
+            .create(&mk(
+                "ms-list-wsa",
+                "list-wsa",
+                MetaSpecScope::Workspace,
+                Some("ws-list-a".to_string()),
+                false,
+            ))
+            .await
+            .unwrap();
+        state
+            .meta_specs
+            .create(&mk(
+                "ms-list-wsb",
+                "list-wsb",
+                MetaSpecScope::Workspace,
+                Some("ws-list-b".to_string()),
+                false,
+            ))
+            .await
+            .unwrap();
+
+        // Developer member of ws-list-a.
+        let mut dev = gyre_domain::User::new(
+            gyre_common::Id::new("user-list-dev"),
+            "list-dev-sub",
+            "list-dev",
+            1000,
+        );
+        dev.roles = vec![gyre_domain::UserRole::Developer];
+        state.users.create(&dev).await.unwrap();
+        state
+            .workspace_memberships
+            .create(&gyre_domain::WorkspaceMembership::new(
+                gyre_common::Id::new("mem-list-dev"),
+                gyre_common::Id::new("user-list-dev"),
+                gyre_common::Id::new("ws-list-a"),
+                gyre_domain::WorkspaceRole::Developer,
+                gyre_common::Id::new("user-list-dev"),
+                1000,
+            ))
+            .await
+            .unwrap();
+        let dev_token = sign_test_jwt(
+            &serde_json::json!({
+                "tenant_id": "default",
+                "sub": "list-dev-sub",
+                "preferred_username": "list-dev",
+                "email": "list-dev@example.com",
+                "realm_access": { "roles": ["developer"] }
+            }),
+            3600,
+        );
+
+        // Developer with no membership anywhere (the membership gate must
+        // reject even though the role alone is Developer).
+        let mut outsider = gyre_domain::User::new(
+            gyre_common::Id::new("user-list-outsider"),
+            "list-outsider-sub",
+            "list-outsider",
+            1000,
+        );
+        outsider.roles = vec![gyre_domain::UserRole::Developer];
+        state.users.create(&outsider).await.unwrap();
+        let outsider_token = sign_test_jwt(
+            &serde_json::json!({
+                "tenant_id": "default",
+                "sub": "list-outsider-sub",
+                "preferred_username": "list-outsider",
+                "email": "list-outsider@example.com",
+                "realm_access": { "roles": ["developer"] }
+            }),
+            3600,
+        );
+
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // Member Developer → the bindable set for ws-list-a.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/workspaces/ws-list-a/meta-specs")
+                    .header("authorization", format!("Bearer {dev_token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let ids: Vec<&str> = json
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["id"].as_str().unwrap())
+            .collect();
+        assert!(
+            ids.contains(&"ms-list-global"),
+            "Global meta-specs are bindable"
+        );
+        assert!(
+            ids.contains(&"ms-list-tenant"),
+            "own-tenant meta-specs are bindable"
+        );
+        assert!(
+            ids.contains(&"ms-list-wsa"),
+            "the workspace's own meta-specs are bindable"
+        );
+        assert!(
+            !ids.contains(&"ms-list-wsb"),
+            "another workspace's meta-spec must not be listed (cross-workscope leak)"
+        );
+
+        // Non-member Developer → 403.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/workspaces/ws-list-a/meta-specs")
+                    .header("authorization", format!("Bearer {outsider_token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "Developer role alone must not enumerate a workspace's bindable meta-specs"
+        );
+
+        // Agent token (no user identity) → 403.
+        state
+            .kv_store
+            .kv_set("agent_tokens", "agt-list", "agt-list-secret".to_string())
+            .await
+            .unwrap();
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/workspaces/ws-list-a/meta-specs")
+                    .header("authorization", "Bearer agt-list-secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "agent tokens cannot list workspace meta-specs"
+        );
+
+        // Unknown workspace → 404.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/workspaces/ws-nope/meta-specs")
+                    .header("authorization", format!("Bearer {dev_token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 
     /// §2 Stale Pin Detection: a spec pinning an old version produces a

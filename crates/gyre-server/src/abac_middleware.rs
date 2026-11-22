@@ -615,6 +615,7 @@ impl ResourceResolver {
                     "meta_spec",
                     None,
                 ),
+                RouteResourceMapping::api("/api/v1/workspaces/:id/meta-specs", "meta_spec", None),
                 RouteResourceMapping::api(
                     "/api/v1/workspaces/:id/meta-specs/preview",
                     "meta_spec",
