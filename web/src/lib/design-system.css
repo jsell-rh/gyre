@@ -1,4 +1,15 @@
-/* Gyre Design System — Red Hat Brand Standards */
+/*
+ * Gyre Design System — Red Hat Brand Standards
+ *
+ * Wrapped in `@layer base` (the layer order is declared in src/app.css):
+ * Tailwind utilities (layer utilities) must be able to override these global
+ * element rules, while component-scoped <style> blocks (unlayered) keep
+ * winning over both — the same relative priority the app had before the
+ * shadcn-svelte migration. The brand palette values here are mirrored as
+ * the shadcn theme tokens in src/app.css; component styling for the UI
+ * primitives now comes from that Tailwind pipeline, not from this file.
+ */
+@layer base {
 
 :root {
   /* --- Color Palette: Red Hat Dark Theme --- */
@@ -255,4 +266,5 @@ a:hover {
   :root {
     --sidebar-width: var(--sidebar-collapsed);
   }
+}
 }
