@@ -95,11 +95,11 @@ Canonical spec: `specs/system/explorer-canvas.md`. Source: `678a8ac3e3bfeafeb66c
 
 **Status: blocked-on-external-implementation — no closure claimed; section `c3a39b320325eff390c4b56c` remains open.**
 
-Round 62. Re-verification ran fresh from the round-61 checkpoint head `81c955a9` (branch clean at start apart from the stage's standard task-file reset; no merge or rebase pending). Fresh `git fetch origin main` shows `origin/main` **unchanged** from round 61: still `73c504f2` (task-301 meta-spec API only). Both external dependencies were re-probed with deterministic git-refs/source/registry evidence saved to `/tmp/stage/review-evidence/task306-round62-probe.txt`.
+Round 63. Re-verification ran fresh from the round-62 checkpoint head `15147668` (no merge/rebase pending; tree clean at start apart from the stage's standard task-file reset). Fresh `git fetch origin` shows `origin/main` **unchanged** from rounds 61/62: still `73c504f2` (task-301 meta-spec API only). Both external dependencies were re-probed with deterministic git-refs/source/registry evidence saved to `/tmp/stage/review-evidence/task306-round63-probe.txt`. State is identical to round 62.
 
 ### Realized-model graph-node-metrics backend — NOT landed
 
-The extractor/store/upsert surfaces this task watches are **byte-identical to discovery base `678a8ac3`** (`git diff 678a8ac3 origin/main --stat` over the four extractors and `sqlite/graph.rs` is empty). All four extractors still hardcode `complexity: None, churn_count_30d: 0` at `origin/main:` blobs (rust_extractor.rs:160-161, go_extractor.rs:135-136, python_extractor.rs:136-137, typescript_extractor.rs:129-130); zero `cyclomatic` matches in any Rust at origin/main; the SQLite upsert still sets `graph_nodes::complexity.eq(row.complexity)` / `graph_nodes::churn_count_30d.eq(row.churn_count_30d)` (sqlite/graph.rs:366-367), overwriting stored values with the extractor defaults on every re-extraction; zero `graph-node-metrics` implementation commits exist in any reachable ref (`git log --all --grep=graph-node-metrics` returns only this task's own blocked-status docs commits). Ordering guard applies — no local backend work permitted; the end-to-end indicator verification cannot run against populated metrics.
+The extractor/store/upsert surfaces this task watches are **byte-identical to discovery base `678a8ac3`** (`git diff 678a8ac3 origin/main --stat` over the four extractors, `sqlite/graph.rs`, and `graph_extraction.rs` is empty). All four extractors still hardcode `complexity: None, churn_count_30d: 0` at `origin/main:` blobs (rust_extractor.rs:160-161, go_extractor.rs:135-136, python_extractor.rs:136-137, typescript_extractor.rs:129-130); zero `cyclomatic` matches in any Rust at origin/main; the SQLite upsert still sets `graph_nodes::complexity.eq(row.complexity)` / `graph_nodes::churn_count_30d.eq(row.churn_count_30d)` (sqlite/graph.rs:366-367), overwriting stored values with the extractor defaults on every re-extraction; zero `graph-node-metrics` implementation commits exist in any reachable ref (`git log --all --grep=graph-node-metrics` returns only this task's own blocked-status docs commits). Ordering guard applies — no local backend work permitted; the end-to-end indicator verification cannot run against populated metrics.
 
 ### ui-layout d3-force rerouting — NOT landed
 
@@ -115,7 +115,7 @@ There is a genuine, unresolved conflict between two canonical specs over the ren
 
 ### Round output
 
-Task file updated to round 62 with truthful `blocked-on-external-implementation` progress; coverage row round reference updated (row stays open); 0/7 acceptance criteria ticked. Only `specs/` files changed — no Rust, no web, so no formatting or build work was needed. Per the assignment constraint, large gyre-server builds/test compilation run in the independent verifier.
+Task file updated to round 63 with truthful `blocked-on-external-implementation` progress; coverage row round reference updated (row stays open); 0/7 acceptance criteria ticked. Only `specs/` files changed — no Rust, no web, so no formatting or build work was needed. Per the assignment constraint, large gyre-server builds/test compilation run in the independent verifier.
 
 ### Remaining work to unblock
 
