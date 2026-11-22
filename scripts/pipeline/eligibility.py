@@ -78,6 +78,15 @@ def eligible(store, work):
     tasks = {task['name']: task for task in store.tasks()}
     if any(dep not in tasks or not satisfied(tasks[dep]['data']) for dep in data.get('dependencies') or []):
         return False
+    if stage == 'implement' and work.get('state') != 'claimed':
+        # Dogfooding progression stage 1: the platform is the sequencing
+        # authority. A dependency the platform reports as not done blocks
+        # new implement admission even when local task data satisfies it,
+        # and an unreachable platform fails closed (a durable error event is
+        # recorded inside the gate). Already-claimed in-flight work proceeds.
+        from . import platform
+        if not platform.dependencies_satisfied(store, data.get('dependencies') or []):
+            return False
     candidate = data.get('candidate')
     if stage == 'implement':
         return (candidate == inputs.get('candidate') and data.get('repair') == inputs.get('repair')

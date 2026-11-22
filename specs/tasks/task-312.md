@@ -2,7 +2,7 @@
 title: "Platform-held development task ledger with authoritative sequencing and lifecycle state (dogfooding progression stage 1)"
 spec_ref: "Spec gap spec-8986fd94925aed0eaae2d366 / dogfooding-platform-orchestration / 644cb4b53ccb"
 depends_on: []
-progress: not-started
+progress: complete
 commits: []
 ---
 
@@ -24,6 +24,91 @@ Close the unimplemented bullet 3 of specs/development/dogfooding.md ('The new pl
 Mirror probe: point the pipeline at a running platform instance, sync, then reset a dependency task's platform status to backlog via PUT /api/v1/tasks/{id}/status while the local pipeline store still marks that dependency satisfied — run implement-stage discovery/claim: the dependent task must NOT be admitted. The real defect this must catch is a write-only mirror that updates the platform but never consults it (the fabricated-completion failure the review feedback identified: local state alone would admit the task, exactly as the base behaves today with no platform involvement at all — the base fails this probe by construction). Fail-open probe: stop the platform server and run implement discovery — admission must fail closed with a durable error; an implementation that catches the connection error and proceeds on local state is the fail-open defect.
 
 Update the relevant coverage rows only after implementing the behavior, with concrete source evidence. Do not mark unrelated rows complete or claim independent verification before it occurs.
+
+## Shipped
+
+The platform product now holds the development task ledger and serves authoritative
+implement-stage sequencing for Gyre's own development (dogfooding progression stage 1).
+All of it is bridge code against the existing production REST task surface; no platform
+Rust changes were needed and no orchestrator-spawn route or gyre_spawn_worker is used.
+
+### Behavior
+
+- Bootstrap (`scripts/dev-platform.py start/stop/status`): idempotently builds
+  (SKIP_WEB_BUILD=1) and starts a gyre-server on a dedicated port with its own SQLite
+  data directory, provisions the `gyre-dev` workspace and repo records plus a
+  Developer-role service principal with an API token (workspace membership Developer,
+  raw key persisted once via POST /api/v1/users), and registers endpoint/token/workspace/
+  repo as pipeline settings using the existing store.setting mechanism. A healthy
+  running instance with a valid token is left untouched; a lost token provisions the
+  next free principal identity.
+- Shared state (`scripts/pipeline/platform.py sync`, called from catalog sync in
+  `scripts/pipeline/catalog.py`): upserts every specs/tasks/*.md task into the platform
+  as an UNTYPED record (no task_type, so the mechanical scheduler in signal_chain.rs
+  never spawns agents for them) carrying title, spec_ref, priority (mapped from the
+  pipeline priority class), order (task number), and depends_on edges resolved through
+  the task-NNN to platform-id mapping persisted in the `platform_tasks` pipeline
+  setting. Creation runs to a dependency-order fixpoint, so edges resolve in one pass;
+  re-running sync creates no duplicates. Drifted create-only fields or reopened
+  (previously done) work supersede the old record (relabeled dev-ledger-superseded) and
+  re-register a fresh one, because the platform's done status is terminal.
+- Lifecycle write-back (hooks in scripts/dev-pipeline.py run_claim): first implement
+  admission pushes in_progress (under the lease heartbeat), the publication code path
+  that records progress: complete pushes done, and a structural runtime hold pushes
+  blocked. Transitions walk the platform's legal status machine; each is pushed once
+  (an operator resetting a non-terminal platform status is respected), and sync
+  reconciles pushes that failed while the platform was unavailable.
+- Authoritative sequencing (scripts/pipeline/eligibility.py, gate in
+  platform.dependencies_satisfied): a task is eligible for new implement admission only
+  if the platform reports every depends_on task done, queried over the real API (one
+  authenticated GET per process; the claim transaction never holds per-row HTTP). A
+  dependency reported not done blocks admission even when local pipeline state satisfies
+  it; an unmapped dependency fails closed. Platform unavailability (stopped server, dead
+  endpoint, refused request) records a durable `platform_unavailable` event in the
+  pipeline ledger and admits no new implement work, while already-claimed in-flight
+  work (post-execution eligibility recheck) proceeds. A checkout that never ran the
+  bootstrap keeps its pre-bridge behavior (documented in docs/dev-pipeline.md).
+- All bridge HTTP is authenticated REST under real ABAC evaluation with the
+  Developer-role service principal; there is no direct platform-storage access and no
+  privileged bypass. docs/dev-pipeline.md now describes the platform as the development
+  task-state and sequencing authority, keeps pipeline.sqlite3 as the stage/attempt/work
+  telemetry ledger (dispatcher adapter backend), and records the staged progression
+  (next stage: scheduler-driven task-to-agent mapping per the amended agent-runtime.md).
+- Settings surface: platform endpoint/workspace appear as read-only rows in the
+  operator configuration (scripts/pipeline/settings.py); the token is never exposed.
+
+### Test evidence
+
+- `scripts/test_pipeline_platform.py` (12 tests): runs the bridge against a real local
+  HTTP server implementing the platform task surface (bearer auth, Developer-role
+  writes, legal status machine). Covers: registration with resolved edges and
+  idempotency; untyped records; lifecycle in_progress/done/blocked observable via GET;
+  the mirror probe (local satisfied + platform not done refuses admission, then admits
+  once done); unmapped dependency fail-closed; unreachable platform records a durable
+  event and admits nothing while claimed work is unaffected; unconfigured inactivity;
+  non-Developer token refused on create/transition with durable failure events; reopen
+  supersession; operator reset of a non-terminal record respected; catalog sync
+  integration. Mutation checks confirm the probes are load bearing: making the gate
+  advisory (write-only mirror) fails 3 tests; making unavailability fail open fails the
+  fail-closed test.
+- `scripts/test_dev_platform.py` (4 tests): provisioning over real HTTP against a
+  provisioning-surface server; settings registration; idempotent re-provision without
+  duplicates; lost-token re-provisioning; health check.
+- Full sweep `python3 -m unittest discover -s scripts -p 'test_pipeline*.py'`: 394
+  tests, only the two failures that also fail on the assignment base 52d7b66b with this
+  task's changes stashed (sandbox-specific verification-timeout and procfs agent
+  identity behavior; pre-existing, unrelated).
+
+### Deferred verification
+
+`cargo build -p gyre-server` is blocked in the implement sandbox by the build wrapper
+(exit 64; server builds belong to the independent verifier under the 4 GiB budget), so
+the real-server legs of the acceptance criteria (bootstrap against a real gyre-server,
+  ABAC 403 from the real policy engine, zero agent records after a sync/admission
+  cycle) are recorded as exact probe commands in
+  /tmp/stage/review-evidence/task-312/verifier-probes.md for the independent verifier.
+No coverage rows exist for specs/development/* (specs/coverage covers system specs
+  only), so no coverage rows were updated.
 
 ## Discovery evidence
 
