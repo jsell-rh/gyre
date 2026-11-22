@@ -1461,12 +1461,25 @@
 
   $effect(() => {
     // Load once per spec entity when the Edit tab is active. Tracks
-    // entity.id so switching specs reloads but keystrokes do not.
+    // entity.id so switching specs reloads but keystrokes do not. The API
+    // path is normalized (leading "specs/" stripped): the ledger and the
+    // bindings side table key the BARE path, while Explorer entries carry
+    // the prefixed id — calling with the raw id would silently return an
+    // empty set and 404 the save.
     if (entity?.type === 'spec' && activeTab === 'edit' && bindingsLoadedFor !== entity.id) {
       bindingsLoadedFor = entity.id;
-      loadSpecBindings(entity.id);
+      loadSpecBindings(specBindingsPath());
     }
   });
+
+  /** The spec's ledger/API path for the bindings endpoints: entity ids may
+   * carry a leading "specs/" prefix (Explorer entries pass
+   * specRef.split('@')[0] = 'specs/system/auth.md') while the API route
+   * already includes /specs/ and the ledger keys the bare path — the same
+   * normalization every other spec call in this component applies. */
+  function specBindingsPath() {
+    return (entity?.id ?? '').replace(/^specs\//, '');
+  }
 
   async function loadSpecBindings(path) {
     bindingsLoading = true;
@@ -1575,7 +1588,9 @@
         meta_spec_id,
         pinned_version,
       }));
-      const saved = await api.putSpecMetaSpecBindings(entity.id, bindings);
+      // Normalized path (see specBindingsPath): the save PUTs against the
+      // bare ledger path, matching the GET.
+      const saved = await api.putSpecMetaSpecBindings(specBindingsPath(), bindings);
       specBindings = saved ?? [];
       bindingsDirty = false;
       toastSuccess($t('detail_panel.bindings_saved'));

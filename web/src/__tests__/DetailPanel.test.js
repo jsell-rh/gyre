@@ -886,11 +886,20 @@ describe('Spec edit tab — meta-spec bindings panel (agent-runtime.md §2)', ()
   afterEach(() => vi.unstubAllGlobals());
 
   it('renders required meta-specs pre-selected and locked; optional bindings editable', async () => {
-    await openEditTab();
+    const fetchMock = await openEditTab();
     // Required: pre-selected and locked (cannot be removed).
     const requiredCheck = screen.getByRole('checkbox', { name: /bind meta-spec security-standard/i });
     expect(requiredCheck.checked).toBe(true);
     expect(requiredCheck.disabled).toBe(true);
+    // The panel calls the bindings endpoint with the NORMALIZED spec path
+    // (the bare ledger path — the entity id carries the "specs/" prefix
+    // and the API route already includes /specs/); a double-prefixed URL
+    // would silently return an empty set and 404 the save.
+    const called = fetchMock.mock.calls.map((c) => String(c[0]));
+    expect(
+      called.some((u) => u.includes('/api/v1/specs/system%2Fauth.md/meta-spec-bindings'))
+    ).toBe(true);
+    expect(called.every((u) => !u.includes('/specs/specs%2F'))).toBe(true);
     // The bound optional meta-spec is selected at its saved pin (v1) with a
     // version selector offering up to the current version (v2).
     const optCheck = screen.getByRole('checkbox', { name: /bind meta-spec backend-developer/i });
@@ -903,7 +912,7 @@ describe('Spec edit tab — meta-spec bindings panel (agent-runtime.md §2)', ()
   });
 
   it('saves the full binding set via the bindings endpoint when the selection changes', async () => {
-    await openEditTab();
+    const fetchMock = await openEditTab();
     // Select the unbound optional meta-spec (defaults to its current version).
     await fireEvent.click(screen.getByRole('checkbox', { name: /bind meta-spec reviewer/i }));
     // Bump the stale backend-developer pin to the current version.
@@ -914,6 +923,13 @@ describe('Spec edit tab — meta-spec bindings panel (agent-runtime.md §2)', ()
     expect(saveBtn.disabled).toBe(false);
     await fireEvent.click(saveBtn);
     await waitFor(() => expect(putPayloads.length).toBe(1));
+    // The save PUT targets the normalized (bare) spec path.
+    const putUrls = fetchMock.mock.calls
+      .filter((c) => c[1]?.method === 'PUT')
+      .map((c) => String(c[0]));
+    expect(
+      putUrls.some((u) => u.includes('/api/v1/specs/system%2Fauth.md/meta-spec-bindings'))
+    ).toBe(true);
     // Declarative full-set replace: the payload IS the desired set —
     // required stays in (locked), the bumped pin, and the new selection.
     const bindings = putPayloads[0].bindings;
