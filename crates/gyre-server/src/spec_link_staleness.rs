@@ -10,9 +10,11 @@
 //! - `stale` — the target spec's current SHA in the ledger differs from the
 //!   link's pinned `target_sha`.
 //! - `active` — otherwise.
+//!
 //! Links already stale/broken/conflicted are RE-CHECKED, not skipped: a
 //! target that re-enters its repo's manifest (or is restored to the ledger)
 //! transitions the link back per the normal active/stale rules.
+//!
 //! - For cross-repo/cross-workspace links (target_display starts with `@`), re-resolves the
 //!   workspace/repo — tenant-scoped from the source link (source repo → workspace → tenant),
 //!   with the target path required to be declared in the target repo's manifest. Links denied

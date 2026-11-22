@@ -832,34 +832,29 @@ pub async fn sync_spec_ledger(
             // Note: Supersedes deprecation is handled ONLY in approve_spec
             // (spec-links.md §Approval Gates: "When source is approved, target
             // is automatically set to deprecated"). No push-time action here.
-            match link.link_type {
-                SpecLinkType::Extends => {
-                    // For extends links with stale target: mark extending spec as drifted
-                    // and invalidate approval.
-                    // spec-links.md §Approval Gates: "When target changes, source's
-                    // approval is invalidated."
-                    if link.status == "stale" {
-                        info!(
-                            source = %link.source_path,
-                            target = %link.target_path,
-                            "spec-registry: extends target SHA changed — marking extending spec drifted"
-                        );
-                        if let Ok(Some(mut source_entry)) =
-                            ledger.find_by_path(&link.source_path).await
-                        {
-                            source_entry.drift_status = "drifted".to_string();
-                            source_entry.approval_status = ApprovalStatus::Pending;
-                            source_entry.updated_at = now;
-                            let _ = ledger.save(&source_entry).await;
-                            approval_changed_paths.push(link.source_path.clone());
-                            info!(
-                                spec_path = %link.source_path,
-                                "spec-registry: approval invalidated (extends target changed)"
-                            );
-                        }
-                    }
+            // Only `extends` has sync-time enforcement; other link types have
+            // no push-time action (supersedes handled in approve_spec).
+            // spec-links.md §Approval Gates: "When target changes, source's
+            // approval is invalidated." — for extends links with a stale
+            // target, mark the extending spec as drifted and invalidate
+            // its approval.
+            if link.link_type == SpecLinkType::Extends && link.status == "stale" {
+                info!(
+                    source = %link.source_path,
+                    target = %link.target_path,
+                    "spec-registry: extends target SHA changed — marking extending spec drifted"
+                );
+                if let Ok(Some(mut source_entry)) = ledger.find_by_path(&link.source_path).await {
+                    source_entry.drift_status = "drifted".to_string();
+                    source_entry.approval_status = ApprovalStatus::Pending;
+                    source_entry.updated_at = now;
+                    let _ = ledger.save(&source_entry).await;
+                    approval_changed_paths.push(link.source_path.clone());
+                    info!(
+                        spec_path = %link.source_path,
+                        "spec-registry: approval invalidated (extends target changed)"
+                    );
                 }
-                _ => {} // wildcard:ok — only extends has sync-time enforcement; supersedes handled in approve_spec
             }
         }
 
