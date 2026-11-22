@@ -3,7 +3,7 @@ title: "Provision the Pass 2 toolchains in the server container image: rust-anal
 spec_ref: "Spec gap spec-b89674dbcb695eb34e8d5e15 / server-image-pass2-toolchains / d96599f10659"
 depends_on: []
 progress: ready-for-review
-commits: []
+commits: ["c148189a"]
 ---
 
 ## Required behavior
