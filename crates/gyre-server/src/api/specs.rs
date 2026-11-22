@@ -6017,33 +6017,43 @@ bindings_sha: String::new(),
             })
             .await
             .unwrap();
-        let meta_set = crate::api::meta_specs::MetaSpecSet {
-            workspace_id: ws_id.to_string(),
-            personas: [(
-                "security".to_string(),
-                crate::api::meta_specs::MetaSpecPinnedEntry {
-                    path: "meta/security.md".to_string(),
-                    sha: "a1b2c3".to_string(),
-                },
-            )]
-            .into_iter()
-            .collect(),
-            ..Default::default()
+        // Seed a REQUIRED approved meta-spec scoped to the workspace —
+        // the registry-model effective set whose SHA the approval ledger's
+        // meta_spec_set_sha covers (the retired KV set model hashed the
+        // stored set JSON instead).
+        let content_hash = "hash-security-v1".to_string();
+        let ms = gyre_domain::meta_spec::MetaSpec {
+            id: gyre_common::Id::new("ms-security-1"),
+            kind: gyre_domain::meta_spec::MetaSpecKind::Standard,
+            name: "security-standard".to_string(),
+            scope: gyre_domain::meta_spec::MetaSpecScope::Workspace,
+            scope_id: Some(ws_id.to_string()),
+            prompt: "be secure".to_string(),
+            version: 1,
+            content_hash: content_hash.clone(),
+            required: true,
+            approval_status: gyre_domain::meta_spec::MetaSpecApprovalStatus::Approved,
+            approved_by: Some("admin".to_string()),
+            approved_at: Some(1_700_000_000),
+            approved_content_hash: Some(content_hash.clone()),
+            created_by: "admin".to_string(),
+            created_at: 1_700_000_000,
+            updated_at: 1_700_000_000,
         };
-        let meta_set_json = serde_json::to_string(&meta_set).unwrap();
-        state
-            .meta_spec_sets
-            .upsert(&gyre_common::Id::new(ws_id), &meta_set_json)
-            .await
-            .unwrap();
+        state.meta_specs.create(&ms).await.unwrap();
 
-        // Compute the expected SHA (same algorithm as compute_meta_spec_set_sha).
-        let expected_sha = {
-            use sha2::{Digest, Sha256};
-            let mut hasher = Sha256::new();
-            hasher.update(meta_set_json.as_bytes());
-            hex::encode(hasher.finalize())
-        };
+        // Expected SHA over the effective set's canonical snapshot tuple —
+        // constructed by hand from the seeded spec, not via the production
+        // resolver, so the assertion checks the approve handler really
+        // stamps the registry's effective set.
+        let expected_sha = crate::reconciliation::meta_spec_snapshot_sha(&[
+            gyre_domain::MetaSpecSnapshot {
+                meta_spec_id: ms.id.to_string(),
+                kind: ms.kind.as_str().to_string(),
+                content_hash: content_hash.clone(),
+                version: 1,
+            },
+        ]);
 
         // Generate a real Ed25519 keypair.
         let (pkcs8_bytes, pub_key) = generate_test_ed25519_keypair();
@@ -6113,7 +6123,7 @@ bindings_sha: String::new(),
             gyre_common::AttestationInput::Signed(signed) => {
                 assert_eq!(
                     signed.content.meta_spec_set_sha, expected_sha,
-                    "meta_spec_set_sha should be SHA256 of workspace's meta-spec set JSON"
+                    "meta_spec_set_sha should be the SHA over the workspace's registry effective set"
                 );
                 assert!(
                     !signed.content.meta_spec_set_sha.is_empty(),

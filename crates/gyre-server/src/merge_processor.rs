@@ -10379,119 +10379,70 @@ mod tests {
 
     // ── meta-spec-reconciliation.md §9: merge-gate drift behavior ───────────
 
-    /// Bind a meta-spec set to the workspace and return its current set SHA
-    /// (the SHA `compute_meta_spec_set_sha` derives for the binding).
-    async fn bind_drift_set(state: &AppState, ws_id: &str) -> String {
-        let set = crate::api::meta_specs::MetaSpecSet {
-            workspace_id: ws_id.to_string(),
-            personas: std::collections::BTreeMap::from([(
-                "backend-developer".to_string(),
-                crate::api::meta_specs::MetaSpecPinnedEntry {
-                    path: "specs/personas/backend.md".to_string(),
-                    sha: "a1b2c3".to_string(),
-                },
-            )]),
-            principles: vec![],
-            standards: vec![],
-            process: vec![],
+    /// Bind a REQUIRED approved meta-spec to the workspace (registry model)
+    /// and return its snapshot — the current required meta-spec the merge
+    /// gate's drift check compares the recorded usage against.
+    async fn bind_required_spec(state: &AppState, ws_id: &str) -> gyre_domain::MetaSpec {
+        let content_hash = format!("hash-{ws_id}-v1");
+        let ms = gyre_domain::meta_spec::MetaSpec {
+            id: Id::new(format!("ms-{ws_id}")),
+            kind: gyre_domain::meta_spec::MetaSpecKind::Persona,
+            name: "backend-developer".to_string(),
+            scope: gyre_domain::meta_spec::MetaSpecScope::Workspace,
+            scope_id: Some(ws_id.to_string()),
+            prompt: "be a good backend developer".to_string(),
+            version: 1,
+            content_hash: content_hash.clone(),
+            required: true,
+            approval_status: gyre_domain::meta_spec::MetaSpecApprovalStatus::Approved,
+            approved_by: Some("admin".to_string()),
+            approved_at: Some(1000),
+            approved_content_hash: Some(content_hash.clone()),
+            created_by: "admin".to_string(),
+            created_at: 1000,
+            updated_at: 1000,
         };
-        let json = serde_json::to_string(&set).unwrap();
-        state
-            .meta_spec_sets
-            .upsert(&Id::new(ws_id), &json)
-            .await
-            .unwrap();
-        crate::compute_meta_spec_set_sha(state, &Id::new(ws_id)).await
+        state.meta_specs.create(&ms).await.unwrap();
+        ms
     }
 
-    /// A signed provenance attestation recording `meta_sha` as the set the
-    /// code was produced under (same shape as the authorization chain's
-    /// root `SignedInput`), attached to `task_id`.
-    fn drift_attestation(
-        task_id: &str,
-        repo_id: &Id,
-        ws_id: &str,
-        meta_sha: &str,
-    ) -> gyre_common::Attestation {
-        use gyre_common::attestation::*;
-        let content = InputContent {
-            spec_path: "specs/system/x.md".to_string(),
-            spec_sha: "a".repeat(40),
-            workspace_id: ws_id.to_string(),
-            repo_id: repo_id.to_string(),
-            persona_constraints: vec![],
-            meta_spec_set_sha: meta_sha.to_string(),
-            scope: ScopeConstraint::default(),
-        };
-        let si = SignedInput {
-            content,
-            output_constraints: vec![],
-            valid_until: 2000,
-            expected_generation: None,
-            signature: vec![1, 2, 3],
-            key_binding: gyre_common::KeyBinding {
-                public_key: vec![1],
-                user_identity: "user:admin".to_string(),
-                issuer: "https://gyre.local".to_string(),
-                trust_anchor_id: "ta".to_string(),
-                issued_at: 1000,
-                expires_at: 2000,
-                user_signature: vec![1],
-                platform_countersign: vec![1],
-            },
-        };
-        gyre_common::Attestation {
-            id: format!("att-{task_id}"),
-            input: AttestationInput::Signed(si),
-            output: AttestationOutput {
-                content_hash: vec![1],
-                commit_sha: format!("{task_id:040}"),
-                agent_signature: None,
-                gate_results: vec![],
-            },
-            metadata: gyre_common::attestation::AttestationMetadata {
-                created_at: 1000,
-                workspace_id: ws_id.to_string(),
-                repo_id: repo_id.to_string(),
-                task_id: task_id.to_string(),
-                agent_id: format!("agent-{task_id}"),
-                chain_depth: 0,
-            },
-        }
-    }
-
-    /// Seed the provenance chain for a drifted MR: an author agent whose
-    /// current task carries a signed attestation recording `meta_sha` as
-    /// the meta-spec set the code was produced under. Returns the agent id
-    /// (the task-based attestation lookup path — the repo path is not a
-    /// real git repo, so the commit-based path resolves nothing).
-    async fn seed_drift_provenance(
-        state: &AppState,
-        mr_id: &str,
-        ws_id: &str,
-        repo: &Repository,
-        meta_sha: &str,
-    ) -> Id {
-        let task_id = format!("task-{mr_id}");
-        let att = drift_attestation(&task_id, &repo.id, ws_id, meta_sha);
-        let mut agent = gyre_domain::Agent::new(Id::new(format!("agent-{mr_id}")), "author", 1000);
-        agent.workspace_id = Id::new(ws_id);
-        agent.current_task_id = Some(Id::new(task_id));
-        state.agents.create(&agent).await.unwrap();
-        state.chain_attestations.save(&att).await.unwrap();
-        agent.id.clone()
-    }
-
-    /// Create an MR whose author agent's current task carries a provenance
-    /// attestation recording `meta_sha`.
+    /// Create an MR whose author agent has a spawn-time prompt-set record
+    /// recording `used` as the meta-specs it ran under — the merge-time
+    /// `meta_specs_used` source (registry model; the retired set model read
+    /// a recorded set SHA off a provenance attestation instead).
     async fn create_drift_mr(
         state: &AppState,
         mr_id: &str,
         ws_id: &str,
         repo: &Repository,
-        meta_sha: &str,
+        used: Vec<gyre_domain::MetaSpecSnapshot>,
     ) -> gyre_domain::MergeRequest {
-        let agent_id = seed_drift_provenance(state, mr_id, ws_id, repo, meta_sha).await;
+        let mut agent = gyre_domain::Agent::new(Id::new(format!("agent-{mr_id}")), "author", 1000);
+        agent.workspace_id = Id::new(ws_id);
+        state.agents.create(&agent).await.unwrap();
+        crate::prompt_assembly::store_prompt_set_record(
+            state,
+            &crate::prompt_assembly::AgentPromptSetRecord {
+                agent_id: agent.id.clone(),
+                task_id: Id::new(format!("task-{mr_id}")),
+                spec_path: None,
+                set_sha: String::new(),
+                assembled_at: 1000,
+                meta_specs_used: used
+                    .iter()
+                    .map(|s| gyre_domain::MetaSpecUsed {
+                        id: Id::new(&s.meta_spec_id),
+                        kind: s.kind.clone(),
+                        content_hash: s.content_hash.clone(),
+                        version: s.version,
+                        required: true,
+                        scope: String::new(),
+                    })
+                    .collect(),
+                rendered_prompt: None,
+            },
+        )
+        .await;
 
         let mut mr = gyre_domain::MergeRequest::new(
             Id::new(mr_id),
@@ -10502,7 +10453,7 @@ mod tests {
             "main",
             1000,
         );
-        mr.author_agent_id = Some(agent_id);
+        mr.author_agent_id = Some(agent.id);
         state.merge_requests.create(&mr).await.unwrap();
         mr
     }
@@ -10524,14 +10475,23 @@ mod tests {
             .expect("seed built-in policies");
         let ws_id = "ws-drift-warn";
         let repo = create_repo_in_workspace(&state, "repo-drift-warn", ws_id).await;
-        let current = bind_drift_set(&state, ws_id).await;
-        assert!(
-            !current.is_empty(),
-            "set must be bound for the check to run"
-        );
+        let ms = bind_required_spec(&state, ws_id).await;
 
-        // Provenance under an OLD set SHA → drift.
-        create_drift_mr(&state, "mr-drift-warn", ws_id, &repo, "deadbeef").await;
+        // Recorded usage pinned to an older version than currently required
+        // → drift.
+        create_drift_mr(
+            &state,
+            "mr-drift-warn",
+            ws_id,
+            &repo,
+            vec![gyre_domain::MetaSpecSnapshot {
+                meta_spec_id: ms.id.to_string(),
+                kind: ms.kind.as_str().to_string(),
+                content_hash: "old-hash".to_string(),
+                version: 0,
+            }],
+        )
+        .await;
         enqueue_mr(&state, "mr-drift-warn", 50, 1000).await;
 
         process_next(&state).await.unwrap();
@@ -10551,8 +10511,18 @@ mod tests {
         let output = drift.output.as_deref().expect("warning output");
         let expected = crate::reconciliation::format_meta_spec_drift_warning(
             &crate::reconciliation::MetaSpecDrift {
-                produced_set_sha: "deadbeef".to_string(),
-                current_set_sha: current.clone(),
+                produced: vec![gyre_domain::MetaSpecSnapshot {
+                    meta_spec_id: ms.id.to_string(),
+                    kind: ms.kind.as_str().to_string(),
+                    content_hash: "old-hash".to_string(),
+                    version: 0,
+                }],
+                current: vec![gyre_domain::MetaSpecSnapshot {
+                    meta_spec_id: ms.id.to_string(),
+                    kind: ms.kind.as_str().to_string(),
+                    content_hash: ms.content_hash.clone(),
+                    version: ms.version,
+                }],
             },
         );
         assert_eq!(output, expected);
@@ -10587,9 +10557,21 @@ mod tests {
             .expect("seed built-in policies");
         let ws_id = "ws-drift-block";
         let repo = create_repo_in_workspace(&state, "repo-drift-block", ws_id).await;
-        bind_drift_set(&state, ws_id).await;
+        let ms = bind_required_spec(&state, ws_id).await;
 
-        create_drift_mr(&state, "mr-drift-block", ws_id, &repo, "deadbeef").await;
+        create_drift_mr(
+            &state,
+            "mr-drift-block",
+            ws_id,
+            &repo,
+            vec![gyre_domain::MetaSpecSnapshot {
+                meta_spec_id: ms.id.to_string(),
+                kind: ms.kind.as_str().to_string(),
+                content_hash: "old-hash".to_string(),
+                version: 0,
+            }],
+        )
+        .await;
         enqueue_mr(&state, "mr-drift-block", 50, 1000).await;
 
         // Strict workspace policy: drift blocks.
@@ -10692,10 +10674,22 @@ mod tests {
             .expect("seed built-in policies");
         let ws_id = "ws-drift-match";
         let repo = create_repo_in_workspace(&state, "repo-drift-match", ws_id).await;
-        let current = bind_drift_set(&state, ws_id).await;
+        let ms = bind_required_spec(&state, ws_id).await;
 
-        // Provenance under the CURRENT set SHA → pass.
-        create_drift_mr(&state, "mr-drift-match", ws_id, &repo, &current).await;
+        // Recorded usage at the CURRENT required version → pass.
+        create_drift_mr(
+            &state,
+            "mr-drift-match",
+            ws_id,
+            &repo,
+            vec![gyre_domain::MetaSpecSnapshot {
+                meta_spec_id: ms.id.to_string(),
+                kind: ms.kind.as_str().to_string(),
+                content_hash: ms.content_hash.clone(),
+                version: ms.version,
+            }],
+        )
+        .await;
         enqueue_mr(&state, "mr-drift-match", 50, 1000).await;
 
         process_next(&state).await.unwrap();
@@ -10728,7 +10722,7 @@ mod tests {
         let state = test_state();
         let ws_id = "ws-drift-noatt";
         let repo = create_repo_in_workspace(&state, "repo-drift-noatt", ws_id).await;
-        bind_drift_set(&state, ws_id).await;
+        bind_required_spec(&state, ws_id).await;
 
         // No author agent, no attestation anywhere.
         let mr = gyre_domain::MergeRequest::new(
@@ -10773,9 +10767,21 @@ mod tests {
         let state = test_state();
         let ws_id = "ws-drift-idem";
         let repo = create_repo_in_workspace(&state, "repo-drift-idem", ws_id).await;
-        bind_drift_set(&state, ws_id).await;
+        let ms = bind_required_spec(&state, ws_id).await;
 
-        let mr = create_drift_mr(&state, "mr-drift-idem", ws_id, &repo, "deadbeef").await;
+        let mr = create_drift_mr(
+            &state,
+            "mr-drift-idem",
+            ws_id,
+            &repo,
+            vec![gyre_domain::MetaSpecSnapshot {
+                meta_spec_id: ms.id.to_string(),
+                kind: ms.kind.as_str().to_string(),
+                content_hash: "old-hash".to_string(),
+                version: 0,
+            }],
+        )
+        .await;
         let drift = crate::reconciliation::mr_meta_spec_drift(&state, &mr)
             .await
             .expect("drift expected");
@@ -10816,8 +10822,20 @@ mod tests {
         // skips gracefully) sits behind it in the SAME workspace.
         let ws_a = "ws-drift-starve";
         let repo_a = create_repo_in_workspace(&state, "repo-drift-starve", ws_a).await;
-        bind_drift_set(&state, ws_a).await;
-        create_drift_mr(&state, "mr-drift-starve-head", ws_a, &repo_a, "deadbeef").await;
+        let ms = bind_required_spec(&state, ws_a).await;
+        create_drift_mr(
+            &state,
+            "mr-drift-starve-head",
+            ws_a,
+            &repo_a,
+            vec![gyre_domain::MetaSpecSnapshot {
+                meta_spec_id: ms.id.to_string(),
+                kind: ms.kind.as_str().to_string(),
+                content_hash: "old-hash".to_string(),
+                version: 0,
+            }],
+        )
+        .await;
         enqueue_mr(&state, "mr-drift-starve-head", 100, 1000).await;
         let clean_same_ws = gyre_domain::MergeRequest::new(
             Id::new("mr-drift-starve-clean"),
@@ -10942,9 +10960,36 @@ mod tests {
         // unit because the drift check expands to all members.
         let ws_a = "ws-drift-group-starve";
         let group_repo = create_repo_in_workspace(&state, "repo-drift-group-starve", ws_a).await;
-        bind_drift_set(&state, ws_a).await;
-        let drifted_author =
-            seed_drift_provenance(&state, "mr-drift-group-a", ws_a, &group_repo, "deadbeef").await;
+        let ms = bind_required_spec(&state, ws_a).await;
+        // The drifted group member's author agent: a prompt-set record
+        // pinned to an older version than currently required.
+        let drifted_author = {
+            let mut agent =
+                gyre_domain::Agent::new(Id::new("agent-mr-drift-group-a"), "author", 1000);
+            agent.workspace_id = Id::new(ws_a);
+            state.agents.create(&agent).await.unwrap();
+            crate::prompt_assembly::store_prompt_set_record(
+                &state,
+                &crate::prompt_assembly::AgentPromptSetRecord {
+                    agent_id: agent.id.clone(),
+                    task_id: Id::new("task-mr-drift-group-a"),
+                    spec_path: None,
+                    set_sha: String::new(),
+                    assembled_at: 1000,
+                    meta_specs_used: vec![gyre_domain::MetaSpecUsed {
+                        id: ms.id.clone(),
+                        kind: ms.kind.as_str().to_string(),
+                        content_hash: "old-hash".to_string(),
+                        version: 0,
+                        required: true,
+                        scope: String::new(),
+                    }],
+                    rendered_prompt: None,
+                },
+            )
+            .await;
+            agent.id.clone()
+        };
         create_mr_in_group(
             &state,
             "mr-drift-group-a",

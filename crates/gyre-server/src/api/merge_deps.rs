@@ -350,15 +350,15 @@ pub async fn get_queue_graph(
                 .and_then(|r| r.output.as_deref())
                 .and_then(crate::reconciliation::parse_meta_spec_drift_warning)
                 .map(|d| MetaSpecDriftWarning {
-                    /// Snapshot labels ("{kind}:{id}@v{version}") recorded for
-                    /// the MR's author agent.
+                    // Snapshot labels ("{kind}:{id}@v{version}") recorded for
+                    // the MR's author agent.
                     produced: d
                         .produced
                         .iter()
                         .map(|s| s.label())
                         .collect(),
-                    /// Snapshot labels of required meta-specs not matched by
-                    /// the recorded usage.
+                    // Snapshot labels of required meta-specs not matched by
+                    // the recorded usage.
                     current: d.current.iter().map(|s| s.label()).collect(),
                 });
             nodes.push(GraphNode {

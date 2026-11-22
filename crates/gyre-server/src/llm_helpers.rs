@@ -386,6 +386,118 @@ mod tests {
         assert_eq!(out, "{{x}}");
     }
 
+    // ── workspace_meta_spec_context (registry effective set) ────────────
+
+    /// {{meta_spec_context}} resolves from the REGISTRY's effective set
+    /// (required + approved + visible meta-specs), not from any stored set
+    /// or git tree: required approved entries contribute their prompt,
+    /// optional and non-approved entries do not (meta-spec-reconciliation
+    /// amendments row — the retired KV set model's path@sha resolution is
+    /// gone). Killing test for the registry sourcing: point the resolution
+    /// back at any non-registry source and the assertions fail.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn meta_spec_context_resolves_from_registry_effective_set() {
+        let state = crate::mem::test_state();
+        let ws_id = Id::new("ws-ms-ctx");
+        state
+            .workspaces
+            .create(&gyre_domain::Workspace::new(
+                ws_id.clone(),
+                Id::new("default"),
+                "ms-ctx-ws",
+                "ms-ctx-ws",
+                0,
+            ))
+            .await
+            .unwrap();
+
+        let mk = |id: &str,
+                  name: &str,
+                  required: bool,
+                  approved: bool,
+                  prompt: &str|
+            -> gyre_domain::MetaSpec {
+            gyre_domain::MetaSpec {
+                id: Id::new(id),
+                kind: gyre_domain::meta_spec::MetaSpecKind::Principle,
+                name: name.to_string(),
+                scope: gyre_domain::meta_spec::MetaSpecScope::Workspace,
+                scope_id: Some(ws_id.to_string()),
+                prompt: prompt.to_string(),
+                version: 1,
+                content_hash: format!("hash-{id}"),
+                required,
+                approval_status: if approved {
+                    gyre_domain::meta_spec::MetaSpecApprovalStatus::Approved
+                } else {
+                    gyre_domain::meta_spec::MetaSpecApprovalStatus::Pending
+                },
+                approved_by: Some("admin".to_string()),
+                approved_at: Some(1),
+                approved_content_hash: Some(format!("hash-{id}")),
+                created_by: "admin".to_string(),
+                created_at: 1,
+                updated_at: 1,
+            }
+        };
+
+        // Required + approved: in the effective set, prompt injected.
+        state
+            .meta_specs
+            .create(&mk(
+                "ms-ctx-req",
+                "registry-principle",
+                true,
+                true,
+                "REGISTRY REQUIRED PROMPT",
+            ))
+            .await
+            .unwrap();
+        // Optional: never in the effective set (spec-level bindings own
+        // its injection, not the workspace context).
+        state
+            .meta_specs
+            .create(&mk(
+                "ms-ctx-opt",
+                "optional-principle",
+                false,
+                true,
+                "OPTIONAL PROMPT MUST NOT APPEAR",
+            ))
+            .await
+            .unwrap();
+        // Required but Pending: fail-closed exclusion.
+        state
+            .meta_specs
+            .create(&mk(
+                "ms-ctx-pend",
+                "pending-principle",
+                true,
+                false,
+                "PENDING PROMPT MUST NOT APPEAR",
+            ))
+            .await
+            .unwrap();
+
+        let ctx = workspace_meta_spec_context(&state, &ws_id).await;
+        assert!(
+            ctx.contains("REGISTRY REQUIRED PROMPT"),
+            "required approved meta-spec prompt must be in the context: {ctx}"
+        );
+        assert!(
+            ctx.contains("registry-principle"),
+            "the effective-set header names the meta-spec: {ctx}"
+        );
+        assert!(
+            !ctx.contains("OPTIONAL PROMPT MUST NOT APPEAR"),
+            "optional meta-specs are not part of the workspace context"
+        );
+        assert!(
+            !ctx.contains("PENDING PROMPT MUST NOT APPEAR"),
+            "non-approved required meta-specs are excluded (fail-closed)"
+        );
+    }
+
     // ── max_tokens_for_function ──────────────────────────────────────────
 
     #[test]

@@ -835,3 +835,110 @@ describe('Spec edit tab — LLM-assisted spec editing (ui-layout.md §3)', () =>
     });
   });
 });
+
+describe('Spec edit tab — meta-spec bindings panel (agent-runtime.md §2)', () => {
+  const specEntityWithRepo = {
+    type: 'spec',
+    id: 'specs/system/auth.md',
+    data: {
+      name: 'auth.md',
+      repo_id: 'repo-abc',
+      title: 'Auth Spec',
+    },
+  };
+
+  const registry = [
+    { id: 'ms-req', name: 'security-standard', kind: 'meta:standard', version: 3, required: true },
+    { id: 'ms-opt', name: 'backend-developer', kind: 'meta:persona', version: 2, required: false },
+    { id: 'ms-opt2', name: 'reviewer', kind: 'meta:persona', version: 5, required: false },
+  ];
+  // Currently-saved bindings: backend-developer pinned at v1 (stale — v2 exists).
+  const currentBindings = [
+    { id: 'b-1', spec_id: 'specs/system/auth.md', meta_spec_id: 'ms-opt', pinned_version: 1, created_at: 1 },
+  ];
+
+  let putPayloads;
+
+  async function openEditTab() {
+    putPayloads = [];
+    const fetchMock = vi.fn(async (url, opts) => {
+      const u = String(url);
+      if (u.includes('/meta-spec-bindings')) {
+        if (opts?.method === 'PUT') {
+          putPayloads.push(JSON.parse(opts.body));
+          return { ok: true, status: 200, json: async () => currentBindings };
+        }
+        return { ok: true, status: 200, json: async () => currentBindings };
+      }
+      if (u.includes('/meta-specs')) {
+        return { ok: true, status: 200, json: async () => registry };
+      }
+      return { ok: true, status: 200, json: async () => ({ content: '# Auth\n\nBody.\n', current_sha: 'sha-1' }) };
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    render(DetailPanel, { props: { entity: specEntityWithRepo } });
+    await fireEvent.click(screen.getByRole('tab', { name: /edit/i }));
+    // Wait for the bindings panel to load.
+    await screen.findByRole('checkbox', { name: /bind meta-spec security-standard/i });
+    return fetchMock;
+  }
+
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('renders required meta-specs pre-selected and locked; optional bindings editable', async () => {
+    await openEditTab();
+    // Required: pre-selected and locked (cannot be removed).
+    const requiredCheck = screen.getByRole('checkbox', { name: /bind meta-spec security-standard/i });
+    expect(requiredCheck.checked).toBe(true);
+    expect(requiredCheck.disabled).toBe(true);
+    // The bound optional meta-spec is selected at its saved pin (v1) with a
+    // version selector offering up to the current version (v2).
+    const optCheck = screen.getByRole('checkbox', { name: /bind meta-spec backend-developer/i });
+    expect(optCheck.checked).toBe(true);
+    expect(optCheck.disabled).toBe(false);
+    const versionSelect = screen.getByRole('combobox', { name: /pinned version for meta-spec backend-developer/i });
+    expect(versionSelect.value).toBe('1');
+    // The unbound optional meta-spec is unselected.
+    expect(screen.getByRole('checkbox', { name: /bind meta-spec reviewer/i }).checked).toBe(false);
+  });
+
+  it('saves the full binding set via the bindings endpoint when the selection changes', async () => {
+    await openEditTab();
+    // Select the unbound optional meta-spec (defaults to its current version).
+    await fireEvent.click(screen.getByRole('checkbox', { name: /bind meta-spec reviewer/i }));
+    // Bump the stale backend-developer pin to the current version.
+    const versionSelect = screen.getByRole('combobox', { name: /pinned version for meta-spec backend-developer/i });
+    await fireEvent.change(versionSelect, { target: { value: '2' } });
+    // Save is enabled only when dirty.
+    const saveBtn = screen.getByRole('button', { name: /save bindings/i });
+    expect(saveBtn.disabled).toBe(false);
+    await fireEvent.click(saveBtn);
+    await waitFor(() => expect(putPayloads.length).toBe(1));
+    // Declarative full-set replace: the payload IS the desired set —
+    // required stays in (locked), the bumped pin, and the new selection.
+    const bindings = putPayloads[0].bindings;
+    expect(bindings).toHaveLength(3);
+    const byId = Object.fromEntries(bindings.map((b) => [b.meta_spec_id, b.pinned_version]));
+    expect(byId['ms-req']).toBe(3);
+    expect(byId['ms-opt']).toBe(2);
+    expect(byId['ms-opt2']).toBe(5);
+    const { toastSuccess } = await import('../lib/toast.svelte.js');
+    await waitFor(() =>
+      expect(toastSuccess).toHaveBeenCalledWith(expect.stringContaining('re-approval'))
+    );
+  });
+
+  it('unbinding an optional meta-spec removes it from the saved set; required cannot be removed', async () => {
+    await openEditTab();
+    // Uncheck the bound optional meta-spec.
+    await fireEvent.click(screen.getByRole('checkbox', { name: /bind meta-spec backend-developer/i }));
+    // The locked required checkbox ignores interaction (disabled).
+    await fireEvent.click(screen.getByRole('checkbox', { name: /bind meta-spec security-standard/i }));
+    await fireEvent.click(screen.getByRole('button', { name: /save bindings/i }));
+    await waitFor(() => expect(putPayloads.length).toBe(1));
+    const bindings = putPayloads[0].bindings;
+    expect(bindings).toHaveLength(1);
+    expect(bindings[0].meta_spec_id).toBe('ms-req');
+    expect(bindings[0].pinned_version).toBe(3);
+  });
+});

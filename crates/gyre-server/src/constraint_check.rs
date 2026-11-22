@@ -1957,18 +1957,10 @@ mod tests {
         String::from_utf8(out.stdout).unwrap().trim().to_string()
     }
 
-    /// Compute the SHA256 of a meta-spec set JSON string (same algorithm as
-    /// `compute_meta_spec_set_sha`).
-    fn meta_spec_sha(json: &str) -> String {
-        use sha2::{Digest, Sha256};
-        let mut hasher = Sha256::new();
-        hasher.update(json.as_bytes());
-        hex::encode(hasher.finalize())
-    }
-
-    /// Set up the state with a workspace meta-spec set and agent persona so
-    /// that `build_agent_context` populates these fields correctly during
-    /// constraint evaluation.
+    /// Set up the state with a workspace, a REQUIRED approved meta-spec
+    /// scoped to it, and an agent persona so that `build_agent_context`
+    /// populates these fields correctly during constraint evaluation.
+    /// Returns the expected effective-set SHA (registry model).
     async fn seed_agent_context(
         state: &crate::AppState,
         workspace_id: &str,
@@ -1997,19 +1989,30 @@ mod tests {
             .await
             .unwrap();
 
-        // Store a meta-spec set for the workspace (canonical serialization —
-        // the SHA is computed over the effective set's serialization).
-        let meta_set = crate::api::meta_specs::MetaSpecSet {
-            workspace_id: workspace_id.to_string(),
-            ..Default::default()
+        // A REQUIRED approved meta-spec scoped to the workspace — the
+        // registry-model effective set whose canonical snapshot SHA
+        // `build_agent_context` stamps (the retired KV set model hashed
+        // the stored set JSON instead).
+        let content_hash = format!("hash-{workspace_id}-v1");
+        let ms = gyre_domain::meta_spec::MetaSpec {
+            id: Id::new(format!("ms-{workspace_id}")),
+            kind: gyre_domain::meta_spec::MetaSpecKind::Persona,
+            name: format!("persona-{workspace_id}"),
+            scope: gyre_domain::meta_spec::MetaSpecScope::Workspace,
+            scope_id: Some(workspace_id.to_string()),
+            prompt: "be rigorous".to_string(),
+            version: 1,
+            content_hash: content_hash.clone(),
+            required: true,
+            approval_status: gyre_domain::meta_spec::MetaSpecApprovalStatus::Approved,
+            approved_by: Some("admin".to_string()),
+            approved_at: Some(1_700_000_000),
+            approved_content_hash: Some(content_hash.clone()),
+            created_by: "admin".to_string(),
+            created_at: 1_700_000_000,
+            updated_at: 1_700_000_000,
         };
-        let meta_set_json = serde_json::to_string(&meta_set).unwrap();
-        state
-            .meta_spec_sets
-            .upsert(&ws_id, &meta_set_json)
-            .await
-            .unwrap();
-        let sha = meta_spec_sha(&meta_set_json);
+        state.meta_specs.create(&ms).await.unwrap();
 
         // Store agent persona in KV (same key as build_agent_context reads).
         state
@@ -2018,7 +2021,15 @@ mod tests {
             .await
             .unwrap();
 
-        sha
+        // Expected SHA over the effective set's canonical snapshot tuple,
+        // constructed by hand from the seeded spec (not via the production
+        // resolver) so the assertion checks real resolution.
+        crate::reconciliation::meta_spec_snapshot_sha(&[gyre_domain::MetaSpecSnapshot {
+            meta_spec_id: ms.id.to_string(),
+            kind: ms.kind.as_str().to_string(),
+            content_hash,
+            version: 1,
+        }])
     }
 
     #[tokio::test]
@@ -2412,23 +2423,39 @@ mod tests {
             .await
             .unwrap();
 
-        // Store a meta-spec set for the workspace (canonical serialization).
-        let meta_set = crate::api::meta_specs::MetaSpecSet {
-            workspace_id: "ws-ctx-1".to_string(),
-            ..Default::default()
+        // A REQUIRED approved meta-spec scoped to the workspace — the
+        // registry-model effective set.
+        let content_hash = "hash-ws-ctx-1-v1".to_string();
+        let ms = gyre_domain::meta_spec::MetaSpec {
+            id: Id::new("ms-ws-ctx-1"),
+            kind: gyre_domain::meta_spec::MetaSpecKind::Standard,
+            name: "ctx-standard".to_string(),
+            scope: gyre_domain::meta_spec::MetaSpecScope::Workspace,
+            scope_id: Some("ws-ctx-1".to_string()),
+            prompt: "be rigorous".to_string(),
+            version: 1,
+            content_hash: content_hash.clone(),
+            required: true,
+            approval_status: gyre_domain::meta_spec::MetaSpecApprovalStatus::Approved,
+            approved_by: Some("admin".to_string()),
+            approved_at: Some(1_700_000_000),
+            approved_content_hash: Some(content_hash.clone()),
+            created_by: "admin".to_string(),
+            created_at: 1_700_000_000,
+            updated_at: 1_700_000_000,
         };
-        let meta_set_json = serde_json::to_string(&meta_set).unwrap();
-        state
-            .meta_spec_sets
-            .upsert(&ws_id, &meta_set_json)
-            .await
-            .unwrap();
+        state.meta_specs.create(&ms).await.unwrap();
 
-        // Compute expected SHA256.
-        use sha2::{Digest, Sha256};
-        let mut hasher = Sha256::new();
-        hasher.update(meta_set_json.as_bytes());
-        let expected_sha = hex::encode(hasher.finalize());
+        // Expected SHA over the effective set's canonical snapshot tuple,
+        // constructed by hand from the seeded spec.
+        let expected_sha = crate::reconciliation::meta_spec_snapshot_sha(&[
+            gyre_domain::MetaSpecSnapshot {
+                meta_spec_id: ms.id.to_string(),
+                kind: ms.kind.as_str().to_string(),
+                content_hash,
+                version: 1,
+            },
+        ]);
 
         let ctx = build_agent_context(&state, "agent-ctx-1", "TASK-CTX-1", &ws_id).await;
 

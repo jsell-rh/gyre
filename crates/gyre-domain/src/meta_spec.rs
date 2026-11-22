@@ -205,8 +205,8 @@ pub fn canonical_bindings_sha(bindings: &[MetaSpecBinding]) -> String {
 /// A registry-resolved snapshot of one meta-spec at a specific version,
 /// shaped `{meta_spec_id, kind, content_hash, version}` — the tuple shape
 /// the meta-spec-reconciliation.md amendments row specces for snapshot data
-/// exchanged on the merge-drift path (replacing the retired model's
-/// `path@sha` `MetaSpecPinnedEntry` strings).
+/// exchanged on the merge-drift path (the retired set model's `path@sha`
+/// pin strings are gone).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MetaSpecSnapshot {
     pub meta_spec_id: String,
