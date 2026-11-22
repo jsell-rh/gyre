@@ -95,7 +95,7 @@ Canonical spec: `specs/system/explorer-canvas.md`. Source: `678a8ac3e3bfeafeb66c
 
 **Status: blocked-on-external-implementation — no closure claimed; section `c3a39b320325eff390c4b56c` remains open.**
 
-Round 65. Re-verification ran fresh from the round-64 checkpoint head `ba235bc0` (no merge/rebase pending; tree clean at start apart from the stage's standard task-file reset). Fresh `git fetch origin` shows `origin/main` **unchanged from rounds 61–64**: still `73c504f2` (task-301 meta-spec API only). Both external dependencies were re-probed with deterministic git-refs/source/registry evidence saved to `/tmp/stage/review-evidence/task306-round65-probe.txt`. State is identical to rounds 61–64.
+Round 66. Re-verification ran fresh from the round-65 checkpoint head `ad20cf5a` (no merge/rebase pending; tree clean at start). Fresh `git fetch origin` shows `origin/main` **unchanged from rounds 61–65**: still `73c504f2` (task-301 meta-spec API only). Both external dependencies were re-probed with deterministic git-refs/source/registry evidence saved to `/tmp/stage/review-evidence/task306-round66-probe.txt`. State is identical to rounds 61–65.
 
 ### Realized-model graph-node-metrics backend — NOT landed
 
@@ -115,7 +115,7 @@ There is a genuine, unresolved conflict between two canonical specs over the ren
 
 ### Round output
 
-Task file updated to round 65 with truthful `blocked-on-external-implementation` progress; coverage row round reference updated (row stays open); 0/7 acceptance criteria ticked. Only `specs/` files changed — no Rust, no web, so no formatting or build work was needed. Per the assignment constraint, large gyre-server builds/test compilation run in the independent verifier.
+Task file updated to round 66 with truthful `blocked-on-external-implementation` progress; coverage row round reference updated (row stays open); 0/7 acceptance criteria ticked. Only `specs/` files changed — no Rust, no web, so no formatting or build work was needed. Per the assignment constraint, large gyre-server builds/test compilation run in the independent verifier.
 
 ### Remaining work to unblock
 
