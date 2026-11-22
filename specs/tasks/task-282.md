@@ -3,7 +3,7 @@ title: "Serve the spec's literal /api/v1/deps/* API surface (all ten rows, ?work
 spec_ref: "Spec gap spec-cab97078efffe0fbfb7339be / deps-spec-route-paths / ed9f34316476"
 depends_on: [task-281]
 progress: ready-for-review
-commits: ["53b8b41983bdf52dc96e9f5d72dd8c8621a8eca8", "88309116208775e04bc778364f335ae5afcb6688"]
+commits: ["53b8b41983bdf52dc96e9f5d72dd8c8621a8eca8", "88309116208775e04bc778364f335ae5afcb6688", "f5703622638027ab45be016c909da3e5cbe02c8a"]
 ---
 
 ## Required behavior
@@ -90,15 +90,30 @@ All ten routes are registered in the ABAC resolver
 `:repo_id` param so the repo-to-workspace-to-tenant scope chain resolves;
 the flat write routes enforce per-handler containment).
 
+### Verification-repair round (f5703622)
+
+The prior verification round failed on formatting only: rustfmt diffs on
+changed lines in `api/dependencies.rs` and `api/mod.rs`, plus two
+`clippy::doc_lazy_continuation` lints where the `add_manual_dependency` doc
+comment's closing paragraph parsed as a lazy continuation of the preceding
+list. Fixed with `cargo fmt -p gyre-server` and one blank `///` separator
+line — whitespace and a doc comment only, zero behavior change (per this
+assignment's instruction not to cold-build an unchanged crate for
+formatting-only feedback; the verifier's checks.sh re-runs rustfmt/clippy on
+the exact head).
+
 ### Test and gate evidence
 
-- `cargo check -p gyre-server --lib --tests` — exit 0 (after finishing the
-  previous checkpoint's unfinished fix: Debug derives on the response DTOs
-  the new `expect_err`-based probe tests require; response shapes unchanged).
+- `cargo check -p gyre-server --lib --tests` — exit 0 at the prior checkpoint
+  (after finishing the previous checkpoint's unfinished fix: Debug derives on
+  the response DTOs the new `expect_err`-based probe tests require; response
+  shapes unchanged).
 - `cargo check -p gyre-cli` — exit 0; the CLI consumes the existing routes
   over HTTP and calls no handler directly, so it is unchanged.
 - `scripts/check-abac-route-registry.sh`, `check-abac-exempt-handlers.sh`,
-  `check-forged-scope-fields.sh` — all pass, no new exemption entries.
+  `check-forged-scope-fields.sh` — all pass at this head, no new exemption
+  entries.
+- `cargo fmt --check -p gyre-server` — exit 0 at this head.
 - Standalone axum-0.7 routing probe (registered the exact route shapes):
   all ten literal rows match — zero 404s, no Router conflict panic, and a
   GET on the flat `:id` path 405s, proving the DELETE registration matched
