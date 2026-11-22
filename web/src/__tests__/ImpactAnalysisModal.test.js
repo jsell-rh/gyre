@@ -86,8 +86,26 @@ const MOCK_EDGES = [
 ];
 
 const MOCK_CASCADE_RESULTS = [
-  { repo_id: 'repo-billing', status: 'passed' },
-  { repo_id: 'repo-auth', status: 'failed' },
+  {
+    id: 'ctr-1',
+    dependent_repo_id: 'repo-billing',
+    merged_repo_id: 'repo-main',
+    merge_commit_sha: 'abc123def4567890abc123def4567890abc12345',
+    cascade_task_id: 'ct-1',
+    passed: true,
+    failure_details: null,
+    recorded_at: 1700003000,
+  },
+  {
+    id: 'ctr-2',
+    dependent_repo_id: 'repo-auth',
+    merged_repo_id: 'repo-main',
+    merge_commit_sha: 'abc123def4567890abc123def4567890abc12345',
+    cascade_task_id: 'ct-2',
+    passed: false,
+    failure_details: 'test_auth failed: expected 200, got 500',
+    recorded_at: 1700004000,
+  },
 ];
 
 // ── API mock ──────────────────────────────────────────────────────────
@@ -201,7 +219,7 @@ describe('ImpactAnalysisModal', () => {
 
   // ── Cascade test section ──────────────────────────────────────────
 
-  it('shows cascade test status with functional trigger button when not configured', async () => {
+  it('shows cascade test status with functional trigger button when results unavailable', async () => {
     api.repoBlastRadius.mockResolvedValue(MOCK_BLAST_RADIUS);
 
     const { container } = render(ImpactAnalysisModal, {
@@ -214,13 +232,30 @@ describe('ImpactAnalysisModal', () => {
 
     const cascade = container.querySelector('[data-testid="cascade-section"]');
     expect(cascade.textContent).toContain('Cascade Tests');
-    expect(cascade.textContent).toContain('not configured');
+    expect(cascade.textContent).toContain('unavailable');
 
     const triggerBtn = container.querySelector('[data-testid="trigger-cascade-btn"]');
     expect(triggerBtn).toBeTruthy();
     expect(triggerBtn.textContent).toContain('Trigger Cascade Tests');
     // Button is enabled (functional) — not permanently disabled
     expect(triggerBtn.disabled).toBe(false);
+  });
+
+  it('shows cascade tests as not yet run when the API returns no results', async () => {
+    api.repoBlastRadius.mockResolvedValue(MOCK_BLAST_RADIUS);
+    api.cascadeTestResults.mockResolvedValue([]);
+
+    const { container } = render(ImpactAnalysisModal, {
+      props: { open: true, repoId: 'repo-main', repoName: 'Main Service' },
+    });
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="cascade-status"]')).toBeTruthy();
+    });
+
+    expect(container.querySelector('[data-testid="cascade-status"]').textContent).toContain('not yet run');
+    // No cascade results section — nothing has run
+    expect(container.querySelector('[data-testid="cascade-results"]')).toBeFalsy();
   });
 
   it('shows cascade test results per dependent when available', async () => {
@@ -242,6 +277,34 @@ describe('ImpactAnalysisModal', () => {
     const cascade = container.querySelector('[data-testid="cascade-section"]');
     expect(cascade.textContent).toContain('Pass');
     expect(cascade.textContent).toContain('Fail');
+    // Per-result identity: merge SHA and failure details from the durable
+    // records are shown, not a placeholder.
+    expect(cascade.textContent).toContain('abc123de');
+    expect(cascade.textContent).toContain('test_auth failed');
+  });
+
+  it('populates the per-dependent test-status column from cascade results', async () => {
+    api.repoBlastRadius.mockResolvedValue(MOCK_BLAST_RADIUS);
+    api.cascadeTestResults.mockResolvedValue(MOCK_CASCADE_RESULTS);
+
+    const { container } = render(ImpactAnalysisModal, {
+      props: { open: true, repoId: 'repo-main', repoName: 'Main Service' },
+    });
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="health-table"]')).toBeTruthy();
+    });
+
+    const rows = container.querySelectorAll('[data-testid="health-row"]');
+    expect(rows.length).toBe(5);
+
+    const testCells = Array.from(rows).map(r => r.querySelector('.health-test').textContent);
+    // repo-billing passed, repo-auth failed, the three transitive
+    // dependents have no result → unknown (never a hardcoded '--').
+    expect(testCells).toContain('passing');
+    expect(testCells).toContain('failing');
+    expect(testCells.filter(t => t === 'unknown').length).toBe(3);
+    expect(testCells).not.toContain('--');
   });
 
   it('trigger cascade tests button calls API on click', async () => {
@@ -260,6 +323,31 @@ describe('ImpactAnalysisModal', () => {
     expect(triggerBtn.disabled).toBe(false);
     await fireEvent.click(triggerBtn);
     expect(api.triggerCascadeTests).toHaveBeenCalledWith('repo-main');
+    // The trigger refreshes the modal data (results re-fetched after the
+    // call, not silently dropped).
+    await waitFor(() => {
+      expect(api.cascadeTestResults.mock.calls.length).toBeGreaterThanOrEqual(2);
+    });
+  });
+
+  it('surfaces a trigger refusal instead of silently dropping it', async () => {
+    api.repoBlastRadius.mockResolvedValue(MOCK_BLAST_RADIUS);
+    api.triggerCascadeTests.mockRejectedValue(new Error('API /repos/repo-main/cascade-tests/trigger: 409 Conflict'));
+
+    const { container } = render(ImpactAnalysisModal, {
+      props: { open: true, repoId: 'repo-main', repoName: 'Main Service' },
+    });
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="trigger-cascade-btn"]')).toBeTruthy();
+    });
+
+    await fireEvent.click(container.querySelector('[data-testid="trigger-cascade-btn"]'));
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="cascade-error"]')).toBeTruthy();
+    });
+    expect(container.querySelector('[data-testid="cascade-error"]').textContent).toContain('409');
   });
 
   // ── Breaking change badge ─────────────────────────────────────────
@@ -469,7 +557,7 @@ describe('ImpactAnalysisModal', () => {
     expect(errorEl.textContent).toContain('Failed to load blast radius');
   });
 
-  it('shows cascade tests as not configured when API returns null', async () => {
+  it('shows cascade tests as unavailable when the results fetch fails', async () => {
     api.repoBlastRadius.mockResolvedValue(MOCK_BLAST_RADIUS);
     api.cascadeTestResults.mockResolvedValue(null);
 
@@ -481,7 +569,7 @@ describe('ImpactAnalysisModal', () => {
       expect(container.querySelector('[data-testid="cascade-status"]')).toBeTruthy();
     });
 
-    expect(container.querySelector('[data-testid="cascade-status"]').textContent).toContain('not configured');
+    expect(container.querySelector('[data-testid="cascade-status"]').textContent).toContain('unavailable');
     // No cascade results section — data not available
     expect(container.querySelector('[data-testid="cascade-results"]')).toBeFalsy();
   });
