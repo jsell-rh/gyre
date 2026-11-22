@@ -2,8 +2,8 @@
 title: "Gate all implementation work on approved specs"
 spec_ref: "Spec gap spec-41a92c20354c6a108e6074e3 / approval-single-trigger / 4a3f940495a8"
 depends_on: []
-progress: not-started
-commits: []
+progress: complete
+commits: ["611bc5ffae121a96eb1becf6c233901e541d881f", "ae87cf5bb64387c932c827b613d3c8d99afaf2b0", "52397d1622d72bfe9f63fe42ca85484a124c1ae5", "6c7ce4091376fc85d674281dc7559842a3bed04e", "569ea13821554e618ee7446aecd69c72a35a8ce7", "d5662b9e702f3691db12a406b3d9e8b5c4363e6f"]
 ---
 
 ## Required behavior
@@ -61,3 +61,64 @@ Canonical spec: `specs/system/agent-runtime.md`. Source: `678a8ac3e3bfeafeb66cdb
     ]
   }
 ]
+
+## Shipped
+
+The single-trigger gates (task-creation gate on POST /api/v1/tasks and
+MCP `gyre_create_task`, Phase-4 scheduler gate with the
+`spec-approval-missing` skip label, direct-spawn 403 on
+POST /api/v1/agents/spawn for task-bound implementation workers) shipped
+in the earlier rounds of this task and are unchanged.
+
+### This round: review repair 96f8dc53 (coordination-leg stall)
+
+The Phase-4 gate permanently stalled the coordination leg of the
+legitimate chain: `run_workspace_orchestrator` created the Coordination
+task with `spec_path` only, and `assess_coordination` propagated the
+absent `spec_ref` to its Implementation review sub-task, which stayed
+Backlog with the skip label forever (UpdateTaskRequest cannot set
+spec_ref; nothing re-pins existing tasks). Fixed in `611bc5ff`:
+
+- `signal_chain.rs` `run_workspace_orchestrator`: the Coordination task
+  now pins `spec_ref = spec_path@spec_sha` — the approved SOURCE spec
+  version, mirroring the delegation leg's pin — so the review sub-task
+  inherits an Approved pinned ref and the Phase-4 gate passes for the
+  legitimate chain (single-trigger preserved: the pinned spec is the
+  approval that triggered the coordination).
+- `mcp.rs` `handle_decompose_spec`: resolve-and-pin before creating any
+  sub-task — the parent's `spec_ref` when present, else the ledger's
+  current SHA resolved from the parent's bare `spec_path` (the same
+  fallback `decompose_delegation` applies to the delegation leg); a
+  parent whose spec version cannot be pinned (no ledger SHA, or no spec
+  reference at all) is refused with a tool error naming the
+  single-trigger requirement and no task row is written, rather than
+  fabricating permanently-stalled Backlog rows.
+- `docs/api-reference.md`: the `gyre_decompose_spec` row documents the
+  resolve-and-pin and refusal semantics.
+
+### Test evidence
+
+- `cargo check -p gyre-server --tests` — exit 0 on this branch head
+  `611bc5ff` (includes all edited test code); log at
+  /tmp/stage/review-evidence/cargo-check-task297-repair.log.
+- `rustfmt --check` on both edited Rust files — clean.
+- Server test execution remains mechanically deferred to the independent
+  verifier (gyre-server test codegen exceeds this sandbox's build
+  budget; the build wrapper permits `cargo check` only). Required
+  probes: `cargo nextest run -p gyre-server signal_chain::tests` (the
+  decomposes test now asserts BOTH the delegation and coordination
+  review sub-tasks spawn — at the broken candidate the coordination twin
+  stayed Backlog with the skip label indefinitely; the two unchanged
+  gate tests `scheduler_skips_unapproved_spec_and_spawns_approved_twin`
+  and `scheduler_stops_spawn_when_approval_invalidated_by_push` must
+  stay green), `cargo nextest run -p gyre-server mcp::tests` (updated
+  `mcp_decompose_spec_creates_subtasks_in_repo_scope`, new
+  `mcp_decompose_spec_refuses_unpinnable_parent`, unchanged
+  `mcp_create_task_implementation_requires_approved_spec`), then the
+  full `cargo nextest run --all` (still outstanding from the previous
+  round's fail-fast-cancelled CI run).
+- Analysis and probe records:
+  /tmp/stage/review-evidence/task-297-review-repair.md.
+- No assertion was weakened: every pre-existing assertion remains, and
+  the previously scoped Phase-4 assertions now additionally cover the
+  coordination twin.
