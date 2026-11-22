@@ -3,7 +3,7 @@ title: "Meta-spec API at specced routes with scope-level admin auth"
 spec_ref: "Spec gap spec-41a92c20354c6a108e6074e3 / meta-spec-api-contract / 4a3f940495a8"
 depends_on: []
 progress: ready-for-review
-commits: ["c5a157de6c437f3f3c7f30156d88c46545fea89b", "d280cff1bf06a1c0d5a15d10024d448cee3a842b", "7a24bf2c5a9f20a10b6f629650b8528da19465f4"]
+commits: ["7a24bf2c5a9f20a10b6f629650b8528da19465f4", "d280cff1bf06a1c0d5a15d10024d448cee3a842b", "c5a157de6c437f3f3c7f30156d88c46545fea89b"]
 ---
 
 ## Required behavior
