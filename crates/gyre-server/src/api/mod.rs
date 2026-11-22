@@ -767,6 +767,37 @@ pub fn api_router() -> Router<Arc<AppState>> {
             "/api/v1/dependencies/breaking/:id/acknowledge",
             post(dependencies::acknowledge_breaking_change),
         )
+        // Spec-literal /api/v1/deps/* surface (dependency-graph.md §API,
+        // task-282): additions alongside the implemented routes above —
+        // the CLI and UI keep consuming those; these paths serve a
+        // consumer written against the canonical spec table. The same
+        // handler cores back both surfaces. matchit prioritizes the static
+        // `graph`/`repo`/`stale`/`breaking`/`manual` segments over the
+        // `:id` param, so the flat DELETE route keeps its distinct match
+        // (a dependency whose id is literally "breaking" or "stale" is
+        // unreachable on the flat DELETE path — the same static-outranks-
+        // param property the /meta-specs/preview routes rely on).
+        .route("/api/v1/deps/graph", get(dependencies::get_graph))
+        .route(
+            "/api/v1/deps/repo/:repo_id/dependents",
+            get(dependencies::list_dependents),
+        )
+        .route(
+            "/api/v1/deps/repo/:repo_id/dependencies",
+            get(dependencies::list_dependencies),
+        )
+        .route(
+            "/api/v1/deps/repo/:repo_id/impact",
+            get(dependencies::blast_radius),
+        )
+        .route("/api/v1/deps/stale", get(dependencies::list_stale_dependencies))
+        .route("/api/v1/deps/breaking", get(dependencies::list_breaking_changes))
+        .route("/api/v1/deps/manual", post(dependencies::add_manual_dependency))
+        .route("/api/v1/deps/:id", delete(dependencies::delete_dependency_by_id))
+        .route(
+            "/api/v1/deps/breaking/:id/acknowledge",
+            post(dependencies::deps_acknowledge_breaking_change),
+        )
         // Per-workspace dependency enforcement policy (TASK-020)
         .route(
             "/api/v1/workspaces/:id/dependency-policy",

@@ -15,7 +15,7 @@
 //! Own test binary (own process): `build_state` reads `GYRE_DATABASE_URL`
 //! from the process environment.
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::Json;
 use gyre_common::Id;
 use gyre_domain::{
@@ -109,7 +109,9 @@ async fn graph_edges_carry_version_and_breaking_change_detail() {
     state.breaking_changes.create(&bc_ack).await.unwrap();
 
     // ── Tenant-wide graph ────────────────────────────────────────────────
-    let Json(graph) = get_graph(State(state.clone())).await.unwrap();
+    let Json(graph) = get_graph(State(state.clone()), Query(Default::default()))
+        .await
+        .unwrap();
     assert_eq!(graph.edges.len(), 1, "exactly one edge in the graph");
     let e = &graph.edges[0];
     assert_eq!(e.id, "edge-1");
