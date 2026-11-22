@@ -2,8 +2,8 @@
 title: "Gate all implementation work on approved specs"
 spec_ref: "Spec gap spec-41a92c20354c6a108e6074e3 / approval-single-trigger / 4a3f940495a8"
 depends_on: []
-progress: ready-for-review
-commits: ["bb42b05c13f78e387cd5fa3d3f41ac17d4979124", "611bc5ffae121a96eb1becf6c233901e541d881f", "ae87cf5bb64387c932c827b613d3c8d99afaf2b0", "52397d1622d72bfe9f63fe42ca85484a124c1ae5", "6c7ce4091376fc85d674281dc7559842a3bed04e", "569ea13821554e618ee7446aecd69c72a35a8ce7", "d5662b9e702f3691db12a406b3d9e8b5c4363e6f"]
+progress: not-started
+commits: []
 ---
 
 ## Required behavior
@@ -61,53 +61,3 @@ Canonical spec: `specs/system/agent-runtime.md`. Source: `678a8ac3e3bfeafeb66cdb
     ]
   }
 ]
-
-## Shipped
-
-The single-trigger gates shipped in the earlier rounds of this task and
-are unchanged: the task-creation gate on POST /api/v1/tasks and MCP
-`gyre_create_task` (approved-ledger resolution at the pinned
-path@sha), the Phase-4 scheduler gate with the `spec-approval-missing`
-skip label, and the direct-spawn 403 for task-bound implementation
-workers on POST /api/v1/agents/spawn.
-
-### This round: CI repair bb42b05c (storage-isolation regression)
-
-The candidate CI run (PR head 01752c5d, nextest run 45014043762)
-failed `git_integration::push_records_agent_commit_provenance` at
-git_integration.rs:187 — POST /api/v1/repos returned an error body
-with no `id` inside the `create_repo` helper. Root cause: task-308's
-durable-default change (87e08778) added
-`gyre_server::select_in_memory_storage()` to the pre-existing
-`start_server` helpers but missed the two state-returning
-`start_server_with_state` helpers this task had added in the meantime
-(git_integration.rs, auth_integration.rs). Those harnesses built state
-with `GYRE_DATABASE_URL` unset — now durable SQLite at the platform
-default data path — so every such test process (plus its merge
-processor) became a concurrent writer on the operator's real default
-database file; the provenance test's repo insert lost the write race
-against `merge_queue_auto_merges_mr_and_commit_on_main` on the same
-file. Both helpers now opt into in-memory storage exactly like
-`start_server` (commit `bb42b05c`, test-harness-only: no product code,
-no assertion changed).
-
-### Test evidence
-
-- `cargo check -p gyre-server --tests` — exit 0 on `bb42b05c` (log:
-  /tmp/stage/review-evidence/cargo-check-task297-ci-repair.log).
-- `python3 scripts/check-rustfmt-diff.py HEAD^1` — exit 0, changed
-  lines clean.
-- Server test execution remains mechanically deferred to the
-  independent verifier (the sandbox build wrapper blocks gyre-server
-  test codegen within the model's 4 GiB budget). Required probes:
-  `cargo nextest run -p gyre-server git_integration` (the previously
-  failing `push_records_agent_commit_provenance` plus both
-  `merge_queue_*` twins that shared the default DB),
-  `cargo nextest run -p gyre-server auth_integration` (the other fixed
-  harness), then the full `cargo nextest run --all` (the failed CI run
-  was fail-fast cancelled with 150 tests not run).
-- Analysis and probe records:
-  /tmp/stage/review-evidence/task-297-ci-repair.md.
-- No assertion was weakened; the fix restores the isolation these
-tests were written against (they were green before the task-308
-  durable default landed in this branch).
