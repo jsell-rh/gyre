@@ -12,6 +12,11 @@ use axum::{
 use tower::ServiceExt; // oneshot
 
 async fn test_state() -> std::sync::Arc<gyre_server::AppState> {
+    // Explicit in-memory opt-in (architecture.md §Storage): the default
+    // (unset) backend is now durable SQLite at the platform default data
+    // path — a test run must never touch the operator's real database
+    // file. Idempotent and race-free (Once-guarded).
+    gyre_server::select_in_memory_storage();
     gyre_server::build_state("gyre-test-token", "http://localhost:0", None)
 }
 

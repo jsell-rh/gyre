@@ -1196,8 +1196,20 @@ fn build_cors_layer() -> tower_http::cors::CorsLayer {
     }
 }
 
-/// Build application state. When `GYRE_DATABASE_URL` is set (e.g. `sqlite://gyre.db`),
-/// uses SQLite-backed repositories; otherwise falls back to in-memory stores.
+/// Build application state. Storage backend selection
+/// (specs/development/architecture.md §Storage — "SQLite as the default
+/// (simple, vertical scaling, zero ops)"):
+///
+/// - `GYRE_DATABASE_URL=memory` — explicit stateless opt-in: every port
+///   falls back to an in-memory implementation and nothing persists
+///   across restarts (the pre-default-SQLite behavior, now opt-in only);
+/// - `postgres://…` / `postgresql://…` — PostgreSQL via Diesel;
+/// - `sqlite://<path>` (or a bare path) — SQLite at that path;
+/// - unset (the shipped default) — durable SQLite at the platform
+///   default data path ([`default_sqlite_db_path`]), so a
+///   zero-configuration `cargo run -p gyre-server` persists all entities
+///   across restarts.
+///
 /// Used by both production (main) and integration tests.
 /// Resolve the repositories root once against this process's working directory
 /// so persisted repo paths and child processes see the same absolute path.
@@ -1710,6 +1722,95 @@ fn load_spiffe_service(
     )
 }
 
+/// Platform-appropriate absolute default SQLite database path
+/// (specs/development/architecture.md §Storage — SQLite is the default
+/// durable backend, zero ops).
+///
+/// `<data-dir>/gyre/gyre.db` where `<data-dir>` is the XDG data home on
+/// Linux (`$XDG_DATA_HOME`, default `~/.local/share`),
+/// `~/Library/Application Support` on macOS and `%APPDATA%` on Windows
+/// (via the `dirs` crate). ALWAYS absolute — a bare relative filename
+/// would resolve against whatever cwd the server happens to start in and
+/// silently point different boots at different databases
+/// (scripts/check-relative-path-defaults.sh). Parent directories are
+/// auto-created by `build_state` on first boot.
+pub fn default_sqlite_db_path() -> String {
+    let data_dir = dirs::data_dir().unwrap_or_else(|| {
+        panic!(
+            "cannot determine the platform data directory for the default SQLite database \
+             (is $HOME set?); set GYRE_DATABASE_URL to an explicit sqlite://<path> URL"
+        )
+    });
+    data_dir.join("gyre").join("gyre.db").display().to_string()
+}
+
+/// Explicitly select the stateless in-memory storage mode for this
+/// process — the in-process equivalent of the `GYRE_DATABASE_URL=memory`
+/// sentinel (specs/development/architecture.md §Storage).
+///
+/// The default (unset) mode is durable SQLite at
+/// [`default_sqlite_db_path`], so in-process harnesses (integration test
+/// binaries, `#[cfg(test)]` suites inside the crate) that want the
+/// stateless behavior must opt in explicitly: without this call, building
+/// state would open the operator's real default database. Writes the
+/// sentinel exactly once per process (`std::sync::Once`), so concurrent
+/// callers race nothing and every later `build_state` in the process sees
+/// the sentinel.
+///
+/// Test binaries that also point `GYRE_DATABASE_URL` at real databases
+/// per test must NOT use this (the sentinel is sticky for the process);
+/// they keep their own serialized env-var discipline instead.
+pub fn select_in_memory_storage() {
+    static SET_SENTINEL: std::sync::Once = std::sync::Once::new();
+    SET_SENTINEL.call_once(|| {
+        // SAFETY: the environment write happens exactly once per process,
+        // serialized by `Once`; the only reader of this variable in the
+        // process (`build_state`) runs after its caller's `call_once`
+        // returns, which orders it after the write.
+        unsafe { std::env::set_var("GYRE_DATABASE_URL", "memory") };
+    });
+}
+
+/// Which durable backend `build_state` opens, derived from
+/// `GYRE_DATABASE_URL` (specs/development/architecture.md §Storage).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum StorageSelection {
+    /// `GYRE_DATABASE_URL=memory` — explicit stateless opt-in.
+    InMemory,
+    /// `postgres://` / `postgresql://` URL — PostgreSQL via Diesel.
+    Postgres(String),
+    /// `sqlite://<path>` (or bare path) URL — SQLite at that path.
+    SqliteExplicit(String),
+    /// Unset — durable SQLite at the platform default data path
+    /// ([`default_sqlite_db_path`]).
+    SqliteDefault(String),
+}
+
+impl StorageSelection {
+    fn resolve(db_url: Option<&str>) -> Self {
+        match db_url {
+            // The stateless sentinel: filtered out BEFORE the sqlite-path
+            // branch so it is never parsed as a sqlite file path.
+            Some("memory") => Self::InMemory,
+            Some(u) if u.starts_with("postgres://") || u.starts_with("postgresql://") => {
+                Self::Postgres(u.to_string())
+            }
+            Some(u) => Self::SqliteExplicit(u.strip_prefix("sqlite://").unwrap_or(u).to_string()),
+            None => Self::SqliteDefault(default_sqlite_db_path()),
+        }
+    }
+}
+
+/// Open (or create) the SQLite database at `path`, running the Diesel
+/// migrations. Failures abort startup: silently continuing without the
+/// configured durable store would turn every restart into data loss.
+fn open_sqlite(path: &str) -> Arc<gyre_adapters::SqliteStorage> {
+    Arc::new(
+        gyre_adapters::SqliteStorage::new(path)
+            .unwrap_or_else(|e| panic!("Failed to open SQLite at {path}: {e}")),
+    )
+}
+
 pub fn build_state(
     auth_token: &str,
     base_url: &str,
@@ -1740,25 +1841,48 @@ pub fn build_state(
         .unwrap_or(100);
 
     let db_url = std::env::var("GYRE_DATABASE_URL").ok();
-    let sqlite_db: Option<Arc<gyre_adapters::SqliteStorage>> = db_url
-        .as_deref()
-        .filter(|u| !u.starts_with("postgres://") && !u.starts_with("postgresql://"))
-        .map(|url| {
-            let path = url.strip_prefix("sqlite://").unwrap_or(url).to_string();
-            Arc::new(
-                gyre_adapters::SqliteStorage::new(&path)
-                    .unwrap_or_else(|e| panic!("Failed to open SQLite at {path}: {e}")),
-            )
-        });
-    let pg_db: Option<Arc<gyre_adapters::PgStorage>> = db_url
-        .as_deref()
-        .filter(|u| u.starts_with("postgres://") || u.starts_with("postgresql://"))
-        .map(|url| {
-            Arc::new(
+    let selection = StorageSelection::resolve(db_url.as_deref());
+    let sqlite_db: Option<Arc<gyre_adapters::SqliteStorage>> = match &selection {
+        StorageSelection::InMemory => {
+            tracing::info!(
+                "storage: in-memory (GYRE_DATABASE_URL=memory; state is lost on restart)"
+            );
+            None
+        }
+        StorageSelection::Postgres(_) => None,
+        StorageSelection::SqliteExplicit(path) => {
+            tracing::info!(path, "storage: SQLite (explicit GYRE_DATABASE_URL)");
+            Some(open_sqlite(path))
+        }
+        StorageSelection::SqliteDefault(path) => {
+            tracing::info!(
+                path,
+                "storage: SQLite (default data path; durable across restarts)"
+            );
+            // Auto-create the default data directory so a zero-configuration
+            // first boot works; an explicit path keeps its existing behavior
+            // (a missing parent dir surfaces the open error below).
+            if let Some(parent) = std::path::Path::new(path).parent() {
+                std::fs::create_dir_all(parent).unwrap_or_else(|e| {
+                    panic!(
+                        "Failed to create default SQLite data directory {}: {e}",
+                        parent.display()
+                    )
+                });
+            }
+            Some(open_sqlite(path))
+        }
+    };
+    let pg_db: Option<Arc<gyre_adapters::PgStorage>> = match &selection {
+        StorageSelection::Postgres(url) => {
+            tracing::info!(url, "storage: PostgreSQL (GYRE_DATABASE_URL)");
+            Some(Arc::new(
                 gyre_adapters::PgStorage::new(url)
                     .unwrap_or_else(|e| panic!("Failed to connect to PostgreSQL: {e}")),
-            )
-        });
+            ))
+        }
+        _ => None,
+    };
     let db_storage = sqlite_db.clone();
 
     // Health-probe handle to whichever durable backend is configured
@@ -2830,6 +2954,45 @@ mod tests {
 
     fn test_app() -> Router {
         build_router(mem::test_state())
+    }
+
+    #[test]
+    fn storage_selection_matrix() {
+        // The stateless sentinel — filtered out before the sqlite branch so
+        // it is never parsed as a sqlite file path.
+        assert_eq!(
+            StorageSelection::resolve(Some("memory")),
+            StorageSelection::InMemory
+        );
+        // PostgreSQL URLs (both spellings) select PostgreSQL.
+        assert_eq!(
+            StorageSelection::resolve(Some("postgres://u:p@h/db")),
+            StorageSelection::Postgres("postgres://u:p@h/db".to_string())
+        );
+        assert_eq!(
+            StorageSelection::resolve(Some("postgresql://h/db")),
+            StorageSelection::Postgres("postgresql://h/db".to_string())
+        );
+        // Explicit sqlite:// URLs (and bare paths) select that exact path.
+        assert_eq!(
+            StorageSelection::resolve(Some("sqlite://tmp/x.db")),
+            StorageSelection::SqliteExplicit("tmp/x.db".to_string())
+        );
+        assert_eq!(
+            StorageSelection::resolve(Some("/abs/path.db")),
+            StorageSelection::SqliteExplicit("/abs/path.db".to_string())
+        );
+        // Unset — the shipped default — is durable SQLite at the platform
+        // default data path, which must ALWAYS be absolute (a bare relative
+        // filename would resolve against the process cwd and silently point
+        // different boots at different databases).
+        match StorageSelection::resolve(None) {
+            StorageSelection::SqliteDefault(path) => assert!(
+                std::path::Path::new(&path).is_absolute(),
+                "default SQLite path must be absolute, got {path}"
+            ),
+            other => panic!("unset GYRE_DATABASE_URL must select the default SQLite path, got {other:?}"),
+        }
     }
 
     #[tokio::test]

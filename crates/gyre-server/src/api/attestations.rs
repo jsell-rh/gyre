@@ -63,6 +63,16 @@ mod tests {
     use gyre_ports::AttestationSigner;
     use tower::ServiceExt;
 
+    fn test_state() -> Arc<AppState> {
+        // Explicit in-memory opt-in (architecture.md §Storage): the default
+        // (unset) backend is now durable SQLite at the platform default
+        // data path — a unit test must never touch the operator's real
+        // database file, and these tests rely on the fresh-per-boot
+        // signing key of the stateless mode.
+        crate::select_in_memory_storage();
+        crate::build_state("gyre-test-token", "http://localhost:0", None)
+    }
+
     fn app(state: &Arc<AppState>) -> Router {
         // The router must serve with the SAME state that signed the
         // bundle: `build_state` generates a fresh Ed25519 issuer key per
@@ -134,7 +144,7 @@ mod tests {
 
     #[tokio::test]
     async fn valid_bundle_verifies_over_http() {
-        let state = crate::build_state("gyre-test-token", "http://localhost:0", None);
+        let state = test_state();
         let bundle = signed_bundle(&state).await;
         let response = app(&state)
             .oneshot(post_json(serde_json::to_value(&bundle).unwrap()))
@@ -155,7 +165,7 @@ mod tests {
 
     #[tokio::test]
     async fn tampered_bundle_returns_200_with_valid_false_and_findings() {
-        let state = crate::build_state("gyre-test-token", "http://localhost:0", None);
+        let state = test_state();
         let mut bundle = signed_bundle(&state).await;
         // Tamper after signing: the bundle signature must fail.
         bundle.merged_at += 1;
@@ -179,7 +189,7 @@ mod tests {
 
     #[tokio::test]
     async fn missing_bundle_signature_is_reported_not_passed() {
-        let state = crate::build_state("gyre-test-token", "http://localhost:0", None);
+        let state = test_state();
         let mut bundle = signed_bundle(&state).await;
         bundle.bundle_signature = None;
         let response = app(&state)
@@ -197,7 +207,7 @@ mod tests {
 
     #[tokio::test]
     async fn body_that_is_not_a_bundle_is_rejected_400() {
-        let state = crate::build_state("gyre-test-token", "http://localhost:0", None);
+        let state = test_state();
         let response = app(&state)
             .oneshot(post_json(serde_json::json!({"not": "a bundle"})))
             .await
