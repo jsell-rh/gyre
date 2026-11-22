@@ -3,7 +3,7 @@ title: "Platform-held development task ledger with authoritative sequencing and 
 spec_ref: "Spec gap spec-8986fd94925aed0eaae2d366 / dogfooding-platform-orchestration / 644cb4b53ccb"
 depends_on: []
 progress: ready-for-review
-commits: ["PENDING-COMMIT"]
+commits: ["7514d9b1"]
 ---
 
 ## Required behavior
