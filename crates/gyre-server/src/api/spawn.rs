@@ -9168,6 +9168,11 @@ exit 1\n"
     #[tokio::test]
     async fn kubernetes_spawn_applies_default_deny_network_policy_and_pids_limit() {
         let state = test_state();
+        // agent-runtime.md §1: the task-create gate requires an approved
+        // spec_ref for implementation tasks — seed the durable approval
+        // state the gated `create_task` helper resolves (same fixture as
+        // every other test in this module).
+        crate::mem::seed_approved_spec(&state, FIXTURE_SPEC_PATH, FIXTURE_SPEC_SHA).await;
         let app = crate::api::api_router().with_state(state.clone());
         let temp = tempfile::tempdir().expect("tempdir");
         let dump_path = temp.path().join("iso-dump").to_string_lossy().into_owned();
