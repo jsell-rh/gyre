@@ -1684,6 +1684,47 @@ async fn handle_decompose_spec(state: &AppState, args: &Value, auth: &Authentica
         Some(s) => s,
         None => return tool_error("missing required field: subtasks"),
     };
+    // Pin the sub-tasks to the parent's spec version — the same
+    // resolve-and-pin the in-process decomposition in signal_chain.rs
+    // (decompose_delegation) applies to the delegation leg. The Phase-4
+    // scheduler only spawns Implementation tasks whose spec_ref resolves
+    // to a currently-Approved ledger entry at the pinned SHA
+    // (agent-runtime.md §1), so a sub-task without a pinned spec_ref
+    // would stay Backlog behind that gate forever — there is no path that
+    // re-pins existing tasks. When the parent carries only a bare
+    // spec_path (a delegation created without a pinned ref), resolve the
+    // ledger's current SHA and pin that; when nothing can be pinned,
+    // refuse to create sub-tasks that could never spawn rather than
+    // fabricating dead Backlog rows.
+    let pinned_spec_ref = match parent.spec_ref.as_deref() {
+        Some(r) => Some(r.to_string()),
+        None => match parent.spec_path.as_deref() {
+            Some(p) if !p.is_empty() => match state.spec_ledger.find_by_path(p).await {
+                Ok(Some(entry)) if !entry.current_sha.is_empty() => {
+                    Some(format!("{p}@{}", entry.current_sha))
+                }
+                Ok(_) => {
+                    return tool_error(format!(
+                        "cannot pin sub-task spec_ref: spec '{p}' has no SHA in the spec \
+                         ledger — implementation sub-tasks require a pinned approved spec \
+                         version (agent-runtime.md §1: spec approval is the single trigger)"
+                    ))
+                }
+                Err(e) => {
+                    return tool_error(format!(
+                        "cannot pin sub-task spec_ref: spec ledger lookup for '{p}' failed: {e}"
+                    ))
+                }
+            },
+            _ => {
+                return tool_error(format!(
+                    "parent task {parent_id} carries no spec_ref or spec_path — \
+                     implementation sub-tasks require a pinned approved spec version \
+                     (agent-runtime.md §1: spec approval is the single trigger)"
+                ))
+            }
+        },
+    };
     let now = now_secs();
     let mut created = Vec::new();
     for st in subtasks {
@@ -1706,14 +1747,10 @@ async fn handle_decompose_spec(state: &AppState, args: &Value, auth: &Authentica
         task.task_type = Some(gyre_domain::TaskType::Implementation);
         task.repo_id = Id::new(&repo_id);
         task.workspace_id = Id::new(&caller_ws);
-        // Pin the sub-task to the parent's spec version (the same
-        // propagation the in-process decomposition in signal_chain.rs
-        // applies): the Phase-4 scheduler only spawns Implementation
-        // tasks whose spec_ref resolves to a currently-Approved ledger
-        // entry at the pinned SHA (agent-runtime.md §1), so a sub-task
-        // without the pinned spec_ref would never spawn.
+        // spec_path stays the bare path (list_by_spec_path consumers);
+        // spec_ref is the resolve-and-pin result computed above.
         task.spec_path = parent.spec_path.clone();
-        task.spec_ref = parent.spec_ref.clone();
+        task.spec_ref = pinned_spec_ref.clone();
         if let Err(e) = state.tasks.create(&task).await {
             return tool_error(format!("Failed to create subtask: {e}"));
         }
@@ -12502,11 +12539,18 @@ concepts:
         )
         .await;
 
-        // Parent task in the caller's repo.
+        // Parent task in the caller's repo. task-297 review repair:
+        // the parent carries only a bare spec_path — the decompose tool
+        // must resolve the ledger's current SHA and pin it on the
+        // sub-tasks (the Phase-4 scheduler only spawns Implementation
+        // tasks whose spec_ref resolves to an Approved ledger entry at
+        // the pinned SHA), so the fixture seeds the approved version.
         let mut parent = gyre_domain::Task::new(gyre_common::Id::new("parent-1"), "Parent", 0);
         parent.workspace_id = gyre_common::Id::new("ws-1");
         parent.repo_id = gyre_common::Id::new("r-1");
+        parent.spec_path = Some("specs/decompose/auth.md".to_string());
         state.tasks.create(&parent).await.unwrap();
+        crate::mem::seed_approved_spec(&state, "specs/decompose/auth.md", MCP_FIXTURE_SHA).await;
 
         // A task in a different repo must be rejected.
         let mut foreign = gyre_domain::Task::new(gyre_common::Id::new("parent-2"), "Foreign", 0);
@@ -12564,7 +12608,85 @@ concepts:
             assert_eq!(t.repo_id, gyre_common::Id::new("r-1"));
             assert_eq!(t.workspace_id, gyre_common::Id::new("ws-1"));
             assert_eq!(t.task_type, Some(gyre_domain::TaskType::Implementation));
+            assert_eq!(
+                t.spec_ref.as_deref(),
+                Some(format!("specs/decompose/auth.md@{MCP_FIXTURE_SHA}").as_str()),
+                "sub-task pins the ledger-resolved approved spec version"
+            );
         }
+    }
+
+    /// task-297 review repair: gyre_decompose_spec refuses to create
+    /// Implementation sub-tasks whose spec_ref cannot be pinned — a
+    /// parent whose spec_path has no SHA in the spec ledger, and a parent
+    /// with no spec reference at all. Sub-tasks without a pinned approved
+    /// spec_ref would stay Backlog behind the Phase-4 single-trigger gate
+    /// forever (nothing re-pins existing tasks), so the tool errors naming
+    /// the requirement and creates no task rows.
+    #[tokio::test]
+    async fn mcp_decompose_spec_refuses_unpinnable_parent() {
+        let state = orch_state().await;
+        let (_id, token) = register_orchestrator(
+            &state,
+            "repo-orch",
+            "ws-1",
+            Some("r-1"),
+            "repo_orchestrator",
+        )
+        .await;
+
+        // Parent whose spec_path is not in the ledger: no SHA to pin.
+        let mut unpinnable =
+            gyre_domain::Task::new(gyre_common::Id::new("parent-unpinnable"), "Unpinnable", 0);
+        unpinnable.workspace_id = gyre_common::Id::new("ws-1");
+        unpinnable.repo_id = gyre_common::Id::new("r-1");
+        unpinnable.spec_path = Some("specs/system/unknown.md".to_string());
+        state.tasks.create(&unpinnable).await.unwrap();
+
+        // Parent with no spec reference at all.
+        let mut bare = gyre_domain::Task::new(gyre_common::Id::new("parent-bare"), "Bare", 0);
+        bare.workspace_id = gyre_common::Id::new("ws-1");
+        bare.repo_id = gyre_common::Id::new("r-1");
+        state.tasks.create(&bare).await.unwrap();
+
+        let app = crate::build_router(state.clone());
+        for (parent_id, needle) in [
+            ("parent-unpinnable", "specs/system/unknown.md"),
+            ("parent-bare", "parent-bare"),
+        ] {
+            let (_status, json) = mcp_post_with_token(
+                app.clone(),
+                tool_call(
+                    "gyre_decompose_spec",
+                    json!({
+                        "parent_task_id": parent_id,
+                        "subtasks": [{ "title": "Dead sub-task" }]
+                    }),
+                ),
+                &token,
+            )
+            .await;
+            assert!(
+                json["result"]["isError"].as_bool().unwrap(),
+                "unpinnable parent {parent_id} must be a tool error: {json}"
+            );
+            let text = json["result"]["content"][0]["text"].as_str().unwrap();
+            assert!(
+                text.contains("single trigger"),
+                "error must name the spec-approval requirement: {text}"
+            );
+            assert!(
+                text.contains(needle),
+                "error must name the parent's spec: {text}"
+            );
+        }
+
+        // No sub-task rows were written for either refusal.
+        let tasks = state.tasks.list().await.unwrap();
+        assert!(
+            tasks.iter().all(|t| t.title != "Dead sub-task"),
+            "no sub-task row may be written for an unpinnable parent"
+        );
     }
 
     #[tokio::test]

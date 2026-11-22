@@ -427,6 +427,17 @@ async fn run_workspace_orchestrator(
         task.repo_id = dep_repo.id.clone();
         task.workspace_id = dep_repo.workspace_id.clone();
         task.spec_path = Some(link.source_path.clone());
+        // Pin the approved SOURCE spec version (agent-runtime.md §1 Phase
+        // 2), mirroring the delegation leg's pin above: the coordination's
+        // review sub-task (task_type=Implementation) inherits this pinned
+        // ref, so the Phase-4 single-trigger scheduler gate resolves it to
+        // the Approved ledger entry at exactly this SHA and the legitimate
+        // chain passes. Without the pin the review sub-task would carry no
+        // spec_ref and stay Backlog behind the gate forever — there is no
+        // path that re-pins existing tasks. The pinned ref is the
+        // authorization for the work (the approved change that triggered
+        // the coordination), not the dependent's own spec_path.
+        task.spec_ref = Some(format!("{spec_path}@{spec_sha}"));
         task.description = Some(format!(
             "Dependency {} changed (approved as {spec_path}@{spec_sha}). Assess impact: documentation updates, spec amendments, or re-implementation as needed (agent-runtime.md §1 Phase 2).",
             link.source_path
@@ -2542,6 +2553,15 @@ mod tests {
             .expect("coordination task created for dependent repo r-2");
         assert_eq!(coordination.repo_id, Id::new("r-2"));
         assert_eq!(coordination.workspace_id, Id::new("ws-1"));
+        // task-297 review repair: the coordination task pins the approved
+        // source spec_ref (path@sha), so the review sub-task its assessment
+        // creates inherits an Approved pinned ref and passes the Phase-4
+        // single-trigger gate instead of stalling Backlog forever.
+        assert_eq!(
+            coordination.spec_ref.as_deref(),
+            Some(pinned_ref.as_str()),
+            "coordination task pins the approved source spec version"
+        );
     }
 
     // Phase 2 routing: a SpecApproved without a workspace scope must not
@@ -2709,13 +2729,12 @@ mod tests {
         // a just-decomposed spec flows straight to an agent.
         scheduler_run_once(&state).await.unwrap();
         let after = state.tasks.list().await.unwrap();
-        // Scope to the DELEGATION's sub-task: the same first cycle also
-        // processed the Coordination task for r-2, whose review sub-task
-        // carries task_type Implementation but no spec_ref — the
-        // single-trigger gate (this task) correctly holds it Backlog with
-        // the spec-approval-missing label. The mem store's list order is
-        // a HashMap iteration (nondeterministic), so an unscoped `find`
-        // flips between the two twins per process seed.
+        // Scope each sub-task assertion to its parent task: the same
+        // first cycle also processed the Coordination task for r-2, whose
+        // review sub-task is a second Implementation twin. The mem
+        // store's list order is a HashMap iteration (nondeterministic),
+        // so an unscoped `find` over task_type == Implementation flips
+        // between the two twins per process seed.
         let sub = after
             .iter()
             .find(|t| {
@@ -2773,6 +2792,47 @@ mod tests {
                     && e.properties["new_status"] == "InProgress"),
             "worker claim must record task.status_changed: {events:?}"
         );
+
+        // task-297 review repair: the coordination leg of the SAME
+        // legitimate chain no longer stalls behind the single-trigger
+        // gate. The Coordination task pins the approved source spec_ref
+        // (path@sha) at creation, so the review sub-task its assessment
+        // creates inherits the pinned approved ref, passes the Phase-4
+        // gate, and spawns a worker — at the base it stayed Backlog with
+        // the spec-approval-missing label forever (no recovery path).
+        let coordination = after
+            .iter()
+            .find(|t| t.task_type == Some(TaskType::Coordination))
+            .expect("coordination task exists");
+        let review_sub = after
+            .iter()
+            .find(|t| {
+                t.parent_task_id.as_ref() == Some(&coordination.id)
+                    && t.task_type == Some(TaskType::Implementation)
+            })
+            .expect("coordination review sub-task exists");
+        assert_eq!(
+            review_sub.spec_ref.as_deref(),
+            Some(pinned_ref.as_str()),
+            "review sub-task inherits the coordination task's pinned approved spec_ref"
+        );
+        assert_eq!(
+            review_sub.status,
+            TaskStatus::InProgress,
+            "coordination review sub-task claimed by the Phase-4 worker path, \
+             not held Backlog behind the spec-approval gate"
+        );
+        assert!(
+            review_sub.assigned_to.is_some(),
+            "coordination review sub-task assigned to a spawned worker agent"
+        );
+        assert!(
+            !review_sub
+                .labels
+                .iter()
+                .any(|l| l == "spec-approval-missing"),
+            "coordination review sub-task carries no spec-approval-missing label"
+        );
     }
 
     // Phase 2 coordination processing: the scheduler runs the repo
@@ -2809,6 +2869,39 @@ mod tests {
         );
         assert_eq!(review_subs[0].repo_id, Id::new("r-2"));
         assert_eq!(review_subs[0].task_type, Some(TaskType::Implementation));
+        // task-297 review repair: the coordination task pins the approved
+        // source spec_ref at creation and the review sub-task inherits it,
+        // so the Phase-4 single-trigger gate resolves it to the Approved
+        // ledger entry — the coordination leg of the legitimate chain
+        // spawns instead of stalling Backlog forever.
+        let pinned_ref = format!("specs/system/auth.md@{APPROVED_SHA}");
+        assert_eq!(
+            review_subs[0].spec_ref.as_deref(),
+            Some(pinned_ref.as_str()),
+            "review sub-task inherits the coordination task's pinned approved spec_ref"
+        );
+
+        // The next cycle's Phase-4 scan claims the review sub-task and
+        // spawns a worker for it (not the spec-approval-missing skip).
+        scheduler_run_once(&state).await.unwrap();
+        let after = state.tasks.list().await.unwrap();
+        let review = after
+            .iter()
+            .find(|t| t.id == review_subs[0].id)
+            .expect("review sub-task persists");
+        assert_eq!(
+            review.status,
+            TaskStatus::InProgress,
+            "coordination review sub-task claimed by the Phase-4 worker path"
+        );
+        assert!(
+            review.assigned_to.is_some(),
+            "coordination review sub-task assigned to a spawned worker agent"
+        );
+        assert!(
+            !review.labels.iter().any(|l| l == "spec-approval-missing"),
+            "coordination review sub-task carries no spec-approval-missing label"
+        );
     }
 
     // The scheduler ignores tasks without a task_type (pre-approval
