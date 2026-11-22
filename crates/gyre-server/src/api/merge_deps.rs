@@ -352,11 +352,7 @@ pub async fn get_queue_graph(
                 .map(|d| MetaSpecDriftWarning {
                     // Snapshot labels ("{kind}:{id}@v{version}") recorded for
                     // the MR's author agent.
-                    produced: d
-                        .produced
-                        .iter()
-                        .map(|s| s.label())
-                        .collect(),
+                    produced: d.produced.iter().map(|s| s.label()).collect(),
                     // Snapshot labels of required meta-specs not matched by
                     // the recorded usage.
                     current: d.current.iter().map(|s| s.label()).collect(),

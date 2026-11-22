@@ -975,7 +975,7 @@ async fn unauthorized_approver_is_denied_by_abac() {
     state
         .spec_ledger
         .save(&gyre_domain::SpecLedgerEntry {
-bindings_sha: String::new(),
+            bindings_sha: String::new(),
             path: spec_path.to_string(),
             title: "Human-only spec".to_string(),
             owner: "user:jsell".to_string(),

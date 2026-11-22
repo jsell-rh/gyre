@@ -416,7 +416,7 @@ mod tests {
                   required: bool,
                   approved: bool,
                   prompt: &str|
-            -> gyre_domain::MetaSpec {
+         -> gyre_domain::MetaSpec {
             gyre_domain::MetaSpec {
                 id: Id::new(id),
                 kind: gyre_domain::meta_spec::MetaSpecKind::Principle,

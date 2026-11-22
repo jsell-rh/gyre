@@ -2448,14 +2448,13 @@ mod tests {
 
         // Expected SHA over the effective set's canonical snapshot tuple,
         // constructed by hand from the seeded spec.
-        let expected_sha = crate::reconciliation::meta_spec_snapshot_sha(&[
-            gyre_domain::MetaSpecSnapshot {
+        let expected_sha =
+            crate::reconciliation::meta_spec_snapshot_sha(&[gyre_domain::MetaSpecSnapshot {
                 meta_spec_id: ms.id.to_string(),
                 kind: ms.kind.as_str().to_string(),
                 content_hash,
                 version: 1,
-            },
-        ]);
+            }]);
 
         let ctx = build_agent_context(&state, "agent-ctx-1", "TASK-CTX-1", &ws_id).await;
 

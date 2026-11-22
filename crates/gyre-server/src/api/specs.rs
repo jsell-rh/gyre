@@ -2656,7 +2656,7 @@ mod tests {
                 state
                     .spec_ledger
                     .save(&SpecLedgerEntry {
-bindings_sha: String::new(),
+                        bindings_sha: String::new(),
                         path: "system/design-principles.md".to_string(),
                         title: "Design Principles".to_string(),
                         owner: "user:jsell".to_string(),
@@ -2761,7 +2761,7 @@ bindings_sha: String::new(),
                     state
                         .spec_ledger
                         .save(&SpecLedgerEntry {
-bindings_sha: String::new(),
+                            bindings_sha: String::new(),
                             path: path.to_string(),
                             title: format!("Spec {path}"),
                             owner: "user:jsell".to_string(),
@@ -3000,7 +3000,7 @@ bindings_sha: String::new(),
                 state
                     .spec_ledger
                     .save(&SpecLedgerEntry {
-bindings_sha: String::new(),
+                        bindings_sha: String::new(),
                         path: "system/auth.md".to_string(),
                         title: "Auth".to_string(),
                         owner: "user:jsell".to_string(),
@@ -3166,7 +3166,7 @@ bindings_sha: String::new(),
                 state
                     .spec_ledger
                     .save(&SpecLedgerEntry {
-bindings_sha: String::new(),
+                        bindings_sha: String::new(),
                         path: "system/auth.md".to_string(),
                         title: "Auth".to_string(),
                         owner: "user:jsell".to_string(),
@@ -3357,7 +3357,7 @@ bindings_sha: String::new(),
                 state
                     .spec_ledger
                     .save(&SpecLedgerEntry {
-bindings_sha: String::new(),
+                        bindings_sha: String::new(),
                         path: path.to_string(),
                         title: format!("Spec {path}"),
                         owner: "user:jsell".to_string(),
@@ -3975,7 +3975,7 @@ specs:
             state
                 .spec_ledger
                 .save(&SpecLedgerEntry {
-bindings_sha: String::new(),
+                    bindings_sha: String::new(),
                     path: spec.clone(),
                     title: spec.clone(),
                     owner: "user:jsell".to_string(),
@@ -4449,7 +4449,7 @@ specs:
 
     fn make_ledger_entry(path: &str, status: ApprovalStatus) -> SpecLedgerEntry {
         SpecLedgerEntry {
-bindings_sha: String::new(),
+            bindings_sha: String::new(),
             path: path.to_string(),
             title: path.to_string(),
             owner: "user:jsell".to_string(),
@@ -5689,7 +5689,7 @@ specs:
                 state
                     .spec_ledger
                     .save(&SpecLedgerEntry {
-bindings_sha: String::new(),
+                        bindings_sha: String::new(),
                         path: "system/ws-scoped.md".to_string(),
                         title: "WS Scoped".to_string(),
                         owner: "user:jsell".to_string(),
@@ -5763,7 +5763,7 @@ bindings_sha: String::new(),
                 state
                     .spec_ledger
                     .save(&SpecLedgerEntry {
-bindings_sha: String::new(),
+                        bindings_sha: String::new(),
                         path: "system/orphaned.md".to_string(),
                         title: "Orphaned".to_string(),
                         owner: "user:jsell".to_string(),
@@ -5977,7 +5977,7 @@ bindings_sha: String::new(),
         state
             .spec_ledger
             .save(&SpecLedgerEntry {
-bindings_sha: String::new(),
+                bindings_sha: String::new(),
                 path: spec_path.to_string(),
                 title: "Design Principles".to_string(),
                 owner: "user:jsell".to_string(),
@@ -6046,14 +6046,13 @@ bindings_sha: String::new(),
         // constructed by hand from the seeded spec, not via the production
         // resolver, so the assertion checks the approve handler really
         // stamps the registry's effective set.
-        let expected_sha = crate::reconciliation::meta_spec_snapshot_sha(&[
-            gyre_domain::MetaSpecSnapshot {
+        let expected_sha =
+            crate::reconciliation::meta_spec_snapshot_sha(&[gyre_domain::MetaSpecSnapshot {
                 meta_spec_id: ms.id.to_string(),
                 kind: ms.kind.as_str().to_string(),
                 content_hash: content_hash.clone(),
                 version: 1,
-            },
-        ]);
+            }]);
 
         // Generate a real Ed25519 keypair.
         let (pkcs8_bytes, pub_key) = generate_test_ed25519_keypair();
@@ -6848,7 +6847,7 @@ bindings_sha: String::new(),
                     state
                         .spec_ledger
                         .save(&SpecLedgerEntry {
-bindings_sha: String::new(),
+                            bindings_sha: String::new(),
                             path: path.to_string(),
                             title: title.to_string(),
                             owner: "user:test".to_string(),
@@ -7073,7 +7072,7 @@ bindings_sha: String::new(),
                 state
                     .spec_ledger
                     .save(&SpecLedgerEntry {
-bindings_sha: String::new(),
+                        bindings_sha: String::new(),
                         path: "system/alpha.md".to_string(),
                         title: "Alpha".to_string(),
                         owner: "user:test".to_string(),
@@ -7094,7 +7093,7 @@ bindings_sha: String::new(),
                 state
                     .spec_ledger
                     .save(&SpecLedgerEntry {
-bindings_sha: String::new(),
+                        bindings_sha: String::new(),
                         path: "system/beta.md".to_string(),
                         title: "Beta".to_string(),
                         owner: "user:test".to_string(),
@@ -7217,7 +7216,7 @@ bindings_sha: String::new(),
                 state
                     .spec_ledger
                     .save(&SpecLedgerEntry {
-bindings_sha: String::new(),
+                        bindings_sha: String::new(),
                         path: "system/old.md".to_string(),
                         title: "Old Spec".to_string(),
                         owner: "user:test".to_string(),
@@ -7284,7 +7283,7 @@ bindings_sha: String::new(),
                 state
                     .spec_ledger
                     .save(&SpecLedgerEntry {
-bindings_sha: String::new(),
+                        bindings_sha: String::new(),
                         path: "system/spec-a.md".to_string(),
                         title: "Spec A".to_string(),
                         owner: "user:test".to_string(),
@@ -7305,7 +7304,7 @@ bindings_sha: String::new(),
                 state
                     .spec_ledger
                     .save(&SpecLedgerEntry {
-bindings_sha: String::new(),
+                        bindings_sha: String::new(),
                         path: "system/spec-b.md".to_string(),
                         title: "Spec B".to_string(),
                         owner: "user:test".to_string(),
@@ -7370,7 +7369,7 @@ bindings_sha: String::new(),
                 state
                     .spec_ledger
                     .save(&SpecLedgerEntry {
-bindings_sha: String::new(),
+                        bindings_sha: String::new(),
                         path: "system/consumer.md".to_string(),
                         title: "Consumer".to_string(),
                         owner: "user:test".to_string(),
@@ -7391,7 +7390,7 @@ bindings_sha: String::new(),
                 state
                     .spec_ledger
                     .save(&SpecLedgerEntry {
-bindings_sha: String::new(),
+                        bindings_sha: String::new(),
                         path: "system/dependency.md".to_string(),
                         title: "Dependency".to_string(),
                         owner: "user:test".to_string(),
@@ -7470,7 +7469,7 @@ bindings_sha: String::new(),
                 state
                     .spec_ledger
                     .save(&SpecLedgerEntry {
-bindings_sha: String::new(),
+                        bindings_sha: String::new(),
                         path: "system/spec-a.md".to_string(),
                         title: "Spec A".to_string(),
                         owner: "user:test".to_string(),
@@ -7492,7 +7491,7 @@ bindings_sha: String::new(),
                 state
                     .spec_ledger
                     .save(&SpecLedgerEntry {
-bindings_sha: String::new(),
+                        bindings_sha: String::new(),
                         path: "system/spec-b.md".to_string(),
                         title: "Spec B".to_string(),
                         owner: "user:test".to_string(),
@@ -7554,7 +7553,7 @@ bindings_sha: String::new(),
 
         // Seed an implements link pointing to a deleted spec (dangling).
         let source = SpecLedgerEntry {
-bindings_sha: String::new(),
+            bindings_sha: String::new(),
             path: "system/impl.md".to_string(),
             title: "Impl".to_string(),
             owner: "user:test".to_string(),

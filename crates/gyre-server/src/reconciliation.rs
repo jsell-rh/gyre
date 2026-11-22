@@ -371,8 +371,7 @@ pub async fn emit_meta_spec_changed(
                     && match meta_spec.scope {
                         gyre_domain::MetaSpecScope::Global => true,
                         gyre_domain::MetaSpecScope::Tenant => {
-                            ws.tenant_id.as_str()
-                                == meta_spec.scope_id.as_deref().unwrap_or("")
+                            ws.tenant_id.as_str() == meta_spec.scope_id.as_deref().unwrap_or("")
                         }
                         gyre_domain::MetaSpecScope::Workspace => {
                             ws.id.as_str() == meta_spec.scope_id.as_deref().unwrap_or("")
@@ -2186,7 +2185,12 @@ mod tests {
 
     /// A required approved meta-spec scoped to this workspace — the
     /// per-workspace effective-set binding.
-    async fn require_for_ws(state: &Arc<AppState>, ws_id: &str, name: &str, version: u32) -> MetaSpec {
+    async fn require_for_ws(
+        state: &Arc<AppState>,
+        ws_id: &str,
+        name: &str,
+        version: u32,
+    ) -> MetaSpec {
         make_required_spec(
             state,
             MetaSpecScope::Workspace,
@@ -3917,7 +3921,9 @@ mod tests {
                     .uri(format!("/api/v1/meta-specs/{}", ms.id.as_str()))
                     .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
-                    .body(Body::from(serde_json::json!({"required": true}).to_string()))
+                    .body(Body::from(
+                        serde_json::json!({"required": true}).to_string(),
+                    ))
                     .unwrap(),
             )
             .await
@@ -3925,7 +3931,11 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
 
         let tasks = open_tasks_with_label(&state, RECONCILIATION_LABEL).await;
-        assert_eq!(tasks.len(), 1, "required flip should trigger reconciliation");
+        assert_eq!(
+            tasks.len(),
+            1,
+            "required flip should trigger reconciliation"
+        );
         assert_eq!(tasks[0].workspace_id.as_str(), ws_id);
 
         // Re-PUT required=true when it is already true -> no new task (the
@@ -3937,7 +3947,9 @@ mod tests {
                     .uri(format!("/api/v1/meta-specs/{}", ms.id.as_str()))
                     .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
-                    .body(Body::from(serde_json::json!({"required": true}).to_string()))
+                    .body(Body::from(
+                        serde_json::json!({"required": true}).to_string(),
+                    ))
                     .unwrap(),
             )
             .await
@@ -4595,7 +4607,11 @@ mod tests {
     /// A used-entry snapshot for the meta-spec `ms` at an explicit version
     /// and content hash (the spawn-time record of what the agent ran
     /// under — an older version for the drift cases).
-    fn used_snapshot(ms: &MetaSpec, version: u32, content_hash: &str) -> gyre_domain::MetaSpecSnapshot {
+    fn used_snapshot(
+        ms: &MetaSpec,
+        version: u32,
+        content_hash: &str,
+    ) -> gyre_domain::MetaSpecSnapshot {
         gyre_domain::MetaSpecSnapshot {
             meta_spec_id: ms.id.to_string(),
             kind: ms.kind.as_str().to_string(),
@@ -4855,12 +4871,9 @@ mod tests {
         let _ws3 = make_workspace_in_tenant(&state, "ws-ten-other", "other-tenant").await;
         let _repo3 = make_repo(&state, "repo-ten-3", "ws-ten-other").await;
 
-        let summary = run_tenant_reconciliation(
-            &state,
-            &Id::new("default"),
-            std::slice::from_ref(&ms.name),
-        )
-        .await;
+        let summary =
+            run_tenant_reconciliation(&state, &Id::new("default"), std::slice::from_ref(&ms.name))
+                .await;
 
         assert_eq!(summary.workspaces_scanned, 2);
         assert_eq!(
@@ -4896,12 +4909,9 @@ mod tests {
         let _ws1 = make_workspace_in_tenant(&state, "ws-unb-1", "default").await;
         let _repo1 = make_repo(&state, "repo-unb-1", "ws-unb-1").await;
 
-        let summary = run_tenant_reconciliation(
-            &state,
-            &Id::new("default"),
-            std::slice::from_ref(&ms.name),
-        )
-        .await;
+        let summary =
+            run_tenant_reconciliation(&state, &Id::new("default"), std::slice::from_ref(&ms.name))
+                .await;
         assert_eq!(summary.workspaces_scanned, 0);
         assert_eq!(summary.tasks_created, 0);
         assert!(reconciliation_tasks_for_workspace(&state, "ws-unb-1")
@@ -5096,10 +5106,7 @@ mod tests {
         state.meta_specs.update(&pending).await.unwrap();
 
         let effective = resolve_effective_meta_spec_set(&state, &ws).await.unwrap();
-        let ids: Vec<String> = effective
-            .iter()
-            .map(|s| s.meta_spec_id.clone())
-            .collect();
+        let ids: Vec<String> = effective.iter().map(|s| s.meta_spec_id.clone()).collect();
         assert!(ids.contains(&global.id.to_string()));
         assert!(ids.contains(&tenant.id.to_string()));
         assert!(ids.contains(&own.id.to_string()));
@@ -5442,7 +5449,9 @@ mod tests {
             "a required removal must not propagate"
         );
         assert_eq!(
-            reconciliation_tasks_for_workspace(&state, "ws-put-1").await.len(),
+            reconciliation_tasks_for_workspace(&state, "ws-put-1")
+                .await
+                .len(),
             1,
             "the required removal must not fire a second wave for the already-reconciled workspace"
         );

@@ -443,8 +443,7 @@ pub async fn assist_spec(
     // principles, standards, and process specs are injected as
     // `{{meta_spec_context}}`.
     let meta_spec_context =
-        crate::llm_helpers::workspace_meta_spec_context(&state, &repo.workspace_id)
-            .await;
+        crate::llm_helpers::workspace_meta_spec_context(&state, &repo.workspace_id).await;
     // Spec content and graph context travel in the system template as
     // grounding variables; the instruction is the user prompt only
     // (injection containment — blank its template placeholder).
@@ -2735,7 +2734,7 @@ mod tests {
 
     fn ledger_entry(path: &str, sha: &str, workspace_id: &str) -> SpecLedgerEntry {
         SpecLedgerEntry {
-bindings_sha: String::new(),
+            bindings_sha: String::new(),
             path: path.to_string(),
             title: format!("Spec {path}"),
             owner: "system".to_string(),

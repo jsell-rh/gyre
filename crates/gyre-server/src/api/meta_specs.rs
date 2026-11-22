@@ -6926,7 +6926,7 @@ mod tests {
         jwt_state
             .spec_ledger
             .save(&gyre_domain::SpecLedgerEntry {
-bindings_sha: String::new(),
+                bindings_sha: String::new(),
                 path: "system/search.md".to_string(),
                 title: "Search".to_string(),
                 owner: "user:admin".to_string(),
@@ -8704,9 +8704,7 @@ pub async fn update_meta_spec_registry(
                 for ws in &workspaces {
                     let in_scope = match ms.scope {
                         MetaSpecScope::Global => true,
-                        MetaSpecScope::Workspace => {
-                            ms.scope_id.as_deref() == Some(ws.id.as_str())
-                        }
+                        MetaSpecScope::Workspace => ms.scope_id.as_deref() == Some(ws.id.as_str()),
                         MetaSpecScope::Tenant => false,
                     };
                     if !in_scope {
@@ -10325,27 +10323,28 @@ mod registry_tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(before.approval_status, gyre_domain::ApprovalStatus::Approved);
+        assert_eq!(
+            before.approval_status,
+            gyre_domain::ApprovalStatus::Approved
+        );
         assert!(before.bindings_sha.is_empty());
         // No bindings → registry identity IS the content SHA.
         assert_eq!(before.registry_sha(), before.current_sha);
 
         // Pin v1 → binding set recorded as registry metadata: new registry
         // SHA, approval invalidated.
-        let put = |app: Router, body: String| {
-            async move {
-                app.oneshot(
-                    Request::builder()
-                        .method("PUT")
-                        .uri("/api/v1/specs/system%2Fauth.md/meta-spec-bindings")
-                        .header("authorization", "Bearer test-token")
-                        .header("content-type", "application/json")
-                        .body(Body::from(body))
-                        .unwrap(),
-                )
-                .await
-                .unwrap()
-            }
+        let put = |app: Router, body: String| async move {
+            app.oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/specs/system%2Fauth.md/meta-spec-bindings")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
         };
         let resp = put(
             app.clone(),
@@ -10423,7 +10422,10 @@ mod registry_tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(unbound.approval_status, gyre_domain::ApprovalStatus::Pending);
+        assert_eq!(
+            unbound.approval_status,
+            gyre_domain::ApprovalStatus::Pending
+        );
         assert!(unbound.bindings_sha.is_empty());
         assert_eq!(unbound.registry_sha(), unbound.current_sha);
 
@@ -10463,7 +10465,7 @@ mod registry_tests {
 
         // Spec ledger entry so the binding's spec resolves to the workspace.
         let entry = gyre_domain::SpecLedgerEntry {
-bindings_sha: String::new(),
+            bindings_sha: String::new(),
             path: "system/stale.md".to_string(),
             title: "Stale".to_string(),
             owner: "system".to_string(),
@@ -10585,7 +10587,7 @@ bindings_sha: String::new(),
 
         // Spec ledger entry scoped to the victim workspace.
         let entry = gyre_domain::SpecLedgerEntry {
-bindings_sha: String::new(),
+            bindings_sha: String::new(),
             path: "system/victim-bind.md".to_string(),
             title: "Victim".to_string(),
             owner: "system".to_string(),
