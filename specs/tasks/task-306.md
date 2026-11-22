@@ -95,15 +95,13 @@ Canonical spec: `specs/system/explorer-canvas.md`. Source: `678a8ac3e3bfeafeb66c
 
 **Status: blocked-on-external-implementation — no closure claimed; section `c3a39b320325eff390c4b56c` remains open.**
 
-Round 69. Re-verification ran from the checkpoint head `de240b15` (branch already contains the merge of base `88202d67` as `6c87f2c3`; no merge/rebase pending; only the executor's round-reset of this task file was unstaged). `origin/main` is **unchanged** since round 68 at `88202d67` — no new merge was needed. Deterministic evidence saved to `/tmp/stage/review-evidence/task306-round69-probe.txt`.
+Round 70. Re-verification ran from the checkpoint head `5c36781f5` (branch already contains the merge of base `88202d67` as `6c87f2c3`; no merge/rebase pending; only the executor's round-reset of this task file was unstaged). `origin/main` is **unchanged** since round 68 at `88202d67` — no new merge was needed. Deterministic evidence saved to `/tmp/stage/review-evidence/task306-round70-probe.txt`.
 
 ### Realized-model graph-node-metrics backend — NOT landed (anywhere reachable)
 
-This round's probe was **broader than prior rounds**: the remote now carries hundreds of additional heads (devloop/*, worker/*, uix/*, pipeline/* — 6656 non-main remote refs after fetching all of `refs/heads/*`), so beyond the usual `origin/main` checks the probe scanned **every remote branch tip** for the backend implementation:
-
-- `git diff 678a8ac3 origin/main --stat` over the four extractors, `sqlite/graph.rs`, and `graph_extraction.rs` is still **empty** — byte-identical to the discovery base.
-- All four extractors still hardcode `complexity: None` / `churn_count_30d: 0` at the exact discovery lines (rust:160-161, go:135-136, python:136-137, typescript:129-130); `git grep -ic cyclomatic origin/main -- crates` exits 1 (zero matches).
-- **New:** tip-level `git grep -I -l -i cyclomatic -- crates/gyre-domain/src` across all 6656 non-main remote refs — **zero hits**. No graph-node-metrics implementation (extractor cyclomatic complexity) exists at any remote tip, merged or unmerged. (The many devloop branches that show diffs on the watched files vs `origin/main` do so only because they are based on older main commits where those files differed historically; the content grep is the decisive check. A full-history pickaxe over all refs was abandoned on timeout — any implementation awaiting merge sits at a tip, so the tip scan is sufficient.)
+- `git diff 678a8ac3 origin/main --stat` over the four extractors, `sqlite/graph.rs`, and `graph_extraction.rs` is still **empty** — byte-identical to the discovery base; local HEAD is likewise identical to `origin/main` on those files.
+- All four extractors still hardcode `complexity: None` / `churn_count_30d: 0` at the exact discovery lines (rust:160-161, go:135-136, python:136-137, typescript:129-130).
+- **Full remote-tip scan (blob-level, this round's method):** after fetching all of `refs/heads/*` (6662 non-main remote refs), a `git ls-tree` of every remote tip over the six watched backend files yields 70 unique blobs — 6 baseline (at `origin/main`) plus 64 historical extras — and `git cat-file blob | grep -i cyclomatic` over every extra blob finds **zero hits**. No graph-node-metrics implementation exists at any remote tip, merged or unmerged; the extras are just older historical file versions.
 - The SQLite upsert still writes `graph_nodes::complexity.eq(row.complexity)` / `graph_nodes::churn_count_30d.eq(row.churn_count_30d)` (sqlite/graph.rs:366-367), overwriting stored values with the extractor defaults on every re-extraction.
 
 Ordering guard applies — no local backend work is permitted, so the end-to-end indicator verification cannot run against populated metrics.
@@ -122,7 +120,7 @@ There is a genuine, unresolved conflict between two canonical specs over the ren
 
 ### Round output
 
-Task file at round 69 with truthful `blocked-on-external-implementation`; coverage row round reference updated (row stays open); 0/7 acceptance criteria ticked. Only `specs/` files changed — no Rust, no web, so no formatting or build work was needed (no cold build of an unchanged crate). Per the assignment constraint, large gyre-server builds/test compilation run in the independent verifier; this round runs no server tests, so nothing is deferred beyond that standing constraint.
+Task file at round 70 with truthful `blocked-on-external-implementation`; coverage row round reference updated (row stays open); 0/7 acceptance criteria ticked. Only `specs/` files changed — no Rust, no web, so no formatting or build work was needed (no cold build of an unchanged crate). Per the assignment constraint, large gyre-server builds/test compilation run in the independent verifier; this round runs no server tests, so nothing is deferred beyond that standing constraint.
 
 ### Remaining work to unblock
 
