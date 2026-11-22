@@ -336,11 +336,19 @@ All backends run the same agent image. The image is the unit of consistency — 
 | **SSH** | SSH to remote host, `docker run` there | Remote build machines, air-gapped environments |
 | **Kubernetes** | Create Pod with agent image | Production scale, multi-tenant |
 
-**Container security defaults** (all backends):
-- `--network=none` (opt-in to bridge via compute target config)
-- `--memory=2g`, `--pids-limit=512`
-- `--user=65534:65534` (non-root)
-- Worktree mounted as volume
+**Container security defaults** (all backends). Each default is enforced by every backend, in the mechanism its API objects support:
+
+| Default | Container / SSH (docker flags) | Kubernetes (created API objects) |
+|---|---|---|
+| Network isolation | `--network=none` | platform-created default-deny NetworkPolicy applied alongside the Pod (same `kubectl apply` stream): both policy types, empty rule lists, `podSelector` on the spawned Pod's `gyre-agent` label; deleted with the Pod |
+| Memory | `--memory=2g` | container resource limit `memory: 2Gi` |
+| PIDs | `--pids-limit=512` | container resource limit `pids: 512` |
+| User | `--user=65534:65534` | `runAsUser`/`runAsGroup: 65534`, `runAsNonRoot`, `allowPrivilegeEscalation: false` |
+| Worktree | mounted as volume (`--volume=<worktree>:<worktree>`) | see amendment below |
+
+Opt-in to bridged networking is via compute target config (`"network": "bridge"`) on every backend; on Kubernetes the opt-in skips the per-Pod default-deny NetworkPolicy, so the Pod uses cluster networking.
+
+**Amendment (task-304) — worktree volume on remote backends.** "Worktree mounted as volume" holds on the server-local Container backend. On the remote backends (SSH remote-docker, Kubernetes) the server-local worktree cannot be mounted as a volume, and provisioning its content as a remote volume is not viable: a git worktree's `.git` is a file pointing into the server-local main repository (`<repo>/.git/worktrees/<name>` — an absolute server path), so a copy of the worktree directory shipped to a remote docker host or a kubelet node (tar-over-SSH, hostPath, populated PVC) carries a dangling `.git` linkage and no object database — `git status`, `git commit`, and `git push` all fail from it. The remote backends therefore provision the agent's working copy the way the platform already ships the content: the agent image entrypoint clones the task branch from the platform's own authenticated git endpoint, yielding a content-identical, self-contained checkout (and enforcing the per-agent token scoping a raw filesystem copy would bypass). This supersedes the blanket "worktree mounted as volume" wording for remote backends.
 
 ### Nix-Based Image Build
 
@@ -362,7 +370,7 @@ docker/gyre-agent/
 
 The Nix flake pins all dependencies (Node.js version, Claude Agent SDK version, git, curl) for bit-reproducible builds. The image hash is recorded in workload attestation (`wl_image_hash` JWT claim): the spawn flow resolves the image digest before minting the agent JWT — `docker image inspect` needs no running container — so container and SSH backends carry the digest of the exact local image in the initial token. Kubernetes records the digest the cluster actually pulled (pod `imageID`) in the post-spawn workload attestation record (`GET /api/v1/agents/:id/workload`), because the `imageID` only exists once the Pod is scheduled and the JWT must pre-exist the Pod it is injected into.
 
-One definition, all targets. The `Dockerfile` is replaced by the Nix flake.
+One definition, all targets. The `Dockerfile` is replaced by the Nix flake — no `Dockerfile` ships in the tree (the legacy pre-flake Dockerfile was removed by task-304), and no code path, script, or doc instructs building the agent image any other way. Deployment guidance points only at the Nix targets above; `agent-image-tar` covers environments without Nix.
 
 ### Tenant and Workspace Configuration
 

@@ -1,12 +1,19 @@
 # gyre-agent Docker Image
 
-Minimal reference Docker image for Gyre container agents. Provides a bootstrap environment that automatically clones the assigned repo, configures git credentials, and sends an initial heartbeat when spawned by the Gyre server.
+Minimal reference container image for Gyre agents, built solely by the Nix flake in this directory (agent-runtime.md §3 Nix-Based Image Build — one definition, all targets; there is no Dockerfile). Provides a bootstrap environment that automatically clones the assigned repo, configures git credentials, and sends an initial heartbeat when spawned by the Gyre server.
 
 ## Build
 
 ```bash
-docker build -t gyre-agent:latest .
+# Run in this directory (docker/gyre-agent/):
+nix build .#agent-image-docker   # Docker-loadable tarball
+docker load < result            # tags gyre-agent:latest
+
+# Air-gapped transfer (gzipped tarball):
+nix build .#agent-image-tar
 ```
+
+The flake pins every input (nixpkgs revision via the committed `flake.lock`, npm dependencies via the committed `package-lock.json`) for bit-reproducible builds — the image digest the server records in the `wl_image_hash` attestation claim always identifies this image.
 
 ## Register as a Compute Target
 
@@ -77,7 +84,7 @@ best-effort and never fail the LLM call itself.
 
 ## Networking
 
-Agent containers default to `bridge` networking so they can reach the Gyre server. This is intentional — agents need LAN access to clone the repo and send API calls. For gate/validation containers (untrusted code review), use `--network=none`.
+Agent containers default to `--network=none` (agent-runtime.md §3 container security defaults, enforced on all backends). Agents that need to reach the Gyre server (clone, heartbeat, complete) run on a compute target whose config opts in: `{"image": "gyre-agent:latest", "network": "bridge"}` — the auto-registered `gyre-agent-default` target sets this. On Kubernetes the default is a platform-created default-deny NetworkPolicy alongside each Pod, with the same `"network": "bridge"` opt-in. Gate/validation containers (untrusted code review) stay on the `none` default.
 
 ## Customizing
 
