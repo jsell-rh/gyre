@@ -2,7 +2,7 @@
 title: "Publish reviewed spec backlog for specs/system/meta-spec-reconciliation.md"
 spec_ref: "GOAL.md — real implementations and meaningful verification"
 depends_on: []
-progress: complete
+progress: ready-for-review
 commits: []
 ---
 
@@ -1046,3 +1046,8 @@ Publish exactly the independently reviewed missing-work plan below. Only create 
 ## Shipped
 
 Task definitions and explicit bindings only; no product implementation claimed.
+
+### Rebase resolution
+
+Rebased the publication onto current main (c42bfe03, task-324's lsp-call-graph
+backlog publication). The only conflicting path was `specs/task-spec-inputs.json`, resolved as an exact union verified programmatically: backlog entries 74 (ours: 9 meta-spec-reconciliation) + 67 (main's, incl. 2 lsp-call-graph) → 76; bindings 263 + 258 → 265; sections → 321; every merged value byte-identical to its parent. Main's task-322/323/324 files and our task-325..331 files are unchanged from their respective parents; no task, spec, coverage status, product file, or gate was altered. New tasks remain `not-started`.
