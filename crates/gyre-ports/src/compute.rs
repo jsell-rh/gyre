@@ -13,7 +13,7 @@ pub struct SpawnConfig {
 }
 
 /// Handle to a running process on a compute target.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ProcessHandle {
     pub id: String,
     pub target_type: String,

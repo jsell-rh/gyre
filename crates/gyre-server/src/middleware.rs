@@ -332,6 +332,7 @@ mod tests {
             audit_broadcast_tx: base.audit_broadcast_tx.clone(),
             notification_broadcast_tx: base.notification_broadcast_tx.clone(),
             network_peers: base.network_peers.clone(),
+            preview_environments: base.preview_environments.clone(),
             dependencies: base.dependencies.clone(),
             breaking_changes: base.breaking_changes.clone(),
             dependency_policies: base.dependency_policies.clone(),

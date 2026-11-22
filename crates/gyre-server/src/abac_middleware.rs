@@ -399,6 +399,29 @@ impl ResourceResolver {
                     "merge_request",
                     None,
                 ),
+                // Try-it ephemeral preview environments
+                // (activity-dashboard.md §"Try it" links). The MR-scoped
+                // routes ride the merge_request resource (workspace
+                // resolved through the MR); the alias and the collection
+                // routes are separate patterns of the same resources.
+                // Per-handler workspace-membership enforcement lives in
+                // the handlers themselves.
+                RouteResourceMapping::api(
+                    "/api/v1/merge-requests/:id/try-it",
+                    "merge_request",
+                    Some("write"),
+                ),
+                RouteResourceMapping::api("/api/v1/mrs/:id/try-it", "merge_request", Some("write")),
+                RouteResourceMapping::api(
+                    "/api/v1/preview-environments",
+                    "preview_environment",
+                    Some("read"),
+                ),
+                RouteResourceMapping::api(
+                    "/api/v1/preview-environments/:id",
+                    "preview_environment",
+                    None,
+                ),
                 // /api/v1/trace-spans/:span_id/payload is ABAC-exempt (per-handler auth).
                 // The handler resolves span → gate_trace → MR → workspace for authorization.
                 RouteResourceMapping::exempt("/api/v1/trace-spans/:span_id/payload"),
@@ -1400,6 +1423,33 @@ async fn extract_entity_attributes(
                     agent_id = %id,
                     err = %e,
                     "agent lookup failed; entity attributes unset"
+                ),
+            }
+        }
+        // Preview environment: scope from the entity itself (tenant,
+        // workspace, repo — the MR's scope, resolved at provisioning and
+        // never caller-supplied).
+        "preview_environment" => {
+            let Some(id) = resource_id else { return };
+            match state
+                .preview_environments
+                .find_by_id(&gyre_common::Id::new(id.clone()))
+                .await
+            {
+                Ok(Some(env)) => {
+                    if !ctx.has("resource.workspace_id") {
+                        ctx.set("resource.workspace_id", env.workspace_id.to_string());
+                    }
+                    if !ctx.has("resource.repo_id") {
+                        ctx.set("resource.repo_id", env.repo_id.to_string());
+                    }
+                    ctx.set("resource.tenant_id", env.tenant_id.to_string());
+                }
+                Ok(None) => {}
+                Err(e) => tracing::warn!(
+                    preview_env_id = %id,
+                    err = %e,
+                    "preview environment lookup failed; entity attributes unset"
                 ),
             }
         }

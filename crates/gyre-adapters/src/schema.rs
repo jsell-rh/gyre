@@ -956,6 +956,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     dependency_policies,
     commit_signatures,
     spec_assertion_results,
+    preview_environments,
 );
 
 diesel::table! {
@@ -1265,5 +1266,31 @@ diesel::table! {
         explanation -> Text,
         commit_sha -> Text,
         checked_at -> BigInt,
+    }
+}
+
+diesel::table! {
+    preview_environments (id) {
+        id -> Text,
+        tenant_id -> Text,
+        workspace_id -> Text,
+        repo_id -> Text,
+        mr_id -> Text,
+        requested_by -> Text,
+        commit_sha -> Text,
+        branch -> Text,
+        status -> Text,
+        mesh_ip -> Nullable<Text>,
+        peer_id -> Nullable<Text>,
+        agent_id -> Text,
+        compute_target -> Text,
+        image -> Nullable<Text>,
+        data_dir -> Text,
+        port -> Integer,
+        process_handle -> Nullable<Text>,
+        created_at -> BigInt,
+        expires_at -> BigInt,
+        ended_at -> Nullable<BigInt>,
+        end_reason -> Nullable<Text>,
     }
 }
