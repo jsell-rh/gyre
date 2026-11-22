@@ -1755,8 +1755,25 @@ mod tests {
         (app, json["id"].as_str().unwrap().to_string())
     }
 
-    async fn boundary_task(app: Router, title: &str) -> (Router, String) {
-        let body = serde_json::json!({"title": title, "task_type": "implementation"});
+    async fn boundary_task(
+        app: Router,
+        state: &std::sync::Arc<crate::AppState>,
+        title: &str,
+    ) -> (Router, String) {
+        // agent-runtime.md §1: the task-create gate requires an approved
+        // spec_ref for implementation tasks — seed the durable approval
+        // state (registry entry + active ledger row) the gate resolves.
+        crate::mem::seed_approved_spec(
+            state,
+            "system/admin-boundary.md",
+            "1234567890abcdef1234567890abcdef12345678",
+        )
+        .await;
+        let body = serde_json::json!({
+            "title": title,
+            "task_type": "implementation",
+            "spec_ref": "system/admin-boundary.md@1234567890abcdef1234567890abcdef12345678"
+        });
         let resp = app
             .clone()
             .oneshot(
@@ -1855,8 +1872,8 @@ mod tests {
 
         let (app, ws_id) = boundary_workspace(app).await;
         let (app, repo_id) = boundary_repo(app, &ws_id).await;
-        let (app, task_a) = boundary_task(app, "Admin boundary A").await;
-        let (app, task_b) = boundary_task(app, "Admin boundary B").await;
+        let (app, task_a) = boundary_task(app, &state, "Admin boundary A").await;
+        let (app, task_b) = boundary_task(app, &state, "Admin boundary B").await;
         let (app, json_a) = boundary_spawn(app, &repo_id, &task_a, "feat/admin-a").await;
         let (app, json_b) = boundary_spawn(app, &repo_id, &task_b, "feat/admin-b").await;
         let agent_a = json_a["agent"]["id"].as_str().unwrap().to_string();
