@@ -2709,10 +2709,20 @@ mod tests {
         // a just-decomposed spec flows straight to an agent.
         scheduler_run_once(&state).await.unwrap();
         let after = state.tasks.list().await.unwrap();
+        // Scope to the DELEGATION's sub-task: the same first cycle also
+        // processed the Coordination task for r-2, whose review sub-task
+        // carries task_type Implementation but no spec_ref — the
+        // single-trigger gate (this task) correctly holds it Backlog with
+        // the spec-approval-missing label. The mem store's list order is
+        // a HashMap iteration (nondeterministic), so an unscoped `find`
+        // flips between the two twins per process seed.
         let sub = after
             .iter()
-            .find(|t| t.task_type == Some(TaskType::Implementation))
-            .expect("implementation sub-task exists");
+            .find(|t| {
+                t.parent_task_id.as_ref() == Some(&delegation.id)
+                    && t.task_type == Some(TaskType::Implementation)
+            })
+            .expect("delegation implementation sub-task exists");
         assert_eq!(
             sub.status,
             TaskStatus::InProgress,
