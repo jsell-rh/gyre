@@ -2396,6 +2396,12 @@
         "Versioning & Release",
         "Version in Code"
       ]
+    },
+    "backlog/69fff34a83938a4731034172": {
+      "file": "specs/development/dogfooding.md",
+      "heading": [
+        "Dogfooding"
+      ]
     }
   },
   "bindings": {
@@ -3288,6 +3294,9 @@
     ],
     "Spec gap spec-17849f2036d5093f11e2a1ae / build-time-version-injection / d1e5376399b8": [
       "backlog/4a0c06c902b41dd1a2000ebe"
+    ],
+    "Spec gap spec-8986fd94925aed0eaae2d366 / dogfooding-platform-orchestration / 644cb4b53ccb": [
+      "backlog/69fff34a83938a4731034172"
     ]
   }
 }

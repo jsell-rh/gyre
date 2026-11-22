@@ -738,6 +738,15 @@ pub fn api_router() -> Router<Arc<AppState>> {
             "/api/v1/repos/:id/blast-radius",
             get(dependencies::blast_radius),
         )
+        // Cascade test results & manual trigger (task-281)
+        .route(
+            "/api/v1/repos/:id/cascade-test-results",
+            get(dependencies::list_cascade_test_results),
+        )
+        .route(
+            "/api/v1/repos/:id/cascade-tests/trigger",
+            post(dependencies::trigger_cascade_tests),
+        )
         .route("/api/v1/dependencies/graph", get(dependencies::get_graph))
         // Workspace-scoped dependency graph (TASK-046)
         .route(
