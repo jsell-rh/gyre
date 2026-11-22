@@ -3,7 +3,7 @@ title: "Meta-spec API at specced routes with scope-level admin auth"
 spec_ref: "Spec gap spec-41a92c20354c6a108e6074e3 / meta-spec-api-contract / 4a3f940495a8"
 depends_on: []
 progress: ready-for-review
-commits: ["d280cff1bf06a1c0d5a15d10024d448cee3a842b", "c5a157de6c437f3f3c7f30156d88c46545fea89b"]
+commits: ["c5a157de6c437f3f3c7f30156d88c46545fea89b", "d280cff1bf06a1c0d5a15d10024d448cee3a842b", "7a24bf2c5a9f20a10b6f629650b8528da19465f4"]
 ---
 
 ## Required behavior
@@ -82,8 +82,9 @@ Canonical spec: `specs/system/agent-runtime.md`. Source: `678a8ac3e3bfeafeb66cdb
 
 ## Shipped
 
-Commits `c5a157de` (route move + scope-level write gate) and `d280cff1`
-(review repair: cross-tenant Admin write containment) implement the task.
+Commits `c5a157de` (route move + scope-level write gate), `d280cff1`
+(review repair: cross-tenant Admin write containment), and `7a24bf2c`
+(verification repair: clippy lint fixes) implement the task.
 
 ### Route contract (agent-runtime §2 API table)
 
@@ -134,9 +135,24 @@ entry. The Workspace branch now loads the workspace and enforces
 `ws.tenant_id == auth.tenant_id` unconditionally before any bypass,
 mirroring `authorize_meta_spec_delete` and the function's own Tenant
 branch. Two pre-existing test setups that created Tenant-scoped fixtures
-via the "default" system admin pinned to another tenant (`delete_tenant_scoped_meta_spec_requires_scope_tenant_admin`,
+via the "default" system admin pinned to another tenant
+(`delete_tenant_scoped_meta_spec_requires_scope_tenant_admin`,
 `force_requires_admin_of_the_scope_tenant`) — correctly rejected by the
 scope-level gate — now create via a signed Admin JWT of the scope tenant.
+
+### Clippy lint repair (verification repair, `7a24bf2c`)
+
+The verification run failed clippy on two lints in the task's own code,
+both fixed with behavior preserved: the paragraph after the
+`authorize_registry_write` scope-bullet list was a lazy doc-list
+continuation (`doc_lazy_continuation`) and is now separated by a blank doc
+line; the AC1 filtered-listing probe built its request URI with an
+interpolation-free `format!` (`useless_format`) and now uses a plain
+string literal. Verified locally: `rustfmt --edition 2021 --check` on the
+file is clean, and a minimal standalone clippy probe reproduces both
+`doc list item without indentation` warnings on the old pattern and zero
+warnings on the fixed pattern (evidence under
+/tmp/stage/review-evidence).
 
 ### Test evidence
 
