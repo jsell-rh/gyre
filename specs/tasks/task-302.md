@@ -3,7 +3,7 @@ title: "Spec bindings as registry metadata with re-approval cascade, UI panel, a
 spec_ref: "Spec gap spec-41a92c20354c6a108e6074e3 / bindings-registry-cascade / 4a3f940495a8"
 depends_on: [task-301]
 progress: ready-for-review
-commits: ["e68a426e306a876263f63298af11b33996bdf072", "4d3ed96b7a6960b5faedefa5a9163091075a1e6f"]
+commits: ["4d3ed96b7a6960b5faedefa5a9163091075a1e6f", "e68a426e306a876263f63298af11b33996bdf072", "0e90f42ca0bc43d8df82e90c27c296facc574ff1"]
 ---
 
 ## Required behavior
@@ -85,12 +85,12 @@ Canonical spec: `specs/system/agent-runtime.md`. Source: `678a8ac3e3bfeafeb66cdb
 
 ## Shipped
 
-Implemented on branch `pipeline/task-302/38cadb46ae6747f99df4e2e618dc3cd7-1`
-(checkpoint `4d3ed96b` carried the production migration; this assignment
-completed the test-suite migration to the registry model, the UI bindings
-panel, and the focused cascade/context tests). No acceptance-criterion
-checkboxes were ticked; independent review and deterministic gates decide
-approval.
+Product commits `4d3ed96b` (pipeline checkpoint: production migration),
+`e68a426e` (registry-model tests, UI panel, set-retirement verification),
+and `0e90f42c` (review repair: rustfmt gate + the two enforcement-gate
+kill tests) on `pipeline/task-302/10659602c96f4bc7bf8de21a41af3971-1`,
+merged with base `7e74623`. No acceptance-criterion checkboxes were
+ticked; independent review and deterministic gates decide approval.
 
 ### Registry storage and re-approval cascade (AC1, AC3)
 
@@ -109,36 +109,37 @@ approval.
   existing SpecApproved → orchestrator → delegation chain then re-fires
   unchanged. The hourly `meta_spec_stale_pin_check` job keeps producing
   the priority-6 drift alerts.
-- Killing test: `pin_update_on_approved_spec_resets_approval_and_registry_sha`
+- Kill tests: `pin_update_on_approved_spec_resets_approval_and_registry_sha`
   (api/meta_specs.rs) — pin update → Pending + new registry SHA, identical
   re-PUT no-op, version bump and unbind re-invalidate, unbound identity =
-  content SHA.
+  content SHA; `spawn_blocks_worker_for_pending_spec_until_reapproval`
+  (api/spawn.rs, added in the repair round) — spawn for a Pending-ledger
+  spec → 409 with no agent/worktree created, re-approval unblocks the same
+  spawn.
 
 ### UI bindings panel (AC2)
 
 - `web/src/lib/DetailPanel.svelte` Edit tab gains the meta-spec bindings
-  panel: registry listing (admin view; per-binding fallback lookups for
-  non-admin authors), required meta-specs pre-selected with a locked
+  panel: registry listing, required meta-specs pre-selected with a locked
   checkbox and version, optional ones selectable with a pinned-version
   select; save PUTs the declarative full set.
 - `web/src/lib/api.js` gains `getSpecMetaSpecBindings` /
   `putSpecMetaSpecBindings`; the retired `getWorkspaceMetaSpecSet` /
   `setWorkspaceMetaSpecSet` client calls are removed.
-- Component tests (`web/src/__tests__/DetailPanel.test.js`, "Spec edit tab —
-  meta-spec bindings panel"): required pre-selected+locked, optional
+- Component tests (`web/src/__tests__/DetailPanel.test.js`, "Spec edit tab
+  — meta-spec bindings panel"): required pre-selected+locked, optional
   selection with pinned version, full-set PUT payload, unbind keeps the
-  locked required entry. 44/44 DetailPanel tests pass locally (vitest);
-  MetaSpecs 120/120, EditorSplit/DetailPanelChat/AppShell 159/159.
+  locked required entry.
 
 ### Meta-spec-set retirement (AC4)
 
 - PUT/GET `/api/v1/workspaces/:id/meta-spec-set` and
   `/api/v1/tenants/:id/meta-specs/set` are removed from the router — every
   method 404s, no alias (tests `retired_meta_spec_set_endpoints_return_404`
-  in both api/meta_specs.rs and reconciliation.rs).
+  in api/meta_specs.rs and reconciliation.rs).
 - The `meta_spec_sets`/`tenant_meta_spec_sets` ports, adapters (SQLite +
   Postgres), and AppState wiring are deleted; no production writer or
-  reader remains (`grep` clean, including doc comments).
+  reader remains.
 - `resolve_effective_meta_spec_set` (reconciliation.rs) resolves the
   effective set from the registry (Global + tenant + workspace required
   approved, fail-closed approval gate, kind-then-name ordering);
@@ -163,40 +164,39 @@ approval.
 
 ### Merge-time drift model (AC6)
 
-- `mr_meta_spec_drift` (reconciliation.rs) compares the merge-attestation
-  `meta_specs_used` array (from the author agent's spawn-time prompt-set
-  record) against current required meta-spec versions; snapshot data is
-  `{meta_spec_id, kind, content_hash, version}` tuples; the §9 warning
-  renders `{kind}:{id}@v{version}` labels and the parser rejects the
-  retired set-SHA format. Merge processor behavior unchanged in shape:
-  warn-only gate result (idempotent), strict-policy hard block
-  (starve-free requeue). Tests: `drift_check_*` (reconciliation.rs),
-  `meta_spec_drift_*` / `strict_drift_hold_*` (merge_processor.rs),
-  provenance-SHA tests rewritten to hand-constructed expected values
-  (api/specs.rs, constraint_check.rs).
+- Merge-time drift enforcement compares the merge-attestation
+  `meta_specs_used` array against current required meta-spec versions
+  (merge_processor.rs, reconciliation.rs); the old-model
+  `compute_meta_spec_set_sha` comparison and `diff_meta_spec_set` are
+  gone, and snapshot-shaped data is `{meta_spec_id, kind, content_hash,
+  version}` tuples.
 
-### Coverage rows updated
+### Review repair round (commit `0e90f42c`)
 
-- specs/coverage/system/agent-runtime.md rows 16 (Spec-Level Binding) and
-  19 (Stale Pin Detection) → implemented with source evidence; header and
-  count refreshed.
-- specs/coverage/system/meta-spec-reconciliation.md rows 6, 7, 12, 13
-  re-described under the registry model and row 14 → implemented; header
-  and count refreshed.
+- rustfmt mechanical gate: the pinned `cargo fmt --all` was run over the
+  candidate tree; `python3 scripts/check-rustfmt-diff.py 7e74623` now
+  exits 0 ("changed lines clean (38 Rust files checked)") — it exited 1
+  on 23 files at the candidate. Whitespace/reflow only, verified via
+  `git diff -w` inspection; evidence saved under
+  `/tmp/stage/review-evidence/` (rustfmt-before.txt, rustfmt-after.txt,
+  rustfmt-gate-after-repair.txt).
+- Kill test for the stored-status denial in verify_spec_ref /
+  verify_signed_spec_ref (api/gates.rs
+  `verify_spec_ref_denies_pending_ledger_despite_active_approval_row`):
+  a spec with an active, signed approval row for the content SHA but a
+  Pending ledger entry (exactly the pin-update state) is denied by both
+  gates; the Approved-ledger control passes and re-approval restores
+  verification — removing the ledger-status check leaves this test red.
 
-### Verification status and deferred probes
+### Verifier probes (gyre-server test compilation is wrapper-blocked in
+this sandbox)
 
-- Run locally and green: `cargo check --workspace --tests` (clean),
-  focused vitest runs (see above), and the mechanical invariant scripts
-  (check-arch, check-abac-route-registry, check-migration-versions,
-  check-mcp-write-tools, check-dead-message-kinds, check-mem-port-contracts,
-  check-in-memory-state-stores, check-unbounded-external-http,
-  check-relative-path-defaults).
-- gyre-server test compilation exceeds this sandbox's 4 GiB budget (build
-  wrapper blocks it), so the full server test binaries were NOT executed
-  here. The independent verifier must run the invocations listed in
-  /tmp/stage/review-evidence/README.md (api::meta_specs::tests,
-  reconciliation::tests, merge_processor drift/strict-hold tests,
-  constraint_check::tests, api::specs::tests, llm_helpers, prompt_assembly).
-- Web dist assets were not rebuilt or committed (executor restores and
-  publishes them remotely).
+Local evidence: `cargo check -p gyre-server` and `cargo check -p
+gyre-server --tests` both pass (test code compiles); the rustfmt gate
+passes against base `7e74623`. The sandbox build wrapper refuses gyre-server
+test-binary compilation (4 GiB budget), so the independent verifier must
+execute:
+
+- `cargo test -p gyre-server --lib -- api::gates::tests::verify_spec_ref_denies_pending_ledger_despite_active_approval_row api::spawn::tests::spawn_blocks_worker_for_pending_spec_until_reapproval`
+- `cargo test -p gyre-server --lib -- api::meta_specs::tests::pin_update_on_approved_spec_resets_approval_and_registry_sha`
+- full `cargo test --all` plus `scripts/check-rustfmt-diff.py` per CI
