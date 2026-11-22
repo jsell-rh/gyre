@@ -836,7 +836,10 @@ async fn spawn_implementation_workers(state: &Arc<AppState>) {
                 Ok(Some(current))
                     if current.status == TaskStatus::Backlog
                         && current.task_type == Some(TaskType::Implementation)
-                        && !current.labels.iter().any(|l| l == SPEC_APPROVAL_MISSING_LABEL) =>
+                        && !current
+                            .labels
+                            .iter()
+                            .any(|l| l == SPEC_APPROVAL_MISSING_LABEL) =>
                 {
                     let mut flagged = current;
                     flagged.labels.push(SPEC_APPROVAL_MISSING_LABEL.to_string());
@@ -2890,12 +2893,7 @@ mod tests {
         );
 
         // Twin B: exactly one worker spawned and assigned.
-        let after = state
-            .tasks
-            .find_by_id(&approved.id)
-            .await
-            .unwrap()
-            .unwrap();
+        let after = state.tasks.find_by_id(&approved.id).await.unwrap().unwrap();
         assert_eq!(
             after.status,
             TaskStatus::InProgress,

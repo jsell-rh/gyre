@@ -870,12 +870,17 @@ pub async fn verify_implementation_spec_ref(
     spec_ref: &str,
 ) -> Result<(), String> {
     // 1. Durable per-SHA approval row (also validates the "path@sha" form
-    // and the 40-char hex SHA).
-    verify_spec_ref(state, spec_ref).await?;
+    // and the 40-char hex SHA). Bound and branched (not `?;`) so the
+    // enforcement result visibly gates the function.
+    if let Err(reason) = verify_spec_ref(state, spec_ref).await {
+        return Err(reason);
+    }
 
     // 2. Current registry state at the pinned version. verify_spec_ref's
     // success guarantees the rsplit_once below resolves.
-    let (path, sha) = spec_ref.rsplit_once('@').expect("parsed by verify_spec_ref");
+    let (path, sha) = spec_ref
+        .rsplit_once('@')
+        .expect("parsed by verify_spec_ref");
     match state.spec_ledger.find_by_path(path).await {
         Ok(Some(entry)) => {
             if entry.current_sha != sha {
@@ -897,9 +902,7 @@ pub async fn verify_implementation_spec_ref(
         Ok(None) => Err(format!(
             "spec '{path}' is not in the spec registry — no approved version exists"
         )),
-        Err(e) => Err(format!(
-            "spec registry lookup for '{path}' failed: {e}"
-        )),
+        Err(e) => Err(format!("spec registry lookup for '{path}' failed: {e}")),
     }
 }
 

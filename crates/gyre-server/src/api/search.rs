@@ -308,11 +308,22 @@ mod tests {
             .await
             .unwrap();
 
+        // agent-runtime.md §1: the task-create gate requires an approved
+        // spec_ref for implementation tasks — seed the approval state the
+        // gate resolves before indexing the task through the public API.
+        crate::mem::seed_approved_spec(
+            &state,
+            "specs/test/search-fixture.md",
+            "abcdefabcdefabcdefabcdefabcdefabcdefabcd",
+        )
+        .await;
+
         // Index a searchable task through the public API so the search port
         // has a real document (create_task indexes for search).
         let task_body = serde_json::json!({
             "title": "Payment reconciliation engine",
             "task_type": "implementation",
+            "spec_ref": "specs/test/search-fixture.md@abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd",
             "workspace_id": "ws-search"
         });
         let resp = app

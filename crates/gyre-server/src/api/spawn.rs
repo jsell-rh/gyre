@@ -4509,8 +4509,20 @@ mod tests {
     use std::sync::Arc;
     use tower::ServiceExt;
 
-    fn app() -> Router {
-        crate::api::api_router().with_state(test_state())
+    /// The approved spec version every spawn-test implementation task
+    /// pins. agent-runtime.md §1 The Signal Chain: spec approval is the
+    /// single trigger for implementation work, so the REST task-create
+    /// gate only accepts `task_type: implementation` with a `spec_ref`
+    /// resolving to a currently-Approved ledger entry at the pinned SHA —
+    /// the fixture `app()` seeds is exactly the durable state POST
+    /// /api/v1/specs/:path/approve leaves behind.
+    const FIXTURE_SPEC_PATH: &str = "specs/test/spawn-fixture.md";
+    const FIXTURE_SPEC_SHA: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    async fn app() -> Router {
+        let state = test_state();
+        crate::mem::seed_approved_spec(&state, FIXTURE_SPEC_PATH, FIXTURE_SPEC_SHA).await;
+        crate::api::api_router().with_state(state)
     }
 
     async fn body_json(resp: axum::response::Response) -> serde_json::Value {
@@ -4544,7 +4556,11 @@ mod tests {
     }
 
     async fn create_task(app: Router, title: &str) -> (Router, String) {
-        let body = serde_json::json!({"title": title, "task_type": "implementation"});
+        let body = serde_json::json!({
+            "title": title,
+            "task_type": "implementation",
+            "spec_ref": format!("{FIXTURE_SPEC_PATH}@{FIXTURE_SPEC_SHA}"),
+        });
         let resp = app
             .clone()
             .oneshot(
@@ -4599,7 +4615,7 @@ mod tests {
 
     #[tokio::test]
     async fn spawn_creates_agent_active_with_token() {
-        let app = app();
+        let app = app().await;
         let (app, repo_id) = create_repo(app).await;
         let (app, task_id) = create_task(app, "Build feature").await;
         let (_, json) = do_spawn(app, &repo_id, &task_id, "feat/build").await;
@@ -4623,6 +4639,7 @@ mod tests {
     #[tokio::test]
     async fn spawn_without_compute_target_mints_attestation_level_one() {
         let state = test_state();
+        crate::mem::seed_approved_spec(&state, FIXTURE_SPEC_PATH, FIXTURE_SPEC_SHA).await;
         let app = crate::api::api_router().with_state(state.clone());
         let (app, repo_id) = create_repo(app).await;
         let (app, task_id) = create_task(app, "no-target spawn").await;
@@ -4645,7 +4662,7 @@ mod tests {
         // Verifies the jj_change_id field is present in the spawn response JSON.
         // It will be null if the worktree path doesn't exist on disk (test env),
         // but the field must always be serialized.
-        let app = app();
+        let app = app().await;
         let (app, repo_id) = create_repo(app).await;
         let (app, task_id) = create_task(app, "jj field task").await;
         let (_, json) = do_spawn(app, &repo_id, &task_id, "feat/jj-test").await;
@@ -5198,7 +5215,7 @@ mod tests {
 
     #[tokio::test]
     async fn spawn_creates_worktree_record() {
-        let app = app();
+        let app = app().await;
         let (app, repo_id) = create_repo(app).await;
         let (app, task_id) = create_task(app, "WT task").await;
         let (app, _) = do_spawn(app, &repo_id, &task_id, "feat/wt-test").await;
@@ -5220,7 +5237,7 @@ mod tests {
 
     #[tokio::test]
     async fn spawn_assigns_task_to_agent() {
-        let app = app();
+        let app = app().await;
         let (app, repo_id) = create_repo(app).await;
         let (app, task_id) = create_task(app, "Assigned task").await;
         let (app, json) = do_spawn(app, &repo_id, &task_id, "feat/assign").await;
@@ -5242,7 +5259,7 @@ mod tests {
 
     #[tokio::test]
     async fn spawn_returns_correct_clone_url_format() {
-        let app = app();
+        let app = app().await;
         let (app, repo_id) = create_repo(app).await;
         let (app, task_id) = create_task(app, "URL task").await;
         let (_, json) = do_spawn(app, &repo_id, &task_id, "feat/url-test").await;
@@ -5264,7 +5281,7 @@ mod tests {
 
     #[tokio::test]
     async fn spawn_branch_slashes_become_dashes_in_worktree_path() {
-        let app = app();
+        let app = app().await;
         let (app, repo_id) = create_repo(app).await;
         let (app, task_id) = create_task(app, "Slash task").await;
         let (_, json) = do_spawn(app, &repo_id, &task_id, "feat/sub/feature").await;
@@ -5278,7 +5295,7 @@ mod tests {
 
     #[tokio::test]
     async fn spawn_with_parent_id() {
-        let app = app();
+        let app = app().await;
         let (app, repo_id) = create_repo(app).await;
         let (app, task_id) = create_task(app, "Child task").await;
 
@@ -5308,7 +5325,7 @@ mod tests {
 
     #[tokio::test]
     async fn spawn_requires_valid_auth_token() {
-        let app = app();
+        let app = app().await;
         let body = serde_json::json!({
             "name": "worker",
             "repo_id": "r",
@@ -5331,7 +5348,7 @@ mod tests {
 
     #[tokio::test]
     async fn spawn_bad_token_rejected() {
-        let app = app();
+        let app = app().await;
         let body = serde_json::json!({
             "name": "worker",
             "repo_id": "r",
@@ -5355,7 +5372,7 @@ mod tests {
 
     #[tokio::test]
     async fn spawn_repo_not_found() {
-        let app = app();
+        let app = app().await;
         let body = serde_json::json!({
             "name": "worker",
             "repo_id": "no-such-repo",
@@ -5379,7 +5396,7 @@ mod tests {
 
     #[tokio::test]
     async fn spawn_task_not_found() {
-        let app = app();
+        let app = app().await;
         let (app, repo_id) = create_repo(app).await;
         let body = serde_json::json!({
             "name": "worker",
@@ -5404,7 +5421,7 @@ mod tests {
 
     #[tokio::test]
     async fn complete_creates_merge_request() {
-        let app = app();
+        let app = app().await;
         let (app, repo_id) = create_repo(app).await;
         let (app, task_id) = create_task(app, "Feature task").await;
         let (app, spawn_json) = do_spawn(app, &repo_id, &task_id, "feat/complete-test").await;
@@ -5437,7 +5454,7 @@ mod tests {
 
     #[tokio::test]
     async fn complete_transitions_task_to_review() {
-        let app = app();
+        let app = app().await;
         let (app, repo_id) = create_repo(app).await;
         let (app, task_id) = create_task(app, "Review task").await;
         let (app, spawn_json) = do_spawn(app, &repo_id, &task_id, "feat/review-test").await;
@@ -5476,7 +5493,7 @@ mod tests {
 
     #[tokio::test]
     async fn complete_transitions_agent_to_idle() {
-        let app = app();
+        let app = app().await;
         let (app, repo_id) = create_repo(app).await;
         let (app, task_id) = create_task(app, "Idle task").await;
         let (app, spawn_json) = do_spawn(app, &repo_id, &task_id, "feat/idle-test").await;
@@ -5722,6 +5739,7 @@ mod tests {
             "target_branch": "main",
         });
         let resp = app()
+            .await
             .oneshot(
                 Request::builder()
                     .method("POST")
@@ -5748,6 +5766,7 @@ mod tests {
     #[tokio::test]
     async fn agent_jwt_task_scope_boundary_on_lifecycle_endpoints() {
         let state = test_state();
+        crate::mem::seed_approved_spec(&state, FIXTURE_SPEC_PATH, FIXTURE_SPEC_SHA).await;
         let app = crate::api::api_router().with_state(state.clone());
         let (app, repo_id) = create_repo(app).await;
         let (app, task_a) = create_task(app, "Boundary task A").await;
@@ -5935,6 +5954,118 @@ mod tests {
         assert!(state.spawn_log.is_token_revoked(&jti_b).await.unwrap());
     }
 
+    /// AC (task-297): agent-runtime.md §1 The Signal Chain — direct-spawn
+    /// gate. POST /api/v1/agents/spawn must no longer create task-bound
+    /// implementation worker agents for external callers: a HUMAN
+    /// principal (Keycloak user JWT) spawning a worker onto an
+    /// Implementation task is rejected 403 naming the single-trigger
+    /// requirement, while the Phase-8 interrogation kind still spawns
+    /// for a non-system (agent) principal on the same surface.
+    #[tokio::test]
+    async fn spawn_rejects_implementation_worker_for_external_callers() {
+        use crate::auth::test_helpers::{make_test_state_with_jwt, sign_test_jwt};
+
+        let state = make_test_state_with_jwt();
+        crate::mem::seed_approved_spec(&state, FIXTURE_SPEC_PATH, FIXTURE_SPEC_SHA).await;
+        let app = crate::api::api_router().with_state(state.clone());
+        let (app, repo_id) = create_repo(app).await;
+        let (app, task_id) = create_task(app, "Direct-spawn gate task").await;
+
+        // A human principal (verified Keycloak user JWT, Developer role).
+        let human_jwt = sign_test_jwt(
+            &serde_json::json!({
+                "sub": "human-spawn-sub",
+                "preferred_username": "human-spawner",
+                "realm_access": { "roles": ["developer"] }
+            }),
+            3600,
+        );
+
+        // Human principal → worker bound to an Implementation task: 403.
+        let body = serde_json::json!({
+            "name": "human-spawned-worker",
+            "repo_id": repo_id,
+            "task_id": task_id,
+            "branch": "feat/human-spawn",
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/agents/spawn")
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {human_jwt}"))
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "human-principal worker spawn onto an Implementation task must be 403"
+        );
+        let json = body_json(resp).await;
+        let msg = json["error"].as_str().unwrap_or("");
+        assert!(
+            msg.contains("single trigger"),
+            "rejection must name the spec-approval requirement, got: {msg}"
+        );
+
+        // The denied spawn created no agent and left the task untouched.
+        let agents = state.agents.list().await.unwrap();
+        assert!(
+            agents.iter().all(|a| a.name != "human-spawned-worker"),
+            "no agent record may exist for the denied spawn"
+        );
+        let task = state
+            .tasks
+            .find_by_id(&Id::new(&task_id))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            task.status,
+            gyre_domain::TaskStatus::Backlog,
+            "the task stays Backlog — the scheduler is the only worker-spawn path"
+        );
+        assert!(task.assigned_to.is_none());
+
+        // An agent principal (spawn-minted task-scoped JWT) spawning an
+        // INTERROGATION agent on the same surface still succeeds: the
+        // endpoint remains for the Phase-8 system-initiated kinds. (The
+        // worker spawn below is the SYSTEM principal — the global test
+        // token — mirroring the Phase-4 scheduler's authority, so it is
+        // not itself subject to the direct-spawn gate.)
+        let (app, json_w) = do_spawn(app, &repo_id, &task_id, "feat/gate-worker").await;
+        let worker_token = json_w["token"].as_str().unwrap().to_string();
+        let body = serde_json::json!({
+            "name": "interrogation-gate-probe",
+            "repo_id": repo_id,
+            "task_id": task_id,
+            "branch": "interrogation/gate",
+            "agent_type": "interrogation",
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/agents/spawn")
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {worker_token}"))
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::CREATED,
+            "interrogation spawn must still succeed for a non-system principal"
+        );
+    }
+
     /// AC (task-263): POST /api/v1/agents/spawn onto task B is denied for
     /// an agent principal whose token carries neither a matching task_id
     /// claim nor a spawn scope covering task B's repo/workspace; spawning
@@ -5942,6 +6073,7 @@ mod tests {
     #[tokio::test]
     async fn agent_jwt_cannot_spawn_onto_foreign_task() {
         let state = test_state();
+        crate::mem::seed_approved_spec(&state, FIXTURE_SPEC_PATH, FIXTURE_SPEC_SHA).await;
         let app = crate::api::api_router().with_state(state.clone());
         let (app, repo_id) = create_repo(app).await;
         let (app, task_a) = create_task(app, "Spawn boundary A").await;
@@ -5970,7 +6102,71 @@ mod tests {
             )
             .await
             .unwrap();
+        // agent-runtime.md §1 direct-spawn gate: the REST surface rejects
+        // agent-principal spawns onto Implementation tasks before the
+        // core's task-claim boundary is reached — the message names the
+        // single-trigger requirement.
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let gate_json = body_json(resp).await;
+        let gate_msg = gate_json["error"].as_str().unwrap_or("");
+        assert!(
+            gate_msg.contains("single trigger"),
+            "agent-principal spawn onto an Implementation task must be rejected by \
+             the direct-spawn gate, got: {gate_msg}"
+        );
+
+        // The task-claim boundary itself lives in spawn_agent_core, ahead
+        // of every other core check, and is still reachable by non-REST
+        // callers (the MCP gyre_spawn_worker orchestrator path). Probe it
+        // directly with a task-scoped agent principal so the boundary
+        // keeps a test that fails if it is removed: a foreign-task spawn
+        // must be rejected with the claim-scoping error, not a later one.
+        let scoped_auth = crate::auth::AuthenticatedAgent {
+            auth_mechanism: crate::auth::AuthMechanism::AgentToken,
+            agent_id: json_a["agent"]["id"].as_str().unwrap().to_string(),
+            user_id: None,
+            roles: vec![],
+            tenant_id: "default".to_string(),
+            workspace_id: None,
+            repo_id: None,
+            scope: vec!["tasks:write".to_string()],
+            jwt_claims: Some(serde_json::json!({
+                "scope": ["tasks:write"],
+                "task_id": task_a,
+            })),
+            bearer_token: None,
+            deprecated_token_auth: false,
+            impersonation: None,
+        };
+        let core_req = SpawnAgentRequest {
+            name: "foreign-core-spawn".to_string(),
+            repo_id: repo_id.clone(),
+            task_id: task_b.clone(),
+            branch: "feat/evil-core".to_string(),
+            parent_id: None,
+            compute_target_id: None,
+            disconnected_behavior: None,
+            loop_config: None,
+            agent_type: None,
+            conversation_sha: None,
+            persona: None,
+            persona_slug: None,
+        };
+        let err = match spawn_agent_core(
+            &state,
+            core_req,
+            &scoped_auth,
+            "test: core task-claim boundary probe",
+        )
+        .await
+        {
+            Err(e) => e,
+            Ok(_) => panic!("foreign-task spawn must be rejected by the core boundary"),
+        };
+        assert!(
+            format!("{err:?}").contains("scoped to task"),
+            "core must reject the foreign-task spawn with the claim-scoping error, got: {err:?}"
+        );
         // Task B was not reassigned nor advanced by the denied spawn.
         let task_resp = app
             .clone()
@@ -5990,8 +6186,15 @@ mod tests {
             "task B must not be assigned by the denied spawn"
         );
 
-        // Spawning onto the caller's own task passes the boundary (the
-        // claim matches).
+        // Spawning onto the caller's own task: under agent-runtime.md §1
+        // (spec approval is the single trigger for implementation work)
+        // the REST spawn surface no longer creates task-bound
+        // implementation workers for agent principals at all — the
+        // Phase-4 scheduler is the only worker-spawn path — so the
+        // claim-matching respawn is now rejected by the direct-spawn
+        // gate, not allowed through the boundary. (The task-claim
+        // boundary itself remains enforced inside spawn_agent_core,
+        // reachable via the MCP gyre_spawn_worker orchestrator path.)
         let body = serde_json::json!({
             "name": "own-task-respawn",
             "repo_id": repo_id,
@@ -6010,7 +6213,13 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::CREATED);
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let json = body_json(resp).await;
+        let msg = json["error"].as_str().unwrap_or("");
+        assert!(
+            msg.contains("single trigger"),
+            "own-task respawn must be rejected by the direct-spawn gate, got: {msg}"
+        );
     }
 
     /// AC (task-263): decoding a spawn-minted agent JWT shows the specced
@@ -6027,6 +6236,7 @@ mod tests {
     #[tokio::test]
     async fn spawn_minted_jwt_carries_task_scoped_claims() {
         let state = test_state();
+        crate::mem::seed_approved_spec(&state, FIXTURE_SPEC_PATH, FIXTURE_SPEC_SHA).await;
         let app = crate::api::api_router().with_state(state.clone());
         seed_spawn_persona(&state, "security", "be vigilant").await;
         let (app, repo_id) = create_repo(app).await;
@@ -6120,6 +6330,7 @@ mod tests {
     #[tokio::test]
     async fn ssh_spawn_mints_configured_remote_host_as_wl_hostname() {
         let state = test_state();
+        crate::mem::seed_approved_spec(&state, FIXTURE_SPEC_PATH, FIXTURE_SPEC_SHA).await;
         let app = crate::api::api_router().with_state(state.clone());
         let (app, ws_id) = create_workspace(app, "wl-hostname-ws").await;
         let (app, repo_id) = create_repo_in_workspace(app, &ws_id).await;
@@ -6200,6 +6411,7 @@ mod tests {
     async fn spawn_emits_agent_spawned_analytics_event() {
         // agent.spawned must carry agent_id, task_id, compute_target, persona.
         let state = test_state();
+        crate::mem::seed_approved_spec(&state, FIXTURE_SPEC_PATH, FIXTURE_SPEC_SHA).await;
         let app = crate::api::api_router().with_state(state.clone());
         let (app, repo_id) = create_repo(app).await;
         let (app, task_id) = create_task(app, "Spawn analytics").await;
@@ -6239,6 +6451,7 @@ mod tests {
     #[tokio::test]
     async fn spawn_analytics_persona_reports_bound_persona() {
         let state = test_state();
+        crate::mem::seed_approved_spec(&state, FIXTURE_SPEC_PATH, FIXTURE_SPEC_SHA).await;
         let app = crate::api::api_router().with_state(state.clone());
         let (app, ws_id) = create_workspace(app, "persona-analytics-ws").await;
         let (app, repo_id) = create_repo_in_workspace(app, &ws_id).await;
@@ -6284,6 +6497,7 @@ mod tests {
     #[tokio::test]
     async fn spawn_auto_advance_records_task_status_changed() {
         let state = test_state();
+        crate::mem::seed_approved_spec(&state, FIXTURE_SPEC_PATH, FIXTURE_SPEC_SHA).await;
         let app = crate::api::api_router().with_state(state.clone());
         let (app, repo_id) = create_repo(app).await;
         let (app, task_id) = create_task(app, "Auto-advance analytics").await;
@@ -6316,6 +6530,7 @@ mod tests {
     #[tokio::test]
     async fn complete_auto_advance_records_task_status_changed() {
         let state = test_state();
+        crate::mem::seed_approved_spec(&state, FIXTURE_SPEC_PATH, FIXTURE_SPEC_SHA).await;
         let app = crate::api::api_router().with_state(state.clone());
         let (app, repo_id) = create_repo(app).await;
         let (app, task_id) = create_task(app, "Complete advance analytics").await;
@@ -6364,6 +6579,7 @@ mod tests {
     async fn complete_agent_emits_analytics_event() {
         // agent.completed must carry agent_id, task_id, duration_secs.
         let state = test_state();
+        crate::mem::seed_approved_spec(&state, FIXTURE_SPEC_PATH, FIXTURE_SPEC_SHA).await;
         let app = crate::api::api_router().with_state(state.clone());
         let (app, repo_id) = create_repo(app).await;
         let (app, task_id) = create_task(app, "Complete analytics").await;
@@ -6435,6 +6651,7 @@ mod tests {
         use gyre_common::message::{Destination, Message, MessageKind, MessageOrigin};
 
         let state = test_state();
+        crate::mem::seed_approved_spec(&state, FIXTURE_SPEC_PATH, FIXTURE_SPEC_SHA).await;
         let app = crate::api::api_router().with_state(state.clone());
         let (app, repo_id) = create_repo(app).await;
         let (app, task_id) = create_task(app, "Inbox cleanup complete").await;
@@ -6625,6 +6842,7 @@ mod tests {
     async fn fail_agent_emits_analytics_event() {
         // agent.failed must carry agent_id, task_id, reason.
         let state = test_state();
+        crate::mem::seed_approved_spec(&state, FIXTURE_SPEC_PATH, FIXTURE_SPEC_SHA).await;
         let app = crate::api::api_router().with_state(state.clone());
         let (app, repo_id) = create_repo(app).await;
         let (app, task_id) = create_task(app, "Fail analytics").await;
@@ -6663,7 +6881,7 @@ mod tests {
 
     #[tokio::test]
     async fn complete_no_worktree_returns_bad_request() {
-        let app = app();
+        let app = app().await;
         // Create agent directly (no worktree)
         let body = serde_json::json!({"name": "bare-agent"});
         let resp = app
@@ -6705,7 +6923,7 @@ mod tests {
 
     #[tokio::test]
     async fn complete_mr_sets_author_agent_id() {
-        let app = app();
+        let app = app().await;
         let (app, repo_id) = create_repo(app).await;
         let (app, task_id) = create_task(app, "Author task").await;
         let (app, spawn_json) = do_spawn(app, &repo_id, &task_id, "feat/author-test").await;
@@ -6739,6 +6957,7 @@ mod tests {
         // an AgentSpawned audit event with name/task_id/compute_target/branch/
         // spawned_by detail fields.
         let state = test_state();
+        crate::mem::seed_approved_spec(&state, FIXTURE_SPEC_PATH, FIXTURE_SPEC_SHA).await;
         let app = crate::api::api_router().with_state(state.clone());
         let (app, repo_id) = create_repo(app).await;
         let (app, task_id) = create_task(app, "audit spawn task").await;
@@ -6764,6 +6983,7 @@ mod tests {
         // record AgentCompleted (task_id/mr_id/branch) and the token
         // revocation must be audited with the revoked token's jti.
         let state = test_state();
+        crate::mem::seed_approved_spec(&state, FIXTURE_SPEC_PATH, FIXTURE_SPEC_SHA).await;
         let app = crate::api::api_router().with_state(state.clone());
         let (app, repo_id) = create_repo(app).await;
         let (app, task_id) = create_task(app, "audit complete task").await;
@@ -6817,7 +7037,7 @@ mod tests {
 
     #[tokio::test]
     async fn complete_revokes_agent_token() {
-        let app = app();
+        let app = app().await;
         let (app, repo_id) = create_repo(app).await;
         let (app, task_id) = create_task(app, "Revoke task").await;
         let (app, spawn_json) = do_spawn(app, &repo_id, &task_id, "feat/revoke-test").await;
@@ -6881,6 +7101,7 @@ mod tests {
         use gyre_common::{Id, Secret, SecretScope, SecretType};
 
         let state = test_state();
+        crate::mem::seed_approved_spec(&state, FIXTURE_SPEC_PATH, FIXTURE_SPEC_SHA).await;
         let app = crate::api::api_router().with_state(state.clone());
         let (app, ws_id) = create_workspace(app, "ws-rest-teardown").await;
         let (app, repo_id) = create_repo_in_workspace(app, &ws_id).await;
@@ -7006,6 +7227,7 @@ mod tests {
         use gyre_common::{Id, Secret, SecretScope, SecretType};
 
         let state = test_state();
+        crate::mem::seed_approved_spec(&state, FIXTURE_SPEC_PATH, FIXTURE_SPEC_SHA).await;
         let app = crate::api::api_router().with_state(state.clone());
         let (app, ws_id) = create_workspace(app, "ws-rest-stop").await;
         let (app, repo_id) = create_repo_in_workspace(app, &ws_id).await;
@@ -7127,6 +7349,7 @@ mod tests {
         use gyre_common::{Id, Secret, SecretScope, SecretType};
 
         let state = test_state();
+        crate::mem::seed_approved_spec(&state, FIXTURE_SPEC_PATH, FIXTURE_SPEC_SHA).await;
         let app = crate::api::api_router().with_state(state.clone());
         let (app, ws_id) = create_workspace(app, "ws-rest-fail").await;
         let (app, repo_id) = create_repo_in_workspace(app, &ws_id).await;
@@ -7242,7 +7465,7 @@ mod tests {
 
     #[tokio::test]
     async fn complete_idempotent_returns_202_on_double_complete() {
-        let app = app();
+        let app = app().await;
         let (app, repo_id) = create_repo(app).await;
         let (app, task_id) = create_task(app, "Idempotent task").await;
         let (app, spawn_json) = do_spawn(app, &repo_id, &task_id, "feat/idempotent-test").await;
@@ -7332,7 +7555,7 @@ mod tests {
 
     #[tokio::test]
     async fn interrogation_spawn_creates_active_agent() {
-        let app = app();
+        let app = app().await;
         let (app, repo_id) = create_repo(app).await;
         let (app, task_id) = create_task(app, "Interrogate agent").await;
         let (_, json) = do_spawn_interrogation(app, &repo_id, &task_id, None).await;
@@ -7343,7 +7566,7 @@ mod tests {
 
     #[tokio::test]
     async fn interrogation_spawn_creates_abac_policies() {
-        let app = app();
+        let app = app().await;
         let (app, repo_id) = create_repo(app).await;
         let (app, task_id) = create_task(app, "Policy agent").await;
         let (app, json) = do_spawn_interrogation(app, &repo_id, &task_id, None).await;
@@ -7384,7 +7607,7 @@ mod tests {
     #[tokio::test]
     async fn interrogation_spawn_without_conversation_sha() {
         // Spawning without conversation_sha should succeed (best-effort context retrieval).
-        let app = app();
+        let app = app().await;
         let (app, repo_id) = create_repo(app).await;
         let (app, task_id) = create_task(app, "No context agent").await;
         let (_, json) = do_spawn_interrogation(app, &repo_id, &task_id, None).await;
@@ -7508,6 +7731,7 @@ mod tests {
         // check_spawn_budget has real inputs. With the recording wiring
         // removed, the counters stay frozen at 0 and this test fails.
         let state = crate::mem::test_state();
+        crate::mem::seed_approved_spec(&state, FIXTURE_SPEC_PATH, FIXTURE_SPEC_SHA).await;
         let app = crate::api::api_router().with_state(Arc::clone(&state));
         let (app, ws_id) = create_workspace(app, "ws-usage-budget").await;
         let (app, repo_id) = create_repo_in_workspace(app, &ws_id).await;
@@ -7593,7 +7817,7 @@ mod tests {
     async fn spawn_uses_workspace_assigned_compute_target() {
         // When a workspace has a compute_target_id set and the spawn request
         // does not specify one, the workspace target is resolved automatically.
-        let app = app();
+        let app = app().await;
         let (app, ws_id) = create_workspace(app, "workspace-ct-test").await;
         let (app, ct_id) = create_compute_target(app, "ws-container", false).await;
         let app = assign_compute_target_to_workspace(app, &ws_id, &ct_id).await;
@@ -7634,7 +7858,7 @@ mod tests {
     async fn spawn_falls_back_to_tenant_default_compute_target() {
         // When no explicit compute_target_id is requested and the workspace has
         // no assignment, the tenant's default compute target is used.
-        let app = app();
+        let app = app().await;
         let (app, ws_id) = create_workspace(app, "workspace-default-ct").await;
         // Create a default compute target for the tenant (is_default = true).
         let (app, ct_id) = create_compute_target(app, "tenant-default", true).await;
@@ -7678,6 +7902,7 @@ mod tests {
     #[tokio::test]
     async fn spawn_rejects_cross_tenant_compute_target() {
         let state = test_state();
+        crate::mem::seed_approved_spec(&state, FIXTURE_SPEC_PATH, FIXTURE_SPEC_SHA).await;
         // Seed a compute target in a DIFFERENT tenant directly in the store
         // (the API path derives tenant from the caller, so it cannot produce it).
         let foreign = gyre_domain::ComputeTargetEntity::new(
@@ -7740,6 +7965,7 @@ mod tests {
     #[tokio::test]
     async fn spawn_rejects_stale_cross_tenant_workspace_assignment() {
         let state = test_state();
+        crate::mem::seed_approved_spec(&state, FIXTURE_SPEC_PATH, FIXTURE_SPEC_SHA).await;
         let foreign = gyre_domain::ComputeTargetEntity::new(
             gyre_common::Id::new("ct-stale-foreign"),
             gyre_common::Id::new("other-tenant"),
@@ -7813,6 +8039,7 @@ mod tests {
     #[tokio::test]
     async fn spawn_rejects_unsafe_agent_name_on_ssh_target_without_orphans() {
         let state = test_state();
+        crate::mem::seed_approved_spec(&state, FIXTURE_SPEC_PATH, FIXTURE_SPEC_SHA).await;
         let app = crate::api::api_router().with_state(state.clone());
         let (app, ws_id) = create_workspace(app, "workspace-ssh-name").await;
         let (app, repo_id) = create_repo_in_workspace(app, &ws_id).await;
@@ -7919,6 +8146,12 @@ mod tests {
         let mut body = serde_json::json!({"title": title});
         if let Some(tt) = task_type {
             body["task_type"] = serde_json::Value::String(tt.to_string());
+            // agent-runtime.md §1: the task-create gate requires an
+            // approved spec_ref pinned by SHA for implementation tasks.
+            if tt == "implementation" {
+                body["spec_ref"] =
+                    serde_json::Value::String(format!("{FIXTURE_SPEC_PATH}@{FIXTURE_SPEC_SHA}"));
+            }
         }
         let resp = app
             .clone()
@@ -7970,7 +8203,7 @@ mod tests {
 
     #[tokio::test]
     async fn spawn_rejects_delegation_tasks() {
-        let app = app();
+        let app = app().await;
         let (app, repo_id) = create_repo(app).await;
         let (app, task_id) =
             create_task_with_type(app, "Delegation task", Some("delegation")).await;
@@ -7991,7 +8224,7 @@ mod tests {
 
     #[tokio::test]
     async fn spawn_rejects_coordination_tasks() {
-        let app = app();
+        let app = app().await;
         let (app, repo_id) = create_repo(app).await;
         let (app, task_id) =
             create_task_with_type(app, "Coordination task", Some("coordination")).await;
@@ -8012,7 +8245,7 @@ mod tests {
 
     #[tokio::test]
     async fn spawn_rejects_tasks_without_task_type() {
-        let app = app();
+        let app = app().await;
         let (app, repo_id) = create_repo(app).await;
         // Create task without task_type (simulates push-hook pre-approval task).
         let (app, task_id) = create_task_with_type(app, "Pre-approval push-hook task", None).await;
@@ -8033,7 +8266,7 @@ mod tests {
 
     #[tokio::test]
     async fn spawn_allows_implementation_tasks() {
-        let app = app();
+        let app = app().await;
         let (app, repo_id) = create_repo(app).await;
         let (app, task_id) =
             create_task_with_type(app, "Implementation task", Some("implementation")).await;
@@ -8050,7 +8283,7 @@ mod tests {
     async fn interrogation_agents_bypass_task_type_check() {
         // Interrogation agents are system-initiated and should work with any task_type,
         // including delegation tasks that would normally be rejected.
-        let app = app();
+        let app = app().await;
         let (app, repo_id) = create_repo(app).await;
         let (app, task_id) =
             create_task_with_type(app, "Delegation for interrogation", Some("delegation")).await;
@@ -8693,6 +8926,7 @@ exit 1\n"
     #[tokio::test]
     async fn spawn_delivers_scoped_secrets_across_all_scopes() {
         let state = test_state();
+        crate::mem::seed_approved_spec(&state, FIXTURE_SPEC_PATH, FIXTURE_SPEC_SHA).await;
         let app = crate::api::api_router().with_state(state.clone());
         let temp = tempfile::tempdir().expect("tempdir");
         let dump_path = temp.path().join("env-dump").to_string_lossy().into_owned();
@@ -8775,6 +9009,7 @@ exit 1\n"
     #[tokio::test]
     async fn spawn_secret_delivery_nearest_scope_wins() {
         let state = test_state();
+        crate::mem::seed_approved_spec(&state, FIXTURE_SPEC_PATH, FIXTURE_SPEC_SHA).await;
         let app = crate::api::api_router().with_state(state.clone());
         let temp = tempfile::tempdir().expect("tempdir");
         let dump_path = temp.path().join("env-dump").to_string_lossy().into_owned();
@@ -8833,6 +9068,7 @@ exit 1\n"
         // kubernetes arm must override work_dir to /workspace (mirroring
         // the SSH container arm).
         let state = test_state();
+        crate::mem::seed_approved_spec(&state, FIXTURE_SPEC_PATH, FIXTURE_SPEC_SHA).await;
         let app = crate::api::api_router().with_state(state.clone());
         let temp = tempfile::tempdir().expect("tempdir");
         let dump_path = temp.path().join("wd-dump").to_string_lossy().into_owned();
@@ -8890,6 +9126,7 @@ exit 1\n"
         // named LEAK in a fabricated "default" tenant must not reach the
         // agent env — trivially guaranteed because no container runs).
         let state = test_state();
+        crate::mem::seed_approved_spec(&state, FIXTURE_SPEC_PATH, FIXTURE_SPEC_SHA).await;
         let app = crate::api::api_router().with_state(state.clone());
         let temp = tempfile::tempdir().expect("tempdir");
         let dump_path = temp.path().join("env-dump").to_string_lossy().into_owned();
@@ -8975,6 +9212,7 @@ exit 1\n"
         // skipped with a warning naming the secret (never the value), while
         // the remaining secrets are still delivered.
         let state = test_state();
+        crate::mem::seed_approved_spec(&state, FIXTURE_SPEC_PATH, FIXTURE_SPEC_SHA).await;
         let app = crate::api::api_router().with_state(state.clone());
         let temp = tempfile::tempdir().expect("tempdir");
         let dump_path = temp.path().join("env-dump").to_string_lossy().into_owned();
@@ -9084,6 +9322,7 @@ exit 1\n"
         }
 
         let state = test_state_with_secrets(Arc::new(FailingSecrets));
+        crate::mem::seed_approved_spec(&state, FIXTURE_SPEC_PATH, FIXTURE_SPEC_SHA).await;
         let app = crate::api::api_router().with_state(state.clone());
         let temp = tempfile::tempdir().expect("tempdir");
         let dump_path = temp.path().join("env-dump").to_string_lossy().into_owned();
@@ -9304,6 +9543,7 @@ exit 1\n"
     #[tokio::test]
     async fn spawn_injects_all_four_system_prompts_with_persona() {
         let state = test_state();
+        crate::mem::seed_approved_spec(&state, FIXTURE_SPEC_PATH, FIXTURE_SPEC_SHA).await;
         let app = crate::api::api_router().with_state(state.clone());
         let temp = tempfile::tempdir().expect("tempdir");
         let dump_path = temp
@@ -9524,6 +9764,7 @@ exit 1\n"
     #[tokio::test]
     async fn spawn_without_persona_injects_prompts_but_no_persona() {
         let state = test_state();
+        crate::mem::seed_approved_spec(&state, FIXTURE_SPEC_PATH, FIXTURE_SPEC_SHA).await;
         let app = crate::api::api_router().with_state(state.clone());
         let temp = tempfile::tempdir().expect("tempdir");
         let dump_path = temp
@@ -9571,6 +9812,7 @@ exit 1\n"
     #[tokio::test]
     async fn spawn_persona_slug_fails_closed() {
         let state = test_state();
+        crate::mem::seed_approved_spec(&state, FIXTURE_SPEC_PATH, FIXTURE_SPEC_SHA).await;
         let app = crate::api::api_router().with_state(state.clone());
 
         let (app, ws_id) = create_workspace(app, "prompts-ws-failclosed").await;
@@ -9680,6 +9922,7 @@ exit 1\n"
     #[tokio::test]
     async fn spawn_bare_persona_fails_closed() {
         let state = test_state();
+        crate::mem::seed_approved_spec(&state, FIXTURE_SPEC_PATH, FIXTURE_SPEC_SHA).await;
         let app = crate::api::api_router().with_state(state.clone());
 
         let (app, ws_id) = create_workspace(app, "prompts-ws-bare-failclosed").await;
@@ -9796,6 +10039,7 @@ exit 1\n"
     #[tokio::test]
     async fn spawn_bare_persona_approved_is_recorded() {
         let state = test_state();
+        crate::mem::seed_approved_spec(&state, FIXTURE_SPEC_PATH, FIXTURE_SPEC_SHA).await;
         let app = crate::api::api_router().with_state(state.clone());
         let temp = tempfile::tempdir().expect("tempdir");
         let dump_path = temp
@@ -9868,6 +10112,7 @@ exit 1\n"
     #[tokio::test]
     async fn spawn_omits_meta_spec_set_sha_without_required_meta_specs() {
         let state = test_state();
+        crate::mem::seed_approved_spec(&state, FIXTURE_SPEC_PATH, FIXTURE_SPEC_SHA).await;
         let app = crate::api::api_router().with_state(state.clone());
 
         // Fresh workspace, no required meta-specs seeded: the field is null.
@@ -9901,6 +10146,7 @@ exit 1\n"
         use sha2::Digest;
 
         let state = test_state();
+        crate::mem::seed_approved_spec(&state, FIXTURE_SPEC_PATH, FIXTURE_SPEC_SHA).await;
         let app = crate::api::api_router().with_state(state.clone());
         let temp = tempfile::tempdir().expect("tempdir");
         let dump_path = temp.path().join("meta-dump").to_string_lossy().into_owned();
@@ -10069,6 +10315,7 @@ exit 1\n"
     #[tokio::test]
     async fn spawn_delivers_local_gates_from_repo_gate_config() {
         let state = test_state();
+        crate::mem::seed_approved_spec(&state, FIXTURE_SPEC_PATH, FIXTURE_SPEC_SHA).await;
         let app = crate::api::api_router().with_state(state.clone());
         let temp = tempfile::tempdir().expect("tempdir");
         let dump_path = temp
@@ -10186,6 +10433,7 @@ exit 1\n"
     #[tokio::test]
     async fn spawn_local_gates_empty_when_repo_configures_none() {
         let state = test_state();
+        crate::mem::seed_approved_spec(&state, FIXTURE_SPEC_PATH, FIXTURE_SPEC_SHA).await;
         let app = crate::api::api_router().with_state(state.clone());
         let temp = tempfile::tempdir().expect("tempdir");
         let dump_path = temp
@@ -10230,6 +10478,7 @@ exit 1\n"
         use sha2::Digest;
 
         let state = test_state();
+        crate::mem::seed_approved_spec(&state, FIXTURE_SPEC_PATH, FIXTURE_SPEC_SHA).await;
         let app = crate::api::api_router().with_state(state.clone());
 
         // One required, approved, tenant-scoped persona — assembled into
@@ -10320,6 +10569,7 @@ exit 1\n"
     #[tokio::test]
     async fn mcp_persona_prompt_carries_bound_persona_attestation() {
         let state = test_state();
+        crate::mem::seed_approved_spec(&state, FIXTURE_SPEC_PATH, FIXTURE_SPEC_SHA).await;
         let app = crate::api::api_router().with_state(state.clone());
 
         let (app, repo_id) = create_repo(app).await;

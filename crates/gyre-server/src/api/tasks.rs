@@ -281,9 +281,7 @@ pub async fn create_task(
     // passes this gate.
     if task.task_type == Some(TaskType::Implementation) {
         let gate = match task.spec_ref.as_deref() {
-            Some(spec_ref) => {
-                super::gates::verify_implementation_spec_ref(&state, spec_ref).await
-            }
+            Some(spec_ref) => super::gates::verify_implementation_spec_ref(&state, spec_ref).await,
             None => Err("the task carries no spec_ref (path@sha)".to_string()),
         };
         if let Err(reason) = gate {
