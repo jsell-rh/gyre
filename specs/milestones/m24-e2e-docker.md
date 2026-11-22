@@ -60,9 +60,10 @@ The entrypoint script:
 4. Sends an initial heartbeat to `POST /api/v1/agents/{GYRE_AGENT_ID}/heartbeat`
 5. Execs `GYRE_AGENT_COMMAND` if set, otherwise sleeps 1h for interactive use
 
-Build the image:
+Build the image (at M24 this was a `docker build` from a Dockerfile; the Dockerfile has since been retired — the Nix flake in `docker/gyre-agent/` is the single image definition, agent-runtime.md §3):
 ```bash
-docker build -t gyre-agent:latest docker/gyre-agent/
+# Run in docker/gyre-agent/:
+nix build .#agent-image-docker && docker load < result
 ```
 
 ### M24.5 — Compute Target Dropdown in Spawn Modal
@@ -72,7 +73,7 @@ The "Spawn Agent" modal in the dashboard now includes a **Compute Target** dropd
 ## How to Run the E2E Flow
 
 1. Start the server with Docker available: `cargo run -p gyre-server`
-2. Build the agent image: `docker build -t gyre-agent:latest docker/gyre-agent/`
+2. Build the agent image (run in `docker/gyre-agent/`): `nix build .#agent-image-docker && docker load < result` (at M24 this was a `docker build`; the Dockerfile has since been retired in favor of the Nix flake — agent-runtime.md §3)
 3. Register a container compute target via Admin → Compute → Add (type: container, image: `gyre-agent:latest`)
 4. Create a project + repo via the dashboard
 5. Create a task
@@ -86,6 +87,6 @@ The "Spawn Agent" modal in the dashboard now includes a **Compute Target** dropd
 | File | Change |
 |---|---|
 | `crates/gyre-server/src/api/spawn.rs` | JWT pre-mint, env injection, bridge network default, configurable entrypoint |
-| `docker/gyre-agent/Dockerfile` | New — minimal Ubuntu agent image |
+| `docker/gyre-agent/Dockerfile` | New — minimal Ubuntu agent image (since removed: replaced by the Nix flake as the single image definition, agent-runtime.md §3) |
 | `docker/gyre-agent/entrypoint.sh` | New — bootstrap script |
 | `web/src/components/AgentList.svelte` | Compute target dropdown in spawn modal |
