@@ -1876,10 +1876,9 @@ pub fn build_state(
     let pg_db: Option<Arc<gyre_adapters::PgStorage>> = match &selection {
         StorageSelection::Postgres(url) => {
             tracing::info!(url, "storage: PostgreSQL (GYRE_DATABASE_URL)");
-            Some(Arc::new(
-                gyre_adapters::PgStorage::new(url)
-                    .unwrap_or_else(|e| panic!("Failed to connect to PostgreSQL: {e}")),
-            ))
+            Some(Arc::new(gyre_adapters::PgStorage::new(url).unwrap_or_else(
+                |e| panic!("Failed to connect to PostgreSQL: {e}"),
+            )))
         }
         _ => None,
     };
@@ -2991,7 +2990,9 @@ mod tests {
                 std::path::Path::new(&path).is_absolute(),
                 "default SQLite path must be absolute, got {path}"
             ),
-            other => panic!("unset GYRE_DATABASE_URL must select the default SQLite path, got {other:?}"),
+            other => {
+                panic!("unset GYRE_DATABASE_URL must select the default SQLite path, got {other:?}")
+            }
         }
     }
 
