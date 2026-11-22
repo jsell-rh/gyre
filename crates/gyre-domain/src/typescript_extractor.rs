@@ -436,7 +436,9 @@ impl ExtractionContext {
                 continue;
             }
             for j in 0..child.child_count() {
-                let Some(clause) = child.child(j) else { continue };
+                let Some(clause) = child.child(j) else {
+                    continue;
+                };
                 if clause.kind() != "extends_clause" {
                     continue; // implements_clause: not owned by this extractor
                 }
@@ -665,7 +667,8 @@ impl ExtractionContext {
                     graph_node.test_node = is_test_file;
                     let node_id = graph_node.id.clone();
                     self.name_to_id.insert(qname, node_id.clone());
-                    let edge = self.make_edge(EdgeType::Contains, module_id.clone(), node_id.clone());
+                    let edge =
+                        self.make_edge(EdgeType::Contains, module_id.clone(), node_id.clone());
                     self.nodes.push(graph_node);
                     self.edges.push(edge);
 
@@ -712,8 +715,11 @@ impl ExtractionContext {
                             graph_node.test_node = is_test_file;
                             let node_id = graph_node.id.clone();
                             self.name_to_id.insert(qname, node_id.clone());
-                            let edge =
-                                self.make_edge(EdgeType::Contains, module_id.clone(), node_id.clone());
+                            let edge = self.make_edge(
+                                EdgeType::Contains,
+                                module_id.clone(),
+                                node_id.clone(),
+                            );
                             self.nodes.push(graph_node);
                             self.edges.push(edge);
 

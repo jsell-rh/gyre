@@ -806,8 +806,7 @@ impl ExtractionContext {
         self.name_to_id.insert(qname, node_id.clone());
         self.nodes.push(node);
 
-        let meta =
-            serde_json::json!({ "path": route_path, "method": method }).to_string();
+        let meta = serde_json::json!({ "path": route_path, "method": method }).to_string();
         let edge = self.make_edge_with_meta(
             EdgeType::Contains,
             parent_id.clone(),
@@ -821,8 +820,7 @@ impl ExtractionContext {
         // resolution is deferred to after all files so the edge is emitted
         // through the same machinery as the other deferred edges.
         let handler_qname = format!("{parent_qname}.{name}");
-        self.deferred_routes
-            .push((node_id, handler_qname, meta));
+        self.deferred_routes.push((node_id, handler_qname, meta));
     }
 
     // -----------------------------------------------------------------------
@@ -1584,7 +1582,11 @@ def process_payment(payment_id: str):
     // -----------------------------------------------------------------------
 
     fn node_id_by_name(result: &ExtractionResult, name: &str) -> Option<Id> {
-        result.nodes.iter().find(|n| n.name == name).map(|n| n.id.clone())
+        result
+            .nodes
+            .iter()
+            .find(|n| n.name == name)
+            .map(|n| n.id.clone())
     }
 
     fn has_edge(result: &ExtractionResult, et: EdgeType, from_name: &str, to_name: &str) -> bool {
@@ -1636,13 +1638,19 @@ def process_payment(payment_id: str):
             write_requirements(&dir);
             let files: Vec<(&str, &str)> = if admin_first {
                 vec![
-                    ("admin.py", "from models import User\n\nclass Admin(User):\n    pass\n"),
+                    (
+                        "admin.py",
+                        "from models import User\n\nclass Admin(User):\n    pass\n",
+                    ),
                     ("models.py", "class User:\n    pass\n"),
                 ]
             } else {
                 vec![
                     ("models.py", "class User:\n    pass\n"),
-                    ("admin.py", "from models import User\n\nclass Admin(User):\n    pass\n"),
+                    (
+                        "admin.py",
+                        "from models import User\n\nclass Admin(User):\n    pass\n",
+                    ),
                 ]
             };
             for (name, content) in files {
@@ -1777,7 +1785,13 @@ def list_users():
         let meta: serde_json::Value =
             serde_json::from_str(routes_edge.metadata.as_deref().unwrap_or("{}"))
                 .expect("RoutesTo metadata must be valid JSON");
-        assert_eq!(meta["path"], "/api/users", "metadata must carry the route path");
-        assert_eq!(meta["method"], "route", "metadata must carry the HTTP method");
+        assert_eq!(
+            meta["path"], "/api/users",
+            "metadata must carry the route path"
+        );
+        assert_eq!(
+            meta["method"], "route",
+            "metadata must carry the HTTP method"
+        );
     }
 }
