@@ -42,6 +42,43 @@ fn git_local(args: &[&str], dir: &std::path::Path) {
     assert!(status.success(), "git {:?} failed", args);
 }
 
+/// Seed an approved spec version — the durable state POST
+/// /api/v1/specs/:path/approve leaves behind — so the implementation
+/// task-create gate (agent-runtime.md §1: spec approval is the single
+/// trigger) accepts the loop's task pinning `path@sha`.
+async fn seed_approved_spec(state: &Arc<gyre_server::AppState>, path: &str, sha: &str) {
+    let entry = gyre_domain::SpecLedgerEntry {
+        path: path.to_string(),
+        title: path.to_string(),
+        owner: "test".to_string(),
+        kind: None,
+        current_sha: sha.to_string(),
+        approval_mode: "single".to_string(),
+        approval_status: gyre_domain::ApprovalStatus::Approved,
+        linked_tasks: vec![],
+        linked_mrs: vec![],
+        drift_status: "clean".to_string(),
+        created_at: 0,
+        updated_at: 0,
+        repo_id: None,
+        workspace_id: None,
+    };
+    state.spec_ledger.save(&entry).await.unwrap();
+    let apr = gyre_domain::SpecApproval::new(
+        gyre_common::Id::new(uuid::Uuid::new_v4().to_string()),
+        path,
+        sha,
+        "user:test",
+    );
+    state.spec_approvals.create(&apr).await.unwrap();
+    state
+        .spec_approvals
+        .approve(&apr.id, 0)
+        .await
+        .unwrap()
+        .expect("freshly created approval row must transition to Approved");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn full_ralph_loop_via_gyre() {
     // -- 1. Start server on random port with real git ops --
@@ -67,7 +104,7 @@ async fn full_ralph_loop_via_gyre() {
         .expect("seed built-in policies");
     merge_processor::spawn_merge_processor(state.clone());
 
-    let app = build_router(state);
+    let app = build_router(state.clone());
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
     let client = reqwest::Client::new();
@@ -123,11 +160,22 @@ async fn full_ralph_loop_via_gyre() {
         "repo should be created (API returned valid id)"
     );
 
-    // -- 3. Create task --
+    // -- 3. Create task (pinned to an approved spec version —
+    //    agent-runtime.md §1: spec approval is the single trigger for
+    //    implementation work, so the task-create gate requires an
+    //    Approved ledger entry at the pinned SHA) --
+    let spec_path = "specs/system/e2e-ralph.md";
+    let spec_sha = "cc33cc33cc33cc33cc33cc33cc33cc33cc33cc33";
+    seed_approved_spec(&state, spec_path, spec_sha).await;
     let task: serde_json::Value = client
         .post(format!("{api}/tasks"))
         .header("Authorization", &auth_hdr)
-        .json(&serde_json::json!({"title": "Implement E2E feature for Ralph loop", "task_type": "implementation"}))
+        .json(&serde_json::json!({
+            "title": "Implement E2E feature for Ralph loop",
+            "task_type": "implementation",
+            "spec_path": spec_path,
+            "spec_ref": format!("{spec_path}@{spec_sha}"),
+        }))
         .send()
         .await
         .unwrap()

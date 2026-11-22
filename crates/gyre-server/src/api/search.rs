@@ -308,11 +308,24 @@ mod tests {
             .await
             .unwrap();
 
+        // agent-runtime.md §1: the task-create gate requires an approved
+        // spec_ref for implementation tasks — seed the approval state the
+        // gate resolves before indexing the task through the public API.
+        // The pinned ref is derived from the SAME constants so the body
+        // can never drift from the seeded ledger row (the prior literal
+        // repeated the pattern to a 46-char SHA the gate rejects).
+        const FIXTURE_SPEC_PATH: &str = "specs/test/search-fixture.md";
+        // "abcdef" x6 + "abcd" = exactly 40 hex chars; verify_spec_ref
+        // rejects any other length, so keep it exact.
+        const FIXTURE_SPEC_SHA: &str = "abcdefabcdefabcdefabcdefabcdefabcdefabcd";
+        crate::mem::seed_approved_spec(&state, FIXTURE_SPEC_PATH, FIXTURE_SPEC_SHA).await;
+
         // Index a searchable task through the public API so the search port
         // has a real document (create_task indexes for search).
         let task_body = serde_json::json!({
             "title": "Payment reconciliation engine",
             "task_type": "implementation",
+            "spec_ref": format!("{FIXTURE_SPEC_PATH}@{FIXTURE_SPEC_SHA}"),
             "workspace_id": "ws-search"
         });
         let resp = app
