@@ -2339,7 +2339,14 @@
         "Explorer Canvas",
         "Design",
         "Lens Definitions",
-        "Structural (default)"      ]
+        "Structural (default)"
+      ]
+    },
+    "backlog/69fff34a83938a4731034172": {
+      "file": "specs/development/dogfooding.md",
+      "heading": [
+        "Dogfooding"
+      ]
     }
   },
   "bindings": {
@@ -3211,6 +3218,9 @@
     ],
     "Spec gap spec-82658b0b4e08c1502a5f0793 / structural-metrics-verification / b3cd47ade570": [
       "backlog/c3a39b320325eff390c4b56c"
+    ],
+    "Spec gap spec-8986fd94925aed0eaae2d366 / dogfooding-platform-orchestration / 644cb4b53ccb": [
+      "backlog/69fff34a83938a4731034172"
     ]
   }
 }
