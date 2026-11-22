@@ -2,8 +2,8 @@
 title: "Spec Links — repo-scoped graph (?repo= filter) and authorization for the four registry-exempt query endpoints"
 spec_ref: "Spec gap spec-10bdced21a063f819b1baabd / spec-links-graph-repo-filter / 5a915155d9bc"
 depends_on: []
-progress: ready-for-review
-commits: ["8cced7f4dbee6f4adf043625ebb2c58858c3a7f2", "b675ee0a9a52376f8c02ebcf46eee511f68a59e2", "f96b5a402e5f52ebf1f69775a5d3d139c591551a"]
+progress: not-started
+commits: []
 ---
 
 ## Required behavior
@@ -78,77 +78,3 @@ Canonical spec: `specs/system/spec-links.md`. Source: `678a8ac3e3bfeafeb66cdb47e
     ]
   }
 ]
-
-## Shipped
-
-Both halves of the spec-links.md §Querying the Graph gap are implemented and
-retained through this round's merge reconciliation; this round resolved the
-DIRTY merge against the new base 80439c18 (task-293's tenant-wide cycle
-detection landing in the same coverage file), preserving the task-290
-implementation intact.
-
-### Behavior (retained from checkpoints f96b5a40/b675ee0a/8cced7f4)
-
-(A) Repo-scoped graph — GET /api/v1/specs/graph takes
-Query<SpecGraphQuery> (api/specs.rs get_spec_graph :1781): with no repo
-parameter the response is the unchanged full tenant-wide graph. With
-?repo={id}: nodes are the ledger entries whose repo_id equals the repo,
-edges are all stored links with source_repo_id == repo or target_repo_id ==
-repo — the repo's specs with all outbound, same-repo inbound, and cross-repo
-inbound links. The repo is resolved and validated first: unknown id → 404,
-empty value → 400, a repo in another tenant → 403 (the route addresses no
-path entity, so the handler enforces tenant containment for non-system
-principals; unresolvable workspace fails closed).
-
-(B) Authorization — the four query endpoints (GET /specs/stale-links,
-/specs/conflicts, /specs/{path}/dependents, /specs/{path}/dependencies) are
-resolver-mapped as RouteResourceMapping::api(..., "spec", None) in
-abac_middleware.rs (:435-438) and removed from
-scripts/abac-route-registry-exemptions.txt (42 → 38 entries;
-FROZEN_EXEMPTION_COUNT lowered to 38). /api/v1/specs/:path/reject is
-untouched (out of scope). Each of the four handlers consults auth.tenant_id
-and passes it to links_visible_to (specs.rs:1895), which scopes the store
-read to rows declared by repos in the caller's tenant (system principal
-excepted — it legitimately spans tenants); rows with no source_repo_id are
-withheld rather than given a fabricated scope.
-
-### This round (merge reconciliation, b364363f)
-
-The published candidate 0b36c366 conflicted with its new target (merge base
-0f95668d; incoming 80439c18 = task-293 tenant-wide cycle detection).
-Resolved the single conflicted file specs/coverage/system/spec-links.md
-rows 11-13: row 11 (Cycle Detection) takes the incoming task-293 note (its
-tenant-wide scope supersedes the prior single-manifest note); rows 12/13
-(Querying the Graph / API) keep task-290's implementation notes — all line
-citations re-verified against the merged tree (get_spec_graph :1781,
-SpecGraphQuery :1773, handlers :1921/:1960/:1995/:2018, links_visible_to
-:1895, with_direction_relative_to :1682, resolver mappings
-abac_middleware.rs:435-438). Code sources (git_http.rs,
-spec_link_staleness.rs, spec_registry.rs from task-293) auto-merged
-cleanly; api/specs.rs and abac_middleware.rs are untouched by the merge, so
-the task-290 implementation is byte-identical to the approved candidate.
-
-### Test evidence (this round)
-
-- `cargo check -p gyre-server` (build wrapper) — clean, 8m00s (evidence:
-  /tmp/stage/review-evidence/cargo-check-gyre-server-merge.txt).
-- `cargo fmt -p gyre-server -- --check` — clean (evidence:
-  /tmp/stage/review-evidence/cargo-fmt-check.txt).
-- `bash scripts/check-abac-route-registry.sh` — OK, all registered routes
-  resolve (38 exemption entries, frozen baseline 38).
-- `bash scripts/check-abac-exempt-handlers.sh` — OK (86 handlers checked).
-- `bash scripts/check-task-commit-attribution.sh` — passes with the
-  restored commits frontmatter (was failing on the controller's reset).
-
-### Server tests for the independent verifier
-
-Large gyre-server test compilation is deferred to the verifier (4 GiB
-budget). Execute each as its own `cargo test -p gyre-server <name>` run:
-
-- get_spec_graph_repo_filter_returns_repo_nodes_and_inbound_edges
-- get_spec_graph_unknown_or_empty_repo_is_an_explicit_error
-- get_spec_graph_repo_filter_denies_cross_tenant_repo
-- spec_graph_query_endpoints_do_not_leak_other_tenants_links
-
-(Names as implemented in crates/gyre-server/src/api/specs.rs tests,
-specs.rs:5402-5722; `cargo test -p gyre-server spec_graph` covers all four.)
