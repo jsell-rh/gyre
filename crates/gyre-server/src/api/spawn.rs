@@ -1768,8 +1768,12 @@ async fn dispatch_agent_launch(
                     tracing::warn!(
                         agent_id = %agent.id,
                         "container spawn failed (best-effort): {e}. \
-                        If the image is missing, build it first: \
-                        `docker build -t gyre-agent:latest docker/gyre-agent/`."
+                        If the image is missing, build it from the Nix flake — \
+                        the single image definition (agent-runtime.md §3 \
+                        Nix-Based Image Build; there is no Dockerfile). Run in \
+                        docker/gyre-agent/: `nix build .#agent-image-docker` then \
+                        `docker load < result`, or `nix build .#agent-image-tar` \
+                        for air-gapped transfer."
                     );
                 }
             }
@@ -8637,13 +8641,33 @@ exit 1\n"
         None
     }
 
+    /// Split a captured multi-document `kubectl apply` stream and return
+    /// the Pod document (kind == "Pod"). The kubernetes backend applies
+    /// the Pod and — by default — its default-deny NetworkPolicy as one
+    /// YAML stream (`---`-separated JSON documents), so test parsing must
+    /// select the Pod document rather than parse the whole stream as a
+    /// single JSON value.
+    fn pod_doc_from_dump(dump: &str) -> serde_json::Value {
+        for doc in dump.split("\n---\n") {
+            let doc = doc.trim();
+            if doc.is_empty() {
+                continue;
+            }
+            let v: serde_json::Value = serde_json::from_str(doc)
+                .unwrap_or_else(|e| panic!("captured stream document must be JSON: {e}\n{doc}"));
+            if v["kind"] == "Pod" {
+                return v;
+            }
+        }
+        panic!("no Pod document in captured kubectl stream:\n{dump}");
+    }
+
     /// Parse the Pod manifest captured by the stub kubectl into a
     /// name → value env map (`spec.containers[0].env`). Structured
     /// parsing keeps the assertions exact (name/value PAIRING, not
     /// substring containment).
     fn pod_env_map(dump: &str) -> std::collections::BTreeMap<String, String> {
-        let manifest: serde_json::Value =
-            serde_json::from_str(dump).expect("captured dump must be the Pod manifest JSON");
+        let manifest = pod_doc_from_dump(dump);
         manifest["spec"]["containers"][0]["env"]
             .as_array()
             .expect("pod manifest must carry env entries")
@@ -8819,8 +8843,7 @@ exit 1\n"
         let dump = wait_for_dump(&dump_path)
             .await
             .expect("stub kubectl should have captured the applied Pod manifest");
-        let manifest: serde_json::Value =
-            serde_json::from_str(&dump).expect("captured dump must be the Pod manifest JSON");
+        let manifest = pod_doc_from_dump(&dump);
         let working_dir = manifest["spec"]["containers"][0]["workingDir"]
             .as_str()
             .unwrap_or("");
@@ -8842,6 +8865,68 @@ exit 1\n"
             "Pod manifest must not mount server-local volumes:
 {dump}"
         );
+    }
+
+    /// agent-runtime.md §3 (task-304): a Kubernetes spawn applies the Pod
+    /// AND a platform-created default-deny NetworkPolicy in the same
+    /// `kubectl apply` stream — network isolation is not deferred to the
+    /// cluster admin. Observed end-to-end through the real dispatch (the
+    /// stub kubectl captures the applied stream), not the manifest
+    /// builder alone. The policy must select exactly the spawned Pod and
+    /// deny all ingress and egress; the Pod must carry the 512 pids limit.
+    #[tokio::test]
+    async fn kubernetes_spawn_applies_default_deny_network_policy_and_pids_limit() {
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let dump_path = temp.path().join("iso-dump").to_string_lossy().into_owned();
+
+        let (app, ws_id) = create_workspace(app, "k8s-iso-ws").await;
+        let (app, repo_id) = create_repo_in_workspace(app, &ws_id).await;
+        let (app, task_id) = create_task(app, "k8s isolation task").await;
+        let (app, ct_id) = create_env_dump_compute_target(app, "iso-dump", &dump_path).await;
+
+        create_worktree_dir(&state, &ws_id, "wt-repo", "feat/k8s-iso");
+        let (_, json) = do_spawn_with_target(app, &repo_id, &task_id, "feat/k8s-iso", &ct_id).await;
+        assert_eq!(json["agent"]["status"], "active");
+
+        let dump = wait_for_dump(&dump_path)
+            .await
+            .expect("stub kubectl should have captured the applied stream");
+        let pod = pod_doc_from_dump(&dump);
+        assert_eq!(
+            pod["spec"]["containers"][0]["resources"]["limits"]["pids"], "512",
+            "applied Pod must carry the 512 pids limit:\n{dump}"
+        );
+        let pod_name = pod["metadata"]["name"].as_str().expect("pod name");
+
+        // Second document in the applied stream: the default-deny policy.
+        let mut policy: Option<serde_json::Value> = None;
+        for doc in dump.split("\n---\n") {
+            let doc = doc.trim();
+            if doc.is_empty() {
+                continue;
+            }
+            let v: serde_json::Value = serde_json::from_str(doc)
+                .unwrap_or_else(|e| panic!("stream doc must be JSON: {e}\n{doc}"));
+            if v["kind"] == "NetworkPolicy" {
+                policy = Some(v);
+            }
+        }
+        let policy = policy.unwrap_or_else(|| {
+            panic!("applied stream must carry a NetworkPolicy alongside the Pod:\n{dump}")
+        });
+        assert_eq!(policy["apiVersion"], "networking.k8s.io/v1");
+        assert_eq!(
+            policy["spec"]["podSelector"]["matchLabels"]["gyre-agent"], pod_name,
+            "policy must select exactly the spawned Pod:\n{dump}"
+        );
+        assert_eq!(
+            policy["spec"]["policyTypes"],
+            serde_json::json!(["Ingress", "Egress"])
+        );
+        assert_eq!(policy["spec"]["ingress"], serde_json::json!([]));
+        assert_eq!(policy["spec"]["egress"], serde_json::json!([]));
     }
 
     #[tokio::test]
