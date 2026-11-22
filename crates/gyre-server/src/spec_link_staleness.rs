@@ -148,7 +148,10 @@ async fn mark_link_status(state: &AppState, link_id: &str, status: &str, now: u6
 ///
 /// Re-resolution applies the same target-manifest requirement as push-time
 /// resolution: a link whose target path is not declared in the target
-/// repo's current manifest stays unresolved.
+/// repo's current manifest stays unresolved. A link whose activation
+/// would create a cycle in the durable spec link graph also stays
+/// unresolved (task-293 round 3: the push-time cycle gate must not be
+/// bypassed by activating a pending row into a cycle).
 ///
 /// Ambiguous three-segment displays (`@{a}/{b}/{c}/...`) disambiguate the
 /// same way as push-time resolution: the workspace form takes precedence,
@@ -294,6 +297,22 @@ async fn resolve_unresolved_cross_workspace_links(
         }
 
         let repo_id = target_repo.id.to_string();
+        // task-293 round 3 (activation gate): refuse to flip a link active
+        // when that would create a cycle in the durable spec link graph —
+        // the graph the push-time gate protects must not acquire a cycle
+        // through unresolved-link activation either. The link stays
+        // unresolved with a warning naming the cycle.
+        let graph_rows: Vec<_> = state.spec_links_store.lock().await.clone();
+        if let Some(cycle) =
+            crate::spec_registry::link_activation_creates_cycle(&graph_rows, link, &repo_id)
+        {
+            warn!(
+                link_id = %link.id,
+                cycle = %cycle,
+                "spec_link_staleness: refusing to activate cross-repo link — activation would create a spec link cycle"
+            );
+            continue;
+        }
         let updated: Option<crate::spec_registry::SpecLinkEntry> = {
             let mut store = state.spec_links_store.lock().await;
             store.iter_mut().find(|l| l.id == link.id).map(|entry| {
@@ -1139,6 +1158,75 @@ mod tests {
         assert_eq!(
             updated.status, "unresolved",
             "the staleness pass must not flip an access-denied link active, got {:?}",
+            updated
+        );
+        assert_eq!(updated.target_repo_id, None);
+    }
+
+    /// task-293 round 3 (activation gate): a pending cross-repo row whose
+    /// activation would create a cycle in the durable spec link graph
+    /// (the stored active edge A→B exists, the pending row is B→A) must
+    /// stay unresolved — the staleness pass must not land a cycle the
+    /// push-time gate would have rejected. Against the pre-gate candidate
+    /// this fails: the row flips active and the A→B→A cycle lives
+    /// permanently in the forge graph. The companion tests above
+    /// (`staleness_pass_resolves_cross_repo_same_workspace_link` etc.)
+    /// prove activation still works when no cycle would be created — the
+    /// gate was added, not made indiscriminate.
+    #[tokio::test]
+    async fn staleness_refuses_activation_that_creates_cycle() {
+        let state = test_state();
+
+        let ws_x = make_workspace_in_tenant("ws-x", "tenant-287", "ws-x");
+        state.workspaces.create(&ws_x).await.unwrap();
+
+        // Source repo of the pending row (repo-b): its repo → workspace
+        // hop scopes the @A/... display's resolution.
+        let repo_b = make_named_repo("repo-b", "B", "ws-x", "/repos/repo-b");
+        state.repos.create(&repo_b).await.unwrap();
+        // Target repo A really declares the target path in its manifest.
+        let dir_a = make_target_git_repo();
+        let repo_a = make_named_repo("repo-a", "A", "ws-x", dir_a.path().to_str().unwrap());
+        state.repos.create(&repo_a).await.unwrap();
+
+        // Stored ACTIVE edge A→B (attributed): activating the pending B→A
+        // row below would close the cycle A→B→A.
+        let mut back_edge = make_link(
+            "link-ab",
+            "system/auth.md",
+            "system/b.md",
+            SpecLinkType::DependsOn,
+            None,
+        );
+        back_edge.source_repo_id = Some("repo-a".to_string());
+        back_edge.target_repo_id = Some("repo-b".to_string());
+        back_edge.target_display = Some("@B/system/b.md".to_string());
+        // Pending unresolved row B→A: everything the activation needs
+        // exists (repo A found by name in ws-x, path declared in repo A's
+        // manifest), so without the gate this row flips active.
+        let mut pending = make_link(
+            "link-ba",
+            "system/b.md",
+            "system/auth.md",
+            SpecLinkType::DependsOn,
+            None,
+        );
+        pending.source_repo_id = Some("repo-b".to_string());
+        pending.target_display = Some("@A/system/auth.md".to_string());
+        pending.status = "unresolved".to_string();
+        {
+            let mut store = state.spec_links_store.lock().await;
+            store.push(back_edge);
+            store.push(pending);
+        }
+
+        run_once(&state).await.unwrap();
+
+        let store = state.spec_links_store.lock().await;
+        let updated = store.iter().find(|l| l.id == "link-ba").unwrap();
+        assert_eq!(
+            updated.status, "unresolved",
+            "activation that would create the A→B→A cycle must be refused, got {:?}",
             updated
         );
         assert_eq!(updated.target_repo_id, None);
