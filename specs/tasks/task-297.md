@@ -3,7 +3,7 @@ title: "Gate all implementation work on approved specs"
 spec_ref: "Spec gap spec-41a92c20354c6a108e6074e3 / approval-single-trigger / 4a3f940495a8"
 depends_on: []
 progress: ready-for-review
-commits: ["569ea13821554e618ee7446aecd69c72a35a8ce7", "d5662b9e702f3691db12a406b3d9e8b5c4363e6f"]
+commits: ["569ea13821554e618ee7446aecd69c72a35a8ce7", "d5662b9e702f3691db12a406b3d9e8b5c4363e6f", "6c7ce4091376fc85d674281dc7559842a3bed04e"]
 ---
 
 ## Required behavior
@@ -65,11 +65,12 @@ Canonical spec: `specs/system/agent-runtime.md`. Source: `678a8ac3e3bfeafeb66cdb
 ## Shipped
 
 Commits `d5662b9e` (pipeline checkpoint: the three gates, the shared
-verifier, the scheduler tests) and this branch's follow-up commit
-(recorded in the frontmatter; gate-hardening repair and test-fixture
-migration) implement agent-runtime.md §1's single-trigger property at
-the task layer. The approval side (ledger row, SpecApproved emission,
-modified-spec invalidation to Pending) is untouched.
+verifier, the scheduler tests) and `569ea138` (gate-hardening repair
+and test-fixture migration) implement agent-runtime.md §1's
+single-trigger property at the task layer; `6c7ce409` repairs the one
+retained verification finding (clippy::question_mark at gates.rs:875)
+without behavior change. The approval side (ledger row, SpecApproved
+emission, modified-spec invalidation to Pending) is untouched.
 
 ### Behavior
 
@@ -103,12 +104,29 @@ modified-spec invalidation to Pending) is untouched.
   in-process scheduler spawns through `spawn_agent_core` directly and
   is unaffected.
 
+### Verification-repair commit `6c7ce409`
+
+The retained verification run (checks.sh, exit 1) flagged exactly one
+finding: `clippy::question_mark` at gates.rs:875 on
+`verify_implementation_spec_ref`'s first ledger check. Rewriting that
+branch as a bare `verify_spec_ref(...)?;` statement would trade the
+lint for a `check-inert-enforcement.sh` failure (statement-position
+`verify_*` call), so the result is now bound and its reason re-wrapped
+with the spec_ref context (`"spec approval ledger check for
+'<spec_ref>' failed: {reason}"`) — same fail-closed rejection, same
+caller-visible messages (the REST/MCP/scheduler wrappers already name
+the single-trigger requirement; no test asserts the inner reason
+text). Probes: `cargo clippy -p gyre-server --lib` → api/gates.rs
+emits zero warnings (the lib's remaining 112 are pre-existing in
+untouched files); `rustfmt --check` and
+`check-inert-enforcement.sh` (repo-wide) both pass.
+
 ### Test evidence
 
-New tests (all type-checked in-sandbox via
-`cargo check -p gyre-server --lib --tests`, exit 0; server test
-execution is deferred to the independent verifier — commands recorded
-in review-evidence):
+Tests live with the implementation commits (type-checked in-sandbox;
+server test execution is deferred to the independent verifier per the
+build-budget constraint — commands recorded in
+/tmp/stage/review-evidence):
 
 - `tasks_create_implementation_requires_approved_spec`
   (tests/api_integration.rs) — AC 1 over the real approve endpoint:
@@ -147,9 +165,7 @@ tests), mcp.rs (signal-chain-fields, search/update analytics), admin.rs
 (`boundary_task`), search.rs, tests/e2e_ralph_loop.rs,
 tests/git_integration.rs, tests/auth_integration.rs,
 tests/m18_oidc_integration.rs. `mem::seed_approved_spec` (cfg(test))
-seeds the production-parity state. `check-inert-enforcement.sh`
-initially flagged the checkpoint's `verify_spec_ref(...)?;` statement —
-rewritten as an explicit branch (no exemption added).
+seeds the production-parity state.
 
 ### Deferred verification (verifier must run)
 
@@ -158,4 +174,4 @@ api::tasks, api::admin, api::search suites) and
 `cargo test -p gyre-server --test api_integration --test e2e_ralph_loop
 --test git_integration --test auth_integration --test m18_oidc_integration`
 — full command list and evidence in
-/tmp/stage/review-evidence (see review-evidence/deferred-server-tests.txt).
+/tmp/stage/review-evidence/deferred-server-tests.txt.
