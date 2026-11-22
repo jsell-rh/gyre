@@ -781,11 +781,7 @@ impl ResourceResolver {
                 // ── Meta-specs ─────────────────────────────────────────────
                 RouteResourceMapping::api("/api/v1/meta-specs", "meta_spec", None),
                 RouteResourceMapping::api("/api/v1/meta-specs/:id", "meta_spec", None),
-                RouteResourceMapping::api(
-                    "/api/v1/meta-specs/:id/versions",
-                    "meta_spec",
-                    None,
-                ),
+                RouteResourceMapping::api("/api/v1/meta-specs/:id/versions", "meta_spec", None),
                 RouteResourceMapping::api(
                     "/api/v1/meta-specs/:id/versions/:version",
                     "meta_spec",

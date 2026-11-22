@@ -8678,12 +8678,18 @@ fn parse_approval_status(s: &str) -> Result<MetaSpecApprovalStatus, ApiError> {
 ///   Admin of the scope tenant — the §8 containment rule, same as the
 ///   force flag and DELETE);
 /// - Workspace entries: that workspace's Owner/Admin members (the tenant
-///   Admin bypass is retained).
+///   Admin bypass is retained, bounded to the workspace's own tenant).
 /// A workspace Owner/Admin writing a Global/Tenant entry is the
 /// privilege-escalation direction the spec warns about — 403.
 ///
 /// `require_registry_scope` (containment) runs before this gate wherever
-/// both apply, so a membership-based grant can never cross tenants.
+/// both apply, so a membership-based grant can never cross tenants. That
+/// caller's Admin bypass admits an Admin of ANY tenant, though, so the
+/// Workspace branch carries its own unconditional tenant-containment
+/// check (mirroring `authorize_meta_spec_delete`): the tenant-Admin write
+/// bypass is bounded to the workspace's own tenant — an Admin of tenant A
+/// can never write (or flip `required` on) a meta-spec inside tenant B's
+/// workspaces.
 async fn authorize_registry_write(
     state: &AppState,
     auth: &AuthenticatedAgent,
@@ -8719,20 +8725,46 @@ async fn authorize_registry_write(
             let ws_id = scope_id.as_deref().ok_or_else(|| {
                 ApiError::BadRequest("workspace-scoped meta-spec requires scope_id".to_string())
             })?;
+            let wid = Id::new(ws_id);
+            let ws = state
+                .workspaces
+                .find_by_id(&wid)
+                .await
+                .map_err(ApiError::Internal)?
+                .ok_or_else(|| {
+                    // Dangling scope reference — fail closed rather than
+                    // write an entry whose scope cannot be verified.
+                    // (`require_registry_scope`, which runs first in both
+                    // write paths, already returns NotFound here; this is
+                    // depth, not a second existence oracle.)
+                    ApiError::NotFound(format!("workspace '{ws_id}' not found"))
+                })?;
+            // Tenant containment, unconditionally — no Admin bypass here:
+            // the bypass in `require_registry_scope` admits an Admin of
+            // ANY tenant, so this gate must bound it itself. An Admin of
+            // tenant A writing (or flipping `required` on) a workspace
+            // meta-spec inside tenant B is the same cross-tenant
+            // escalation `authorize_meta_spec_delete` rejects (§8).
+            if ws.tenant_id.as_str() != auth.tenant_id {
+                crate::rbac::record_rbac_denied(state, auth, "Admin", route).await;
+                return Err(ApiError::Forbidden(
+                    "cross-tenant meta-spec access denied".to_string(),
+                ));
+            }
             // Workspace-registry entry: the caller must be an Owner/Admin
-            // member of that workspace (or a tenant Admin bypass). The
-            // membership store is the only source — never a claim.
+            // member of that workspace (or a tenant Admin — of THIS
+            // tenant, per the containment check above). The membership
+            // store is the only source — never a claim.
             let is_ws_admin = match &auth.user_id {
                 Some(uid) => state
                     .workspace_memberships
-                    .find_by_user_and_workspace(uid, &Id::new(ws_id))
+                    .find_by_user_and_workspace(uid, &wid)
                     .await
                     .map_err(ApiError::Internal)?
                     .is_some_and(|m| {
                         matches!(
                             m.role,
-                            gyre_domain::WorkspaceRole::Owner
-                                | gyre_domain::WorkspaceRole::Admin
+                            gyre_domain::WorkspaceRole::Owner | gyre_domain::WorkspaceRole::Admin
                         )
                     }),
                 None => false,
@@ -8961,8 +8993,14 @@ pub async fn create_meta_spec_registry(
     require_registry_scope(&state, &auth, &scope, &req.scope_id).await?;
     // Scope-level write gate (§2 Required vs Optional): the entry's own
     // scope decides who may create it.
-    authorize_registry_write(&state, &auth, &scope, &req.scope_id, "POST /api/v1/meta-specs")
-        .await?;
+    authorize_registry_write(
+        &state,
+        &auth,
+        &scope,
+        &req.scope_id,
+        "POST /api/v1/meta-specs",
+    )
+    .await?;
     let prompt = req.prompt.unwrap_or_default();
     let content_hash = sha256_hex(&prompt);
     let now = now_secs();
@@ -9052,9 +9090,16 @@ pub async fn update_meta_spec_registry(
     // Scope-level write gate (§2 Required vs Optional): the meta-spec's
     // own scope decides who may write it — tenant Admin for Global/Tenant
     // entries, the workspace's Owner/Admin members for Workspace entries
-    // (tenant Admin bypass retained).
-    authorize_registry_write(&state, &auth, &ms.scope, &ms.scope_id, "PUT /api/v1/meta-specs/:id")
-        .await?;
+    // (tenant Admin bypass retained, bounded to the workspace's own
+    // tenant).
+    authorize_registry_write(
+        &state,
+        &auth,
+        &ms.scope,
+        &ms.scope_id,
+        "PUT /api/v1/meta-specs/:id",
+    )
+    .await?;
 
     // §8 tenant-admin force flag: only defined for Tenant-scoped specs, and
     // only an admin of THAT tenant may force propagation into its
@@ -11665,15 +11710,26 @@ mod registry_tests {
         );
         state.tenants.create(&other_tenant).await.unwrap();
 
-        // Create a Tenant-scoped meta-spec as the system admin (registry
-        // creation is Admin-governed; the scope tenant must exist).
+        // Create a Tenant-scoped meta-spec as an Admin of the SCOPE
+        // tenant (the scope-level write grant: only the scope tenant's
+        // admins may create tenant-scoped entries — the system admin of
+        // tenant "default" is cross-tenant here and would be rejected).
+        let scope_admin_create_jwt = sign_test_jwt(
+            &serde_json::json!({
+                "sub": "del-create-admin-sub",
+                "preferred_username": "del-create-admin",
+                "tenant_id": "tenant-del-other",
+                "realm_access": { "roles": ["admin"] }
+            }),
+            3600,
+        );
         let create_resp = app
             .clone()
             .oneshot(
                 Request::builder()
                     .method("POST")
                     .uri("/api/v1/meta-specs")
-                    .header("authorization", "Bearer test-token")
+                    .header("authorization", format!("Bearer {scope_admin_create_jwt}"))
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::json!({
@@ -11790,6 +11846,172 @@ mod registry_tests {
             .await
             .unwrap();
         assert_eq!(get_resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// §8 containment on the registry write gate: an Admin of tenant A
+    /// must not PUT (any field, including `required`) or POST
+    /// workspace-scoped meta-specs inside tenant B's workspaces — the
+    /// tenant-Admin bypass in `authorize_registry_write` is bounded by the
+    /// workspace's own tenant, mirroring the cross-admin DELETE rule
+    /// (`delete_tenant_scoped_meta_spec_requires_scope_tenant_admin` and
+    /// `authorize_meta_spec_delete`). Without the bound, flipping
+    /// `required` would inject that prompt into every agent tenant B
+    /// spawns in the workspace (prompt_assembly required-workspace band).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cross_tenant_admin_cannot_write_workspace_meta_spec() {
+        use crate::auth::test_helpers::{make_test_state_with_jwt, sign_test_jwt};
+        use gyre_domain::{Tenant, Workspace};
+
+        let state = make_test_state_with_jwt();
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // A second tenant with a workspace: the scope the meta-spec is
+        // pinned to. The system admin's own tenant is "default",
+        // deliberately different.
+        let other_tenant = Tenant::new(
+            gyre_common::Id::new("tenant-wr-other"),
+            "OtherWr",
+            "other-wr",
+            0,
+        );
+        state.tenants.create(&other_tenant).await.unwrap();
+        let ws = Workspace::new(
+            gyre_common::Id::new("ws-wr-1"),
+            gyre_common::Id::new("tenant-wr-other"),
+            "WrWs",
+            "wr-ws",
+            0,
+        );
+        state.workspaces.create(&ws).await.unwrap();
+
+        // An Admin of the SCOPE tenant creates a Workspace-scoped
+        // meta-spec (the scope-level write grant: the scope tenant's
+        // admins may write its workspaces' entries).
+        let scope_admin_jwt = sign_test_jwt(
+            &serde_json::json!({
+                "sub": "wr-scope-admin-sub",
+                "preferred_username": "wr-scope-admin",
+                "tenant_id": "tenant-wr-other",
+                "realm_access": { "roles": ["admin"] }
+            }),
+            3600,
+        );
+        let create_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/meta-specs")
+                    .header("authorization", format!("Bearer {scope_admin_jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "kind": "meta:persona", "name": "wr-persona",
+                            "scope": "Workspace", "scope_id": "ws-wr-1",
+                            "prompt": "p"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(create_resp.status(), StatusCode::CREATED);
+        let id = body_json(create_resp).await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // An Admin of a DIFFERENT tenant ("default", the system admin)
+        // PUTs required=true on the workspace meta-spec — must be 403 and
+        // must not flip the flag. (require_registry_scope's Admin bypass
+        // lets the request through containment; the write gate itself
+        // must bound the bypass.)
+        let put_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/meta-specs/{id}"))
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"required": true}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            put_resp.status(),
+            StatusCode::FORBIDDEN,
+            "an Admin of another tenant must not write workspace meta-specs"
+        );
+        let ms = state
+            .meta_specs
+            .get_by_id(&gyre_common::Id::new(&id))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!ms.required, "the rejected PUT must not flip required");
+
+        // The same cross-tenant Admin cannot POST a new workspace-scoped
+        // entry into the other tenant's workspace either.
+        let post_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/meta-specs")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "kind": "meta:persona", "name": "wr-sneak",
+                            "scope": "Workspace", "scope_id": "ws-wr-1",
+                            "prompt": "p"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            post_resp.status(),
+            StatusCode::FORBIDDEN,
+            "an Admin of another tenant must not create workspace meta-specs"
+        );
+
+        // Positive control — the scope tenant's Admin PUT still succeeds:
+        // the denials above are the cross-tenant bound, not removal of the
+        // Admin bypass.
+        let put_resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/meta-specs/{id}"))
+                    .header("authorization", format!("Bearer {scope_admin_jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"required": true}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            put_resp.status(),
+            StatusCode::OK,
+            "an Admin of the workspace's own tenant must still write it"
+        );
+        let ms = state
+            .meta_specs
+            .get_by_id(&gyre_common::Id::new(&id))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(ms.required, "the scope-tenant Admin PUT must flip required");
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -12556,7 +12778,9 @@ mod registry_tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn force_requires_admin_of_the_scope_tenant() {
-        let state = test_state();
+        use crate::auth::test_helpers::{make_test_state_with_jwt, sign_test_jwt};
+
+        let state = make_test_state_with_jwt();
         let app = crate::api::api_router().with_state(state.clone());
 
         // A tenant OTHER than the caller's ("default").
@@ -12578,15 +12802,26 @@ mod registry_tests {
         assert_eq!(resp.status(), StatusCode::CREATED);
         let other_id = body_json(resp).await["id"].as_str().unwrap().to_string();
 
-        // Tenant-scoped spec for that other tenant (registry creation is
-        // platform-admin governed; force is the tenant-scoped power).
+        // Tenant-scoped spec for that other tenant, created by an Admin of
+        // the SCOPE tenant (the scope-level write grant — the "default"
+        // system admin is cross-tenant here and would be rejected); force
+        // is the tenant-scoped power under test below.
+        let scope_admin_jwt = sign_test_jwt(
+            &serde_json::json!({
+                "sub": "force-scope-admin-sub",
+                "preferred_username": "force-scope-admin",
+                "tenant_id": other_id,
+                "realm_access": { "roles": ["admin"] }
+            }),
+            3600,
+        );
         let resp = app
             .clone()
             .oneshot(
                 Request::builder()
                     .method("POST")
                     .uri("/api/v1/meta-specs")
-                    .header("authorization", "Bearer test-token")
+                    .header("authorization", format!("Bearer {scope_admin_jwt}"))
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::json!({
