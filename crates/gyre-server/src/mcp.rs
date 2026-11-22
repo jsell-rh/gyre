@@ -721,10 +721,8 @@ fn is_worker_tier(auth: &AuthenticatedAgent) -> bool {
     if auth.agent_task_claim().is_some() {
         return true;
     }
-    matches!(
-        auth.auth_mechanism,
-        crate::auth::AuthMechanism::AgentToken
-    ) && auth.jwt_claims.is_none()
+    matches!(auth.auth_mechanism, crate::auth::AuthMechanism::AgentToken)
+        && auth.jwt_claims.is_none()
 }
 
 /// True when the caller's token carries at least one `repo:{name}:{right}`
@@ -4710,9 +4708,9 @@ async fn caller_agent_workspaces(
     }
     match &auth.workspace_id {
         Some(ws) => Ok(Some(vec![Id::new(ws.as_str())])),
-        None => Err(
-            "forbidden: caller scope cannot be resolved; refusing agents:// read".to_string(),
-        ),
+        None => {
+            Err("forbidden: caller scope cannot be resolved; refusing agents:// read".to_string())
+        }
     }
 }
 
@@ -7919,13 +7917,7 @@ mod tests {
 
         let state = make_test_state_with_jwt();
         for wid in ["ws-a", "ws-b"] {
-            let ws = gyre_domain::Workspace::new(
-                Id::new(wid),
-                Id::new("default"),
-                wid,
-                wid,
-                0,
-            );
+            let ws = gyre_domain::Workspace::new(Id::new(wid), Id::new("default"), wid, wid, 0);
             state.workspaces.create(&ws).await.unwrap();
         }
         // Active agents in BOTH workspaces — workspace B's agent must not
@@ -8072,7 +8064,10 @@ mod tests {
         let text = json["result"]["contents"][0]["text"].as_str().unwrap();
         let agents: Vec<Value> = serde_json::from_str(text).unwrap();
         let ids: Vec<&str> = agents.iter().map(|a| a["id"].as_str().unwrap()).collect();
-        assert!(ids.contains(&"kb-orch-w1"), "own-workspace agent missing: {ids:?}");
+        assert!(
+            ids.contains(&"kb-orch-w1"),
+            "own-workspace agent missing: {ids:?}"
+        );
         assert!(
             !ids.contains(&"kb-orch-w2"),
             "orchestrator must not see other-workspace agents: {ids:?}"
