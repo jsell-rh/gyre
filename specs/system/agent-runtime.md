@@ -34,6 +34,8 @@ Spec approval is the **single trigger** for all agent work. Every path to implem
 
 There is no other trigger. The `SpecApproved` event is the universal starting signal.
 
+**Forge-native cascade-test execution (amendment — reconciles with dependency-graph.md §Cascade Testing):** the one non-spec class of agent work. When a workspace enables `require_cascade_tests` and a merge lands in a repo that other repos depend on, the forge itself files a per-dependent cascade-test task (labeled `cascade-test`, carrying no `spec_ref` — it implements no spec; it runs the dependent repo's test suite against the merged version and reports the result) and the worker scheduler spawns its agent with no further human or orchestrator action. The workspace policy, set by a workspace admin, is the human authorization for this class of work. The exemption from the spec-approval gate is bounded to exactly those system-filed tasks: both task-creation surfaces reject `task_type: implementation` without an approved `spec_ref` regardless of labels, and `task_type` is immutable after creation, so an Implementation task carrying the `cascade-test` label and no `spec_ref` is reachable only through the merge processor. A task that pins a `spec_ref` is always gated — the label alone never bypasses an unapproved or invalidated approval.
+
 ### Phase 1: Spec Approval Triggers Orchestration
 
 When a human approves a spec (`POST /api/v1/specs/:path/approve`), the approval handler:

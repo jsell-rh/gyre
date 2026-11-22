@@ -3716,8 +3716,13 @@ pub async fn complete_agent(
     // Agent completion means the cascade test passed (tests ran successfully).
     if let Some(task_id) = &agent.current_task_id {
         if let Ok(Some(task)) = state.tasks.find_by_id(task_id).await {
-            if task.labels.iter().any(|l| l == "cascade-test") {
-                crate::merge_processor::report_cascade_test_result(&state, &task, true, None).await;
+            if task
+                .labels
+                .iter()
+                .any(|l| l == crate::merge_processor::CASCADE_TEST_LABEL)
+            {
+                crate::merge_processor::report_cascade_test_result(&state, &task, true, None)
+                    .await;
             }
         }
     }
@@ -4055,7 +4060,11 @@ pub async fn fail_agent(
     // TASK-022: If this agent's task was a cascade test, report failure.
     if let Some(ref task_id) = agent.current_task_id {
         if let Ok(Some(task)) = state.tasks.find_by_id(task_id).await {
-            if task.labels.iter().any(|l| l == "cascade-test") {
+            if task
+                .labels
+                .iter()
+                .any(|l| l == crate::merge_processor::CASCADE_TEST_LABEL)
+            {
                 crate::merge_processor::report_cascade_test_result(
                     &state,
                     &task,

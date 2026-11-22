@@ -827,15 +827,39 @@ async fn spawn_implementation_workers(state: &Arc<AppState>) {
         }
         // Spec-approval gate (agent-runtime.md §1 The Signal Chain —
         // defense in depth behind the task-creation gate): before claiming
-        // the task and spawning a worker, the task's spec_ref must still
-        // resolve to a currently-Approved ledger entry at exactly the
+        // the task and spawning a worker, a task that pins a spec_ref must
+        // still resolve to a currently-Approved ledger entry at exactly the
         // pinned SHA. An approval invalidated by a later push (or a task
         // inserted into storage without one) stops the spawn here: the
         // task stays Backlog with the spec-approval-missing skip label and
         // a logged reason — no agent record, no InProgress transition.
+        //
+        // The ONE exemption (agent-runtime.md §1, amended for the
+        // dependency-graph.md §Cascade Testing reconciliation): a
+        // forge-filed cascade-test execution task carries no spec_ref — it
+        // implements no spec; it runs the dependent repo's test suite
+        // against the merged version and reports the result, triggered by
+        // the workspace's require_cascade_tests policy (the human
+        // authorization for that class of work) plus the merge itself.
+        // The exemption is bounded to exactly those system-filed tasks:
+        // it requires BOTH the cascade-test label AND the absence of a
+        // spec_ref, because both task-creation surfaces (REST + MCP)
+        // reject task_type=implementation without an approved spec_ref
+        // regardless of labels and task_type is immutable after creation
+        // — so "Implementation + no spec_ref + cascade-test label" is
+        // reachable only through trigger_cascade_tests. A task that pins
+        // ANY spec_ref is always gated; the label alone never bypasses an
+        // unapproved or invalidated approval.
         let spec_gate = match task.spec_ref.as_deref() {
             Some(spec_ref) => {
                 crate::api::gates::verify_implementation_spec_ref(state, spec_ref).await
+            }
+            None if task
+                .labels
+                .iter()
+                .any(|l| l == crate::merge_processor::CASCADE_TEST_LABEL) =>
+            {
+                Ok(())
             }
             None => Err("the task carries no spec_ref (path@sha)".to_string()),
         };
@@ -3061,6 +3085,77 @@ mod tests {
                 .iter()
                 .all(|a| a.current_task_id != Some(task.id.clone())),
             "zero agent records exist for the invalidated-approval task"
+        );
+    }
+
+    /// Reconciliation boundary (agent-runtime.md §1, amended for
+    /// dependency-graph.md §Cascade Testing): the cascade-test label
+    /// exempts ONLY the forge-filed execution tasks that carry no
+    /// spec_ref. A task that pins a spec_ref is always gated — the label
+    /// alone must never bypass an unapproved or invalidated approval
+    /// (otherwise any caller with an approved spec could pre-label a
+    /// task and keep spawning after a later push invalidated the
+    /// approval, defeating the defense-in-depth re-check).
+    #[tokio::test]
+    async fn cascade_label_does_not_bypass_spec_approval_gate() {
+        let state = chain_state().await;
+
+        // A task carrying the cascade-test label BUT pinning a spec_ref
+        // whose approval has been invalidated by a later push (registry
+        // entry moved to a new blob, approval rows revoked).
+        let task = impl_task(&state, "impl-cascade-labeled").await;
+        let mut labeled = state
+            .tasks
+            .find_by_id(&task.id)
+            .await
+            .unwrap()
+            .unwrap();
+        labeled
+            .labels
+            .push(crate::merge_processor::CASCADE_TEST_LABEL.to_string());
+        state.tasks.update(&labeled).await.unwrap();
+
+        let mut entry = state
+            .spec_ledger
+            .find_by_path("specs/system/auth.md")
+            .await
+            .unwrap()
+            .unwrap();
+        entry.current_sha = "1".repeat(40);
+        entry.approval_status = ApprovalStatus::Pending;
+        state.spec_ledger.save(&entry).await.unwrap();
+        state
+            .spec_approvals
+            .revoke_all_for_path(
+                "specs/system/auth.md",
+                "system:spec-lifecycle",
+                "spec file modified in push",
+                1,
+            )
+            .await
+            .unwrap();
+
+        scheduler_run_once(&state).await.unwrap();
+
+        let after = state.tasks.find_by_id(&task.id).await.unwrap().unwrap();
+        assert_eq!(
+            after.status,
+            TaskStatus::Backlog,
+            "the cascade-test label does not exempt a spec-pinned task — \
+             invalidated approval still stops the spawn"
+        );
+        assert!(after.assigned_to.is_none(), "no agent spawned");
+        assert!(
+            after.labels.iter().any(|l| l == "spec-approval-missing"),
+            "labeled-but-spec-pinned task carries the skip label: {:?}",
+            after.labels
+        );
+        let agents = state.agents.list().await.unwrap();
+        assert!(
+            agents
+                .iter()
+                .all(|a| a.current_task_id != Some(task.id.clone())),
+            "zero agent records exist for the labeled-but-unapproved task"
         );
     }
 
