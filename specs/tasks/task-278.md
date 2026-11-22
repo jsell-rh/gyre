@@ -2,8 +2,8 @@
 title: "Dependency auto-detection: full extraction forms (git refs, structured contracts, nested files) and every-push trigger"
 spec_ref: "Spec gap spec-cab97078efffe0fbfb7339be / dep-detection-extraction-forms / ed9f34316476"
 depends_on: []
-progress: not-started
-commits: []
+progress: complete
+commits: ["0ba78217e343b3c488178b5970f47d099e5cb3a6", "78bc6dacc4ca62bc2c05a164fda6cafc69011c3c", "08f3082ae98e67172f75986d158e2253ed32f15d", "05ba66134f77df6cffd99aa4720fd5d92764fe5a", "dcdb28f1eb469d2ab0cf694d975a90deaec628ad"]
 ---
 
 ## Required behavior
@@ -25,6 +25,28 @@ Narrow delta on the existing push-time detection pipeline (task-048's detect_dep
 Push a Cargo.toml whose only repo-b reference is `repo-b = { git = "https://gyre.example.com/<ws>/repo-b.git" }` (no `path` key) on a feature branch, then GET the repo's dependencies: pre-fix this fails twice over — detect_cargo_path_deps/extract_path_value parse only `path = "..."` values so a git reference produces no edge, and detection only runs for `u.refname == default_ref` updates so a feature-branch push never runs detection at all — the probe must fail until both the git-reference extraction and the every-push trigger land. Companion over-match probe: an openapi.yaml whose description text contains "repo-b" but whose servers[].url does not must produce NO Api edge — pre-fix `content.contains(repo_name)` creates one, so the probe fails until server-URL-structured extraction replaces the substring scan.
 
 Update the relevant coverage rows only after implementing the behavior, with concrete source evidence. Do not mark unrelated rows complete or claim independent verification before it occurs.
+
+## Shipped
+
+All three gap areas are implemented in `crates/gyre-server/src/git_http.rs`, scoped strictly to the detection helpers and the post-receive call site (no changes to `process_spec_lifecycle` or gates). Coverage rows 5/6/8 in `specs/coverage/system/dependency-graph.md` are re-evidenced with current function names and line numbers; no other rows touched.
+
+### Behavior
+
+- **Every-push trigger (gap 12ff1c4b):** the `detect_dependencies_on_push` call runs for every applied (non-delete) ref update on any branch. The changed-dependency-file early return is gone: all eight detectors always run against the tree at the pushed tip, `ran_methods` covers every method each push, and reconcile orphans (never deletes) edges whose declarations vanish from the tip while leaving Manual edges untouched. A target repo created after the manifest was committed is matched by the next push, even one whose changed-file set contains no dependency file.
+- **Cargo.toml (gap e07d32e2):** `detect_cargo_deps` parses `[dependencies]`/`[dev-dependencies]`/`[build-dependencies]` inline-table entries with word-boundary key matching for BOTH `path = "…"` and `git = "<url>"`, with `version`/`tag`/`rev` captured as the pinned version. `repo_name_from_reference` extracts the repo name from a reference (URL last path segment, `#fragment`/`?query` stripped, `.git` suffix removed, `git@host:` forms handled). ALL `Cargo.toml` files in the tree at the pushed SHA are enumerated via `git ls-tree`, with the manifest's tree path as `source_artifact`.
+- **package.json / pyproject.toml:** `detect_package_json_deps` additionally extracts git URL values (`git+https://…`, `git+ssh://…`, stored verbatim; `#fragment` as version); `detect_pyproject_deps` additionally extracts PEP 508 direct references `pkg @ git+https://…`. go.mod unchanged. External registry deps still ignored — only references matching a known tenant repo (excluding self) create edges.
+- **API contracts (gap 8244b7d9):** `detect_openapi_refs` parses the document (serde_yaml; JSON is valid YAML) and extracts server URLs only — OpenAPI 3.x `servers[].url`, Swagger 2.0 `host`+`basePath` — matching known repo names as whole URL labels (`repo_name_in_url`). `detect_mcp_refs` parses the mcp.json structure for `mcpServers.<name>.url`/`.server` and `tools[].url`/`.server` fields only. A repo name appearing only in a description/title/unrelated field creates NO edge. Contract files are enumerated tree-wide (`api/openapi.yaml` carries its tree path as `source_artifact`). Proto import detection unchanged.
+
+### This repair round (0ba78217)
+
+The previous verification run (`cargo test --all --quiet`, attempt 4ec6b6b4) failed one test: `git_http::tests::push_to_non_default_branch_detects_git_dependency_then_orphans` panicked because its local `git` closure invoked `git commit-tree` without any author identity, and the verification sandbox has no global git user configured ("Author identity unknown"). Every other `commit-tree` site in this file already sets identity (`make_commit` via `-c user.name=…`, `git_with_input` and the sibling closures via `GIT_AUTHOR_*`/`GIT_COMMITTER_*` env vars); this closure was the lone miss. The fix adds the same four env vars — a test-hermeticity repair with no production behavior change.
+
+### Test evidence
+
+- Standalone git probe (`/tmp/stage/review-evidence/git-identity-probe/`): in a HOME with no git identity, bare `git commit-tree` fails with "Author identity unknown" (the exact verification failure) while the same command with the closure's `GIT_AUTHOR_*`/`GIT_COMMITTER_*` env vars succeeds — confirming both the root cause and the fix mechanism.
+- `cargo check -p gyre-server` passes via the build wrapper after the fix (exit 0; log in review evidence).
+- rustfmt changed-lines check clean on the edited file (edition 2021, `skip_children=true`).
+- Full gyre-server test execution remains deferred to the independent verifier (model-phase 4 GiB budget; the cargo wrapper blocks server test builds mechanically). Required verifier probes: `cargo test -p gyre-server` — in particular `git_http::tests::push_to_non_default_branch_detects_git_dependency_then_orphans` (the test this round repairs) and `git_http::tests::detect_dependencies_on_push_full_extraction_forms`, plus the detector unit tests in `api::dependencies::tests` (`test_cargo_toml_dep_detection_path_and_git_forms`, `test_repo_name_from_reference`, `test_detect_package_json_git_ref`, `test_detect_pyproject_pep508_git_ref`, `test_detect_openapi_description_mention_no_edge`, `test_detect_mcp_refs_unrelated_field_no_edge`, and the reconcile suite).
 
 ## Discovery evidence
 

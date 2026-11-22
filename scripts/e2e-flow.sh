@@ -1331,7 +1331,7 @@ ok "Speculative merge results: $(echo "$SPEC_MERGE" | jq 'length // 0')"
 # =============================================================================
 step $((STEP++)) "Meta-spec registry"
 # =============================================================================
-MS_CREATE=$(api_post "${API}/meta-specs-registry" "{
+MS_CREATE=$(api_post "${API}/meta-specs" "{
   \"name\": \"e2e-coding-standard\",
   \"kind\": \"meta:standard\",
   \"scope\": \"Global\",
@@ -1343,21 +1343,21 @@ if [ -n "$MS_CREATE" ]; then
   ok "Meta-spec created: ${MS_ID}"
 
   # List
-  MS_LIST=$(api_get "${API}/meta-specs-registry" 2>/dev/null) || MS_LIST="[]"
+  MS_LIST=$(api_get "${API}/meta-specs" 2>/dev/null) || MS_LIST="[]"
   MS_CT=$(echo "$MS_LIST" | jq 'length // 0')
   ok "Meta-spec registry: ${MS_CT} entries"
 
   # Get by ID
   if [ "$MS_ID" != "none" ]; then
-    MS_GET=$(api_get "${API}/meta-specs-registry/${MS_ID}" 2>/dev/null) || MS_GET="{}"
+    MS_GET=$(api_get "${API}/meta-specs/${MS_ID}" 2>/dev/null) || MS_GET="{}"
     ok "Meta-spec detail: $(echo "$MS_GET" | jq -r '.name // "?"')"
 
     # Versions
-    MS_VERS=$(api_get "${API}/meta-specs-registry/${MS_ID}/versions" 2>/dev/null) || MS_VERS="[]"
+    MS_VERS=$(api_get "${API}/meta-specs/${MS_ID}/versions" 2>/dev/null) || MS_VERS="[]"
     ok "Meta-spec versions: $(echo "$MS_VERS" | jq 'length // 0')"
 
     # Delete
-    DEL_MS=$(curl -s -w '%{http_code}' -X DELETE -H "$AUTH" "${API}/meta-specs-registry/${MS_ID}")
+    DEL_MS=$(curl -s -w '%{http_code}' -X DELETE -H "$AUTH" "${API}/meta-specs/${MS_ID}")
     ok "Meta-spec deleted: HTTP $(echo "$DEL_MS" | tail -c 4)"
   fi
 else

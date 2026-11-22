@@ -351,7 +351,7 @@ mod tests {
             let resp = app
                 .oneshot(
                     Request::builder()
-                        .uri("/api/v1/meta-specs-registry")
+                        .uri("/api/v1/meta-specs")
                         .header("Authorization", format!("Bearer {developer_jwt}"))
                         .body(Body::empty())
                         .unwrap(),
@@ -359,7 +359,7 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(resp.status(), StatusCode::FORBIDDEN);
-            assert_one_rbac_denied(&state, "Admin", "GET /api/v1/meta-specs-registry").await;
+            assert_one_rbac_denied(&state, "Admin", "GET /api/v1/meta-specs").await;
         }
 
         // 2. ReadOnly caller running a meta-spec preview (Admin-or-Developer).

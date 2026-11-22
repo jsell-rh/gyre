@@ -8569,13 +8569,13 @@ mod tests {
 // ===========================================================================
 // Meta-spec registry CRUD API (agent-runtime spec §2)
 //
-// GET    /api/v1/meta-specs-registry           — list (query: scope, scope_id, kind, required)
-// POST   /api/v1/meta-specs-registry           — create
-// GET    /api/v1/meta-specs-registry/:id       — get by id
-// PUT    /api/v1/meta-specs-registry/:id       — update (content edit bumps version; approval-only PUT does not)
-// DELETE /api/v1/meta-specs-registry/:id       — delete (409 if bindings)
-// GET    /api/v1/meta-specs-registry/:id/versions       — list versions
-// GET    /api/v1/meta-specs-registry/:id/versions/:ver  — get specific version
+// GET    /api/v1/meta-specs           — list (query: scope, scope_id, kind, required)
+// POST   /api/v1/meta-specs           — create
+// GET    /api/v1/meta-specs/:id       — get by id
+// PUT    /api/v1/meta-specs/:id       — update (content edit bumps version; approval-only PUT does not)
+// DELETE /api/v1/meta-specs/:id       — delete (409 if bindings)
+// GET    /api/v1/meta-specs/:id/versions       — list versions
+// GET    /api/v1/meta-specs/:id/versions/:ver  — get specific version
 // ===========================================================================
 
 use axum::extract::Query;
@@ -8630,7 +8630,10 @@ pub struct UpdateMetaSpecRequest {
 // ---------------------------------------------------------------------------
 
 fn parse_kind(s: &str) -> Result<MetaSpecKind, ApiError> {
-    MetaSpecKind::parse(s).ok_or_else(|| {
+    // Case-insensitive: the §2 API table spells the query filter
+    // `?kind=meta:persona` and `?scope=workspace` in either case; accept
+    // any case, serialize canonically.
+    MetaSpecKind::parse(&s.to_ascii_lowercase()).ok_or_else(|| {
         ApiError::BadRequest(format!(
             "invalid kind '{s}'; must be one of: meta:persona, meta:principle, meta:standard, meta:process"
         ))
@@ -8638,11 +8641,18 @@ fn parse_kind(s: &str) -> Result<MetaSpecKind, ApiError> {
 }
 
 fn parse_scope(s: &str) -> Result<MetaSpecScope, ApiError> {
-    MetaSpecScope::parse(s).ok_or_else(|| {
-        ApiError::BadRequest(format!(
+    // Case-insensitive (see parse_kind): `?scope=workspace` and
+    // `?scope=Workspace` both name the Workspace scope. The domain
+    // `MetaSpecScope::parse` is case-sensitive (canonical form only), so
+    // the leniency lives here at the API edge.
+    match s.to_ascii_lowercase().as_str() {
+        "global" => Ok(MetaSpecScope::Global),
+        "tenant" => Ok(MetaSpecScope::Tenant),
+        "workspace" => Ok(MetaSpecScope::Workspace),
+        _ => Err(ApiError::BadRequest(format!(
             "invalid scope '{s}'; must be one of: Global, Tenant, Workspace"
-        ))
-    })
+        ))),
+    }
 }
 
 fn parse_approval_status(s: &str) -> Result<MetaSpecApprovalStatus, ApiError> {
@@ -8654,26 +8664,122 @@ fn parse_approval_status(s: &str) -> Result<MetaSpecApprovalStatus, ApiError> {
 }
 
 // ---------------------------------------------------------------------------
-// Registry authorization (registry routes run without middleware ABAC —
-// frozen exemption list — so every handler enforces per-handler authz)
+// Registry authorization (the per-handler gate for registry writes; reads
+// and versions go through `require_meta_spec_access` below)
 // ---------------------------------------------------------------------------
 
-/// Role gate for registry mutations: creating, editing, approving, or deleting
-/// a meta-spec rewrites the rules agents operate under — same authority class
-/// as the workspace meta-spec-set binding (Admin-only, NEW-26).
-async fn require_registry_admin(
+/// Scope-level write gate for registry mutations (agent-runtime §2
+/// Required vs Optional: "Only admins at the meta-spec's own scope level —
+/// tenant admins for tenant meta-specs, workspace admins (Owner/Admin
+/// role) for workspace meta-specs"; §214 Registry Levels). Creating and
+/// updating a registry entry — including flipping `required` in either
+/// direction — is authorized by the meta-spec's OWN scope:
+/// - Global / Tenant entries: tenant Admin only (for Tenant entries, an
+///   Admin of the scope tenant — the §8 containment rule, same as the
+///   force flag and DELETE);
+/// - Workspace entries: that workspace's Owner/Admin members (the tenant
+///   Admin bypass is retained, bounded to the workspace's own tenant).
+///
+/// A workspace Owner/Admin writing a Global/Tenant entry is the
+/// privilege-escalation direction the spec warns about — 403.
+///
+/// `require_registry_scope` (containment) runs before this gate wherever
+/// both apply, so a membership-based grant can never cross tenants. That
+/// caller's Admin bypass admits an Admin of ANY tenant, though, so the
+/// Workspace branch carries its own unconditional tenant-containment
+/// check (mirroring `authorize_meta_spec_delete`): the tenant-Admin write
+/// bypass is bounded to the workspace's own tenant — an Admin of tenant A
+/// can never write (or flip `required` on) a meta-spec inside tenant B's
+/// workspaces.
+async fn authorize_registry_write(
     state: &AppState,
     auth: &AuthenticatedAgent,
+    scope: &MetaSpecScope,
+    scope_id: &Option<String>,
     route: &str,
 ) -> Result<(), ApiError> {
-    if auth.roles.contains(&UserRole::Admin) {
-        Ok(())
-    } else {
-        crate::rbac::record_rbac_denied(state, auth, "Admin", route).await;
-        Err(ApiError::Forbidden(
-            "only Admin role may modify the meta-spec registry".to_string(),
-        ))
+    let is_tenant_admin = auth.roles.contains(&UserRole::Admin);
+    match scope {
+        MetaSpecScope::Global => {
+            if !is_tenant_admin {
+                crate::rbac::record_rbac_denied(state, auth, "Admin", route).await;
+                return Err(ApiError::Forbidden(
+                    "only tenant Admin may write Global-scoped meta-specs".to_string(),
+                ));
+            }
+        }
+        MetaSpecScope::Tenant => {
+            // §8 containment: only an Admin of the scope tenant may write —
+            // an admin of another tenant must not write, or learn of, this
+            // entry. A missing scope_id fails closed (no caller's tenant
+            // scope matches the empty string).
+            let scope_tenant = scope_id.as_deref().unwrap_or("");
+            if !is_tenant_admin || auth.tenant_id != scope_tenant {
+                crate::rbac::record_rbac_denied(state, auth, "Admin", route).await;
+                return Err(ApiError::Forbidden(
+                    "only an Admin of the scope tenant may write tenant-scoped meta-specs"
+                        .to_string(),
+                ));
+            }
+        }
+        MetaSpecScope::Workspace => {
+            let ws_id = scope_id.as_deref().ok_or_else(|| {
+                ApiError::BadRequest("workspace-scoped meta-spec requires scope_id".to_string())
+            })?;
+            let wid = Id::new(ws_id);
+            let ws = state
+                .workspaces
+                .find_by_id(&wid)
+                .await
+                .map_err(ApiError::Internal)?
+                .ok_or_else(|| {
+                    // Dangling scope reference — fail closed rather than
+                    // write an entry whose scope cannot be verified.
+                    // (`require_registry_scope`, which runs first in both
+                    // write paths, already returns NotFound here; this is
+                    // depth, not a second existence oracle.)
+                    ApiError::NotFound(format!("workspace '{ws_id}' not found"))
+                })?;
+            // Tenant containment, unconditionally — no Admin bypass here:
+            // the bypass in `require_registry_scope` admits an Admin of
+            // ANY tenant, so this gate must bound it itself. An Admin of
+            // tenant A writing (or flipping `required` on) a workspace
+            // meta-spec inside tenant B is the same cross-tenant
+            // escalation `authorize_meta_spec_delete` rejects (§8).
+            if ws.tenant_id.as_str() != auth.tenant_id {
+                crate::rbac::record_rbac_denied(state, auth, "Admin", route).await;
+                return Err(ApiError::Forbidden(
+                    "cross-tenant meta-spec access denied".to_string(),
+                ));
+            }
+            // Workspace-registry entry: the caller must be an Owner/Admin
+            // member of that workspace (or a tenant Admin — of THIS
+            // tenant, per the containment check above). The membership
+            // store is the only source — never a claim.
+            let is_ws_admin = match &auth.user_id {
+                Some(uid) => state
+                    .workspace_memberships
+                    .find_by_user_and_workspace(uid, &wid)
+                    .await
+                    .map_err(ApiError::Internal)?
+                    .is_some_and(|m| {
+                        matches!(
+                            m.role,
+                            gyre_domain::WorkspaceRole::Owner | gyre_domain::WorkspaceRole::Admin
+                        )
+                    }),
+                None => false,
+            };
+            if !is_tenant_admin && !is_ws_admin {
+                crate::rbac::record_rbac_denied(state, auth, "workspace Admin", route).await;
+                return Err(ApiError::Forbidden(
+                    "only workspace Owner/Admin (or tenant Admin) may write workspace meta-specs"
+                        .to_string(),
+                ));
+            }
+        }
     }
+    Ok(())
 }
 
 /// Scope containment for a scoped meta-spec: the named entity must exist and
@@ -8751,7 +8857,7 @@ async fn require_meta_spec_access(
 }
 
 // ---------------------------------------------------------------------------
-// GET /api/v1/meta-specs-registry
+// GET /api/v1/meta-specs
 // ---------------------------------------------------------------------------
 
 pub async fn list_meta_specs_registry(
@@ -8760,12 +8866,13 @@ pub async fn list_meta_specs_registry(
     Query(q): Query<ListMetaSpecsQuery>,
 ) -> Result<Json<Vec<MetaSpec>>, ApiError> {
     // Admin-only: the registry is tenant-wide governance configuration (it
-    // defines the meta-specs that can be bound to any workspace). This route
-    // is ABAC-exempt, so the handler is the only authorization surface —
-    // any authenticated agent must not enumerate cross-workspace governance.
+    // defines the meta-specs that can be bound to any workspace). This
+    // per-handler gate is the role surface for the listing; the route is
+    // also evaluated by the ABAC middleware (resolver mapping
+    // /api/v1/meta-specs) — any authenticated agent must not enumerate
+    // cross-workspace governance.
     if !auth.roles.contains(&gyre_domain::UserRole::Admin) {
-        crate::rbac::record_rbac_denied(&state, &auth, "Admin", "GET /api/v1/meta-specs-registry")
-            .await;
+        crate::rbac::record_rbac_denied(&state, &auth, "Admin", "GET /api/v1/meta-specs").await;
         return Err(ApiError::Forbidden(
             "only Admin role may list the meta-specs registry".to_string(),
         ));
@@ -8786,7 +8893,7 @@ pub async fn list_meta_specs_registry(
     // listing is a tenant governance view — the caller's tenant must match
     // the queried tenant. Global-scope registry entries are shared reference
     // data, readable by any authenticated principal (docs/api-reference.md
-    // §meta-specs-registry).
+    // §meta-specs).
     if let (Some(MetaSpecScope::Tenant), Some(scope_id)) = (&scope, &q.scope_id) {
         if auth.tenant_id != *scope_id {
             return Err(ApiError::Forbidden(
@@ -8872,7 +8979,7 @@ pub async fn list_meta_specs_registry(
 }
 
 // ---------------------------------------------------------------------------
-// POST /api/v1/meta-specs-registry
+// POST /api/v1/meta-specs
 // ---------------------------------------------------------------------------
 
 pub async fn create_meta_spec_registry(
@@ -8880,12 +8987,21 @@ pub async fn create_meta_spec_registry(
     auth: AuthenticatedAgent,
     Json(req): Json<CreateMetaSpecRequest>,
 ) -> Result<(StatusCode, Json<MetaSpec>), ApiError> {
-    require_registry_admin(&state, &auth, "POST /api/v1/meta-specs-registry").await?;
     let kind = parse_kind(&req.kind)?;
     let scope = parse_scope(&req.scope)?;
     // Scope containment: `scope_id` is caller-supplied, so it is validated
     // against the caller's tenant, never trusted.
     require_registry_scope(&state, &auth, &scope, &req.scope_id).await?;
+    // Scope-level write gate (§2 Required vs Optional): the entry's own
+    // scope decides who may create it.
+    authorize_registry_write(
+        &state,
+        &auth,
+        &scope,
+        &req.scope_id,
+        "POST /api/v1/meta-specs",
+    )
+    .await?;
     let prompt = req.prompt.unwrap_or_default();
     let content_hash = sha256_hex(&prompt);
     let now = now_secs();
@@ -8919,7 +9035,7 @@ pub async fn create_meta_spec_registry(
 }
 
 // ---------------------------------------------------------------------------
-// GET /api/v1/meta-specs-registry/:id
+// GET /api/v1/meta-specs/:id
 // ---------------------------------------------------------------------------
 
 pub async fn get_meta_spec_registry(
@@ -8932,7 +9048,7 @@ pub async fn get_meta_spec_registry(
 }
 
 // ---------------------------------------------------------------------------
-// PUT /api/v1/meta-specs-registry/:id
+// PUT /api/v1/meta-specs/:id
 // ---------------------------------------------------------------------------
 
 pub async fn update_meta_spec_registry(
@@ -8941,8 +9057,50 @@ pub async fn update_meta_spec_registry(
     Path(id): Path<String>,
     Json(req): Json<UpdateMetaSpecRequest>,
 ) -> Result<Json<MetaSpec>, ApiError> {
-    require_registry_admin(&state, &auth, "PUT /api/v1/meta-specs-registry/:id").await?;
-    let mut ms = require_meta_spec_access(&state, &auth, &id).await?;
+    // Load the entity and derive its scope from the record — never from
+    // the request. Authorization ordering mirrors DELETE: a missing row
+    // must not become an existence oracle for unprivileged callers
+    // (403 precedes 404); only a tenant Admin — who may write at least
+    // some scope — gets the truthful 404.
+    let mut ms = match state
+        .meta_specs
+        .get_by_id(&Id::new(&id))
+        .await
+        .map_err(ApiError::Internal)?
+    {
+        Some(ms) => ms,
+        None => {
+            if !auth.roles.contains(&UserRole::Admin) {
+                crate::rbac::record_rbac_denied(
+                    &state,
+                    &auth,
+                    "Admin",
+                    "PUT /api/v1/meta-specs/:id",
+                )
+                .await;
+                return Err(ApiError::Forbidden("meta-spec access denied".to_string()));
+            }
+            return Err(ApiError::NotFound(format!("meta-spec '{id}' not found")));
+        }
+    };
+    // Scope containment first (the record's own scope must be inside the
+    // caller's tenant, or the caller is a bypassing Admin), then the
+    // scope-level write gate below — a membership-based grant can never
+    // cross tenants because containment runs first.
+    require_registry_scope(&state, &auth, &ms.scope, &ms.scope_id).await?;
+    // Scope-level write gate (§2 Required vs Optional): the meta-spec's
+    // own scope decides who may write it — tenant Admin for Global/Tenant
+    // entries, the workspace's Owner/Admin members for Workspace entries
+    // (tenant Admin bypass retained, bounded to the workspace's own
+    // tenant).
+    authorize_registry_write(
+        &state,
+        &auth,
+        &ms.scope,
+        &ms.scope_id,
+        "PUT /api/v1/meta-specs/:id",
+    )
+    .await?;
 
     // §8 tenant-admin force flag: only defined for Tenant-scoped specs, and
     // only an admin of THAT tenant may force propagation into its
@@ -9003,7 +9161,11 @@ pub async fn update_meta_spec_registry(
     if let Some(required) = req.required {
         // §2 Required vs Optional: only scope-level admins can change the
         // required flag (either direction — both alter the injected set).
-        // The outer write gate already enforces this for every PUT.
+        // authorize_registry_write above enforces exactly that per-scope
+        // grant: tenant Admin for Global/Tenant entries, the workspace's
+        // Owner/Admin members for Workspace entries. A workspace admin
+        // marking a tenant/Global meta-spec required is rejected there
+        // (privilege escalation, per the spec's warning).
         ms.required = required;
     }
     if let Some(status_str) = &req.approval_status {
@@ -9181,7 +9343,7 @@ async fn record_meta_spec_publish(
 }
 
 // ---------------------------------------------------------------------------
-// DELETE /api/v1/meta-specs-registry/:id
+// DELETE /api/v1/meta-specs/:id
 // ---------------------------------------------------------------------------
 
 /// Per-handler authorization (agent-runtime §214 "Registry Levels": only
@@ -9203,7 +9365,7 @@ async fn authorize_meta_spec_delete(
                     state,
                     auth,
                     "Admin",
-                    "DELETE /api/v1/meta-specs-registry/:id",
+                    "DELETE /api/v1/meta-specs/:id",
                 )
                 .await;
                 return Err(ApiError::Forbidden(
@@ -9224,7 +9386,7 @@ async fn authorize_meta_spec_delete(
                     state,
                     auth,
                     "Admin",
-                    "DELETE /api/v1/meta-specs-registry/:id",
+                    "DELETE /api/v1/meta-specs/:id",
                 )
                 .await;
                 return Err(ApiError::Forbidden(
@@ -9257,7 +9419,7 @@ async fn authorize_meta_spec_delete(
                     state,
                     auth,
                     "Admin",
-                    "DELETE /api/v1/meta-specs-registry/:id",
+                    "DELETE /api/v1/meta-specs/:id",
                 )
                 .await;
                 return Err(ApiError::Forbidden(
@@ -9289,7 +9451,7 @@ async fn authorize_meta_spec_delete(
                     state,
                     auth,
                     "workspace Admin",
-                    "DELETE /api/v1/meta-specs-registry/:id",
+                    "DELETE /api/v1/meta-specs/:id",
                 )
                 .await;
                 return Err(ApiError::Forbidden(
@@ -9337,7 +9499,7 @@ pub async fn delete_meta_spec_registry(
                     &state,
                     &auth,
                     "Admin",
-                    "DELETE /api/v1/meta-specs-registry/:id",
+                    "DELETE /api/v1/meta-specs/:id",
                 )
                 .await;
                 return Err(ApiError::Forbidden("meta-spec access denied".to_string()));
@@ -9364,7 +9526,7 @@ pub async fn delete_meta_spec_registry(
 }
 
 // ---------------------------------------------------------------------------
-// GET /api/v1/meta-specs-registry/:id/versions
+// GET /api/v1/meta-specs/:id/versions
 // ---------------------------------------------------------------------------
 
 pub async fn list_meta_spec_versions(
@@ -9384,7 +9546,7 @@ pub async fn list_meta_spec_versions(
 }
 
 // ---------------------------------------------------------------------------
-// GET /api/v1/meta-specs-registry/:id/versions/:version
+// GET /api/v1/meta-specs/:id/versions/:version
 // ---------------------------------------------------------------------------
 
 pub async fn get_meta_spec_version(
@@ -9675,7 +9837,7 @@ mod registry_tests {
             .clone()
             .oneshot(req(
                 "POST",
-                "/api/v1/meta-specs-registry",
+                "/api/v1/meta-specs",
                 r#"{"kind":"meta:persona","name":"sneak","scope":"Global","prompt":"x"}"#,
             ))
             .await
@@ -9690,7 +9852,7 @@ mod registry_tests {
             .clone()
             .oneshot(req(
                 "PUT",
-                "/api/v1/meta-specs-registry/00000000-0000-0000-0000-000000000000",
+                "/api/v1/meta-specs/00000000-0000-0000-0000-000000000000",
                 r#"{"prompt":"x"}"#,
             ))
             .await
@@ -9705,7 +9867,7 @@ mod registry_tests {
             .clone()
             .oneshot(req(
                 "DELETE",
-                "/api/v1/meta-specs-registry/00000000-0000-0000-0000-000000000000",
+                "/api/v1/meta-specs/00000000-0000-0000-0000-000000000000",
                 "",
             ))
             .await
@@ -9725,7 +9887,7 @@ mod registry_tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/api/v1/meta-specs-registry")
+                    .uri("/api/v1/meta-specs")
                     .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(
@@ -9746,7 +9908,7 @@ mod registry_tests {
         let get_resp = app
             .oneshot(
                 Request::builder()
-                    .uri(format!("/api/v1/meta-specs-registry/{id}"))
+                    .uri(format!("/api/v1/meta-specs/{id}"))
                     .header("authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
@@ -9761,7 +9923,7 @@ mod registry_tests {
         let resp = app()
             .oneshot(
                 Request::builder()
-                    .uri("/api/v1/meta-specs-registry")
+                    .uri("/api/v1/meta-specs")
                     .header("authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
@@ -9782,7 +9944,7 @@ mod registry_tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/api/v1/meta-specs-registry")
+                    .uri("/api/v1/meta-specs")
                     .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(
@@ -9802,7 +9964,7 @@ mod registry_tests {
             .oneshot(
                 Request::builder()
                     .method("PUT")
-                    .uri(format!("/api/v1/meta-specs-registry/{id}"))
+                    .uri(format!("/api/v1/meta-specs/{id}"))
                     .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(r#"{"prompt":"Updated CC prompt."}"#))
@@ -9828,7 +9990,7 @@ mod registry_tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/api/v1/meta-specs-registry")
+                    .uri("/api/v1/meta-specs")
                     .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(
@@ -9852,7 +10014,7 @@ mod registry_tests {
             .oneshot(
                 Request::builder()
                     .method("PUT")
-                    .uri(format!("/api/v1/meta-specs-registry/{id}"))
+                    .uri(format!("/api/v1/meta-specs/{id}"))
                     .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(r#"{"required":true}"#))
@@ -9871,7 +10033,7 @@ mod registry_tests {
         let get_resp = app
             .oneshot(
                 Request::builder()
-                    .uri(format!("/api/v1/meta-specs-registry/{id}"))
+                    .uri(format!("/api/v1/meta-specs/{id}"))
                     .header("authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
@@ -9932,7 +10094,7 @@ mod registry_tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/api/v1/meta-specs-registry")
+                    .uri("/api/v1/meta-specs")
                     .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(
@@ -10002,7 +10164,7 @@ mod registry_tests {
             .oneshot(
                 Request::builder()
                     .method("PUT")
-                    .uri(format!("/api/v1/meta-specs-registry/{id}"))
+                    .uri(format!("/api/v1/meta-specs/{id}"))
                     .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(r#"{"approval_status":"Approved"}"#))
@@ -10063,7 +10225,7 @@ mod registry_tests {
             .oneshot(
                 Request::builder()
                     .method("PUT")
-                    .uri(format!("/api/v1/meta-specs-registry/{id}"))
+                    .uri(format!("/api/v1/meta-specs/{id}"))
                     .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(r#"{"prompt":"v2"}"#))
@@ -10092,7 +10254,7 @@ mod registry_tests {
             .oneshot(
                 Request::builder()
                     .method("PUT")
-                    .uri(format!("/api/v1/meta-specs-registry/{id}"))
+                    .uri(format!("/api/v1/meta-specs/{id}"))
                     .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(r#"{"approval_status":"Approved"}"#))
@@ -10134,7 +10296,7 @@ mod registry_tests {
             .oneshot(
                 Request::builder()
                     .method("PUT")
-                    .uri(format!("/api/v1/meta-specs-registry/{id}"))
+                    .uri(format!("/api/v1/meta-specs/{id}"))
                     .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(r#"{"approval_status":"Approved"}"#))
@@ -10228,7 +10390,7 @@ mod registry_tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/api/v1/meta-specs-registry")
+                    .uri("/api/v1/meta-specs")
                     .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(
@@ -10273,7 +10435,7 @@ mod registry_tests {
             .oneshot(
                 Request::builder()
                     .method("PUT")
-                    .uri(format!("/api/v1/meta-specs-registry/{id}"))
+                    .uri(format!("/api/v1/meta-specs/{id}"))
                     .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(r#"{"approval_status":"Approved"}"#))
@@ -10385,7 +10547,7 @@ mod registry_tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/api/v1/meta-specs-registry")
+                    .uri("/api/v1/meta-specs")
                     .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(
@@ -10405,7 +10567,7 @@ mod registry_tests {
             .oneshot(
                 Request::builder()
                     .method("PUT")
-                    .uri(format!("/api/v1/meta-specs-registry/{id}"))
+                    .uri(format!("/api/v1/meta-specs/{id}"))
                     .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(r#"{"prompt":"v2 prompt"}"#))
@@ -10439,8 +10601,8 @@ mod registry_tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn registry_endpoints_reject_non_admin() {
-        // The meta-specs-registry routes are ABAC-exempt (legacy exemption
-        // file), so the handler is the only authorization surface. A
+        // The registry routes are resolver-mapped in the ABAC middleware,
+        // and the per-handler gates below are the role surface: a
         // Developer-role JWT must get 403 from every registry mutation and
         // from the list — governance configuration is Admin-only (docs:
         // "Admin only for PUT/DELETE"; list/create follow the same class).
@@ -10464,7 +10626,7 @@ mod registry_tests {
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri("/api/v1/meta-specs-registry")
+                    .uri("/api/v1/meta-specs")
                     .header("authorization", &auth)
                     .body(Body::empty())
                     .unwrap(),
@@ -10479,7 +10641,7 @@ mod registry_tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/api/v1/meta-specs-registry")
+                    .uri("/api/v1/meta-specs")
                     .header("authorization", &auth)
                     .header("content-type", "application/json")
                     .body(Body::from(
@@ -10498,7 +10660,7 @@ mod registry_tests {
             .oneshot(
                 Request::builder()
                     .method("PUT")
-                    .uri("/api/v1/meta-specs-registry/whatever")
+                    .uri("/api/v1/meta-specs/whatever")
                     .header("authorization", &auth)
                     .header("content-type", "application/json")
                     .body(Body::from(r#"{"prompt":"p2"}"#))
@@ -10512,7 +10674,7 @@ mod registry_tests {
             .oneshot(
                 Request::builder()
                     .method("DELETE")
-                    .uri("/api/v1/meta-specs-registry/whatever")
+                    .uri("/api/v1/meta-specs/whatever")
                     .header("authorization", &auth)
                     .body(Body::empty())
                     .unwrap(),
@@ -10527,7 +10689,7 @@ mod registry_tests {
         let resp = app()
             .oneshot(
                 Request::builder()
-                    .uri("/api/v1/meta-specs-registry/00000000-0000-0000-0000-000000000000")
+                    .uri("/api/v1/meta-specs/00000000-0000-0000-0000-000000000000")
                     .header("authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
@@ -10546,7 +10708,7 @@ mod registry_tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/api/v1/meta-specs-registry")
+                    .uri("/api/v1/meta-specs")
                     .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(
@@ -10567,7 +10729,7 @@ mod registry_tests {
             .oneshot(
                 Request::builder()
                     .method("DELETE")
-                    .uri(format!("/api/v1/meta-specs-registry/{id}"))
+                    .uri(format!("/api/v1/meta-specs/{id}"))
                     .header("authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
@@ -10604,7 +10766,7 @@ mod registry_tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/api/v1/meta-specs-registry")
+                    .uri("/api/v1/meta-specs")
                     .header("authorization", "Bearer agt-secret-rq")
                     .header("content-type", "application/json")
                     .body(Body::from(
@@ -10622,7 +10784,7 @@ mod registry_tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/api/v1/meta-specs-registry")
+                    .uri("/api/v1/meta-specs")
                     .header("authorization", "Bearer agt-secret-rq")
                     .header("content-type", "application/json")
                     .body(Body::from(
@@ -10640,7 +10802,7 @@ mod registry_tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/api/v1/meta-specs-registry")
+                    .uri("/api/v1/meta-specs")
                     .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(
@@ -10658,7 +10820,7 @@ mod registry_tests {
             .oneshot(
                 Request::builder()
                     .method("PUT")
-                    .uri(format!("/api/v1/meta-specs-registry/{id}"))
+                    .uri(format!("/api/v1/meta-specs/{id}"))
                     .header("authorization", "Bearer agt-secret-rq")
                     .header("content-type", "application/json")
                     .body(Body::from(r#"{"prompt":"injected rules"}"#))
@@ -10674,7 +10836,7 @@ mod registry_tests {
             .oneshot(
                 Request::builder()
                     .method("DELETE")
-                    .uri(format!("/api/v1/meta-specs-registry/{id}"))
+                    .uri(format!("/api/v1/meta-specs/{id}"))
                     .header("authorization", "Bearer agt-secret-rq")
                     .body(Body::empty())
                     .unwrap(),
@@ -10688,7 +10850,7 @@ mod registry_tests {
             .oneshot(
                 Request::builder()
                     .method("PUT")
-                    .uri(format!("/api/v1/meta-specs-registry/{id}"))
+                    .uri(format!("/api/v1/meta-specs/{id}"))
                     .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(r#"{"required":true}"#))
@@ -10713,7 +10875,7 @@ mod registry_tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/api/v1/meta-specs-registry")
+                    .uri("/api/v1/meta-specs")
                     .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(
@@ -10730,7 +10892,7 @@ mod registry_tests {
             .oneshot(
                 Request::builder()
                     .method("PUT")
-                    .uri(format!("/api/v1/meta-specs-registry/{ms_id}"))
+                    .uri(format!("/api/v1/meta-specs/{ms_id}"))
                     .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(r#"{"prompt":"v2"}"#))
@@ -11196,7 +11358,7 @@ mod registry_tests {
         // Create as admin so a target exists for update/delete attempts.
         let created = authz(
             "POST",
-            "/api/v1/meta-specs-registry".to_string(),
+            "/api/v1/meta-specs".to_string(),
             "test-token",
             Some(r#"{"kind":"meta:persona","name":"authz-worker","scope":"Global","prompt":"p"}"#),
         )
@@ -11218,7 +11380,7 @@ mod registry_tests {
         assert_eq!(
             authz(
                 "POST",
-                "/api/v1/meta-specs-registry".to_string(),
+                "/api/v1/meta-specs".to_string(),
                 &dev_token,
                 Some(r#"{"kind":"meta:standard","name":"forged","scope":"Global","prompt":"p"}"#),
             )
@@ -11231,7 +11393,7 @@ mod registry_tests {
         assert_eq!(
             authz(
                 "PUT",
-                format!("/api/v1/meta-specs-registry/{id}"),
+                format!("/api/v1/meta-specs/{id}"),
                 &dev_token,
                 Some(r#"{"approval_status":"Approved"}"#),
             )
@@ -11258,7 +11420,7 @@ mod registry_tests {
         assert_eq!(
             authz(
                 "DELETE",
-                format!("/api/v1/meta-specs-registry/{id}"),
+                format!("/api/v1/meta-specs/{id}"),
                 &dev_token,
                 None,
             )
@@ -11290,7 +11452,7 @@ mod registry_tests {
         assert_eq!(
             authz(
                 "GET",
-                format!("/api/v1/meta-specs-registry?scope=Workspace&scope_id={ws_id}"),
+                format!("/api/v1/meta-specs?scope=Workspace&scope_id={ws_id}"),
                 &dev_token,
                 None,
             )
@@ -11303,7 +11465,7 @@ mod registry_tests {
         assert_eq!(
             authz(
                 "PUT",
-                format!("/api/v1/meta-specs-registry/{id}"),
+                format!("/api/v1/meta-specs/{id}"),
                 "test-token",
                 Some(r#"{"approval_status":"Approved"}"#),
             )
@@ -11356,7 +11518,7 @@ mod registry_tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/api/v1/meta-specs-registry")
+                    .uri("/api/v1/meta-specs")
                     .header("authorization", format!("Bearer {jwt}"))
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&create_body).unwrap()))
@@ -11410,7 +11572,7 @@ mod registry_tests {
             .oneshot(
                 Request::builder()
                     .method("PUT")
-                    .uri(format!("/api/v1/meta-specs-registry/{id}"))
+                    .uri(format!("/api/v1/meta-specs/{id}"))
                     .header("authorization", format!("Bearer {jwt}"))
                     .header("content-type", "application/json")
                     .body(Body::from(r#"{"prompt":"Updated."}"#))
@@ -11479,7 +11641,7 @@ mod registry_tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/api/v1/meta-specs-registry")
+                    .uri("/api/v1/meta-specs")
                     .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(
@@ -11509,7 +11671,7 @@ mod registry_tests {
             .oneshot(
                 Request::builder()
                     .method("DELETE")
-                    .uri(format!("/api/v1/meta-specs-registry/{id}"))
+                    .uri(format!("/api/v1/meta-specs/{id}"))
                     .header("authorization", format!("Bearer {dev_jwt}"))
                     .body(Body::empty())
                     .unwrap(),
@@ -11522,7 +11684,7 @@ mod registry_tests {
         let get_resp = app
             .oneshot(
                 Request::builder()
-                    .uri(format!("/api/v1/meta-specs-registry/{id}"))
+                    .uri(format!("/api/v1/meta-specs/{id}"))
                     .header("authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
@@ -11549,15 +11711,26 @@ mod registry_tests {
         );
         state.tenants.create(&other_tenant).await.unwrap();
 
-        // Create a Tenant-scoped meta-spec as the system admin (registry
-        // creation is Admin-governed; the scope tenant must exist).
+        // Create a Tenant-scoped meta-spec as an Admin of the SCOPE
+        // tenant (the scope-level write grant: only the scope tenant's
+        // admins may create tenant-scoped entries — the system admin of
+        // tenant "default" is cross-tenant here and would be rejected).
+        let scope_admin_create_jwt = sign_test_jwt(
+            &serde_json::json!({
+                "sub": "del-create-admin-sub",
+                "preferred_username": "del-create-admin",
+                "tenant_id": "tenant-del-other",
+                "realm_access": { "roles": ["admin"] }
+            }),
+            3600,
+        );
         let create_resp = app
             .clone()
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/api/v1/meta-specs-registry")
-                    .header("authorization", "Bearer test-token")
+                    .uri("/api/v1/meta-specs")
+                    .header("authorization", format!("Bearer {scope_admin_create_jwt}"))
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::json!({
@@ -11591,7 +11764,7 @@ mod registry_tests {
             .oneshot(
                 Request::builder()
                     .method("DELETE")
-                    .uri(format!("/api/v1/meta-specs-registry/{id}"))
+                    .uri(format!("/api/v1/meta-specs/{id}"))
                     .header("authorization", format!("Bearer {dev_jwt}"))
                     .body(Body::empty())
                     .unwrap(),
@@ -11616,7 +11789,7 @@ mod registry_tests {
             .oneshot(
                 Request::builder()
                     .method("DELETE")
-                    .uri(format!("/api/v1/meta-specs-registry/{id}"))
+                    .uri(format!("/api/v1/meta-specs/{id}"))
                     .header("authorization", format!("Bearer {cross_admin_jwt}"))
                     .body(Body::empty())
                     .unwrap(),
@@ -11630,7 +11803,7 @@ mod registry_tests {
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri(format!("/api/v1/meta-specs-registry/{id}"))
+                    .uri(format!("/api/v1/meta-specs/{id}"))
                     .header("authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
@@ -11654,7 +11827,7 @@ mod registry_tests {
             .oneshot(
                 Request::builder()
                     .method("DELETE")
-                    .uri(format!("/api/v1/meta-specs-registry/{id}"))
+                    .uri(format!("/api/v1/meta-specs/{id}"))
                     .header("authorization", format!("Bearer {scope_admin_jwt}"))
                     .body(Body::empty())
                     .unwrap(),
@@ -11666,7 +11839,7 @@ mod registry_tests {
         let get_resp = app
             .oneshot(
                 Request::builder()
-                    .uri(format!("/api/v1/meta-specs-registry/{id}"))
+                    .uri(format!("/api/v1/meta-specs/{id}"))
                     .header("authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
@@ -11674,6 +11847,172 @@ mod registry_tests {
             .await
             .unwrap();
         assert_eq!(get_resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// §8 containment on the registry write gate: an Admin of tenant A
+    /// must not PUT (any field, including `required`) or POST
+    /// workspace-scoped meta-specs inside tenant B's workspaces — the
+    /// tenant-Admin bypass in `authorize_registry_write` is bounded by the
+    /// workspace's own tenant, mirroring the cross-admin DELETE rule
+    /// (`delete_tenant_scoped_meta_spec_requires_scope_tenant_admin` and
+    /// `authorize_meta_spec_delete`). Without the bound, flipping
+    /// `required` would inject that prompt into every agent tenant B
+    /// spawns in the workspace (prompt_assembly required-workspace band).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cross_tenant_admin_cannot_write_workspace_meta_spec() {
+        use crate::auth::test_helpers::{make_test_state_with_jwt, sign_test_jwt};
+        use gyre_domain::{Tenant, Workspace};
+
+        let state = make_test_state_with_jwt();
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // A second tenant with a workspace: the scope the meta-spec is
+        // pinned to. The system admin's own tenant is "default",
+        // deliberately different.
+        let other_tenant = Tenant::new(
+            gyre_common::Id::new("tenant-wr-other"),
+            "OtherWr",
+            "other-wr",
+            0,
+        );
+        state.tenants.create(&other_tenant).await.unwrap();
+        let ws = Workspace::new(
+            gyre_common::Id::new("ws-wr-1"),
+            gyre_common::Id::new("tenant-wr-other"),
+            "WrWs",
+            "wr-ws",
+            0,
+        );
+        state.workspaces.create(&ws).await.unwrap();
+
+        // An Admin of the SCOPE tenant creates a Workspace-scoped
+        // meta-spec (the scope-level write grant: the scope tenant's
+        // admins may write its workspaces' entries).
+        let scope_admin_jwt = sign_test_jwt(
+            &serde_json::json!({
+                "sub": "wr-scope-admin-sub",
+                "preferred_username": "wr-scope-admin",
+                "tenant_id": "tenant-wr-other",
+                "realm_access": { "roles": ["admin"] }
+            }),
+            3600,
+        );
+        let create_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/meta-specs")
+                    .header("authorization", format!("Bearer {scope_admin_jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "kind": "meta:persona", "name": "wr-persona",
+                            "scope": "Workspace", "scope_id": "ws-wr-1",
+                            "prompt": "p"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(create_resp.status(), StatusCode::CREATED);
+        let id = body_json(create_resp).await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // An Admin of a DIFFERENT tenant ("default", the system admin)
+        // PUTs required=true on the workspace meta-spec — must be 403 and
+        // must not flip the flag. (require_registry_scope's Admin bypass
+        // lets the request through containment; the write gate itself
+        // must bound the bypass.)
+        let put_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/meta-specs/{id}"))
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"required": true}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            put_resp.status(),
+            StatusCode::FORBIDDEN,
+            "an Admin of another tenant must not write workspace meta-specs"
+        );
+        let ms = state
+            .meta_specs
+            .get_by_id(&gyre_common::Id::new(&id))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!ms.required, "the rejected PUT must not flip required");
+
+        // The same cross-tenant Admin cannot POST a new workspace-scoped
+        // entry into the other tenant's workspace either.
+        let post_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/meta-specs")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "kind": "meta:persona", "name": "wr-sneak",
+                            "scope": "Workspace", "scope_id": "ws-wr-1",
+                            "prompt": "p"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            post_resp.status(),
+            StatusCode::FORBIDDEN,
+            "an Admin of another tenant must not create workspace meta-specs"
+        );
+
+        // Positive control — the scope tenant's Admin PUT still succeeds:
+        // the denials above are the cross-tenant bound, not removal of the
+        // Admin bypass.
+        let put_resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/meta-specs/{id}"))
+                    .header("authorization", format!("Bearer {scope_admin_jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"required": true}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            put_resp.status(),
+            StatusCode::OK,
+            "an Admin of the workspace's own tenant must still write it"
+        );
+        let ms = state
+            .meta_specs
+            .get_by_id(&gyre_common::Id::new(&id))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(ms.required, "the scope-tenant Admin PUT must flip required");
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -11708,7 +12047,7 @@ mod registry_tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/api/v1/meta-specs-registry")
+                    .uri("/api/v1/meta-specs")
                     .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&create_body).unwrap()))
@@ -11756,7 +12095,7 @@ mod registry_tests {
             .oneshot(
                 Request::builder()
                     .method("DELETE")
-                    .uri(format!("/api/v1/meta-specs-registry/{id}"))
+                    .uri(format!("/api/v1/meta-specs/{id}"))
                     .header("authorization", format!("Bearer {member_jwt}"))
                     .body(Body::empty())
                     .unwrap(),
@@ -11779,7 +12118,7 @@ mod registry_tests {
             .oneshot(
                 Request::builder()
                     .method("DELETE")
-                    .uri(format!("/api/v1/meta-specs-registry/{id}"))
+                    .uri(format!("/api/v1/meta-specs/{id}"))
                     .header("authorization", format!("Bearer {outsider_jwt}"))
                     .body(Body::empty())
                     .unwrap(),
@@ -11821,7 +12160,7 @@ mod registry_tests {
             .oneshot(
                 Request::builder()
                     .method("DELETE")
-                    .uri(format!("/api/v1/meta-specs-registry/{id}"))
+                    .uri(format!("/api/v1/meta-specs/{id}"))
                     .header("authorization", format!("Bearer {owner_jwt}"))
                     .body(Body::empty())
                     .unwrap(),
@@ -11834,7 +12173,7 @@ mod registry_tests {
         let get_resp = app
             .oneshot(
                 Request::builder()
-                    .uri(format!("/api/v1/meta-specs-registry/{id}"))
+                    .uri(format!("/api/v1/meta-specs/{id}"))
                     .header("authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
@@ -11842,6 +12181,506 @@ mod registry_tests {
             .await
             .unwrap();
         assert_eq!(get_resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// §2 Required vs Optional + §214 Registry Levels: a workspace Owner
+    /// (NOT a tenant Admin) may PUT `required: true` on a Workspace-scoped
+    /// meta-spec — the specced workspace-admin authority that the old
+    /// tenant-Admin-for-every-scope gate denied. The flag persists and the
+    /// meta-spec is injected into the required-workspace band for agents
+    /// spawned in that workspace (prompt_assembly band 2).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn workspace_owner_sets_required_on_workspace_meta_spec() {
+        use crate::auth::test_helpers::{make_test_state_with_jwt, sign_test_jwt};
+        use gyre_domain::{Workspace, WorkspaceMembership, WorkspaceRole};
+
+        let state = make_test_state_with_jwt();
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // Workspace in the caller's tenant ("default" for JWT auth without
+        // a tenant_id claim).
+        let ws = Workspace::new(
+            gyre_common::Id::new("ws-req-1"),
+            gyre_common::Id::new("default"),
+            "ReqWs",
+            "req-ws",
+            0,
+        );
+        state.workspaces.create(&ws).await.unwrap();
+
+        // Admin creates a Workspace-scoped meta:persona and approves it
+        // (injection only serves Approved entries).
+        let create_body = serde_json::json!({
+            "kind": "meta:persona",
+            "name": "ws-owner-persona",
+            "scope": "Workspace",
+            "scope_id": "ws-req-1",
+            "prompt": "Be the workspace persona."
+        });
+        let create_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/meta-specs")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&create_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(create_resp.status(), StatusCode::CREATED);
+        let id = body_json(create_resp).await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let approve_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/meta-specs/{id}"))
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"approval_status": "Approved"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(approve_resp.status(), StatusCode::OK);
+
+        // The AC1 filtered listing at the specced path: only this entry
+        // matches scope+scope_id+kind.
+        let list_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/meta-specs?scope=workspace&scope_id=ws-req-1&kind=meta:persona")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(list_resp.status(), StatusCode::OK);
+        let list = body_json(list_resp).await;
+        let arr = list.as_array().unwrap();
+        assert_eq!(arr.len(), 1, "filtered list returns exactly the entry");
+        assert_eq!(arr[0]["name"].as_str().unwrap(), "ws-owner-persona");
+
+        // A workspace Owner member (Developer global role — NOT tenant
+        // Admin) PUTs required=true. At the base tree this is 403 because
+        // the write gate is tenant-Admin for every scope; the specced
+        // scope-level grant must allow it.
+        let owner_jwt = sign_test_jwt(
+            &serde_json::json!({
+                "sub": "req-owner-sub",
+                "preferred_username": "req-owner",
+                "realm_access": { "roles": ["developer"] }
+            }),
+            3600,
+        );
+        let owner_user = gyre_domain::User::new(
+            gyre_common::Id::new("user-req-owner"),
+            "req-owner-sub",
+            "req-owner",
+            0,
+        );
+        state.users.create(&owner_user).await.unwrap();
+        state
+            .workspace_memberships
+            .create(&WorkspaceMembership::new(
+                gyre_common::Id::new("m-req-1"),
+                owner_user.id.clone(),
+                gyre_common::Id::new("ws-req-1"),
+                WorkspaceRole::Owner,
+                gyre_common::Id::new("admin"),
+                0,
+            ))
+            .await
+            .unwrap();
+        let put_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/meta-specs/{id}"))
+                    .header("authorization", format!("Bearer {owner_jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"required": true}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            put_resp.status(),
+            StatusCode::OK,
+            "workspace Owner must be able to set required on a workspace meta-spec"
+        );
+        assert_eq!(body_json(put_resp).await["required"], true);
+
+        // The flag persists in the store.
+        let ms = state
+            .meta_specs
+            .get_by_id(&gyre_common::Id::new(&id))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(ms.required, "required must persist");
+
+        // Injection: agents spawned in that workspace receive the meta-spec
+        // in the required-workspace band (the same assembly spawn uses).
+        let mut task = gyre_domain::Task::new(gyre_common::Id::new("t-req-1"), "T", 1);
+        task.workspace_id = gyre_common::Id::new("ws-req-1");
+        let set = crate::prompt_assembly::assemble_prompt_set(&state, &task).await;
+        let section = set
+            .sections
+            .iter()
+            .find(|s| s.name == "ws-owner-persona")
+            .expect("required workspace meta-spec must be injected");
+        assert_eq!(section.source, "required-workspace");
+        assert!(section.used.required);
+
+        // A workspace Admin member (also not tenant Admin) may write too.
+        let ws_admin_jwt = sign_test_jwt(
+            &serde_json::json!({
+                "sub": "req-ws-admin-sub",
+                "preferred_username": "req-ws-admin",
+                "realm_access": { "roles": ["developer"] }
+            }),
+            3600,
+        );
+        let ws_admin_user = gyre_domain::User::new(
+            gyre_common::Id::new("user-req-ws-admin"),
+            "req-ws-admin-sub",
+            "req-ws-admin",
+            0,
+        );
+        state.users.create(&ws_admin_user).await.unwrap();
+        state
+            .workspace_memberships
+            .create(&WorkspaceMembership::new(
+                gyre_common::Id::new("m-req-2"),
+                ws_admin_user.id.clone(),
+                gyre_common::Id::new("ws-req-1"),
+                WorkspaceRole::Admin,
+                gyre_common::Id::new("admin"),
+                0,
+            ))
+            .await
+            .unwrap();
+        let put_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/meta-specs/{id}"))
+                    .header("authorization", format!("Bearer {ws_admin_jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"required": false}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            put_resp.status(),
+            StatusCode::OK,
+            "workspace Admin member must be able to write workspace meta-specs"
+        );
+
+        // A mere Developer member (not Owner/Admin) is still forbidden.
+        let member_jwt = sign_test_jwt(
+            &serde_json::json!({
+                "sub": "req-member-sub",
+                "preferred_username": "req-member",
+                "realm_access": { "roles": ["developer"] }
+            }),
+            3600,
+        );
+        let member_user = gyre_domain::User::new(
+            gyre_common::Id::new("user-req-member"),
+            "req-member-sub",
+            "req-member",
+            0,
+        );
+        state.users.create(&member_user).await.unwrap();
+        state
+            .workspace_memberships
+            .create(&WorkspaceMembership::new(
+                gyre_common::Id::new("m-req-3"),
+                member_user.id.clone(),
+                gyre_common::Id::new("ws-req-1"),
+                WorkspaceRole::Developer,
+                gyre_common::Id::new("admin"),
+                0,
+            ))
+            .await
+            .unwrap();
+        let put_resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/meta-specs/{id}"))
+                    .header("authorization", format!("Bearer {member_jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"required": true}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            put_resp.status(),
+            StatusCode::FORBIDDEN,
+            "a plain workspace Developer member must not write registry entries"
+        );
+    }
+
+    /// §2 Required vs Optional: the privilege-escalation direction — a
+    /// workspace Owner/Admin writing a Global- or Tenant-scoped meta-spec
+    /// (any field, including `required`) is rejected 403. Only tenant
+    /// Admins write those scopes.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn workspace_owner_cannot_write_global_or_tenant_meta_spec() {
+        use crate::auth::test_helpers::{make_test_state_with_jwt, sign_test_jwt};
+        use gyre_domain::{Workspace, WorkspaceMembership, WorkspaceRole};
+
+        let state = make_test_state_with_jwt();
+        // The Tenant-scoped POST below pins scope_id to the caller's own
+        // tenant "default"; `require_registry_scope` fails closed (404)
+        // when the scope tenant row is missing, and the mem test state
+        // wires an empty tenant repo — materialize it like production
+        // startup (main.rs) and the sibling reconciliation tests do.
+        crate::bootstrap_default_tenant(&state).await;
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // A workspace the owner belongs to (their authority exists, but
+        // only over that workspace's scope).
+        let ws = Workspace::new(
+            gyre_common::Id::new("ws-esc-1"),
+            gyre_common::Id::new("default"),
+            "EscWs",
+            "esc-ws",
+            0,
+        );
+        state.workspaces.create(&ws).await.unwrap();
+        let owner_jwt = sign_test_jwt(
+            &serde_json::json!({
+                "sub": "esc-owner-sub",
+                "preferred_username": "esc-owner",
+                "realm_access": { "roles": ["developer"] }
+            }),
+            3600,
+        );
+        let owner_user = gyre_domain::User::new(
+            gyre_common::Id::new("user-esc-owner"),
+            "esc-owner-sub",
+            "esc-owner",
+            0,
+        );
+        state.users.create(&owner_user).await.unwrap();
+        state
+            .workspace_memberships
+            .create(&WorkspaceMembership::new(
+                gyre_common::Id::new("m-esc-1"),
+                owner_user.id.clone(),
+                gyre_common::Id::new("ws-esc-1"),
+                WorkspaceRole::Owner,
+                gyre_common::Id::new("admin"),
+                0,
+            ))
+            .await
+            .unwrap();
+
+        // Global meta-spec (admin-created).
+        let global_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/meta-specs")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "kind": "meta:principle",
+                            "name": "global-esc-target",
+                            "scope": "Global",
+                            "prompt": "p"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(global_resp.status(), StatusCode::CREATED);
+        let global_id = body_json(global_resp).await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // Owner PUT (required) on the Global entry → 403.
+        let put_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/meta-specs/{global_id}"))
+                    .header("authorization", format!("Bearer {owner_jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"required": true}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            put_resp.status(),
+            StatusCode::FORBIDDEN,
+            "workspace Owner must not write Global-scoped meta-specs"
+        );
+        // Flag not flipped by the rejected request.
+        let ms = state
+            .meta_specs
+            .get_by_id(&gyre_common::Id::new(&global_id))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!ms.required);
+
+        // Tenant-scoped meta-spec in the caller's OWN tenant: membership
+        // authority over a workspace must not reach up to tenant scope.
+        let tenant_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/meta-specs")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "kind": "meta:standard",
+                            "name": "tenant-esc-target",
+                            "scope": "Tenant",
+                            "scope_id": "default",
+                            "prompt": "p"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(tenant_resp.status(), StatusCode::CREATED);
+        let tenant_id = body_json(tenant_resp).await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let put_resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/meta-specs/{tenant_id}"))
+                    .header("authorization", format!("Bearer {owner_jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"required": true}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            put_resp.status(),
+            StatusCode::FORBIDDEN,
+            "workspace Owner must not write Tenant-scoped meta-specs (privilege escalation)"
+        );
+    }
+
+    /// The registry CRUD moved to the specced flat routes
+    /// (/api/v1/meta-specs, agent-runtime §2 API table) with NO silent
+    /// alias: the old /api/v1/meta-specs-registry prefix is gone (404),
+    /// and the blast-radius route still resolves under the shared prefix.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn registry_old_prefix_removed_no_alias() {
+        use crate::auth::test_helpers::make_test_state_with_jwt;
+
+        let state = make_test_state_with_jwt();
+        let app = crate::api::api_router().with_state(state);
+
+        for (method, uri) in [
+            ("GET", "/api/v1/meta-specs-registry"),
+            ("POST", "/api/v1/meta-specs-registry"),
+            (
+                "GET",
+                "/api/v1/meta-specs-registry/00000000-0000-0000-0000-000000000000",
+            ),
+            (
+                "PUT",
+                "/api/v1/meta-specs-registry/00000000-0000-0000-0000-000000000000",
+            ),
+            (
+                "DELETE",
+                "/api/v1/meta-specs-registry/00000000-0000-0000-0000-000000000000",
+            ),
+            (
+                "GET",
+                "/api/v1/meta-specs-registry/00000000-0000-0000-0000-000000000000/versions",
+            ),
+            (
+                "GET",
+                "/api/v1/meta-specs-registry/00000000-0000-0000-0000-000000000000/versions/1",
+            ),
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(uri)
+                        .header("authorization", "Bearer test-token")
+                        .header("content-type", "application/json")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::NOT_FOUND,
+                "{method} {uri} must be gone (no silent alias)"
+            );
+        }
+
+        // The blast-radius route under the shared prefix still resolves
+        // (a miss for an unknown path is its normal 404/405 shape — the
+        // point is that the route is registered, not shadowed).
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/meta-specs/meta%2Fpersonas%2Fbackend.md/blast-radius")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_ne!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "blast-radius route must stay reachable under /api/v1/meta-specs"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -11857,7 +12696,7 @@ mod registry_tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/api/v1/meta-specs-registry")
+                    .uri("/api/v1/meta-specs")
                     .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(
@@ -11878,7 +12717,7 @@ mod registry_tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/api/v1/meta-specs-registry")
+                    .uri("/api/v1/meta-specs")
                     .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(
@@ -11903,7 +12742,7 @@ mod registry_tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/api/v1/meta-specs-registry")
+                    .uri("/api/v1/meta-specs")
                     .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(
@@ -11926,7 +12765,7 @@ mod registry_tests {
             .oneshot(
                 Request::builder()
                     .method("PUT")
-                    .uri(format!("/api/v1/meta-specs-registry/{id}"))
+                    .uri(format!("/api/v1/meta-specs/{id}"))
                     .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(
@@ -11944,7 +12783,9 @@ mod registry_tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn force_requires_admin_of_the_scope_tenant() {
-        let state = test_state();
+        use crate::auth::test_helpers::{make_test_state_with_jwt, sign_test_jwt};
+
+        let state = make_test_state_with_jwt();
         let app = crate::api::api_router().with_state(state.clone());
 
         // A tenant OTHER than the caller's ("default").
@@ -11966,15 +12807,26 @@ mod registry_tests {
         assert_eq!(resp.status(), StatusCode::CREATED);
         let other_id = body_json(resp).await["id"].as_str().unwrap().to_string();
 
-        // Tenant-scoped spec for that other tenant (registry creation is
-        // platform-admin governed; force is the tenant-scoped power).
+        // Tenant-scoped spec for that other tenant, created by an Admin of
+        // the SCOPE tenant (the scope-level write grant — the "default"
+        // system admin is cross-tenant here and would be rejected); force
+        // is the tenant-scoped power under test below.
+        let scope_admin_jwt = sign_test_jwt(
+            &serde_json::json!({
+                "sub": "force-scope-admin-sub",
+                "preferred_username": "force-scope-admin",
+                "tenant_id": other_id,
+                "realm_access": { "roles": ["admin"] }
+            }),
+            3600,
+        );
         let resp = app
             .clone()
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/api/v1/meta-specs-registry")
-                    .header("authorization", "Bearer test-token")
+                    .uri("/api/v1/meta-specs")
+                    .header("authorization", format!("Bearer {scope_admin_jwt}"))
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::json!({
@@ -11995,7 +12847,7 @@ mod registry_tests {
             .oneshot(
                 Request::builder()
                     .method("PUT")
-                    .uri(format!("/api/v1/meta-specs-registry/{id}"))
+                    .uri(format!("/api/v1/meta-specs/{id}"))
                     .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(

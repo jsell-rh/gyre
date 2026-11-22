@@ -2275,6 +2275,13 @@ pub(crate) async fn launch_agent_process(
         container_env.insert("GYRE_AGENT_ID".to_string(), agent.id.to_string());
         container_env.insert("GYRE_TASK_ID".to_string(), task.id.to_string());
         container_env.insert("GYRE_REPO_ID".to_string(), repo.id.to_string());
+        // architecture.md §API (task-310): the runner's WebSocket transport
+        // subscribes to the agent's own workspace — the scope the server
+        // authorizes for agent connections on Subscribe.
+        container_env.insert(
+            "GYRE_WORKSPACE_ID".to_string(),
+            agent.workspace_id.to_string(),
+        );
         // agent-workflow.md §Immediate Feedback (task-268): pre-PR local
         // verification. Resolve the repo's locally-runnable command gates
         // from the REAL QualityGateRepository config (pre-merge
@@ -2958,6 +2965,13 @@ pub(crate) async fn launch_taskless_agent_process(
         container_env.insert("GYRE_TASK_ID".to_string(), task_id.to_string());
     }
     container_env.insert("GYRE_REPO_ID".to_string(), repo_id.to_string());
+    // architecture.md §API (task-310): the runner's WebSocket transport
+    // subscribes to the agent's own workspace — the scope the server
+    // authorizes for agent connections on Subscribe.
+    container_env.insert(
+        "GYRE_WORKSPACE_ID".to_string(),
+        agent.workspace_id.to_string(),
+    );
 
     // identity-security.md Layer 1 (task-206 review repair): issue the
     // session's X.509-SVID before dispatch, mirroring
