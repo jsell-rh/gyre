@@ -1,0 +1,28 @@
+# Review — task-321 (Publish reviewed spec backlog for specs/development/ci-docs-release.md)
+
+Spec: `specs/development/ci-docs-release.md` (canonical, unchanged by the candidate).
+Candidate under review: `cf6abbd4` (branch `pipeline/task-321/fa43b0abd5074ed99bdfa106d115d443-1`, base `a2bd3eb0`).
+Verdict: **approved** — no findings. The publication is a faithful, exactly-additive rendering of the independently reviewed plan `a6e170077d39…`; the audit's gap/satisfied decisions were re-verified against the code tree and held.
+
+## What the candidate is
+
+A single commit `cf6abbd4` ("chore: publish reviewed spec backlog a6e170077d39") touching only `specs/tasks/task-314.md` … `task-321.md` (7 new planned-task docs + the publication doc) and `specs/task-spec-inputs.json`. No product file, spec, coverage matrix, script, or gate is touched (diff-stat evidence: `/tmp/stage/review-evidence/01-candidate.txt`). No Rust compilation is implicated; no runtime probe is required for a docs-only publication, and none was run (per the focused-probe rule).
+
+## Probes run (all evidence under `/tmp/stage/review-evidence/`)
+
+- **Plan fidelity (02, 07):** the JSON plan embedded in `specs/tasks/task-321.md` deep-equals the assigned plan from the task contract; each of the 7 task docs (314–320) was regenerated from the plan data using the pipeline's own publication template (`scripts/pipeline/spec_backlog.py`, the `expected[...]` body construction) and compared byte-for-byte — **7/7 byte-exact**, including required_behavior, acceptance lists, negative probes (plus the standard coverage-discipline boilerplate), discovery-evidence gap JSON, `spec_ref` form (`Spec gap spec-17849f2036d5093f11e2a1ae / <key> / d1e5376399b8`), `depends_on`, and `progress: not-started`.
+- **Registry transformation (03, 08, 04):** `specs/task-spec-inputs.json` at the candidate equals the base registry plus exactly 7 new `backlog/<section-id>` section entries and 7 new binding keys — zero sections/bindings removed, changed, or retargeted; `version`/`shared` unchanged; file is valid JSON. Every new section's heading path resolves against the real spec heading tree using the pipeline's own `sections()` parser (`scripts/pipeline/requirements.py`) — all 7 OK, including the four-level `Pre-Accept Enforcement` path.
+- **Audit challenge (09):** every load-bearing code claim behind the 7 gap decisions was independently re-verified on the tree: no `astro.config.*`/Starlight dependency and no Pages deployment step anywhere; no i18n-coverage or doc-freshness check script or CI step (only locale is `en.json`); `check_pre_accept_gates` returns early for repos with no gates (opt-in, not forge-level); the gate whitelist contains `revert` (not in the spec's ten-type table) and never validates scope content/case; rejection is a plain-text HTTP 403 with no SHA and no sideband framing; `ChangelogEntry` ends at `task_id` (no spec-ref field); `release_prepare` is Admin-only (`api/release.rs:57`); no dev-version computation exists anywhere; the CLI `--version` resolves to the manifest literal (`Cargo.toml` `version = "0.1.0"`). The 4 `satisfied` decisions were spot-verified (`is_conventional`/`parse_conventional` parsers, `type_bump` mapping feat→Minor / fix|perf→Patch, `!`/`BREAKING CHANGE:` detection with Major-wins fold, `latest_semver_tag`/`commits_since`/`compute_next_version` in the real prepare handler). The 4 `context` classifications are defensible (title heading, bare parent headings deferring to their normative children, a cross-reference map).
+- **Decomposition / coverage (06):** 15 audited sections → 7 gaps, 4 satisfied, 4 context; every gap is covered by exactly one planned task; the audit's `gaps` list equals the gap-classified sections.
+- **Evidence freshness (05):** all 16 `source_evidence` sha256 digests still match the candidate tree (the diff touches none of them); the audit base `7e746233` is an ancestor of HEAD.
+- **Duplicate-work / dependency sweep (10):** no existing task binds the new spec-gap ref or the new backlog section IDs; related prior tasks (i18n mentions, pre-accept, release, Sigstore, supply chain) are all `complete` and none overlaps the seven planned tasks; task-285 (dependency-graph publication) references ci-docs-release.md only as context. Dependencies introduced (task-318 → task-314, task-320 → task-319) are real consumer relationships, acyclic. Cross-plan coordination references in the task texts (`sign_commit_keyless`, `workspace_orchestrator_scope`, `build_release_aibom`, `gyre_spawn_repo_orchestrator`) all resolve to real code.
+- **Commit attribution:** `cf6abbd4` carries no `task-NNN` label and touches only `specs/` — outside `check-task-commit-attribution.sh` scope; `commits: []` frontmatter matches the assigned task body.
+
+## Observations (non-blocking)
+
+- Task numbers 312/313 do not exist in `specs/tasks/`; the plan's authoritative `assigned_names` allocates 314–321 only, so the numbering gap originates in the reviewed plan allocation, not in this publication. The publication was required to publish *exactly* the plan, and did.
+- `specs/coverage/development/` does not yet exist (only `system/` matrices); coverage-matrix generation for the development spec belongs to the verifier's regeneration, not to this publication — correctly left untouched here.
+
+## Verifier notes
+
+Nothing beyond the standard mechanical suite is required for this docs-only candidate: the CI lint/test jobs run on unchanged code. If desired, `python3 -m unittest scripts/test_pipeline_spec_backlog.py` exercises the publication machinery itself (synthetic repo; not a probe of this candidate's content).
