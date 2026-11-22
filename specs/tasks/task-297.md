@@ -2,8 +2,8 @@
 title: "Gate all implementation work on approved specs"
 spec_ref: "Spec gap spec-41a92c20354c6a108e6074e3 / approval-single-trigger / 4a3f940495a8"
 depends_on: []
-progress: complete
-commits: ["bb42b05c13f78e387cd5fa3d3f41ac17d4979124", "611bc5ffae121a96eb1becf6c233901e541d881f", "ae87cf5bb64387c932c827b613d3c8d99afaf2b0", "52397d1622d72bfe9f63fe42ca85484a124c1ae5", "6c7ce4091376fc85d674281dc7559842a3bed04e", "569ea13821554e618ee7446aecd69c72a35a8ce7", "d5662b9e702f3691db12a406b3d9e8b5c4363e6f"]
+progress: ready-for-review
+commits: ["69394abf5b8cd8913144f1f3cd84b1a03c57045b"]
 ---
 
 ## Required behavior
@@ -64,50 +64,67 @@ Canonical spec: `specs/system/agent-runtime.md`. Source: `678a8ac3e3bfeafeb66cdb
 
 ## Shipped
 
-The single-trigger gates shipped in the earlier rounds of this task and
-are unchanged: the task-creation gate on POST /api/v1/tasks and MCP
-`gyre_create_task` (approved-ledger resolution at the pinned
-path@sha), the Phase-4 scheduler gate with the `spec-approval-missing`
-skip label, and the direct-spawn 403 for task-bound implementation
-workers on POST /api/v1/agents/spawn.
+The single-trigger gates shipped in earlier rounds of this task are
+unchanged: the task-creation gate on POST /api/v1/tasks and MCP
+`gyre_create_task` (approved-ledger resolution at the pinned path@sha,
+4xx / SPEC_APPROVAL_REQUIRED before any task row is written), the
+Phase-4 scheduler gate with the `spec-approval-missing` skip label, and
+the direct-spawn 403 for task-bound implementation workers on
+POST /api/v1/agents/spawn.
 
-### This round: CI repair bb42b05c (storage-isolation regression)
+### This round: CI repair 69394abf (task-297 × task-280 reconciliation)
 
-The candidate CI run (PR head 01752c5d, nextest run 45014043762)
-failed `git_integration::push_records_agent_commit_provenance` at
-git_integration.rs:187 — POST /api/v1/repos returned an error body
-with no `id` inside the `create_repo` helper. Root cause: task-308's
-durable-default change (87e08778) added
-`gyre_server::select_in_memory_storage()` to the pre-existing
-`start_server` helpers but missed the two state-returning
-`start_server_with_state` helpers this task had added in the meantime
-(git_integration.rs, auth_integration.rs). Those harnesses built state
-with `GYRE_DATABASE_URL` unset — now durable SQLite at the platform
-default data path — so every such test process (plus its merge
-processor) became a concurrent writer on the operator's real default
-database file; the provenance test's repo insert lost the write race
-against `merge_queue_auto_merges_mr_and_commit_on_main` on the same
-file. Both helpers now opt into in-memory storage exactly like
-`start_server` (commit `bb42b05c`, test-harness-only: no product code,
-no assertion changed).
+Candidate CI (PR head 929cfe3, nextest run 45032971996) failed
+`signal_chain::tests::scheduler_spawns_agent_for_cascade_test_task` —
+Backlog != InProgress. Root cause: a genuine inter-spec conflict
+introduced by the merge with main. task-280's cascade testing files each
+cascade-test task with `task_type=Implementation` and no `spec_ref`
+(dependency-graph.md §Cascade Testing: the forge runs the dependent
+repo's tests with no human or orchestrator action beyond the policy
+gates), while the task-297 Phase-4 scheduler gate rejects every
+Implementation task whose spec_ref does not resolve to an Approved
+ledger entry — so cascade tests could never execute.
+
+Resolution per the goal's rule 4 (specs are the contract; amend rather
+than contradict): agent-runtime.md §1 now documents cascade-test
+execution as the one non-spec class of agent work, authorized by the
+workspace `require_cascade_tests` policy. The scheduler gate exempts
+exactly the forge-filed shape: the cascade-test label AND no `spec_ref`.
+That combination is unreachable from either task-creation surface (both
+reject `task_type=implementation` without an approved `spec_ref`
+regardless of labels, and `task_type` is immutable after creation — the
+PATCH surface has no `task_type` field), so the exemption cannot be
+forged through the API. A task pinning any `spec_ref` is always gated —
+the label alone never bypasses an unapproved or invalidated approval.
+The label constant is shared (`merge_processor::CASCADE_TEST_LABEL`)
+across the trigger, the completion routing (api/spawn.rs), and the
+scheduler exemption, so the discriminator cannot drift. The
+already-satisfied approval-side behavior (ledger row, SpecApproved
+emission, modified-spec invalidation to Pending) is untouched.
 
 ### Test evidence
 
-- `cargo check -p gyre-server --tests` — exit 0 on `bb42b05c` (log:
-  /tmp/stage/review-evidence/cargo-check-task297-ci-repair.log).
-- `python3 scripts/check-rustfmt-diff.py HEAD^1` — exit 0, changed
-  lines clean.
-- Server test execution remains mechanically deferred to the
-  independent verifier (the sandbox build wrapper blocks gyre-server
-  test codegen within the model's 4 GiB budget). Required probes:
-  `cargo nextest run -p gyre-server git_integration` (the previously
-  failing `push_records_agent_commit_provenance` plus both
-  `merge_queue_*` twins that shared the default DB),
-  `cargo nextest run -p gyre-server auth_integration` (the other fixed
-  harness), then the full `cargo nextest run --all` (the failed CI run
-  was fail-fast cancelled with 150 tests not run).
-- Analysis and probe records:
-  /tmp/stage/review-evidence/task-297-ci-repair.md.
-- No assertion was weakened; the fix restores the isolation these
-tests were written against (they were green before the task-308
-  durable default landed in this branch).
+- New:
+  `signal_chain::tests::cascade_label_does_not_bypass_spec_approval_gate`
+  — an implementation task carrying the cascade-test label but pinning
+  a `spec_ref` whose approval was invalidated by a later push stays
+  Backlog with the `spec-approval-missing` label and zero agent records:
+  the label is not a gate bypass for spec-pinned tasks.
+- Unchanged, expected green again:
+  `scheduler_spawns_agent_for_cascade_test_task` (task-280's EXECUTION
+  link — the CI failure),
+  `scheduler_skips_unapproved_spec_and_spawns_approved_twin` and
+  `scheduler_stops_spawn_when_approval_invalidated_by_push`
+  (task-297's scheduler-gate tests).
+- `cargo check -p gyre-server --all-targets` (wrapper
+  `/tmp/stage/bin/cargo`): clean at 69394abf, exit 0, ~10m. Evidence
+  saved under /tmp/stage/review-evidence. `check-inert-enforcement.sh`:
+  OK. Per the sandbox budget rules the gyre-server test compilation was
+  NOT run in this assignment — the independent verifier must execute
+  (minimum set): `cargo nextest run -p gyre-server signal_chain::` plus
+  `api_integration::tasks_create_implementation_requires_approved_spec`,
+  `mcp` unit tests
+  (`mcp_create_task_implementation_requires_approved_spec`),
+  `spawn_rejects_implementation_worker_for_external_callers`, and the
+  merge_processor cascade suites (`trigger_cascade_tests_*`,
+  `report_cascade_test_result_*`).
