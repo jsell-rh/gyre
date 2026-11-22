@@ -768,6 +768,18 @@ pub async fn scheduler_run_once(state: &Arc<AppState>) -> anyhow::Result<()> {
 /// cycle spawns the task successfully.
 const BUDGET_EXHAUSTED_LABEL: &str = "budget-exhausted";
 
+/// Task label flagging a Backlog Implementation task whose spec_ref does
+/// not resolve to a currently-Approved spec version at the pinned SHA
+/// (agent-runtime.md §1 The Signal Chain: spec approval is the single
+/// trigger — "There is no other trigger. The SpecApproved event is the
+/// universal starting signal."). Defense in depth behind the
+/// task-creation gate: an approval invalidated by a later push must stop
+/// the spawn. The task stays Backlog with this observable skip label and
+/// a logged reason — no agent record, no InProgress transition. Cleared
+/// when a later cycle spawns the task successfully (e.g. after
+/// re-approval).
+const SPEC_APPROVAL_MISSING_LABEL: &str = "spec-approval-missing";
+
 /// Exponential backoff between worker spawn attempts, in seconds
 /// (agent-runtime.md §1 Phase 7 "Spawn failure": 3 retries at 1s / 5s /
 /// 30s, then the task is Blocked with a priority-1 notification).
@@ -801,6 +813,49 @@ async fn spawn_implementation_workers(state: &Arc<AppState>) {
     for task in backlog {
         if task.task_type != Some(TaskType::Implementation) {
             continue; // Delegation/Coordination → orchestrators; untyped → never spawned
+        }
+        // Spec-approval gate (agent-runtime.md §1 The Signal Chain —
+        // defense in depth behind the task-creation gate): before claiming
+        // the task and spawning a worker, the task's spec_ref must still
+        // resolve to a currently-Approved ledger entry at exactly the
+        // pinned SHA. An approval invalidated by a later push (or a task
+        // inserted into storage without one) stops the spawn here: the
+        // task stays Backlog with the spec-approval-missing skip label and
+        // a logged reason — no agent record, no InProgress transition.
+        let spec_gate = match task.spec_ref.as_deref() {
+            Some(spec_ref) => {
+                crate::api::gates::verify_implementation_spec_ref(state, spec_ref).await
+            }
+            None => Err("the task carries no spec_ref (path@sha)".to_string()),
+        };
+        if let Err(reason) = spec_gate {
+            // Flag the FRESHEST row (the same stale-snapshot defense as the
+            // budget flag below): persisting the scan snapshot could revert
+            // a concurrent status change while merely adding the label.
+            match state.tasks.find_by_id(&task.id).await {
+                Ok(Some(current))
+                    if current.status == TaskStatus::Backlog
+                        && current.task_type == Some(TaskType::Implementation)
+                        && !current
+                            .labels
+                            .iter()
+                            .any(|l| l == SPEC_APPROVAL_MISSING_LABEL) =>
+                {
+                    let mut flagged = current;
+                    flagged.labels.push(SPEC_APPROVAL_MISSING_LABEL.to_string());
+                    flagged.updated_at = now;
+                    let _ = state.tasks.update(&flagged).await;
+                }
+                _ => {}
+            }
+            tracing::info!(
+                task_id = %task.id,
+                spec_ref = ?task.spec_ref,
+                reason,
+                "signal-chain: spec not approved at the pinned SHA; worker spawn skipped, \
+                 task left Backlog (agent-runtime.md §1 single-trigger)"
+            );
+            continue;
         }
         let Some(repo) = resolve_task_repo(state, &task).await else {
             continue;
@@ -942,8 +997,11 @@ async fn spawn_implementation_workers(state: &Arc<AppState>) {
             continue;
         }
         claimed.updated_at = now;
-        // Clear the budget flag: this cycle is spending budget on the task.
-        claimed.labels.retain(|l| l != BUDGET_EXHAUSTED_LABEL);
+        // Clear the budget and spec-approval skip flags: this cycle is
+        // spending budget on the task against a verified approval.
+        claimed
+            .labels
+            .retain(|l| l != BUDGET_EXHAUSTED_LABEL && l != SPEC_APPROVAL_MISSING_LABEL);
         if let Err(e) = state.tasks.update(&claimed).await {
             tracing::warn!(task_id = %task.id, "signal-chain: worker claim persist failed: {e}");
             continue;
@@ -2161,6 +2219,11 @@ pub fn spawn_task_scheduler(state: Arc<AppState>) {
 mod tests {
     use super::*;
 
+    /// The approved blob SHA of `specs/system/auth.md` in the chain fixture
+    /// (a 40-char hex git blob SHA, the form approve_spec validates and the
+    /// chain pins into spec_refs).
+    const APPROVED_SHA: &str = "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c";
+
     // Registry semantics: distinct locks per scope, stable identity across
     // calls, no cross-contamination between workspaces/repos.
     #[tokio::test]
@@ -2350,14 +2413,20 @@ mod tests {
             persona.approval_status = gyre_domain::PersonaApprovalStatus::Approved;
             state.personas.create(&persona).await.unwrap();
         }
+        // Production parity for the single-trigger gate (agent-runtime.md
+        // §1): the chain below runs AFTER a spec approval, so the registry
+        // entry is Approved at the approved blob SHA and the durable
+        // approval ledger carries the matching active row — the exact
+        // state POST /api/v1/specs/:path/approve leaves behind.
+        crate::mem::seed_approved_spec(&state, "specs/system/auth.md", APPROVED_SHA).await;
         let entry = gyre_domain::SpecLedgerEntry {
             path: "specs/system/auth.md".to_string(),
             title: "Auth".to_string(),
             owner: "owner".to_string(),
             kind: None,
-            current_sha: "abc123".to_string(),
+            current_sha: APPROVED_SHA.to_string(),
             approval_mode: "single".to_string(),
-            approval_status: ApprovalStatus::Pending,
+            approval_status: ApprovalStatus::Approved,
             linked_tasks: vec![],
             linked_mrs: vec![],
             drift_status: "clean".to_string(),
@@ -2395,7 +2464,7 @@ mod tests {
         serde_json::json!({
             "repo_id": "r-1",
             "spec_path": "specs/system/auth.md",
-            "spec_sha": "abc123",
+            "spec_sha": APPROVED_SHA,
             "approved_by": "user:alice",
             "approval_id": "approval-1",
             "workspace_id": "ws-1",
@@ -2457,9 +2526,10 @@ mod tests {
             Some("specs/system/auth.md"),
             "spec_path is the bare path (list_by_spec_path match key)"
         );
+        let pinned_ref = format!("specs/system/auth.md@{APPROVED_SHA}");
         assert_eq!(
             delegation.spec_ref.as_deref(),
-            Some("specs/system/auth.md@abc123"),
+            Some(pinned_ref.as_str()),
             "spec_ref pins the approved blob"
         );
         assert_eq!(delegation.assigned_to.as_ref(), Some(&orch[0].id));
@@ -2587,6 +2657,7 @@ mod tests {
             .iter()
             .find(|t| t.task_type == Some(TaskType::Delegation))
             .expect("delegation task exists");
+        let pinned_ref = format!("specs/system/auth.md@{APPROVED_SHA}");
         assert_eq!(
             delegation.status,
             TaskStatus::Done,
@@ -2616,7 +2687,7 @@ mod tests {
             assert_eq!(sub.spec_path.as_deref(), Some("specs/system/auth.md"));
             assert_eq!(
                 sub.spec_ref.as_deref(),
-                Some("specs/system/auth.md@abc123"),
+                Some(pinned_ref.as_str()),
                 "sub-task pins the approved spec blob"
             );
         }
@@ -2735,15 +2806,159 @@ mod tests {
 
     // ── Phase 4 (task-118): worker agent spawning ──────────────────────────
 
-    /// Helper: a Backlog Implementation task in repo r-1 (workspace ws-1).
+    /// Helper: a Backlog Implementation task in repo r-1 (workspace ws-1),
+    /// pinned to the fixture's approved spec version (agent-runtime.md §1:
+    /// the scheduler only spawns Implementation tasks whose spec_ref
+    /// resolves to a currently-Approved ledger entry at the pinned SHA).
     async fn impl_task(state: &Arc<crate::AppState>, id: &str) -> Task {
         let mut t = Task::new(Id::new(id), "Implement thing", 0);
         t.task_type = Some(TaskType::Implementation);
         t.workspace_id = Id::new("ws-1");
         t.repo_id = Id::new("r-1");
         t.spec_path = Some("specs/system/auth.md".to_string());
+        t.spec_ref = Some(format!("specs/system/auth.md@{APPROVED_SHA}"));
         state.tasks.create(&t).await.unwrap();
         t
+    }
+
+    /// agent-runtime.md §1 The Signal Chain — scheduler gate (defense in
+    /// depth behind the task-creation gate): a Backlog Implementation
+    /// task inserted directly into storage with a spec_ref whose spec has
+    /// NO Approved ledger entry at that SHA is never spawned — one cycle
+    /// creates zero agent records for it and leaves it Backlog with the
+    /// observable skip label — while a twin task referencing an approved
+    /// spec spawns exactly one worker.
+    #[tokio::test]
+    async fn scheduler_skips_unapproved_spec_and_spawns_approved_twin() {
+        let state = chain_state().await;
+
+        // Twin A — unapproved: the registry entry is Pending and no
+        // approval ledger row exists (the verification-intent scenario:
+        // inserted directly into task storage).
+        let pending_sha = "9".repeat(40);
+        let mut unapproved = Task::new(Id::new("impl-unapproved"), "Unapproved", 0);
+        unapproved.task_type = Some(TaskType::Implementation);
+        unapproved.workspace_id = Id::new("ws-1");
+        unapproved.repo_id = Id::new("r-1");
+        unapproved.spec_path = Some("specs/system/pending.md".to_string());
+        unapproved.spec_ref = Some(format!("specs/system/pending.md@{pending_sha}"));
+        state.tasks.create(&unapproved).await.unwrap();
+        let pending_entry = gyre_domain::SpecLedgerEntry {
+            path: "specs/system/pending.md".to_string(),
+            title: "Pending".to_string(),
+            owner: "owner".to_string(),
+            kind: None,
+            current_sha: pending_sha,
+            approval_mode: "single".to_string(),
+            approval_status: ApprovalStatus::Pending,
+            linked_tasks: vec![],
+            linked_mrs: vec![],
+            drift_status: "clean".to_string(),
+            created_at: 0,
+            updated_at: 0,
+            repo_id: Some("r-1".to_string()),
+            workspace_id: Some("ws-1".to_string()),
+        };
+        state.spec_ledger.save(&pending_entry).await.unwrap();
+
+        // Twin B — approved: the fixture's approved spec version.
+        let approved = impl_task(&state, "impl-approved").await;
+
+        scheduler_run_once(&state).await.unwrap();
+
+        // Twin A: no agent record, no claim, observable skip label.
+        let after = state
+            .tasks
+            .find_by_id(&unapproved.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            after.status,
+            TaskStatus::Backlog,
+            "unapproved-spec task stays Backlog (single trigger)"
+        );
+        assert!(after.assigned_to.is_none(), "no agent spawned");
+        assert!(
+            after.labels.iter().any(|l| l == "spec-approval-missing"),
+            "unapproved-spec task carries the observable skip label: {:?}",
+            after.labels
+        );
+        let agents = state.agents.list().await.unwrap();
+        assert!(
+            agents
+                .iter()
+                .all(|a| a.current_task_id != Some(unapproved.id.clone())),
+            "zero agent records exist for the unapproved-spec task"
+        );
+
+        // Twin B: exactly one worker spawned and assigned.
+        let after = state.tasks.find_by_id(&approved.id).await.unwrap().unwrap();
+        assert_eq!(
+            after.status,
+            TaskStatus::InProgress,
+            "approved-spec twin is claimed by the Phase 4 worker path"
+        );
+        let workers: Vec<_> = agents
+            .iter()
+            .filter(|a| a.current_task_id == Some(approved.id.clone()))
+            .collect();
+        assert_eq!(workers.len(), 1, "exactly one worker for the approved twin");
+    }
+
+    /// agent-runtime.md §1 — an approval invalidated by a LATER PUSH must
+    /// stop the spawn: the task's spec_ref pins the approved SHA, the push
+    /// moves the registry entry onto a new blob (Pending) and revokes the
+    /// approval rows; the scheduler must not spawn the worker.
+    #[tokio::test]
+    async fn scheduler_stops_spawn_when_approval_invalidated_by_push() {
+        let state = chain_state().await;
+        let task = impl_task(&state, "impl-invalidated").await;
+
+        // The later push: registry sync resets the entry (Pending, new
+        // blob SHA) and the post-receive hook revokes every approval row
+        // for the path.
+        let mut entry = state
+            .spec_ledger
+            .find_by_path("specs/system/auth.md")
+            .await
+            .unwrap()
+            .unwrap();
+        entry.current_sha = "1".repeat(40);
+        entry.approval_status = ApprovalStatus::Pending;
+        state.spec_ledger.save(&entry).await.unwrap();
+        state
+            .spec_approvals
+            .revoke_all_for_path(
+                "specs/system/auth.md",
+                "system:spec-lifecycle",
+                "spec file modified in push",
+                1,
+            )
+            .await
+            .unwrap();
+
+        scheduler_run_once(&state).await.unwrap();
+
+        let after = state.tasks.find_by_id(&task.id).await.unwrap().unwrap();
+        assert_eq!(
+            after.status,
+            TaskStatus::Backlog,
+            "invalidated approval stops the spawn — task stays Backlog"
+        );
+        assert!(after.assigned_to.is_none(), "no agent spawned");
+        assert!(
+            after.labels.iter().any(|l| l == "spec-approval-missing"),
+            "invalidated-approval task carries the skip label: {:?}",
+            after.labels
+        );
+        let agents = state.agents.list().await.unwrap();
+        assert!(
+            agents
+                .iter()
+                .all(|a| a.current_task_id != Some(task.id.clone())),
+            "zero agent records exist for the invalidated-approval task"
+        );
     }
 
     /// Phase 4 acceptance: the scheduler detects a Backlog Implementation
@@ -2814,12 +3029,14 @@ mod tests {
         dep.task_type = Some(TaskType::Implementation);
         dep.workspace_id = Id::new("ws-1");
         dep.repo_id = Id::new("r-1");
+        dep.spec_ref = Some(format!("specs/system/auth.md@{APPROVED_SHA}"));
         state.tasks.create(&dep).await.unwrap();
 
         let mut task = Task::new(Id::new("impl-dep"), "Dependent", 0);
         task.task_type = Some(TaskType::Implementation);
         task.workspace_id = Id::new("ws-1");
         task.repo_id = Id::new("r-1");
+        task.spec_ref = Some(format!("specs/system/auth.md@{APPROVED_SHA}"));
         task.depends_on.push(dep.id.clone());
         state.tasks.create(&task).await.unwrap();
 
@@ -2865,6 +3082,7 @@ mod tests {
         first.repo_id = Id::new("r-1");
         first.parent_task_id = Some(parent.clone());
         first.order = Some(0);
+        first.spec_ref = Some(format!("specs/system/auth.md@{APPROVED_SHA}"));
         state.tasks.create(&first).await.unwrap();
 
         let mut second = Task::new(Id::new("ord-1"), "Second", 0);
@@ -2873,6 +3091,7 @@ mod tests {
         second.repo_id = Id::new("r-1");
         second.parent_task_id = Some(parent.clone());
         second.order = Some(1);
+        second.spec_ref = Some(format!("specs/system/auth.md@{APPROVED_SHA}"));
         state.tasks.create(&second).await.unwrap();
 
         scheduler_run_once(&state).await.unwrap();
@@ -3168,6 +3387,7 @@ mod tests {
         dep.task_type = Some(TaskType::Implementation);
         dep.workspace_id = Id::new("ws-1");
         dep.repo_id = Id::new("r-1");
+        dep.spec_ref = Some(format!("specs/system/auth.md@{APPROVED_SHA}"));
         state.tasks.create(&dep).await.unwrap();
         let mut gated = state.tasks.find_by_id(&task.id).await.unwrap().unwrap();
         gated.depends_on = vec![dep.id.clone()];

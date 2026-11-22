@@ -1516,6 +1516,26 @@ async fn handle_create_task(state: &AppState, args: &Value, auth: &Authenticated
             }
         }
     }
+    // agent-runtime.md §1 The Signal Chain — spec approval is the single
+    // trigger for implementation work: reject an implementation task
+    // whose spec_ref does not resolve to a currently-Approved spec version
+    // at exactly the pinned SHA (the same gate the REST task-create
+    // handler enforces). Delegation/Coordination tasks are unaffected.
+    if task.task_type == Some(gyre_domain::TaskType::Implementation) {
+        let gate = match task.spec_ref.as_deref() {
+            Some(spec_ref) => {
+                crate::api::gates::verify_implementation_spec_ref(state, spec_ref).await
+            }
+            None => Err("the task carries no spec_ref (path@sha)".to_string()),
+        };
+        if let Err(reason) = gate {
+            return tool_error(format!(
+                "SPEC_APPROVAL_REQUIRED: spec approval is the single trigger for \
+                 implementation work (agent-runtime.md §1): {reason} — approve the spec \
+                 first via POST /api/v1/specs/:path/approve"
+            ));
+        }
+    }
     match state.tasks.create(&task).await {
         Ok(()) => tool_result(format!("Created task {} (id: {})", task.title, task.id)),
         Err(e) => tool_error(format!("Failed to create task: {e}")),
@@ -1686,6 +1706,14 @@ async fn handle_decompose_spec(state: &AppState, args: &Value, auth: &Authentica
         task.task_type = Some(gyre_domain::TaskType::Implementation);
         task.repo_id = Id::new(&repo_id);
         task.workspace_id = Id::new(&caller_ws);
+        // Pin the sub-task to the parent's spec version (the same
+        // propagation the in-process decomposition in signal_chain.rs
+        // applies): the Phase-4 scheduler only spawns Implementation
+        // tasks whose spec_ref resolves to a currently-Approved ledger
+        // entry at the pinned SHA (agent-runtime.md §1), so a sub-task
+        // without the pinned spec_ref would never spawn.
+        task.spec_path = parent.spec_path.clone();
+        task.spec_ref = parent.spec_ref.clone();
         if let Err(e) = state.tasks.create(&task).await {
             return tool_error(format!("Failed to create subtask: {e}"));
         }
@@ -5928,6 +5956,14 @@ mod tests {
             .unwrap();
 
         let app = crate::build_router(state.clone());
+        // agent-runtime.md §1: the task-create gate requires an approved
+        // spec_ref pinned by SHA for implementation tasks.
+        crate::mem::seed_approved_spec(
+            &state,
+            "specs/test/mcp-search.md",
+            "aa57aa57aa57aa57aa57aa57aa57aa57aa57aa57",
+        )
+        .await;
         // Index a searchable task through the public API so the search port
         // has a real document (create_task indexes for search).
         let resp = app
@@ -5942,6 +5978,7 @@ mod tests {
                         serde_json::to_vec(&json!({
                             "title": "Payment reconciliation engine",
                             "task_type": "implementation",
+                            "spec_ref": "specs/test/mcp-search.md@aa57aa57aa57aa57aa57aa57aa57aa57aa57aa57",
                             // The task's search document resolves its tenant
                             // from the task's workspace row
                             // (search_scope::index_doc) — a task in a
@@ -8211,8 +8248,14 @@ mod tests {
 
     #[tokio::test]
     async fn mcp_create_task_with_signal_chain_fields() {
+        // agent-runtime.md §1: implementation tasks need a spec_ref
+        // resolving to a currently-Approved ledger entry at the pinned
+        // SHA, so the fixture seeds the approved version first (the same
+        // durable state POST /api/v1/specs/:path/approve leaves behind).
+        let state = test_state();
+        crate::mem::seed_approved_spec(&state, "system/auth.md", MCP_FIXTURE_SHA).await;
         let (status, json) = mcp_post(
-            app(),
+            crate::build_router(state),
             json!({
                 "jsonrpc": "2.0",
                 "id": 60,
@@ -8225,6 +8268,7 @@ mod tests {
                         "order": 1,
                         "depends_on": ["task-parent-1"],
                         "spec_path": "system/auth.md",
+                        "spec_ref": format!("system/auth.md@{MCP_FIXTURE_SHA}"),
                         "repo_id": "repo-abc",
                         "workspace_id": "ws-abc",
                         "parent_task_id": "delegation-task-1"
@@ -8240,6 +8284,86 @@ mod tests {
         );
         let text = json["result"]["content"][0]["text"].as_str().unwrap();
         assert!(text.contains("Created task"));
+    }
+
+    /// The approved blob SHA for the MCP fixture spec version.
+    const MCP_FIXTURE_SHA: &str = "fedcba9876543210fedcba9876543210fedcba98";
+
+    /// agent-runtime.md §1 The Signal Chain — the gyre_create_task tool
+    /// rejects task_type=implementation unless the spec_ref resolves to
+    /// a currently-Approved ledger entry at the pinned SHA; the identical
+    /// request succeeds once the spec version is approved. AC (task-297).
+    #[tokio::test]
+    async fn mcp_create_task_implementation_requires_approved_spec() {
+        let state = test_state();
+        let app = crate::build_router(state.clone());
+
+        // Unapproved: the registry entry is Pending and no approval row
+        // exists for the pinned SHA.
+        let args = json!({
+            "title": "Implement gated feature",
+            "task_type": "implementation",
+            "spec_path": "system/gated.md",
+            "spec_ref": format!("system/gated.md@{MCP_FIXTURE_SHA}"),
+            "repo_id": "repo-abc",
+            "workspace_id": "ws-abc"
+        });
+        let (status, json) = mcp_post(
+            app,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 63,
+                "method": "tools/call",
+                "params": { "name": "gyre_create_task", "arguments": args }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            json["result"]["isError"].as_bool().unwrap(),
+            "unapproved spec_ref must be a tool error: {json}"
+        );
+        let text = json["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("SPEC_APPROVAL_REQUIRED"),
+            "tool error must name the spec-approval requirement: {text}"
+        );
+        assert!(text.contains("single trigger"));
+        // No task was created.
+        let tasks = state.tasks.list().await.unwrap();
+        assert!(
+            tasks.iter().all(|t| t.title != "Implement gated feature"),
+            "no task row may be written for the rejected request"
+        );
+
+        // Approve the spec version (the durable state the approve
+        // endpoint records), then the identical request succeeds.
+        crate::mem::seed_approved_spec(&state, "system/gated.md", MCP_FIXTURE_SHA).await;
+        let (status, json) = mcp_post(
+            crate::build_router(state),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 64,
+                "method": "tools/call",
+                "params": {
+                    "name": "gyre_create_task",
+                    "arguments": {
+                        "title": "Implement gated feature",
+                        "task_type": "implementation",
+                        "spec_path": "system/gated.md",
+                        "spec_ref": format!("system/gated.md@{MCP_FIXTURE_SHA}"),
+                        "repo_id": "repo-abc",
+                        "workspace_id": "ws-abc"
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            !json["result"]["isError"].as_bool().unwrap(),
+            "approved spec_ref must create the task: {json}"
+        );
     }
 
     #[tokio::test]
@@ -8714,7 +8838,15 @@ mod tests {
         let state = test_state();
         let app = crate::build_router(state.clone());
 
-        // Create a task through the public API.
+        // Create a task through the public API. agent-runtime.md §1: the
+        // task-create gate requires an approved spec_ref pinned by SHA
+        // for implementation tasks.
+        crate::mem::seed_approved_spec(
+            &state,
+            "specs/test/mcp-update.md",
+            "ab58ab58ab58ab58ab58ab58ab58ab58ab58ab58",
+        )
+        .await;
         let resp = app
             .clone()
             .oneshot(
@@ -8726,7 +8858,8 @@ mod tests {
                     .body(Body::from(
                         serde_json::to_vec(&json!({
                             "title": "mcp-status-task",
-                            "task_type": "implementation"
+                            "task_type": "implementation",
+                            "spec_ref": "specs/test/mcp-update.md@ab58ab58ab58ab58ab58ab58ab58ab58ab58ab58"
                         }))
                         .unwrap(),
                     ))
