@@ -15,17 +15,18 @@ use axum::{
     Json,
 };
 use futures_util::stream;
+use gyre_common::message::{Destination, MessageKind};
 use gyre_common::Id;
 use gyre_domain::{
-    CostEntry, DependencySource, MergeRequest, MergeRequestDependency, Task, TaskPriority,
-    TaskStatus,
+    CostEntry, DependencySource, MergeRequest, MergeRequestDependency, PolicyEffect, Task,
+    TaskPriority, TaskStatus,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::sync::Arc;
 use tracing::instrument;
 
-use crate::{auth::AuthenticatedAgent, AppState};
+use crate::{auth::AuthenticatedAgent, policy_engine, policy_engine::AttributeContext, AppState};
 
 use gyre_domain::UserRole;
 
@@ -243,13 +244,15 @@ fn tool_definitions() -> Value {
             },
             {
                 "name": "gyre_agent_heartbeat",
-                "description": "Send a heartbeat for an agent to keep it alive.",
+                "description": "Send a heartbeat for an agent to keep it alive. The heartbeat carries the session's X.509-SVID (GYRE_SVID_PEM) for workload-identity verification (identity-security.md Layer 1) — a heartbeat without a valid SVID is rejected.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "agent_id": { "type": "string", "description": "Agent ID" }
+                        "agent_id": { "type": "string", "description": "Agent ID" },
+                        "svid": { "type": "string", "description": "The session's X.509-SVID chain (PEM, leaf first) — the content of the GYRE_SVID_PEM environment variable" },
+                        "stack_fingerprint": { "type": "string", "description": "The workload's current stack fingerprint (GYRE_STACK_HASH environment variable), when set" }
                     },
-                    "required": ["agent_id"]
+                    "required": ["agent_id", "svid"]
                 }
             },
             {
@@ -309,6 +312,28 @@ fn tool_definitions() -> Value {
                 }
             },
             {
+                "name": "gyre_analytics_decide",
+                "description": "Evaluate a named analytics decision (feature.promote, feature.rollback, gate.effectiveness, agent.performance, budget.headroom, merge_queue.health) or a custom rule DSL",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "decision": {
+                            "type": "string",
+                            "description": "Named decision to evaluate (feature.promote, feature.rollback, gate.effectiveness, agent.performance, budget.headroom, merge_queue.health). With custom_rules present, this is the custom decision's name instead."
+                        },
+                        "context": {
+                            "type": "object",
+                            "description": "Decision context, e.g. {\"flag\": \"new-diff-viewer\", \"baseline_days\": 7}. May scope the decision with workspace_id/repo_id."
+                        },
+                        "custom_rules": {
+                            "type": "array",
+                            "description": "Custom rule DSL rules ({metric, window, threshold, comparison, then, filter?}). First match wins; the decision's default applies otherwise. Omit to evaluate the named built-in decision."
+                        }
+                    },
+                    "required": ["decision"]
+                }
+            },
+            {
                 "name": "conversation_upload",
                 "description": "Upload the agent's full conversation blob for provenance linking (HSI §5). Call this just before agent.complete. The blob is base64-encoded zstd-compressed JSON. Max 10MB before base64 (configurable via GYRE_MAX_CONVERSATION_SIZE).",
                 "inputSchema": {
@@ -328,17 +353,17 @@ fn tool_definitions() -> Value {
             },
             {
                 "name": "gyre_search",
-                "description": "Full-text search across tasks, agents, MRs, and specs. Returns matching entities ranked by relevance.",
+                "description": "Full-text search across tasks, agents, MRs, and specs. Supports the query language (search.md §Query Language): space-separated terms (AND), \"quoted phrases\", and facet filters — type:, workspace:, repo:, status:, priority:, label:, since:, until: (e.g. 'identity \"merge queue\" type:spec status:approved since:7d'; multiple values for one facet compose with OR). The entity_type and workspace_id args are fallback shortcuts; type:/workspace: facets in q take precedence. Returns matching entities ranked by relevance.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "q": { "type": "string", "description": "Search query" },
+                        "q": { "type": "string", "description": "Search query — supports the query language: terms, \"quoted phrases\", and type:/workspace:/repo:/status:/priority:/label:/since:/until: facets" },
                         "entity_type": {
                             "type": "string",
                             "enum": ["task", "agent", "mr", "spec"],
                             "description": "Filter by entity type (optional)"
                         },
-                        "workspace_id": { "type": "string", "description": "Limit to a specific workspace (optional)" },
+                        "workspace_id": { "type": "string", "description": "Limit to a specific workspace (optional — can only narrow within the caller's accessible scope; must resolve within the caller's tenant: rejected on cross-tenant or unknown id)" },
                         "limit": { "type": "number", "description": "Max results to return (default 10)" }
                     },
                     "required": ["q"]
@@ -586,7 +611,9 @@ fn tool_definitions() -> Value {
                         "name": { "type": "string", "description": "Worker agent name" },
                         "branch": { "type": "string", "description": "Git branch for the worker's worktree" },
                         "parent_id": { "type": "string", "description": "Optional parent agent id" },
-                        "compute_target_id": { "type": "string", "description": "Optional compute target id" }
+                        "compute_target_id": { "type": "string", "description": "Optional compute target id" },
+                        "persona": { "type": "string", "description": "Optional persona name the worker runs (e.g. 'security') — recorded as the agent's persona (spec-registry.md §16); must resolve to an Approved persona in the repo/workspace/tenant chain, else the spawn is rejected" },
+                        "persona_slug": { "type": "string", "description": "Optional persona slug to bind (resolved repo → workspace → tenant, must be approved); its system prompt is injected as GYRE_PROMPT_PERSONA" }
                     },
                     "required": ["task_id", "name", "branch"]
                 }
@@ -666,14 +693,720 @@ fn new_id() -> Id {
 }
 
 /// Returns true when the caller authenticated via a Gyre-minted agent JWT
-/// (i.e. `scope == "agent"` in the JWT claims). Global tokens, API keys, and
-/// Keycloak JWTs do NOT satisfy this check and bypass repo-scope enforcement.
+/// (i.e. the claims carry a non-empty fine-grained `scope` list per §1 Token
+/// Scoping). Global tokens, API keys, and Keycloak JWTs do NOT satisfy this
+/// check and bypass repo-scope enforcement.
 fn is_agent_jwt(auth: &AuthenticatedAgent) -> bool {
-    auth.jwt_claims
-        .as_ref()
-        .and_then(|c| c.get("scope"))
-        .and_then(|s| s.as_str())
-        == Some("agent")
+    auth.is_gyre_agent_jwt()
+}
+
+/// True for worker-tier principals — the task-scoped agent identities whose
+/// Phase-5 knowledge boundary (agent-runtime.md §1 Phase 5: "The agent has
+/// no knowledge of other agents, the merge queue, or the broader system
+/// state. It sees its task, its spec, and its repo.") excludes the
+/// `agents://` and `queue://` MCP resources entirely. The boundary is
+/// mechanical, not prompt-level: `resources/list` omits both resources for
+/// these principals and `resources/read` returns an error result.
+///
+/// Covered principal classes:
+/// - Task-scoped Gyre agent JWTs — worker tokens (`task_id` = the spawn's
+///   task, no `orchestrator_type` claim) and gate-agent capability tokens
+///   (`task_id` = the gate id, read-only contract). `agent_task_claim()` is
+///   `Some` for exactly these; orchestrator JWTs are excluded because they
+///   carry `orchestrator_type` (their `task_id` names their own agent id).
+/// - Legacy UUID per-agent tokens — pre-§1 spawned worker agents whose
+///   tokens carry no JWT claims at all. Same worker tier, and there is no
+///   scope list to enforce, so the resource layer is the only gate.
+fn is_worker_tier(auth: &AuthenticatedAgent) -> bool {
+    if auth.agent_task_claim().is_some() {
+        return true;
+    }
+    matches!(auth.auth_mechanism, crate::auth::AuthMechanism::AgentToken)
+        && auth.jwt_claims.is_none()
+}
+
+/// True when the caller's token carries at least one `repo:{name}:{right}`
+/// scope entry (worker / repo-orchestrator tier).
+fn has_repo_scopes(auth: &AuthenticatedAgent) -> bool {
+    auth.scope.iter().any(|s| s.starts_with("repo:"))
+}
+
+/// True when the caller's token carries at least one
+/// `workspace:{id}:{right}` scope entry (workspace-orchestrator tier).
+fn has_workspace_scopes(auth: &AuthenticatedAgent) -> bool {
+    auth.scope.iter().any(|s| s.starts_with("workspace:"))
+}
+
+/// Scope validation for a single MCP tool call (platform-model.md §1 Token
+/// Scoping — "The MCP server validates scope on every tool call").
+///
+/// Gyre-minted agent JWTs carry a fine-grained scope list:
+/// - workers: `["repo:{name}:write"]`
+/// - repo orchestrators: `["repo:{name}:write", "repo:{name}:spawn"]`
+/// - workspace orchestrators: `["workspace:{id}:read", "workspace:{id}:spawn"]`
+///
+/// Every tool names the scope tier it operates in. A caller whose token
+/// carries no scope list (global token, API key, Keycloak JWT, legacy UUID
+/// agent token) is not token-scoped here — those callers are authorized by
+/// the ABAC/RBAC layers instead, matching the pre-existing behaviour.
+///
+/// Targets are resolved from real state where the tool addresses entities
+/// indirectly: `gyre_update_task`/`gyre_decompose_spec` address tasks by id
+/// (never by the repo_id/workspace_id args), so the target task's actual
+/// repo/workspace is loaded from `state.tasks`; repo-addressable read
+/// tools resolve the target repo's workspace for workspace-tier callers.
+/// Repo identity is checked against the signed `repo_id` claim (scope
+/// entries name repos by *name* while tools address repos by *id* — the
+/// claim and the scope entries are written by the same mint).
+///
+/// Returns `Err(message)` describing the mismatch on rejection.
+async fn validate_tool_scope(
+    state: &AppState,
+    tool_name: &str,
+    args: &Value,
+    auth: &AuthenticatedAgent,
+) -> Result<(), String> {
+    if !is_agent_jwt(auth) {
+        return Ok(()); // not a token-scoped caller
+    }
+    if auth.scope.is_empty() {
+        // Claims carried a scope array but the extractor derived nothing —
+        // fail closed rather than silently treating the caller as unscoped.
+        return Err(format!(
+            "PERMISSION_DENIED: agent token has no scope claims; refusing {tool_name}"
+        ));
+    }
+
+    // Classify each tool by the tier it operates in and the action it needs.
+    // Repo-scoped tools: the target repo comes from `repository_id`/`repo_id`;
+    // workspace-scoped tools: the target workspace from `workspace_id`.
+    match tool_name {
+        // Worker tools — operate on the caller's own agent/task/branch.
+        // The token must carry a repo-write right, and when the tool
+        // addresses a target agent by id, that agent must live in the
+        // caller's own repo: heartbeat/record_activity accept a
+        // caller-chosen agent_id, and an unbound target would let a worker
+        // maintain (or keep alive against stale-agent reaping) a foreign
+        // repo/tenant's agent. The caller itself is always in scope;
+        // gyre_agent_complete additionally keeps its self-only identity
+        // check at dispatch.
+        "gyre_agent_heartbeat" | "gyre_agent_complete" | "gyre_record_activity" => {
+            check_repo_write_scope(auth, None, "agent maintenance")?;
+            let target = args.get("agent_id").and_then(|v| v.as_str()).unwrap_or("");
+            if !target.is_empty() && target != auth.agent_id {
+                check_agent_target_scope(state, auth, target, tool_name).await?;
+            }
+            Ok(())
+        }
+        "gyre_create_mr" => {
+            let repo = args
+                .get("repository_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if repo.is_empty() {
+                return Ok(()); // handler rejects the missing field — no write happens
+            }
+            check_agent_mr_task_scope(state, auth, repo, tool_name).await?;
+            check_repo_target_by_id(auth, repo, false, tool_name)
+        }
+        "gyre_list_mrs" => {
+            let repo = args
+                .get("repository_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if repo.is_empty() {
+                // repository_id is OPTIONAL for this tool: with no explicit
+                // target the handler falls back to a listing, which for a
+                // scoped caller is clamped to its own repo (never the
+                // shared unfiltered store). A repo-tier token must carry
+                // its single repo scope; a workspace-tier token has no
+                // repo to clamp to and must address one explicitly.
+                if has_repo_scopes(auth) {
+                    check_repo_scope(auth, None, false, tool_name)
+                } else {
+                    Err(format!(
+                        "PERMISSION_DENIED: token scope {:?} carries no repo scope; pass repository_id to list merge requests",
+                        auth.scope
+                    ))
+                }
+            } else {
+                check_repo_read_target(state, auth, repo, tool_name).await
+            }
+        }
+        // Repo-tier spawning (repo orchestrator persona). A token carrying
+        // repo scopes must hold `repo:{target}:spawn` — a worker's
+        // write-only token is rejected here. A workspace-tier token carries
+        // no repo scopes; its tier mismatch is enforced by the handler
+        // ("requires a repo-orchestrator token"), the denial shape the
+        // task-093 contract pins.
+        "gyre_spawn_worker" => {
+            if has_repo_scopes(auth) {
+                let repo = args.get("repo_id").and_then(|v| v.as_str()).unwrap_or("");
+                if repo.is_empty() {
+                    // No explicit target: the handler spawns in the caller's
+                    // own repo (repo_orchestrator_scope) — validate the spawn
+                    // right on the token's single repo scope.
+                    check_repo_scope(auth, None, true, tool_name)
+                } else {
+                    check_repo_target_by_id(auth, repo, true, tool_name)
+                }
+            } else {
+                Ok(())
+            }
+        }
+        // Workspace-tier spawning (workspace orchestrator persona): the
+        // caller's token must hold `workspace:{ws}:spawn`. The target
+        // repo's membership in the caller's workspace is enforced by the
+        // handler against real state (repo→workspace is not derivable
+        // from the token); repo-tier tokens carry no workspace scopes and
+        // are denied by the handler's tier check.
+        "gyre_spawn_repo_orchestrator" => {
+            if has_workspace_scopes(auth) {
+                check_workspace_scope(auth, None, true, tool_name)
+            } else {
+                Ok(())
+            }
+        }
+        // Workspace-tier tools (workspace orchestrator persona).
+        "gyre_list_repo_orchestrators" => {
+            let ws = args
+                .get("workspace_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            check_workspace_scope(auth, Some(ws), false, tool_name)
+        }
+        "gyre_cross_repo_task" => {
+            let ws = args
+                .get("workspace_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            check_workspace_scope(auth, Some(ws), true, tool_name)
+        }
+        // Task-addressing tools: the target task is addressed by id
+        // (`gyre_update_task`) or parent id (`gyre_decompose_spec`), never
+        // by the repo_id/workspace_id args — resolve the task's actual
+        // repo/workspace from state and check it against the token. A
+        // repo-tier token may act on tasks in its own repo; a
+        // workspace-tier token on tasks in its own workspace.
+        //
+        // identity-security.md §Task-Scoped JWT Claims — hard task
+        // boundary: beyond the tier check, a task-bound agent token may
+        // only mutate the task its `task_id` claim names (the tier check
+        // alone resolves repo/workspace scope and never compares the
+        // claim).
+        "gyre_update_task" | "gyre_decompose_spec" => {
+            let id_key = if tool_name == "gyre_update_task" {
+                "id"
+            } else {
+                "parent_task_id"
+            };
+            let task_id = args.get(id_key).and_then(|v| v.as_str()).unwrap_or("");
+            if task_id.is_empty() {
+                return Ok(()); // handler rejects the missing field — no write happens
+            }
+            let task = match state.tasks.find_by_id(&Id::new(task_id)).await {
+                Ok(Some(t)) => t,
+                // Handler reports "Task not found" — no scope decision needed.
+                Ok(None) => return Ok(()),
+                Err(e) => {
+                    return Err(format!(
+                        "PERMISSION_DENIED: task lookup failed, refusing {tool_name}: {e}"
+                    ))
+                }
+            };
+            if let Some(claim) = auth.agent_task_claim() {
+                if task_id != claim {
+                    return Err(format!(
+                        "PERMISSION_DENIED: agent token is scoped to task {claim}, \
+                         not task {task_id}"
+                    ));
+                }
+            }
+            check_task_target(auth, &task, task_id, tool_name)
+        }
+        // Task creation: explicit repo_id/workspace_id targets must lie
+        // within the caller's tier; absent targets are clamped to the
+        // caller's own claims by handle_create_task (a scoped caller cannot
+        // create floating unscoped tasks).
+        "gyre_create_task" => check_create_task_target(state, auth, args, tool_name).await,
+        // gyre_search addresses a workspace explicitly via its workspace_id
+        // arg — a scoped caller may only search its own workspace; an absent
+        // target is clamped to the caller's workspace claim in handle_search
+        // rather than widening the query tenant-wide.
+        "gyre_search" => {
+            let own = match &auth.workspace_id {
+                Some(w) => w.clone(),
+                None => {
+                    return Err(format!(
+                        "PERMISSION_DENIED: agent token carries no workspace claim; refusing {tool_name}"
+                    ))
+                }
+            };
+            let ws = args
+                .get("workspace_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if ws.is_empty() || ws == own {
+                return Ok(());
+            }
+            if has_workspace_scopes(auth) {
+                check_workspace_scope(auth, Some(ws), false, tool_name)
+            } else {
+                Err(format!(
+                    "PERMISSION_DENIED: token scope {:?} does not permit searching workspace {ws}",
+                    auth.scope
+                ))
+            }
+        }
+        // Repo-addressable read tools (realized-model graph + spec assist):
+        // the explicit repo_id target must be the caller's own repo (repo
+        // tier) or a repo of the caller's workspace (workspace tier — the
+        // repo's real workspace is resolved from state).
+        "graph_summary" | "graph_query_dryrun" | "graph_nodes" | "graph_edges" | "search"
+        | "node_provenance" | "graph_concept" | "spec_assist" => {
+            let repo = args.get("repo_id").and_then(|v| v.as_str()).unwrap_or("");
+            if repo.is_empty() {
+                return Ok(()); // handler rejects the missing field
+            }
+            check_repo_read_target(state, auth, repo, tool_name).await
+        }
+        // gyre_analytics_decide addresses scope through its `context`
+        // object (context.workspace_id / context.repo_id name the events
+        // the decision is computed over) — the same scope-addressable
+        // surface as gyre_search's workspace_id arg. A scoped caller may
+        // only compute decisions over its own tier's scope; the shared
+        // core evaluator additionally validates the named scope against
+        // the caller's tenant (validate_decision_scope).
+        "gyre_analytics_decide" => {
+            let ctx = args.get("context").cloned().unwrap_or(json!({}));
+            let ws = ctx
+                .get("workspace_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if !ws.is_empty() {
+                let own = match &auth.workspace_id {
+                    Some(w) => w.clone(),
+                    None => {
+                        return Err(format!(
+                            "PERMISSION_DENIED: agent token carries no workspace claim; refusing {tool_name}"
+                        ))
+                    }
+                };
+                if ws != own {
+                    if has_workspace_scopes(auth) {
+                        check_workspace_scope(auth, Some(ws), false, tool_name)?;
+                    } else {
+                        return Err(format!(
+                            "PERMISSION_DENIED: token scope {:?} does not permit deciding over workspace {ws}",
+                            auth.scope
+                        ));
+                    }
+                }
+            }
+            let repo = ctx.get("repo_id").and_then(|v| v.as_str()).unwrap_or("");
+            if !repo.is_empty() {
+                check_repo_read_target(state, auth, repo, tool_name).await?;
+            }
+            Ok(())
+        }
+        // Remaining read-only platform tools (analytics query, messaging,
+        // conversation upload): scoped callers may read within their tier —
+        // analytics query returns aggregate counters with no
+        // scope-addressable args, messaging is agent-identity routed and
+        // validated per tool, conversation upload is caller-bound (see the
+        // platform-model.md §Token Scoping coverage row for the per-tool
+        // read-surface justification).
+        _ => Ok(()),
+    }
+}
+
+/// The caller's token must carry `repo:{repo}:write` (or an orchestrator's
+/// `repo:{repo}:spawn`) for the named repo. `None` (worker tools without an
+/// explicit repo arg) validates against the single repo scope the token carries.
+fn check_repo_write_scope(
+    auth: &AuthenticatedAgent,
+    repo: Option<&str>,
+    action: &str,
+) -> Result<(), String> {
+    check_repo_scope(auth, repo, false, action)
+}
+
+/// Validate a repo-tier action against the token's scope list.
+///
+/// A scope entry `repo:{name}:{right}` matches when `right` is the required
+/// action ("write"/"spawn") — an orchestrator's `spawn` right also implies
+/// write access to its repo (it owns the repo's Ralph loop). When `repo` is
+/// None, the caller's token must carry exactly one repo scope and the action
+/// is validated against it (a worker acting on its own repo).
+fn check_repo_scope(
+    auth: &AuthenticatedAgent,
+    repo: Option<&str>,
+    require_spawn_right: bool,
+    action: &str,
+) -> Result<(), String> {
+    let repo_scopes: Vec<&String> = auth
+        .scope
+        .iter()
+        .filter(|s| s.starts_with("repo:"))
+        .collect();
+    // No explicit target: the token's repo scopes must name exactly one
+    // distinct repo (a worker or repo orchestrator may carry multiple
+    // rights on its single repo — write + spawn — which is unambiguous).
+    // Multiple distinct repos or none is ambiguous.
+    let target = match repo {
+        Some(r) if !r.is_empty() => r.to_string(),
+        _ => {
+            let distinct: Vec<&str> = repo_scopes
+                .iter()
+                .map(|s| {
+                    s.trim_start_matches("repo:")
+                        .rsplit_once(':')
+                        .map(|(name, _)| name)
+                        .unwrap_or("")
+                })
+                .collect();
+            let mut unique: Vec<&str> = Vec::new();
+            for name in &distinct {
+                if !unique.contains(name) {
+                    unique.push(name);
+                }
+            }
+            match unique.len() {
+                1 => unique[0].to_string(),
+                _ => {
+                    return Err(format!(
+                        "PERMISSION_DENIED: token carries no single repo scope for {action} (scopes: {:?})",
+                        auth.scope
+                    ));
+                }
+            }
+        }
+    };
+    let allowed = repo_scopes.iter().any(|s| {
+        let rest = s.trim_start_matches("repo:");
+        let (name, right) = match rest.rsplit_once(':') {
+            Some(parts) => parts,
+            None => return false,
+        };
+        name == target
+            && if require_spawn_right {
+                right == "spawn"
+            } else {
+                right == "write" || right == "spawn"
+            }
+    });
+    if allowed {
+        Ok(())
+    } else {
+        Err(format!(
+            "PERMISSION_DENIED: token scope {:?} does not permit {action} on repo {target}",
+            auth.scope
+        ))
+    }
+}
+
+/// Validate a workspace-tier action against the token's scope list
+/// (`workspace:{id}:read` / `workspace:{id}:spawn`).
+fn check_workspace_scope(
+    auth: &AuthenticatedAgent,
+    workspace: Option<&str>,
+    require_spawn_right: bool,
+    action: &str,
+) -> Result<(), String> {
+    let ws_scopes: Vec<&String> = auth
+        .scope
+        .iter()
+        .filter(|s| s.starts_with("workspace:"))
+        .collect();
+    // No explicit target: the token's workspace scopes must name exactly
+    // one distinct workspace (a workspace orchestrator carries read +
+    // spawn on its single workspace — unambiguous). Multiple distinct
+    // workspaces or none is ambiguous.
+    let target = match workspace {
+        Some(w) if !w.is_empty() => w.to_string(),
+        _ => {
+            let distinct: Vec<&str> = ws_scopes
+                .iter()
+                .map(|s| {
+                    s.trim_start_matches("workspace:")
+                        .rsplit_once(':')
+                        .map(|(name, _)| name)
+                        .unwrap_or("")
+                })
+                .collect();
+            let mut unique: Vec<&str> = Vec::new();
+            for name in &distinct {
+                if !unique.contains(name) {
+                    unique.push(name);
+                }
+            }
+            match unique.len() {
+                1 => unique[0].to_string(),
+                _ => {
+                    return Err(format!(
+                        "PERMISSION_DENIED: token carries no single workspace scope for {action} (scopes: {:?})",
+                        auth.scope
+                    ));
+                }
+            }
+        }
+    };
+    let allowed = ws_scopes.iter().any(|s| {
+        let (name, right) = match s.trim_start_matches("workspace:").rsplit_once(':') {
+            Some(parts) => parts,
+            None => return false,
+        };
+        name == target
+            && if require_spawn_right {
+                right == "spawn"
+            } else {
+                right == "read" || right == "spawn"
+            }
+    });
+    if allowed {
+        Ok(())
+    } else {
+        Err(format!(
+            "PERMISSION_DENIED: token scope {:?} does not permit {action} on workspace {target}",
+            auth.scope
+        ))
+    }
+}
+
+/// Repo-targeted action for a repo-tier token: the target repo (addressed
+/// by id) must be the caller's own `repo_id` claim, and the token's scope
+/// entries must grant the required right on the caller's single repo.
+/// Scope entries name repos by *name* while tools address repos by *id*;
+/// both are written by the same mint, so the identity comes from the
+/// signed repo_id claim rather than string-matching the scope list.
+fn check_repo_target_by_id(
+    auth: &AuthenticatedAgent,
+    repo_id: &str,
+    require_spawn_right: bool,
+    action: &str,
+) -> Result<(), String> {
+    match &auth.repo_id {
+        Some(own) if own == repo_id => check_repo_scope(auth, None, require_spawn_right, action),
+        _ => Err(format!(
+            "PERMISSION_DENIED: token scope {:?} does not permit {action} on repo {repo_id}",
+            auth.scope
+        )),
+    }
+}
+
+/// Repo-addressable read for any scoped tier: a repo-tier token must target
+/// its own repo; a workspace-tier token may read any repo of its workspace
+/// (the target repo's real workspace is resolved from state — repo
+/// membership is not derivable from the token alone). Unresolvable repos
+/// fail closed.
+async fn check_repo_read_target(
+    state: &AppState,
+    auth: &AuthenticatedAgent,
+    repo_id: &str,
+    tool_name: &str,
+) -> Result<(), String> {
+    if has_repo_scopes(auth) {
+        return check_repo_target_by_id(auth, repo_id, false, tool_name);
+    }
+    let ws = match state.repos.find_by_id(&Id::new(repo_id)).await {
+        Ok(Some(repo)) => repo.workspace_id.to_string(),
+        Ok(None) => {
+            return Err(format!(
+                "PERMISSION_DENIED: cannot verify repo {repo_id} belongs to the caller's workspace; refusing {tool_name}"
+            ))
+        }
+        Err(e) => return Err(format!("repo lookup failed, refusing {tool_name}: {e}")),
+    };
+    check_workspace_scope(auth, Some(&ws), false, tool_name)
+}
+
+/// MR-creation task-scope check (identity-security.md §Task-Scoped JWT
+/// Claims: an agent cannot "open MRs outside its task scope" — the repo
+/// scope alone is not the boundary). A task-bound agent token may only
+/// create MRs in the repo of its `task_id` claim (or its signed `repo_id`
+/// claim when the task row no longer resolves — the mint derived both from
+/// the same spawn context).
+async fn check_agent_mr_task_scope(
+    state: &AppState,
+    auth: &AuthenticatedAgent,
+    repo_id: &str,
+    tool_name: &str,
+) -> Result<(), String> {
+    let Some(claim) = auth.agent_task_claim() else {
+        return Ok(()); // not a task-bound agent token
+    };
+    let allowed = state
+        .tasks
+        .find_by_id(&Id::new(claim))
+        .await
+        .ok()
+        .flatten()
+        .map(|t| t.repo_id.to_string())
+        .or_else(|| auth.repo_id.clone());
+    match allowed {
+        Some(allowed) if allowed == repo_id => Ok(()),
+        Some(allowed) => Err(format!(
+            "PERMISSION_DENIED: agent token is scoped to task {claim} (repo {allowed}); \
+             {tool_name} targets repo {repo_id}"
+        )),
+        None => Err(format!(
+            "PERMISSION_DENIED: agent token carries no repo scope for {tool_name}"
+        )),
+    }
+}
+
+/// Task-targeted action (`gyre_update_task` / `gyre_decompose_spec`): the
+/// target task's real repo/workspace (resolved from state by the caller)
+/// must lie within the caller's tier — a repo-tier token may act on tasks
+/// in its own repo, a workspace-tier token on tasks in its own workspace.
+fn check_task_target(
+    auth: &AuthenticatedAgent,
+    task: &Task,
+    task_id: &str,
+    tool_name: &str,
+) -> Result<(), String> {
+    if has_repo_scopes(auth) {
+        return check_repo_target_by_id(auth, &task.repo_id.to_string(), false, tool_name)
+            .map_err(|_| {
+                format!(
+                    "PERMISSION_DENIED: token scope {:?} does not permit {tool_name} on task {task_id} (repo {})",
+                    auth.scope, task.repo_id
+                )
+            });
+    }
+    check_workspace_scope(
+        auth,
+        Some(&task.workspace_id.to_string()),
+        false,
+        tool_name,
+    )
+    .map_err(|_| {
+        format!(
+            "PERMISSION_DENIED: token scope {:?} does not permit {tool_name} on task {task_id} (workspace {})",
+            auth.scope, task.workspace_id
+        )
+    })
+}
+
+/// Agent-targeted action (`gyre_agent_heartbeat` / `gyre_agent_complete` /
+/// `gyre_record_activity` with a non-self agent_id): the target agent must
+/// live in the caller's own repo. The target's real repo is resolved from
+/// state — repo orchestrators carry `repo_id` directly, workers link their
+/// repo via their worktree, and the current task's repo is the final
+/// fallback. A target whose repo cannot be resolved fails closed (the
+/// handler's own not-found path still reports missing agents).
+async fn check_agent_target_scope(
+    state: &AppState,
+    auth: &AuthenticatedAgent,
+    agent_id: &str,
+    tool_name: &str,
+) -> Result<(), String> {
+    let id = Id::new(agent_id);
+    let agent = match state.agents.find_by_id(&id).await {
+        Ok(Some(agent)) => agent,
+        // Agent row missing: the heartbeat/complete handlers reject the id
+        // themselves ("Agent not found") — no write happens on a missing
+        // target, so there is no scope decision to make.
+        Ok(None) => return Ok(()),
+        Err(e) => {
+            return Err(format!(
+                "PERMISSION_DENIED: agent lookup failed, refusing {tool_name}: {e}"
+            ))
+        }
+    };
+    // Repo orchestrators carry repo_id directly; workers link their repo
+    // via their worktree; the current task's repo is the final fallback.
+    let target_repo: Option<String> = if let Some(repo) = agent.repo_id {
+        Some(repo.to_string())
+    } else if let Ok(worktrees) = state.worktrees.find_by_agent(&id).await {
+        worktrees.first().map(|wt| wt.repository_id.to_string())
+    } else {
+        None
+    };
+    let target_repo = match target_repo {
+        Some(repo) => Some(repo),
+        None => match agent.current_task_id {
+            Some(tid) => match state.tasks.find_by_id(&tid).await {
+                Ok(Some(task)) => Some(task.repo_id.to_string()),
+                _ => None,
+            },
+            None => None,
+        },
+    };
+    match target_repo {
+        Some(repo) => check_repo_target_by_id(auth, &repo, false, tool_name).map_err(|_| {
+            format!(
+                "PERMISSION_DENIED: token scope {:?} does not permit {tool_name} on agent {agent_id} (repo {repo})",
+                auth.scope
+            )
+        }),
+        None => Err(format!(
+            "PERMISSION_DENIED: cannot resolve repo for agent {agent_id}; refusing {tool_name}"
+        )),
+    }
+}
+
+/// `gyre_create_task` target validation: explicit repo_id/workspace_id
+/// args must lie within the caller's tier (repo-tier: the caller's own
+/// repo/workspace claims; workspace-tier: the caller's workspace). Absent
+/// targets are clamped to the caller's own claims by handle_create_task.
+async fn check_create_task_target(
+    state: &AppState,
+    auth: &AuthenticatedAgent,
+    args: &Value,
+    tool_name: &str,
+) -> Result<(), String> {
+    let repo = args.get("repo_id").and_then(|v| v.as_str()).unwrap_or("");
+    let ws = args
+        .get("workspace_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if has_repo_scopes(auth) {
+        // Repo-tier token: both explicit targets must be the caller's own,
+        // and the token must carry the write right on its single repo.
+        if !repo.is_empty() {
+            check_repo_target_by_id(auth, repo, false, tool_name)?;
+        }
+        if !ws.is_empty() && auth.workspace_id.as_deref() != Some(ws) {
+            return Err(format!(
+                "PERMISSION_DENIED: token scope {:?} does not permit creating tasks in workspace {ws}",
+                auth.scope
+            ));
+        }
+        check_repo_scope(auth, None, false, tool_name)
+    } else {
+        // Workspace-tier token: explicit targets must resolve into the
+        // caller's workspace (the repo's real workspace comes from state —
+        // a workspace token may not create tasks in repos of another
+        // workspace by omitting the workspace_id arg).
+        if !ws.is_empty() {
+            check_workspace_scope(auth, Some(ws), false, tool_name)?;
+        }
+        if !repo.is_empty() {
+            let repo_ws = match state.repos.find_by_id(&Id::new(repo)).await {
+                Ok(Some(r)) => r.workspace_id.to_string(),
+                Ok(None) => {
+                    return Err(format!(
+                        "PERMISSION_DENIED: cannot verify repo {repo} belongs to the caller's workspace; refusing {tool_name}"
+                    ))
+                }
+                Err(e) => return Err(format!("repo lookup failed, refusing {tool_name}: {e}")),
+            };
+            check_workspace_scope(auth, Some(&repo_ws), false, tool_name)?;
+        }
+        Ok(())
+    }
+}
+
+/// Visibility of a task to a scoped caller (§1 Token Scoping): repo-tier
+/// tokens see their own repo's tasks; workspace-tier tokens their
+/// workspace's tasks. Both bounds come from the signed token's claims.
+fn task_visible_to_caller(auth: &AuthenticatedAgent, task: &Task) -> bool {
+    if let Some(repo) = &auth.repo_id {
+        &task.repo_id.to_string() == repo
+    } else {
+        auth.workspace_id.as_deref() == Some(&task.workspace_id.to_string())
+    }
 }
 
 /// Workspace-orchestrator scope from an agent JWT (task-093): the caller's
@@ -719,7 +1452,7 @@ fn parse_status(s: &str) -> Option<TaskStatus> {
     }
 }
 
-async fn handle_create_task(state: &AppState, args: &Value) -> Value {
+async fn handle_create_task(state: &AppState, args: &Value, auth: &AuthenticatedAgent) -> Value {
     let title = match require_str(args, "title") {
         Ok(t) => t.to_string(),
         Err(_) => return tool_error("missing required field: title"),
@@ -767,6 +1500,22 @@ async fn handle_create_task(state: &AppState, args: &Value) -> Value {
     if let Some(ws_id) = get_str(args, "workspace_id") {
         task.workspace_id = Id::new(ws_id);
     }
+    // §1 Token Scoping: a scoped caller creates within its own tier —
+    // validate_tool_scope rejected explicit out-of-scope targets; absent
+    // targets default to the caller's own claims (from the signed token)
+    // instead of floating unscoped values.
+    if is_agent_jwt(auth) {
+        if get_str(args, "repo_id").is_none() {
+            if let Some(own) = &auth.repo_id {
+                task.repo_id = Id::new(own);
+            }
+        }
+        if get_str(args, "workspace_id").is_none() {
+            if let Some(own) = &auth.workspace_id {
+                task.workspace_id = Id::new(own);
+            }
+        }
+    }
     match state.tasks.create(&task).await {
         Ok(()) => tool_result(format!("Created task {} (id: {})", task.title, task.id)),
         Err(e) => tool_error(format!("Failed to create task: {e}")),
@@ -808,6 +1557,7 @@ async fn handle_spawn_repo_orchestrator(
         &repo_id,
         req,
         &auth.agent_id,
+        &auth.tenant_id,
     )
     .await
     {
@@ -847,7 +1597,8 @@ async fn handle_list_repo_orchestrators(
 }
 
 /// gyre_cross_repo_task (task-093): workspace-orchestrator only. Creates a
-/// coordination task scoped to the caller's workspace.
+/// coordination task scoped to the caller's workspace. Parsing and scope
+/// checks stay here; task construction lives in the shared core (F9).
 async fn handle_cross_repo_task(
     state: &AppState,
     args: &Value,
@@ -861,22 +1612,22 @@ async fn handle_cross_repo_task(
         Ok(t) => t.to_string(),
         Err(_) => return tool_error("missing required field: title"),
     };
-    let now = now_secs();
-    let mut task = Task::new(new_id(), title, now);
-    task.description = get_str(args, "description").map(|s| s.to_string());
-    if let Some(p) = get_str(args, "priority") {
-        task.priority = parse_priority(p);
-    }
-    if let Some(labels) = args.get("labels").and_then(|v| v.as_array()) {
-        task.labels = labels
-            .iter()
-            .filter_map(|v| v.as_str().map(|s| s.to_string()))
-            .collect();
-    }
-    task.task_type = Some(gyre_domain::TaskType::Coordination);
-    task.workspace_id = Id::new(&caller_ws);
-    match state.tasks.create(&task).await {
-        Ok(()) => tool_result(format!("Created task {} (id: {})", task.title, task.id)),
+    let req = crate::api::orchestrator::CrossRepoTaskRequest {
+        title,
+        description: get_str(args, "description").map(|s| s.to_string()),
+        priority: get_str(args, "priority").map(|s| s.to_string()),
+        labels: args
+            .get("labels")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default(),
+    };
+    match crate::api::orchestrator::cross_repo_task_core(state, &caller_ws, req).await {
+        Ok(task) => tool_result(format!("Created task {} (id: {})", task.title, task.id)),
         Err(e) => tool_error(format!("Failed to create task: {e}")),
     }
 }
@@ -1000,6 +1751,8 @@ async fn handle_spawn_worker(
         disconnected_behavior: None,
         loop_config: None,
         conversation_sha: None,
+        persona: get_str(args, "persona").map(|s| s.to_string()),
+        persona_slug: get_str(args, "persona_slug").map(|s| s.to_string()),
     };
     match crate::api::spawn::spawn_agent_core(
         state,
@@ -1014,7 +1767,7 @@ async fn handle_spawn_worker(
     }
 }
 
-async fn handle_list_tasks(state: &AppState, args: &Value) -> Value {
+async fn handle_list_tasks(state: &AppState, args: &Value, auth: &AuthenticatedAgent) -> Value {
     let tasks = if let Some(status_str) = get_str(args, "status") {
         if let Some(status) = parse_status(status_str) {
             state.tasks.list_by_status(&status).await
@@ -1028,7 +1781,18 @@ async fn handle_list_tasks(state: &AppState, args: &Value) -> Value {
     };
     match tasks {
         Ok(list) => {
-            let items: Vec<Value> = list
+            // §1 Token Scoping: a scoped caller enumerates only within its
+            // tier — repo-tier tokens (workers, repo orchestrators) see
+            // their own repo's tasks, workspace-tier tokens see their
+            // workspace's tasks. Non-scoped callers keep the full list.
+            let visible: Vec<Task> = if is_agent_jwt(auth) {
+                list.into_iter()
+                    .filter(|t| task_visible_to_caller(auth, t))
+                    .collect()
+            } else {
+                list
+            };
+            let items: Vec<Value> = visible
                 .into_iter()
                 .map(|t| {
                     let mut v = json!({
@@ -1090,8 +1854,10 @@ async fn handle_update_task(state: &std::sync::Arc<AppState>, args: &Value) -> V
     if let Some(pr) = get_str(args, "pr_link") {
         task.pr_link = Some(pr.to_string());
     }
+    let mut old_status: Option<gyre_domain::TaskStatus> = None;
     if let Some(status_str) = get_str(args, "status") {
         if let Some(new_status) = parse_status(status_str) {
+            old_status = Some(task.status.clone());
             if let Err(e) = task.transition_status(new_status) {
                 return tool_error(format!("Invalid status transition: {e}"));
             }
@@ -1102,6 +1868,12 @@ async fn handle_update_task(state: &std::sync::Arc<AppState>, args: &Value) -> V
     task.updated_at = now_secs();
     match state.tasks.update(&task).await {
         Ok(()) => {
+            // task.status_changed analytics event (analytics.md §Auto-Emitted).
+            // The MCP tool is the autonomous-agent path for task transitions;
+            // the HTTP endpoint in tasks.rs is the other. Both must record.
+            if let Some(old) = old_status.as_ref() {
+                crate::api::analytics::record_task_status_changed(state, &task, old).await;
+            }
             // meta-spec-reconciliation.md §11: ReconciliationCompleted /
             // MetaSpecDriftResolved fire when the last open reconciliation /
             // drift-review task for a workspace reaches terminal status. The
@@ -1115,6 +1887,14 @@ async fn handle_update_task(state: &std::sync::Arc<AppState>, args: &Value) -> V
             {
                 crate::reconciliation::on_reconciliation_task_terminal(state, &task.workspace_id)
                     .await;
+            }
+            // agent-workflow.md §Parallel Work via Worktrees: worktrees
+            // are ephemeral — Cancelled is terminal, so the cancelled
+            // task's agents have their worktrees torn down via the same
+            // shared helper the HTTP status endpoint uses (session end
+            // state captured first, inside the helper).
+            if task.status == TaskStatus::Cancelled {
+                crate::api::spawn::cleanup_worktrees_for_task(state, &task).await;
             }
             tool_result(format!("Updated task {id_str}"))
         }
@@ -1197,9 +1977,23 @@ async fn handle_create_mr(state: &AppState, args: &Value) -> Value {
 
     let now = now_secs();
     let rid = Id::new(&repo_id);
+    // The MR's workspace scope comes from its repository (M34 hierarchy
+    // enforcement, mirroring REST create_mr). Refuse to create an MR whose
+    // scope cannot be resolved instead of fabricating a "default"
+    // workspace identity.
+    let repo = match state.repos.find_by_id(&rid).await {
+        Ok(Some(repo)) => repo,
+        Ok(None) => {
+            return tool_error(format!("repository {rid} not found"));
+        }
+        Err(e) => {
+            return tool_error(format!("failed to look up repository {rid}: {e}"));
+        }
+    };
     let mut mr = MergeRequest::new(
         new_id(),
         rid.clone(),
+        repo.workspace_id.clone(),
         title.clone(),
         source.clone(),
         target.clone(),
@@ -1207,37 +2001,22 @@ async fn handle_create_mr(state: &AppState, args: &Value) -> Value {
     );
     mr.author_agent_id = get_str(args, "author_agent_id").map(Id::new);
 
-    // Auto-detect branch lineage dependencies and set workspace_id (mirrors REST create_mr).
-    if let Ok(Some(repo)) = state.repos.find_by_id(&rid).await {
-        mr.workspace_id = repo.workspace_id.clone();
-        let lineage_deps = crate::api::merge_requests::detect_lineage_deps(
-            state,
-            &rid,
-            &repo.path,
-            &source,
-            &repo.default_branch,
-        )
-        .await;
-        if !lineage_deps.is_empty() {
-            mr.depends_on = lineage_deps;
-        }
-    }
-
-    // Merge explicit deps with lineage deps: explicit takes precedence,
-    // lineage adds to the set for deps not already declared.
-    if !explicit_deps.is_empty() {
-        let explicit_ids: std::collections::HashSet<String> = explicit_deps
-            .iter()
-            .map(|d| d.target_mr_id.to_string())
-            .collect();
-        let additional_lineage: Vec<_> = mr
-            .depends_on
-            .drain(..)
-            .filter(|d| !explicit_ids.contains(&d.target_mr_id.to_string()))
-            .collect();
-        mr.depends_on = explicit_deps;
-        mr.depends_on.extend(additional_lineage);
-    }
+    // Auto-detect branch lineage and graph-driven cross-repo dependencies
+    // (mirrors REST create_mr).
+    let lineage_deps = crate::api::merge_requests::detect_lineage_deps(
+        state,
+        &rid,
+        &repo.path,
+        &source,
+        &repo.default_branch,
+    )
+    .await;
+    let graph_deps = crate::api::merge_requests::detect_graph_deps(state, &repo, &source).await;
+    mr.depends_on = crate::api::merge_requests::merge_explicit_and_auto_deps(
+        explicit_deps,
+        lineage_deps,
+        graph_deps,
+    );
 
     match state.merge_requests.create(&mr).await {
         Ok(()) => tool_result(format!("Created MR '{}' (id: {})", title, mr.id)),
@@ -1245,9 +2024,30 @@ async fn handle_create_mr(state: &AppState, args: &Value) -> Value {
     }
 }
 
-async fn handle_list_mrs(state: &AppState, args: &Value) -> Value {
+async fn handle_list_mrs(state: &AppState, args: &Value, auth: &AuthenticatedAgent) -> Value {
     let mrs = if let Some(repo_id) = get_str(args, "repository_id") {
         state.merge_requests.list_by_repo(&Id::new(repo_id)).await
+    } else if is_agent_jwt(auth) {
+        // §1 Token Scoping: repository_id is optional, and the legacy
+        // fallback listed the shared unfiltered store — every MR across
+        // every tenant. A scoped caller's fallback listing is clamped to
+        // its own repo instead (the signed repo_id claim; the scope gate
+        // already rejected workspace-tier tokens, which carry no repo to
+        // clamp to). Unscoped callers (global token, API key) keep the
+        // ABAC-governed full listing.
+        match &auth.repo_id {
+            Some(own) => {
+                state
+                    .merge_requests
+                    .list_by_repo(&Id::new(own.as_str()))
+                    .await
+            }
+            None => {
+                return tool_error(
+                    "PERMISSION_DENIED: scoped token carries no repo claim; pass repository_id",
+                )
+            }
+        }
     } else {
         state.merge_requests.list().await
     };
@@ -1407,12 +2207,36 @@ async fn handle_agent_heartbeat(state: &AppState, args: &Value) -> Value {
         Some(a) => a.to_string(),
         None => return tool_error("missing required field: agent_id"),
     };
+    // identity-security.md Layer 1: the heartbeat carries the session's
+    // X.509-SVID, verified fail-closed against the published trust bundle
+    // (same surface as PUT /agents/{id}/heartbeat and POST /attest — no
+    // bypass variant). A heartbeat without a valid SVID is rejected.
+    let svid = match get_str(args, "svid") {
+        Some(s) => s.to_string(),
+        None => {
+            return tool_error(
+                "missing required field: svid — present the session's X.509-SVID                  (the GYRE_SVID_PEM environment variable) on every heartbeat",
+            )
+        }
+    };
+    let stack_fingerprint = get_str(args, "stack_fingerprint")
+        .unwrap_or_default()
+        .to_string();
     match state.agents.find_by_id(&Id::new(&agent_id)).await {
         Ok(Some(mut agent)) => {
-            agent.heartbeat(now_secs());
-            match state.agents.update(&agent).await {
-                Ok(()) => tool_result(format!("Heartbeat recorded for agent {agent_id}")),
-                Err(e) => tool_error(format!("Failed to update agent: {e}")),
+            match crate::spiffe::attest_session(state, &agent_id, &svid, &stack_fingerprint).await {
+                Ok(_) => {
+                    agent.heartbeat(now_secs());
+                    match state.agents.update(&agent).await {
+                        Ok(()) => tool_result(format!(
+                            "Heartbeat recorded for agent {agent_id} (workload identity verified)"
+                        )),
+                        Err(e) => tool_error(format!("Failed to update agent: {e}")),
+                    }
+                }
+                Err(reason) => {
+                    tool_error(format!("Workload-identity verification failed: {reason}"))
+                }
             }
         }
         Ok(None) => tool_error(format!("Agent not found: {agent_id}")),
@@ -1461,6 +2285,9 @@ async fn complete_via_mr(
     crate::agent_audit::revoke_agent_token(state, agent, "agent_completed").await;
     // Release the workspace's active-agent budget slot.
     crate::api::budget::decrement_active_agents(state, &repo.workspace_id.to_string()).await;
+    // agent-runtime.md §4 What's Tracked: wall-clock compute time
+    // (spawn → complete), same as the REST completion surface.
+    crate::api::budget::record_compute_minutes_for_agent(state, agent).await;
     Some(mr)
 }
 
@@ -1497,7 +2324,7 @@ async fn handle_agent_complete(state: &std::sync::Arc<AppState>, args: &Value) -
             let ws_dest = gyre_common::Destination::Workspace(ws_id.clone());
             state
                 .emit_event(
-                    Some(ws_id.clone()),
+                    ws_id.clone(),
                     ws_dest,
                     gyre_common::MessageKind::AgentCompleted,
                     Some(payload),
@@ -1536,14 +2363,54 @@ async fn handle_agent_complete(state: &std::sync::Arc<AppState>, args: &Value) -
                     })),
                 )
                 .await;
+            // ── agent.completed analytics event (analytics.md §Auto-Emitted) ──────
+            // This MCP tool is the autonomous-agent completion path
+            // (agent-runner.mjs calls gyre_agent_complete); the HTTP endpoint
+            // in spawn.rs is the other. Both must record the event.
+            let duration_secs = now_secs().saturating_sub(agent.spawned_at);
+            let ev = gyre_domain::AnalyticsEvent::new(
+                gyre_common::Id::new(uuid::Uuid::new_v4().to_string()),
+                "agent.completed",
+                Some(agent.id.to_string()),
+                serde_json::json!({
+                    "task_id": agent.current_task_id.as_ref().map(|id| id.to_string()),
+                    "duration_secs": duration_secs,
+                }),
+                now_secs(),
+            )
+            .with_scope(
+                None,
+                None,
+                Some(&agent.workspace_id),
+                agent.repo_id.as_ref(),
+            );
+            let _ = state.analytics.record(&ev).await;
 
             match state.agents.update(&agent).await {
                 Ok(()) => {
+                    // source-control.md §Agent-to-Commit Tracking: completion
+                    // terminates the agent's open session — records the
+                    // worktree's real current branch and dirty state, and
+                    // stamps ended_at. MCP parity with the REST
+                    // POST /agents/:id/complete surface (which calls the
+                    // same helper). Best-effort: never fails the completion.
+                    crate::agent_sessions::end_session(state, &agent).await;
+
                     // Platform Model §7: revoke task-scoped ephemeral secrets
                     // on agent completion ("Secrets access revoked" at
                     // teardown) — deletes Task-scoped secrets for the
                     // agent's task and logs `secret.revoked` per secret.
                     crate::secret_rotation::revoke_agent_task_secrets(state, &agent).await;
+
+                    // message-bus.md §Delivery Guarantees (Agent completion
+                    // cleanup): MCP parity with the REST
+                    // POST /agents/:id/complete surface — all unacked
+                    // Directed messages in the completing agent's inbox are
+                    // bulk-acked with reason "agent_completed" (retained for
+                    // audit, never redelivered, reclaimable by the
+                    // dead-inbox retention job).
+                    crate::api::spawn::acknowledge_agent_inbox(state, &agent.id, "agent_completed")
+                        .await;
 
                     // agent-runtime.md §1 Phase 5→6: `agent.complete` ends
                     // the implementation phase — the server creates the MR
@@ -1797,11 +2664,14 @@ async fn create_uncertainty_notifications(
         notif.source.entity_id = agent_id.to_string();
         notif.body = body.clone();
 
-        if let Err(e) = state.notifications.create(&notif).await {
+        if let Err(e) = state.create_notification(&notif).await {
             tracing::warn!(
                 "agent_complete: failed to create AgentNeedsClarification notification for user {}: {e}",
                 member.user_id
             );
+        } else {
+            // Channel fan-out per user-management.md §Delivery Channels.
+            crate::notification_dispatcher::dispatch_to_channels(state, &notif).await;
         }
     }
 
@@ -1955,26 +2825,146 @@ async fn handle_analytics_query(state: &AppState, args: &Value) -> Value {
     }
 }
 
-async fn handle_search(state: &AppState, args: &Value) -> Value {
+/// `gyre_analytics_decide` (analytics.md §MCP Tool: `gyre_analytics_decide`)
+/// — the primary way agent code invokes analytics decisions without raw
+/// HTTP calls. A thin wrapper around the decision API's shared core
+/// evaluators (same functions the HTTP handlers call): with `custom_rules`
+/// present it assembles a `CustomDecisionSpec` and evaluates the rule DSL;
+/// otherwise it evaluates the named built-in decision. No decision logic
+/// lives here — scope validation, event fetching, and evaluation are all
+/// in `api::analytics::evaluate_builtin_decision` /
+/// `evaluate_custom_decision`.
+async fn handle_analytics_decide(
+    state: &AppState,
+    args: &Value,
+    auth: &AuthenticatedAgent,
+) -> Value {
+    let decision = match get_str(args, "decision") {
+        Some(d) => d.to_string(),
+        None => return tool_error("missing required field: decision"),
+    };
+    let context = args.get("context").cloned().unwrap_or(json!({}));
+    if !context.is_object() {
+        return tool_error("context must be a JSON object");
+    }
+
+    let result = if let Some(custom_rules) = args.get("custom_rules") {
+        if !custom_rules.is_array() {
+            return tool_error("custom_rules must be an array of rule DSL objects");
+        }
+        // Assemble the custom decision spec from the tool arguments: the
+        // `decision` arg names it, `context` scopes it, `custom_rules` are
+        // the DSL rules, and an optional `default` outcome fills the
+        // spec's default ("default" otherwise, matching the HTTP body
+        // shape of POST /api/v1/analytics/decide/custom).
+        let mut body = json!({
+            "name": decision,
+            "rules": custom_rules,
+            "context": context,
+        });
+        if let Some(default) = args.get("default") {
+            body["default"] = default.clone();
+        }
+        let spec = match gyre_domain::decisions::CustomDecisionSpec::parse(&body) {
+            Ok(spec) => spec,
+            Err(e) => return tool_error(format!("invalid custom decision: {e}")),
+        };
+        crate::api::analytics::evaluate_custom_decision(state, auth, &spec).await
+    } else {
+        crate::api::analytics::evaluate_builtin_decision(state, auth, &decision, context).await
+    };
+
+    match result {
+        Ok(response) => tool_result(serde_json::to_string_pretty(&response).unwrap_or_default()),
+        Err(e) => tool_error(format!("analytics decide failed: {e}")),
+    }
+}
+
+async fn handle_search(state: &AppState, args: &Value, auth: &AuthenticatedAgent) -> Value {
     let q = match get_str(args, "q") {
         Some(q) => q.to_string(),
         None => return tool_error("missing required field: q"),
     };
-    let entity_type = get_str(args, "entity_type").map(|s| s.to_string());
-    let workspace_id = get_str(args, "workspace_id").map(|s| s.to_string());
+    // §Query Language: parse `q` (terms, quoted phrases, facets) — the same
+    // grammar as GET /api/v1/search. entity_type / workspace_id args are
+    // fallback shortcuts; query-string facets take precedence.
+    let parsed = gyre_ports::search::parse_query(&q);
+    let entity_type = if parsed.facets.contains_key("type") {
+        None
+    } else {
+        get_str(args, "entity_type").map(|s| s.to_string())
+    };
     let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
 
+    // Caller-scope validation (task-146 review round 3, same rule as the
+    // HTTP search handler): the workspace_id arg doubles as the
+    // search.query event's workspace attribution — a cross-tenant or
+    // unknown id is rejected instead of letting the caller attribute
+    // events to an arbitrary workspace. When a `workspace:` facet in `q`
+    // overrides the arg as a filter, the arg is still validated because
+    // it still attributes the auto-emitted event.
+    let workspace_scope = match get_str(args, "workspace_id") {
+        Some(w) => {
+            let id = gyre_common::Id::new(w);
+            match crate::api::audit::validate_workspace_scope(state, &id, auth).await {
+                Ok(()) => Some(id),
+                Err(e) => return tool_error(format!("Invalid workspace_id: {e}")),
+            }
+        }
+        None => None,
+    };
+    let mut workspace_id = if parsed.facets.contains_key("workspace") {
+        None
+    } else {
+        workspace_scope.as_ref().map(|id| id.to_string())
+    };
+    // §1 Token Scoping: a scoped caller's search is bounded to its own
+    // workspace — validate_tool_scope already rejected explicit targets
+    // beyond it; an absent target is clamped to the caller's workspace
+    // claim rather than widening the query tenant-wide.
+    if is_agent_jwt(auth) {
+        match &auth.workspace_id {
+            Some(own) => workspace_id = Some(own.clone()),
+            None => return tool_error("PERMISSION_DENIED: agent token carries no workspace claim"),
+        }
+    }
+
+    // §Access Scoping: scope comes from the agent's authenticated token
+    // context, never from client args. The client's `workspace_id` remains a
+    // narrowing filter the adapter intersects with the accessible set — it
+    // can only narrow, never widen.
+    let scope = crate::search_scope::derive_search_scope(state, auth).await;
+    let started = std::time::Instant::now();
     match state
         .search
         .search(gyre_ports::search::SearchQuery {
             query: q.clone(),
+            parsed,
             entity_type,
             workspace_id,
             limit,
+            tenant_id: scope.tenant_id,
+            accessible_workspace_ids: scope.accessible_workspace_ids,
+            accessible_repo_ids: scope.accessible_repo_ids,
         })
         .await
     {
         Ok(results) => {
+            // search.query analytics event (analytics.md §Auto-Emitted
+            // Events): this MCP tool is the autonomous-agent search path;
+            // the HTTP endpoint is the other. Both record through the same
+            // helper, with identity bound to the verified caller and the
+            // workspace scope validated above.
+            let duration_ms = started.elapsed().as_millis() as u64;
+            crate::api::analytics::record_search_query(
+                state,
+                auth,
+                &q,
+                &results,
+                duration_ms,
+                workspace_scope.as_ref(),
+            )
+            .await;
             let text = if results.is_empty() {
                 format!("No results for '{q}'")
             } else {
@@ -2086,6 +3076,46 @@ async fn handle_message_send(state: &AppState, args: &Value, auth: &Authenticate
             ));
         }
 
+        // Scoping rule 1 (message-bus.md §Scoping Rules), mirrored from the
+        // REST send path: ALL Agent-directed messages validate tenant
+        // isolation — the target agent's tenant (resolved from its workspace
+        // record) must match the message's tenant (the caller's verified
+        // tenant), regardless of origin. Fail-closed when the workspace
+        // record cannot be resolved (deleted workspace, dangling agent):
+        // an indeterminable tenant scope rejects the send, never allows it
+        // through — the same inconsistent-state leak class rule 1 exists to
+        // prevent.
+        let target_ws = match state.workspaces.find_by_id(&target.workspace_id).await {
+            Ok(Some(ws)) => ws,
+            Ok(None) => {
+                tracing::warn!(
+                    workspace_id = %target.workspace_id,
+                    "message.send: target agent's workspace not found; tenant isolation cannot be verified"
+                );
+                return tool_error(format!(
+                    "target agent {} workspace {} cannot be resolved; tenant isolation cannot be verified",
+                    target_id, target.workspace_id
+                ));
+            }
+            Err(e) => {
+                tracing::warn!(
+                    workspace_id = %target.workspace_id,
+                    error = %e,
+                    "message.send: failed to resolve target workspace"
+                );
+                return tool_error(format!(
+                    "failed to resolve target workspace {}: {e}",
+                    target.workspace_id
+                ));
+            }
+        };
+        if target_ws.tenant_id.as_str() != auth.tenant_id {
+            return tool_error(format!(
+                "target agent {} belongs to a different tenant",
+                target_id
+            ));
+        }
+
         // Queue depth check for Directed tier.
         if effective_tier == MessageTier::Directed {
             let unacked = state.messages.count_unacked(target_id).await.unwrap_or(0);
@@ -2142,8 +3172,13 @@ async fn handle_message_send(state: &AppState, args: &Value, auth: &Authenticate
         msg.key_id = Some(kid);
     }
 
-    // Persist Directed and Event tier.
-    if effective_tier != MessageTier::Telemetry && !matches!(msg.to, Destination::Broadcast) {
+    // Persist Directed and Event tier. Broadcast-only kinds
+    // (DataSeeded/QueueUpdated) are storage-exempt regardless of destination
+    // (message-bus.md §Broadcast-only kinds) — broadcast channel only.
+    if effective_tier != MessageTier::Telemetry
+        && !matches!(msg.to, Destination::Broadcast)
+        && !msg.kind.broadcast_only()
+    {
         if let Err(e) = state.messages.store(&msg).await {
             return tool_error(format!("failed to store message: {e}"));
         }
@@ -2153,8 +3188,20 @@ async fn handle_message_send(state: &AppState, args: &Value, auth: &Authenticate
     // subscribers see the message even if dispatch consumers are slow).
     let _ = state.message_broadcast_tx.send(msg.clone());
 
-    // Dispatch to consumers (notifications, etc.).
-    let _ = state.message_dispatch_tx.try_send(msg.clone());
+    // Dispatch to consumers (notification bridge, etc.). Non-blocking and
+    // best-effort: consumer drops under backpressure are logged, never
+    // block the send path (message-bus.md §Relationship to Notifications).
+    match state.message_dispatch_tx.try_send(msg.clone()) {
+        Ok(()) => {}
+        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+            tracing::warn!(
+                "message dispatch channel full; consumer dropped a message (best-effort tier)"
+            );
+        }
+        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+            tracing::debug!("message dispatch channel closed; no consumers registered");
+        }
+    }
 
     tool_result(format!("Message sent: id={}, kind={}", msg_id, kind_str,))
 }
@@ -2318,7 +3365,7 @@ async fn handle_graph_query_dryrun(state: &AppState, args: &Value) -> Value {
         Err(e) => return tool_error(format!("Failed to load graph edges: {e}")),
     };
 
-    let result = gyre_domain::view_query_resolver::dry_run_with_call_graph(
+    let result = gyre_domain::view_query_resolver::dry_run_with_diff_change_set(
         &query,
         &nodes,
         &edges,
@@ -2331,6 +3378,11 @@ async fn handle_graph_query_dryrun(state: &AppState, args: &Value) -> Value {
             )
             .await,
         ),
+        // SHA/ref-based diff scopes resolve their change set from the repo's
+        // real git via the shared two-commit graph-diff core.
+        crate::graph_diff_core::resolve_view_query_diff_changes_for_state(state, &repo_id, &query)
+            .await
+            .as_ref(),
     );
     // §9: the dry-run tool response echoes the query alongside the preview
     // (`{"query": ..., "result": {...}}`); the `result` member carries the
@@ -2666,7 +3718,11 @@ async fn handle_graph_concept(state: &AppState, args: &Value) -> Value {
     }
 }
 
-async fn handle_spec_assist(state: &AppState, args: &Value, auth: &AuthenticatedAgent) -> Value {
+async fn handle_spec_assist(
+    state: &Arc<AppState>,
+    args: &Value,
+    auth: &AuthenticatedAgent,
+) -> Value {
     let repo_id = match require_str(args, "repo_id") {
         Ok(r) => r.to_string(),
         Err(_) => return tool_error("missing required field: repo_id"),
@@ -2689,13 +3745,14 @@ async fn handle_spec_assist(state: &AppState, args: &Value, auth: &Authenticated
         Err(e) => return tool_error(format!("failed to look up repo: {e}")),
     };
 
-    // Per-user/workspace sliding-window rate limit (HSI §6): 10 req/60 s.
+    // Per-user/workspace sliding-window rate limit (ui-layout.md §2):
+    // 10 req/60 s, keyed on the auth-context user_id.
     {
         let workspace_id = repo.workspace_id.to_string();
         let mut limiter = state.llm_rate_limiter.lock().await;
         if let Err(retry_after) = crate::llm_rate_limit::check_rate_limit(
             &mut limiter,
-            &auth.agent_id,
+            &crate::llm_rate_limit::rate_limit_principal(auth),
             &workspace_id,
             crate::llm_rate_limit::LLM_RATE_LIMIT,
             crate::llm_rate_limit::LLM_WINDOW_SECS,
@@ -2761,25 +3818,38 @@ async fn handle_spec_assist(state: &AppState, args: &Value, auth: &Authenticated
         }
     };
 
-    // Load effective prompt; fall back to hardcoded default.
-    let template_content = state
-        .prompt_templates
-        .get_effective(&repo.workspace_id, "specs-assist")
-        .await
-        .ok()
-        .flatten()
-        .map(|t| t.content)
-        .unwrap_or_else(|| crate::llm_defaults::PROMPT_SPECS_ASSIST.to_string());
+    // Prompt template (ui-layout.md §2, MCP parity with REST handler per
+    // HSI §11): DB override → this repo's git tree
+    // (specs/prompts/specs-assist.md) → hardcoded fallback.
+    let template = crate::llm_helpers::resolve_prompt_template(
+        state,
+        &repo.workspace_id,
+        Some(&repo.id),
+        "specs-assist",
+        crate::llm_defaults::PROMPT_SPECS_ASSIST,
+    )
+    .await;
 
-    let system_prompt = template_content
-        .replace("{{spec_path}}", &spec_path)
-        .replace("{{spec_content}}", &spec_content)
-        .replace("{{graph_context}}", &graph_context)
-        .replace("{{instruction}}", &instruction)
-        .replace(
-            "{{draft_content}}",
-            draft_content.as_deref().unwrap_or(&spec_content),
-        );
+    // Meta-spec-set binding (ui-layout.md §2, MCP parity with REST handler):
+    // inject the workspace's pinned personas/principles/standards/process
+    // as `{{meta_spec_context}}`.
+    let meta_spec_context =
+        crate::llm_helpers::workspace_meta_spec_context(state, &repo.workspace_id, Some(&repo.id))
+            .await;
+
+    // Spec content and graph context travel in the system template as
+    // grounding variables; the instruction is the user prompt only
+    // (injection containment — blank its template placeholder).
+    let system_prompt = crate::llm_helpers::substitute_template(
+        &template.content,
+        &[
+            ("spec_path", spec_path.as_str()),
+            ("spec_content", spec_content.as_str()),
+            ("graph_context", graph_context.as_str()),
+            ("meta_spec_context", meta_spec_context.as_str()),
+            ("instruction", ""),
+        ],
+    );
     let user_prompt = format!("Instruction: {instruction}");
 
     // Resolve model and call LLM.
@@ -2821,8 +3891,11 @@ async fn handle_spec_assist(state: &AppState, args: &Value, auth: &Authenticated
         tracing::warn!("Failed to record MCP specs/assist cost entry: {e}");
     }
 
-    // Per-call budget record + workspace/tenant counter increment
-    // (platform-model.md §Budget Tracking). User-initiated query via MCP.
+    // Per-call `llm_query` budget record + workspace/tenant counter
+    // increment (platform-model.md §Budget Tracking; REST handler parity,
+    // HSI §11), with the prompt-template git SHA for audit (ui-layout.md
+    // §2). Tenant scope comes from the repo's workspace; skip and log if
+    // unresolvable.
     let ws_for_budget = state
         .workspaces
         .find_by_id(&repo.workspace_id)
@@ -2843,6 +3916,7 @@ async fn handle_spec_assist(state: &AppState, args: &Value, auth: &Authenticated
                 output_tokens: (base_estimate - estimated_input as f64) as u64,
                 cost_usd: 0.0,
                 model: model.clone(),
+                prompt_template_sha: template.sha.clone(),
             },
         )
         .await;
@@ -3001,8 +4075,183 @@ async fn collect_secret_metadata(
     Ok(secrets)
 }
 
-fn resource_definitions() -> Value {
+// ── permissions:// resources (abac-policy-engine.md §MCP Integration) ─────────
+
+/// The ABAC action vocabulary probed by `permissions://me` — the spec's
+/// action-attribute examples (§Attributes: read, write, delete, approve,
+/// spawn, push, merge, escalate, generate).
+const PERMISSION_ACTIONS: &[&str] = &[
+    "read", "write", "delete", "approve", "spawn", "push", "merge", "escalate", "generate",
+];
+
+/// Build the CALLING agent's ABAC attribute context for the `permissions://`
+/// resources (abac-policy-engine.md §MCP Integration).
+///
+/// Subject attributes are extracted from the `AuthenticatedAgent` — the
+/// same sources the ABAC middleware uses on live requests (auth context,
+/// allowlisted agent-JWT claims, membership/team stores) — so the answer
+/// the pre-flight check gives is the answer the middleware would give.
+/// There is deliberately NO subject parameter: an agent can only ever
+/// query its own permissions, never another agent's.
+///
+/// Resource scope attributes come from the caller's own resolved scope
+/// (JWT claims → agent record → task, tenant from the governing
+/// workspace — `agent_secret_scope`), and `env.budget_remaining` from the
+/// real budget stores. `action`, `resource.type`, and `env.time` are
+/// injected by the evaluation engine itself.
+async fn agent_permission_context(state: &AppState, auth: &AuthenticatedAgent) -> AttributeContext {
+    let mut ctx = AttributeContext::default();
+
+    let subject_type = if auth.roles.contains(&UserRole::Agent) {
+        "agent"
+    } else {
+        "user"
+    };
+    ctx.set("subject.type", subject_type);
+    ctx.set("subject.id", &auth.agent_id);
+    ctx.set("subject.tenant_id", &auth.tenant_id);
+    // The genuine system principal carries the reserved, non-spoofable
+    // ABAC identity (same discipline as the middleware; see its comment
+    // on SYSTEM_ABAC_IDENTITY for why the audit id differs).
+    if auth.is_system_principal() {
+        ctx.set("subject.id", gyre_domain::SYSTEM_ABAC_IDENTITY);
+    }
+    // Role SET semantics, matching the middleware: empty roles leave the
+    // attribute unset (fail closed); multi-role callers get a list the
+    // engine evaluates with membership semantics.
+    match auth.roles.as_slice() {
+        [] => {}
+        [only] => ctx.set("subject.global_role", only.as_str()),
+        many => ctx.set_list(
+            "subject.global_role",
+            many.iter().map(|r| r.as_str().to_string()).collect(),
+        ),
+    }
+
+    // Allowlisted agent-JWT claim attributes (persona, stack_hash,
+    // attestation_level, repo_scope — §Attributes, source "Agent OIDC
+    // claim"), agent subjects only, with the spec-named normalization
+    // (wl_stack_hash → stack_hash). Same gate + allowlist as the
+    // middleware; a raw claim must never define a membership-sourced or
+    // extractor-sourced attribute.
+    if subject_type == "agent" {
+        if let Some(claims) = &auth.jwt_claims {
+            ctx.merge_agent_jwt_claims(claims);
+            crate::abac_middleware::normalize_agent_jwt_attributes(&mut ctx, claims);
+        }
+    }
+
+    // Membership-sourced subject attributes (workspace_ids, team_ids) for
+    // callers with a user identity — same stores the middleware consults.
+    // A failed lookup leaves the attributes unset (conditions on them
+    // fail closed), matching the middleware's read of these stores.
+    if let Some(user_id) = &auth.user_id {
+        if let Ok(memberships) = state.workspace_memberships.list_by_user(user_id).await {
+            let workspace_ids: Vec<String> = memberships
+                .iter()
+                .map(|m| m.workspace_id.to_string())
+                .collect();
+            if !workspace_ids.is_empty() {
+                ctx.set_list("subject.workspace_ids", workspace_ids);
+            }
+            let mut team_ids: Vec<String> = Vec::new();
+            for m in &memberships {
+                if let Ok(teams) = state.teams.list_for_user(&m.workspace_id, user_id).await {
+                    for team in teams {
+                        team_ids.push(team.id.to_string());
+                    }
+                }
+            }
+            if !team_ids.is_empty() {
+                ctx.set_list("subject.team_ids", team_ids);
+            }
+        }
+    }
+
+    // Resource scope chain from the caller's own agent scope (JWT claims →
+    // agent record → task; tenant from the governing workspace record —
+    // never fabricated). This is what makes "in my scope" real: scoped
+    // policies apply via the engine's canonical scope filter only when
+    // the context names the caller's actual scope. A caller with no
+    // resolvable agent scope (e.g. a user token) queries an unscoped
+    // resource — scoped policies conservatively do not apply, same as the
+    // REST effective-permissions endpoint's no-scope path.
+    if let Some(scope) = agent_secret_scope(state, auth).await {
+        ctx.set("resource.tenant_id", &scope.tenant_id);
+        ctx.set("resource.workspace_id", &scope.workspace_id);
+        if !scope.repo_id.is_empty() {
+            ctx.set("resource.repo_id", &scope.repo_id);
+        }
+        // env.budget_remaining (§Attributes): tokens remaining in the
+        // governing workspace's daily budget, from the real budget stores;
+        // absent when no cap is configured (conditions fail closed).
+        let key = format!("workspace:{}", scope.workspace_id);
+        let config = state.budget_configs.get_config(&key).await.ok().flatten();
+        let usage = state.budget_usages.get_usage(&key).await.ok().flatten();
+        if let Some(remaining) =
+            crate::abac_middleware::budget_tokens_remaining(config.as_ref(), usage.as_ref())
+        {
+            ctx.set_number("env.budget_remaining", remaining);
+        }
+    }
+
+    ctx
+}
+
+/// `permissions://me` — the caller's effective permissions: a JSON array of
+/// `{resource_type, allowed_actions: []}`, one entry per canonical resource
+/// type (the route registry's vocabulary), each listing the spec's action
+/// vocabulary entries the current policy set would ALLOW for this caller
+/// in its own scope (abac-policy-engine.md §MCP Integration).
+async fn resource_permissions_me(state: &AppState, auth: &AuthenticatedAgent) -> Value {
+    let ctx = agent_permission_context(state, auth).await;
+    let policies = match state.policies.list().await {
+        Ok(p) => p,
+        Err(e) => return json!({"error": format!("failed to load policies: {e}")}),
+    };
+    let resource_types = crate::abac_middleware::all_resource_types();
+    let mut results = Vec::with_capacity(resource_types.len());
+    for resource_type in resource_types {
+        let mut allowed_actions = Vec::new();
+        for action in PERMISSION_ACTIONS {
+            let result = policy_engine::evaluate(policies.clone(), &ctx, action, resource_type);
+            if result.effect == PolicyEffect::Allow {
+                allowed_actions.push(*action);
+            }
+        }
+        results.push(json!({
+            "resource_type": resource_type,
+            "allowed_actions": allowed_actions,
+        }));
+    }
+    Value::Array(results)
+}
+
+/// `permissions://check?action={action}&resource={type}` — single pre-flight
+/// policy check: can this caller perform `action` on `resource_type` in its
+/// own scope? Returns `{allowed, matched_policy}` (abac-policy-engine.md
+/// §MCP Integration). The subject is always the caller — there is no way to
+/// ask about another agent.
+async fn resource_permissions_check(
+    state: &AppState,
+    auth: &AuthenticatedAgent,
+    action: &str,
+    resource_type: &str,
+) -> Value {
+    let ctx = agent_permission_context(state, auth).await;
+    let policies = match state.policies.list().await {
+        Ok(p) => p,
+        Err(e) => return json!({"error": format!("failed to load policies: {e}")}),
+    };
+    let result = policy_engine::evaluate(policies, &ctx, action, resource_type);
     json!({
+        "allowed": result.effect == PolicyEffect::Allow,
+        "matched_policy": result.matched_policy,
+    })
+}
+
+fn resource_definitions(auth: &AuthenticatedAgent) -> Value {
+    let mut definitions = json!({
         "resources": [
             {
                 "uri": "spec://",
@@ -3014,14 +4263,14 @@ fn resource_definitions() -> Value {
             {
                 "uri": "agents://",
                 "name": "Workspace Agents",
-                "description": "List active agents in a workspace. URI: agents://{workspace_id} or agents:// for all.",
+                "description": "List active agents in a workspace. URI: agents://{workspace_id}; an unscoped read resolves against the caller's accessible workspaces only.",
                 "mimeType": "application/json",
                 "uriTemplate": "agents://{workspace_id}"
             },
             {
                 "uri": "queue://",
                 "name": "Merge Queue",
-                "description": "List merge queue entries for a repository. URI: queue://{repo_id}",
+                "description": "List merge queue entries for a repository. URI: queue://{repo_id} (the caller must have access to the repo's workspace)",
                 "mimeType": "application/json",
                 "uriTemplate": "queue://{repo_id}"
             },
@@ -3063,9 +4312,500 @@ fn resource_definitions() -> Value {
                 "name": "Secret Expiry Status",
                 "description": "Expiry status of the secrets available to this agent: [{name, scope, expires_at, last_rotated_at, status: active|expiring|expired}] (platform-model.md §7).",
                 "mimeType": "application/json"
+            },
+            {
+                "uri": "permissions://me",
+                "name": "My Permissions",
+                "description": "Effective ABAC permissions of the calling agent in its own scope: [{resource_type, allowed_actions: []}] (abac-policy-engine.md §MCP Integration). Only the caller's own permissions — never another agent's.",
+                "mimeType": "application/json"
+            },
+            {
+                "uri": "permissions://check",
+                "name": "Permission Pre-Flight Check",
+                "description": "Can the calling agent perform a specific action? URI: permissions://check?action={action}&resource={type} (abac-policy-engine.md §MCP Integration). Returns {allowed, matched_policy}.",
+                "mimeType": "application/json",
+                "uriTemplate": "permissions://check?action={action}&resource={type}"
+            }
+        ]
+    });
+    // Phase-5 knowledge boundary (agent-runtime.md §1, task-299):
+    // worker-tier principals must not even be offered the agents:// and
+    // queue:// resources — the advertisement itself would leak the
+    // existence of other agents and the merge queue.
+    if is_worker_tier(auth) {
+        if let Some(resources) = definitions["resources"].as_array_mut() {
+            resources.retain(|r| {
+                let uri = r["uri"].as_str().unwrap_or("");
+                uri != "agents://" && uri != "queue://"
+            });
+        }
+    }
+    definitions
+}
+
+// ── MCP Prompts (agent-runtime.md §5 / platform-model.md §4) ──────────────────
+
+/// The four system prompts every Gyre agent can pull on demand
+/// (platform-model.md §4; agent-runtime.md §5 maps the three-section
+/// prompt structure onto them):
+/// - `system://persona`   — the assembled meta-spec prompt set
+/// - `system://protocol`  — the system-managed protocol section
+/// - `system://context`   — task context, gate failures, inbox messages
+/// - `system://constraints` — budget limits and operational parameters
+fn prompt_definitions() -> Value {
+    json!({
+        "prompts": [
+            {
+                "name": "system://persona",
+                "description": "The assembled meta-spec prompt set this agent was spawned under (required tenant + workspace meta-specs and spec-level bindings at pinned versions).",
+            },
+            {
+                "name": "system://protocol",
+                "description": "System-managed protocol: Ralph loop rules, MCP tool usage, heartbeat requirement, escalation rules, completion signaling.",
+            },
+            {
+                "name": "system://context",
+                "description": "Task context: task details, spec ref, branch/repo context, gate failure messages from previous iterations, inbox messages.",
+            },
+            {
+                "name": "system://constraints",
+                "description": "Budget limits and operational parameters: workspace budget limits and usage, agent lifetime, iteration ceiling, scope boundaries.",
             }
         ]
     })
+}
+
+/// Wrap prompt content in an MCP `prompts/get` result.
+fn prompt_result(description: &str, text: String) -> Value {
+    json!({
+        "description": description,
+        "messages": [
+            {
+                "role": "user",
+                "content": { "type": "text", "text": text }
+            }
+        ]
+    })
+}
+
+/// `system://persona` — the assembled meta-spec prompt set (the persona
+/// section of the agent-runtime.md §5 prompt structure), served verbatim
+/// from the spawn-time record (pinned versions, not a re-render). The
+/// system-managed protocol section is served separately via
+/// `system://protocol`.
+///
+/// Attestation metadata (platform-model.md §8: the persona prompt comes
+/// from the persona entity — versioned, approved): when the calling agent
+/// has a persona bound, the result carries its slug, version,
+/// content_hash, and approval status, so a consumer can attest exactly
+/// which approved persona content styles the agent. The persona entity's
+/// own prompt is injected at spawn as `GYRE_PROMPT_PERSONA` (with the same
+/// version/content_hash as `GYRE_PERSONA_VERSION` /
+/// `GYRE_PERSONA_CONTENT_HASH`).
+async fn prompt_persona(state: &AppState, auth: &AuthenticatedAgent) -> Value {
+    let metadata = persona_attestation_metadata(state, auth).await;
+    let mut result =
+        match crate::prompt_assembly::load_prompt_set_record(state, &auth.agent_id).await {
+            Some(record) => match record.rendered_prompt {
+                Some(rendered) => {
+                    prompt_result("Assembled meta-spec prompt set (pinned at spawn)", rendered)
+                }
+                None => prompt_result(
+                    "Assembled meta-spec prompt set (pinned at spawn)",
+                    format!(
+                        "# Meta-spec set {set_sha}\n(assembled {assembled_at}; \
+                     pre-task-119 record — the rendered text was not retained)",
+                        set_sha = record.set_sha,
+                        assembled_at = record.assembled_at,
+                    ),
+                ),
+            },
+            None => prompt_result(
+                "Assembled meta-spec prompt set (pinned at spawn)",
+                "No meta-spec prompt set was assembled for this agent (no \
+             required meta-specs and no spec-level bindings applied at spawn)."
+                    .to_string(),
+            ),
+        };
+    if let Some(metadata) = metadata {
+        if let Some(obj) = result.as_object_mut() {
+            obj.insert("metadata".to_string(), metadata);
+        }
+    }
+    result
+}
+
+/// Resolve the persona-entity attestation metadata for the calling agent:
+/// the persona bound to the agent row (`Agent.persona_id`, bound
+/// fail-closed to an Approved persona at spawn). `None` when the agent has
+/// no persona bound or the record is unresolvable — absence is truthful,
+/// never a fabricated persona identity.
+async fn persona_attestation_metadata(
+    state: &AppState,
+    auth: &AuthenticatedAgent,
+) -> Option<Value> {
+    let agent = state
+        .agents
+        .find_by_id(&Id::new(auth.agent_id.clone()))
+        .await
+        .ok()
+        .flatten()?;
+    let persona_id = agent.persona_id.as_ref()?;
+    let persona = state.personas.find_by_id(persona_id).await.ok().flatten()?;
+    Some(json!({
+        "persona": {
+            "id": persona.id.to_string(),
+            "slug": persona.slug,
+            "version": persona.version,
+            "content_hash": persona.content_hash,
+            "approval_status": format!("{:?}", persona.approval_status),
+        }
+    }))
+}
+
+/// `system://context` — task details, spec ref, branch/repo context, gate
+/// failure messages from previous iterations, and inbox messages.
+async fn prompt_context(state: &AppState, auth: &AuthenticatedAgent) -> Value {
+    let mut text = String::from("# Task Context\n\n");
+    let agent = state
+        .agents
+        .find_by_id(&Id::new(auth.agent_id.clone()))
+        .await
+        .ok()
+        .flatten();
+    let Some(agent) = agent else {
+        return prompt_result(
+            "Task context",
+            "No agent record found for this identity — task context is agent-scoped.".to_string(),
+        );
+    };
+
+    match agent.current_task_id.as_ref() {
+        Some(task_id) => match state.tasks.find_by_id(task_id).await {
+            Ok(Some(task)) => {
+                text.push_str(&format!("## Task {}\n", task.id.as_str()));
+                text.push_str(&format!("- Title: {}\n", task.title));
+                if let Some(desc) = task.description.as_ref() {
+                    text.push_str(&format!("- Description: {desc}\n"));
+                }
+                text.push_str(&format!(
+                    "- Status: {}\n",
+                    serde_json::to_string(&task.status).unwrap_or_default()
+                ));
+                text.push_str(&format!(
+                    "- Priority: {}\n",
+                    serde_json::to_string(&task.priority).unwrap_or_default()
+                ));
+                if let Some(spec_ref) = task.spec_ref.as_ref() {
+                    text.push_str(&format!("- Spec ref (pinned): {spec_ref}\n"));
+                }
+                if let Some(spec_path) = task.spec_path.as_ref() {
+                    text.push_str(&format!("- Spec path: {spec_path}\n"));
+                }
+                text.push_str(&format!("- Iteration: {}\n", agent.iteration));
+            }
+            _ => text.push_str("## Task\n(current task record unavailable)\n"),
+        },
+        None => text.push_str("## Task\n(no task assigned)\n"),
+    }
+
+    text.push_str("\n## Branch / repo context\n");
+    if let Ok(worktrees) = state.worktrees.find_by_agent(&agent.id).await {
+        for wt in worktrees {
+            text.push_str(&format!(
+                "- worktree branch {} (repo {})\n",
+                wt.branch,
+                wt.repository_id.as_str()
+            ));
+        }
+    }
+
+    text.push_str("\n## Gate failure messages & inbox (unacknowledged)\n");
+    match state.messages.list_unacked(&agent.id, 20).await {
+        Ok(msgs) if !msgs.is_empty() => {
+            for m in msgs {
+                text.push_str(&format!(
+                    "- [{}] {}\n",
+                    m.kind.as_str(),
+                    m.payload
+                        .as_ref()
+                        .map(|p| p.to_string())
+                        .unwrap_or_default()
+                ));
+            }
+        }
+        _ => text.push_str("(none)\n"),
+    }
+
+    // platform-model.md §8: the context document includes the agent's
+    // budget limits (remaining tokens/cost for the day). Shared renderer
+    // with the spawn-time context injection, so both deliveries agree.
+    text.push_str(&crate::api::prompts::budget_snapshot_section(state, &agent.workspace_id).await);
+
+    prompt_result("Task context", text)
+}
+
+/// `system://constraints` — budget limits and operational parameters.
+async fn prompt_constraints(state: &AppState, auth: &AuthenticatedAgent) -> Value {
+    let mut text = String::from("# Constraints\n\n");
+    let agent = state
+        .agents
+        .find_by_id(&Id::new(auth.agent_id.clone()))
+        .await
+        .ok()
+        .flatten();
+    let Some(agent) = agent else {
+        return prompt_result(
+            "Budget limits and operational parameters",
+            "No agent record found for this identity — constraints are agent-scoped.".to_string(),
+        );
+    };
+
+    text.push_str("## Scope boundaries\n");
+    text.push_str(&format!("- Workspace: {}\n", agent.workspace_id.as_str()));
+    if let Some(repo_id) = agent.repo_id.as_ref() {
+        text.push_str(&format!("- Repo: {}\n", repo_id.as_str()));
+    }
+    if let Some(task_id) = agent.current_task_id.as_ref() {
+        text.push_str(&format!("- Task: {}\n", task_id.as_str()));
+    }
+
+    // platform-model.md §8: workspace trust level affects agent autonomy.
+    // Shared renderer with the spawn-time constraints injection.
+    text.push_str(&crate::api::prompts::trust_level_section(state, &agent.workspace_id).await);
+
+    text.push_str("\n## Workspace budget\n");
+    let ws_key = crate::api::budget::workspace_key(&agent.workspace_id.to_string());
+    let config = state
+        .budget_configs
+        .get_config(&ws_key)
+        .await
+        .ok()
+        .flatten();
+    let usage = state.budget_usages.get_usage(&ws_key).await.ok().flatten();
+    match (config, usage) {
+        (Some(config), usage) => {
+            text.push_str(&format!(
+                "- max_tokens_per_day: {}\n",
+                config
+                    .max_tokens_per_day
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "unlimited".into())
+            ));
+            text.push_str(&format!(
+                "- max_cost_per_day: {}\n",
+                config
+                    .max_cost_per_day
+                    .map(|v| format!("${v:.4}"))
+                    .unwrap_or_else(|| "unlimited".into())
+            ));
+            text.push_str(&format!(
+                "- max_concurrent_agents: {}\n",
+                config
+                    .max_concurrent_agents
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "unlimited".into())
+            ));
+            if let Some(u) = usage {
+                text.push_str(&format!(
+                    "- used today: {} tokens, ${:.4}, {} active agents, {} compute minutes\n",
+                    u.tokens_used_today, u.cost_today, u.active_agents, u.compute_minutes
+                ));
+            }
+        }
+        (None, _) => text.push_str("(no workspace budget configured)\n"),
+    }
+
+    text.push_str("\n## Operational parameters\n");
+    match agent.lifetime_budget_secs {
+        Some(secs) => text.push_str(&format!("- Lifetime budget: {secs}s\n")),
+        None => text.push_str("- Lifetime budget: unlimited\n"),
+    }
+    // Iteration ceiling: repo override, else the server default (10).
+    let mut max_iterations = 10;
+    if let Some(task_id) = agent.current_task_id.as_ref() {
+        if let Ok(Some(task)) = state.tasks.find_by_id(task_id).await {
+            if let Ok(Some(repo)) = state.repos.find_by_id(&task.repo_id).await {
+                if let Some(repo_max) = repo.max_agent_iterations {
+                    max_iterations = repo_max;
+                }
+            }
+        }
+    }
+    text.push_str(&format!(
+        "- Max iterations (Ralph loop): {max_iterations}\n"
+    ));
+
+    prompt_result("Budget limits and operational parameters", text)
+}
+
+/// Dispatch `prompts/get`. Prompt content is agent-scoped: it resolves the
+/// caller's agent record (JWT claims or agent id) — one agent can never
+/// read another agent's context or constraints.
+async fn handle_prompt_get(state: &AppState, auth: &AuthenticatedAgent, name: &str) -> Value {
+    match name {
+        "system://persona" => prompt_persona(state, auth).await,
+        "system://protocol" => prompt_result(
+            "System-managed protocol section",
+            crate::prompt_assembly::render_protocol_prompt(),
+        ),
+        "system://context" => prompt_context(state, auth).await,
+        "system://constraints" => prompt_constraints(state, auth).await,
+        other => json!({"error": format!("unknown prompt: {other}")}),
+    }
+}
+
+/// Resolve the set of workspaces whose agents the caller may enumerate
+/// (task-299: MCP `agents://` caller-scope enforcement — an unscoped read
+/// must resolve against the caller's accessible workspaces, never the
+/// unfiltered store).
+///
+/// Returns `Ok(None)` for unrestricted callers (the system principal —
+/// the global dev/system token). Every other principal gets a concrete
+/// workspace set:
+/// - Gyre agent JWTs (orchestrators here — workers are rejected at the
+///   dispatch): the signed `workspace_id` claim, id-precise.
+/// - User principals (Keycloak JWT, API key, impersonation): their
+///   workspace memberships; Admin-role users administer every workspace
+///   of their tenant (the same tenant-admin rule `authorize_repo_access`
+///   applies on the git surface).
+/// - Other agent principals (federated JWTs): the signed `workspace_id`
+///   claim, or fail closed — a caller whose scope cannot be resolved must
+///   not fall back to the unfiltered listing.
+async fn caller_agent_workspaces(
+    state: &AppState,
+    auth: &AuthenticatedAgent,
+) -> Result<Option<Vec<Id>>, String> {
+    if auth.is_system_principal() {
+        return Ok(None);
+    }
+    if is_agent_jwt(auth) {
+        return match &auth.workspace_id {
+            Some(ws) => Ok(Some(vec![Id::new(ws.as_str())])),
+            None => Err(
+                "forbidden: agent token carries no workspace scope; refusing agents:// read"
+                    .to_string(),
+            ),
+        };
+    }
+    if let Some(user_id) = &auth.user_id {
+        if auth.roles.contains(&UserRole::Admin) {
+            let workspaces = state
+                .workspaces
+                .list_by_tenant(&Id::new(auth.tenant_id.as_str()))
+                .await
+                .map_err(|e| format!("failed to list tenant workspaces: {e}"))?;
+            return Ok(Some(workspaces.into_iter().map(|ws| ws.id).collect()));
+        }
+        let memberships = state
+            .workspace_memberships
+            .list_by_user(user_id)
+            .await
+            .map_err(|e| format!("failed to list workspace memberships: {e}"))?;
+        return Ok(Some(
+            memberships.into_iter().map(|m| m.workspace_id).collect(),
+        ));
+    }
+    match &auth.workspace_id {
+        Some(ws) => Ok(Some(vec![Id::new(ws.as_str())])),
+        None => {
+            Err("forbidden: caller scope cannot be resolved; refusing agents:// read".to_string())
+        }
+    }
+}
+
+/// Does the caller have access to workspace `workspace_id`? Per-handler
+/// authorization for `agents://{workspace_id}` reads (task-299): the
+/// exempt-handler rule — load the scoped entity, compare it against the
+/// caller's scope, deny on mismatch. Denials are `Err("forbidden: ...")`
+/// strings the resource layer surfaces as an error result.
+async fn caller_can_read_workspace(
+    state: &AppState,
+    auth: &AuthenticatedAgent,
+    workspace_id: &str,
+) -> Result<(), String> {
+    if auth.is_system_principal() {
+        return Ok(());
+    }
+    if is_agent_jwt(auth) {
+        // Orchestrator confinement: the signed `workspace_id` claim is the
+        // boundary (repo orchestrators carry it alongside their repo_id).
+        return match &auth.workspace_id {
+            Some(ws) if ws == workspace_id => Ok(()),
+            _ => Err(format!(
+                "forbidden: agent token scope does not cover workspace {workspace_id}"
+            )),
+        };
+    }
+    if let Some(user_id) = &auth.user_id {
+        let membership = state
+            .workspace_memberships
+            .find_by_user_and_workspace(user_id, &Id::new(workspace_id))
+            .await
+            .map_err(|e| format!("failed to look up workspace membership: {e}"))?;
+        if membership.is_some() {
+            return Ok(());
+        }
+        // Tenant admins administer every workspace of their tenant — the
+        // same rule `authorize_repo_access` applies on the git surface.
+        if auth.roles.contains(&UserRole::Admin) {
+            let ws = state
+                .workspaces
+                .find_by_id(&Id::new(workspace_id))
+                .await
+                .map_err(|e| format!("failed to look up workspace: {e}"))?;
+            if let Some(ws) = ws {
+                if ws.tenant_id.as_str() == auth.tenant_id {
+                    return Ok(());
+                }
+            }
+        }
+        return Err(format!(
+            "forbidden: caller is not a member of workspace {workspace_id}"
+        ));
+    }
+    // Other agent principals (federated JWTs): signed workspace claim or
+    // fail closed.
+    match &auth.workspace_id {
+        Some(ws) if ws == workspace_id => Ok(()),
+        _ => Err(format!(
+            "forbidden: caller scope does not cover workspace {workspace_id}; refusing agents:// read"
+        )),
+    }
+}
+
+/// Does the caller have access to repo `repo_id`'s merge queue?
+/// Per-handler authorization for `queue://{repo_id}` reads (task-299):
+/// load the repo, compare its real workspace against the caller's scope,
+/// deny on mismatch. Agent-JWT principals (orchestrators — workers are
+/// rejected at the dispatch) go through the id-precise token-scope check
+/// (`check_repo_read_target`): a repo-tier token may only read its own
+/// repo's queue, a workspace-tier token any repo of its signed workspace.
+async fn caller_can_read_queue(
+    state: &AppState,
+    auth: &AuthenticatedAgent,
+    repo_id: &str,
+) -> Result<(), String> {
+    if auth.is_system_principal() {
+        return Ok(());
+    }
+    if is_agent_jwt(auth) {
+        return check_repo_read_target(state, auth, repo_id, "queue:// read").await;
+    }
+    // Load the repo and compare its real workspace against the caller's
+    // scope. An unresolvable repo fails closed: there is no scope the
+    // caller could be verified against.
+    let repo = state
+        .repos
+        .find_by_id(&Id::new(repo_id))
+        .await
+        .map_err(|e| format!("failed to look up repo: {e}"))?
+        .ok_or_else(|| {
+            format!(
+                "forbidden: cannot verify repo {repo_id} belongs to the caller's scope; refusing queue:// read"
+            )
+        })?;
+    caller_can_read_workspace(state, auth, repo.workspace_id.as_str()).await
 }
 
 async fn handle_resource_read(state: &AppState, auth: &AuthenticatedAgent, uri: &str) -> Value {
@@ -3112,11 +4852,53 @@ async fn handle_resource_read(state: &AppState, auth: &AuthenticatedAgent, uri: 
             Err(e) => json!({"error": format!("cannot read {file_path}: {e}")}),
         }
     } else if let Some(workspace_id) = uri.strip_prefix("agents://") {
-        let agents_result = if workspace_id.is_empty() || workspace_id == "*" {
-            state.agents.list().await
-        } else {
-            state.agents.list_by_workspace(&Id::new(workspace_id)).await
-        };
+        // Phase-5 knowledge boundary (agent-runtime.md §1): a worker-tier
+        // principal must not learn about other agents at all — the gate is
+        // mechanical, at the resource layer, not in the prompt.
+        if is_worker_tier(auth) {
+            return json!({
+                "error": "forbidden: worker-tier principals cannot read agents:// \
+                          (agent-runtime.md §1 Phase 5 knowledge boundary)"
+            });
+        }
+        // Caller-scope enforcement (task-299): an unscoped (or `*`) read
+        // resolves against the caller's accessible workspaces — never the
+        // unfiltered cross-workspace store; an explicit workspace requires
+        // access to it.
+        let agents_result: Result<Vec<gyre_domain::Agent>, String> =
+            if workspace_id.is_empty() || workspace_id == "*" {
+                match caller_agent_workspaces(state, auth).await {
+                    Err(e) => Err(e),
+                    Ok(None) => state
+                        .agents
+                        .list()
+                        .await
+                        .map_err(|e| format!("failed to list agents: {e}")),
+                    Ok(Some(workspaces)) => {
+                        let mut all = Vec::new();
+                        for ws in &workspaces {
+                            match state.agents.list_by_workspace(ws).await {
+                                Ok(mut list) => all.append(&mut list),
+                                Err(e) => {
+                                    return json!({
+                                        "error": format!("failed to list agents: {e}")
+                                    })
+                                }
+                            }
+                        }
+                        Ok(all)
+                    }
+                }
+            } else {
+                if let Err(e) = caller_can_read_workspace(state, auth, workspace_id).await {
+                    return json!({"error": e});
+                }
+                state
+                    .agents
+                    .list_by_workspace(&Id::new(workspace_id))
+                    .await
+                    .map_err(|e| format!("failed to list agents: {e}"))
+            };
         match agents_result {
             Ok(list) => {
                 let active: Vec<Value> = list
@@ -3144,9 +4926,22 @@ async fn handle_resource_read(state: &AppState, auth: &AuthenticatedAgent, uri: 
                     }]
                 })
             }
-            Err(e) => json!({"error": format!("failed to list agents: {e}")}),
+            Err(e) => json!({"error": e}),
         }
     } else if let Some(repo_id) = uri.strip_prefix("queue://") {
+        // Phase-5 knowledge boundary (agent-runtime.md §1): a worker-tier
+        // principal must not learn the merge-queue state — mechanical gate.
+        if is_worker_tier(auth) {
+            return json!({
+                "error": "forbidden: worker-tier principals cannot read queue:// \
+                          (agent-runtime.md §1 Phase 5 knowledge boundary)"
+            });
+        }
+        // Caller-scope enforcement (task-299): load the repo, compare its
+        // workspace against the caller's scope, deny on mismatch.
+        if let Err(e) = caller_can_read_queue(state, auth, repo_id).await {
+            return json!({"error": e});
+        }
         match state.merge_queue.list_queue().await {
             Ok(entries) => {
                 let mut results = Vec::new();
@@ -3256,9 +5051,33 @@ async fn handle_resource_read(state: &AppState, auth: &AuthenticatedAgent, uri: 
             .clone()
             .unwrap_or_else(|| Id::new(auth.agent_id.clone()));
         let ws_id = Id::new(workspace_id);
+        // HSI §12 parity with REST: types the user disabled in preferences are
+        // excluded from the MCP inbox too.
+        let disabled: Vec<String> =
+            match state.user_notification_prefs.list_for_user(&user_id).await {
+                Ok(prefs) => prefs
+                    .into_iter()
+                    .filter(|p| !p.enabled)
+                    .map(|p| p.notification_type)
+                    .collect(),
+                Err(e) => {
+                    return json!({"error": format!("failed to load notification preferences: {e}")})
+                }
+            };
+        let disabled: Vec<&str> = disabled.iter().map(String::as_str).collect();
         match state
             .notifications
-            .list_for_user(&user_id, Some(&ws_id), min_pri, max_pri, None, 50, 0)
+            .list_for_user(
+                &user_id,
+                Some(&ws_id),
+                min_pri,
+                max_pri,
+                None,
+                None,
+                &disabled,
+                50,
+                0,
+            )
             .await
         {
             Ok(notifications) => {
@@ -3374,6 +5193,56 @@ async fn handle_resource_read(state: &AppState, auth: &AuthenticatedAgent, uri: 
                 json!({"error": "secrets:// resources resolve scope from the caller's agent identity — no agent record or scope claims found"})
             }
         }
+    } else if let Some(rest) = uri.strip_prefix("permissions://") {
+        // permissions://me | permissions://check?action={action}&resource={type}
+        // (abac-policy-engine.md §MCP Integration). The subject is always
+        // the caller: neither resource accepts a subject parameter, so an
+        // agent can only ever query its own permissions.
+        let (name, query) = match rest.split_once('?') {
+            Some((n, q)) => (n, q),
+            None => (rest, ""),
+        };
+        match name {
+            "me" => {
+                let result = resource_permissions_me(state, auth).await;
+                json!({
+                    "contents": [{
+                        "uri": uri,
+                        "mimeType": "application/json",
+                        "text": serde_json::to_string_pretty(&result).unwrap_or_default()
+                    }]
+                })
+            }
+            "check" => {
+                // Parse action= and resource= query params (plain tokens —
+                // same non-decoding parse the other parameterized
+                // resources use for their query strings).
+                let action = query
+                    .split('&')
+                    .find_map(|kv| kv.strip_prefix("action="))
+                    .unwrap_or("");
+                let resource_type = query
+                    .split('&')
+                    .find_map(|kv| kv.strip_prefix("resource="))
+                    .unwrap_or("");
+                if action.is_empty() || resource_type.is_empty() {
+                    return json!({"error": "permissions://check requires both query params: action={action}&resource={type}"});
+                }
+                let result = resource_permissions_check(state, auth, action, resource_type).await;
+                json!({
+                    "contents": [{
+                        "uri": uri,
+                        "mimeType": "application/json",
+                        "text": serde_json::to_string_pretty(&result).unwrap_or_default()
+                    }]
+                })
+            }
+            other => json!({
+                "error": format!(
+                    "unknown permissions:// resource '{other}' — expected permissions://me or permissions://check?action={{action}}&resource={{type}}"
+                )
+            }),
+        }
     } else {
         json!({"error": format!("unknown resource URI scheme: {uri}")})
     }
@@ -3399,14 +5268,26 @@ pub async fn mcp_handler(
                 },
                 "capabilities": {
                     "tools": {},
-                    "resources": {}
+                    "resources": {},
+                    "prompts": {}
                 }
             }),
         ),
         // Client sends this after init — no response body needed but we ack
         "notifications/initialized" => JsonRpcResponse::ok(id, json!(null)),
         "tools/list" => JsonRpcResponse::ok(id, tool_definitions()),
-        "resources/list" => JsonRpcResponse::ok(id, resource_definitions()),
+        "prompts/list" => JsonRpcResponse::ok(id, prompt_definitions()),
+        "prompts/get" => {
+            let params = req.params.unwrap_or(json!({}));
+            let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            if name.is_empty() {
+                JsonRpcResponse::err(id, INVALID_PARAMS, "missing required field: name")
+            } else {
+                let result = handle_prompt_get(&state, &auth, name).await;
+                JsonRpcResponse::ok(id, result)
+            }
+        }
+        "resources/list" => JsonRpcResponse::ok(id, resource_definitions(&auth)),
         "resources/read" => {
             let params = req.params.unwrap_or(json!({}));
             let uri = params.get("uri").and_then(|v| v.as_str()).unwrap_or("");
@@ -3444,6 +5325,7 @@ pub async fn mcp_handler(
                     | "gyre_agent_heartbeat"
                     | "gyre_agent_complete"
                     | "conversation_upload"
+                    | "gyre_message_send"
                     | "gyre_message_ack"
                     | "gyre_spawn_repo_orchestrator"
                     | "gyre_cross_repo_task"
@@ -3461,6 +5343,82 @@ pub async fn mcp_handler(
                     PERMISSION_DENIED,
                     "insufficient permissions: this tool requires Agent or higher role",
                 ));
+            }
+
+            // Preview agents (meta-spec reconciliation §5) run with all
+            // ceremony stripped: no task ledger, no MR, no merge queue, no
+            // provenance. The runner withholds these tools client-side, but
+            // allowedTools is advisory — the server must not execute
+            // task/MR/complete mutations for a preview agent. The branch push
+            // is the entire deliverable; the run ends when the process exits.
+            // gyre_message_send / gyre_message_ack are in the same class: a
+            // preview agent injecting Directed-tier messages into production
+            // inboxes (or acking around the exit hook's bulk-ack) leaves a
+            // durable footprint that outlives the throwaway run. The four
+            // orchestrator tools (gyre_spawn_worker,
+            // gyre_spawn_repo_orchestrator, gyre_cross_repo_task,
+            // gyre_decompose_spec) are in the same class too: they create tasks and spawn agents — ceremony a preview
+            // run must skip. They are currently unreachable for a preview
+            // caller only because preview JWTs carry no orchestrator claims
+            // (validate_tool_scope's token-shape check); the preview registry
+            // is the containment boundary, so they are denied here as
+            // defense-in-depth, not left to token shape.
+            if is_agent_jwt(&auth)
+                && matches!(
+                    tool_name,
+                    "gyre_create_task"
+                        | "gyre_update_task"
+                        | "gyre_create_mr"
+                        | "gyre_agent_complete"
+                        | "conversation_upload"
+                        | "gyre_message_send"
+                        | "gyre_message_ack"
+                        | "gyre_spawn_worker"
+                        | "gyre_spawn_repo_orchestrator"
+                        | "gyre_cross_repo_task"
+                        | "gyre_decompose_spec"
+                )
+                && crate::api::meta_specs::is_preview_agent(&state, &auth.agent_id).await
+            {
+                return Json(JsonRpcResponse::err(
+                    id,
+                    PERMISSION_DENIED,
+                    format!(
+                        "PERMISSION_DENIED: preview agent {auth_agent_id} may not call {tool_name} — preview runs skip task/MR/provenance ceremony",
+                        auth_agent_id = auth.agent_id
+                    ),
+                ));
+            }
+
+            // The liveness/telemetry tools stay available to a preview run's
+            // OWN agent (the preview prompt instructs self-heartbeat), but a
+            // preview agent may not target ANOTHER agent with them:
+            // heartbeating a real agent keeps it alive against stale-reaping,
+            // and record_activity injects telemetry attributed to the named
+            // agent. Self-targeting only — the scratch run may touch its own
+            // identity and nothing else.
+            if is_agent_jwt(&auth)
+                && matches!(tool_name, "gyre_agent_heartbeat" | "gyre_record_activity")
+                && get_str(&args, "agent_id")
+                    .map(|a| a != auth.agent_id)
+                    .unwrap_or(false)
+                && crate::api::meta_specs::is_preview_agent(&state, &auth.agent_id).await
+            {
+                return Json(JsonRpcResponse::err(
+                    id,
+                    PERMISSION_DENIED,
+                    format!(
+                        "PERMISSION_DENIED: preview agent {auth_agent_id} may not target another agent with {tool_name} — preview runs are scratch work scoped to their own agent",
+                        auth_agent_id = auth.agent_id
+                    ),
+                ));
+            }
+
+            // §1 Token Scoping: validate the caller's token scope on every
+            // tool call. Scoped callers (agent JWTs) may only act within the
+            // tenant/workspace/repo their token encodes.
+            if let Err(denial) = validate_tool_scope(&state, tool_name, &args, &auth).await {
+                return Json(JsonRpcResponse::err(id, PERMISSION_DENIED, denial));
             }
 
             // Repo-scope validation (TASK-216): an agent JWT is scoped to the
@@ -3514,16 +5472,17 @@ pub async fn mcp_handler(
             }
 
             let result = match tool_name {
-                "gyre_create_task" => handle_create_task(&state, &args).await,
-                "gyre_list_tasks" => handle_list_tasks(&state, &args).await,
+                "gyre_create_task" => handle_create_task(&state, &args, &auth).await,
+                "gyre_list_tasks" => handle_list_tasks(&state, &args, &auth).await,
                 "gyre_update_task" => handle_update_task(&state, &args).await,
                 "gyre_create_mr" => handle_create_mr(&state, &args).await,
-                "gyre_list_mrs" => handle_list_mrs(&state, &args).await,
+                "gyre_list_mrs" => handle_list_mrs(&state, &args, &auth).await,
                 "gyre_record_activity" => handle_record_activity(&state, &args, &auth).await,
                 "gyre_agent_heartbeat" => handle_agent_heartbeat(&state, &args).await,
                 "gyre_agent_complete" => handle_agent_complete(&state, &args).await,
                 "gyre_analytics_query" => handle_analytics_query(&state, &args).await,
-                "gyre_search" => handle_search(&state, &args).await,
+                "gyre_analytics_decide" => handle_analytics_decide(&state, &args, &auth).await,
+                "gyre_search" => handle_search(&state, &args, &auth).await,
                 "conversation_upload" => handle_conversation_upload(&state, &args, &auth).await,
                 "gyre_message_send" => handle_message_send(&state, &args, &auth).await,
                 "gyre_message_poll" => handle_message_poll(&state, &args, &auth).await,
@@ -3555,27 +5514,123 @@ pub async fn mcp_handler(
 }
 
 /// GET /mcp/sse — SSE stream for server→client notifications.
-/// Returns an open SSE connection; events are emitted as activity broadcasts arrive.
+///
+/// message-bus.md §MCP Integration: the stream subscribes to the message bus
+/// **filtered by the authenticated agent's workspace**, and maps `MessageKind`
+/// variants to AG-UI event types for protocol compatibility.
+///
+/// Workspace scope resolution (fail-closed, never fabricated):
+/// - for agent/system principals, the agent record is the authoritative ABAC
+///   boundary ("Workspace that governs this agent", M34 hierarchy
+///   enforcement) — when the caller's agent id resolves to a stored agent,
+///   that record's workspace governs;
+/// - callers without an agent record (user/API-key principals, ephemeral
+///   agent JWTs) fall back to the signature-verified `workspace_id` JWT
+///   claim mirrored onto the principal by the auth extractor;
+/// - callers with neither (e.g. the global token) have no workspace scope:
+///   Admin principals keep the legacy unscoped view (admin dashboards —
+///   the same bypass ws.rs Subscribe grants admins), everyone else sees
+///   Broadcast messages only.
+///
+/// Delivery filter:
+/// - `Destination::Workspace(ws)` — delivered only when `ws` matches the
+///   subscriber's resolved workspace (workspace ids are globally unique, so
+///   the match implies tenant containment);
+/// - `Destination::Broadcast` — delivered to all subscribers per the bus's
+///   broadcast semantics (message-bus.md §Delivery: "all connected clients");
+/// - `Destination::Agent(id)` — delivered only on the authenticated agent's
+///   own stream, and only for genuine agent principals: the match is gated
+///   on the agent-principal namespace exactly like the ws.rs bus filter —
+///   user principals (API key, Keycloak) carry a display name/username in
+///   `agent_id`, and the global token carries `agent_id: "system"` with
+///   the Admin role, so under an id collision neither may receive another
+///   principal's Directed messages (message-bus.md §Real-time Delivery:
+///   user identities and the global token never match agent-targeted
+///   messages); other agents' directed messages never appear either (they
+///   reach their target via the REST/MCP poll paths instead).
 pub async fn mcp_sse_handler(
     State(state): State<Arc<AppState>>,
-    _auth: AuthenticatedAgent,
+    auth: AuthenticatedAgent,
 ) -> impl IntoResponse {
-    let rx = state.message_broadcast_tx.subscribe();
-    let event_stream = stream::unfold(rx, |mut rx| async move {
-        loop {
-            match rx.recv().await {
-                Ok(msg) => {
-                    let data = serde_json::to_string(&msg).unwrap_or_default();
-                    // Map all bus messages to SSE "message" events.
-                    let sse_event = Event::default().event("message").data(data);
-                    return Some((Ok::<Event, std::convert::Infallible>(sse_event), rx));
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
+    // Only agent/system principals resolve a record: user principals
+    // (API key, Keycloak) carry a username in `agent_id`, which must never
+    // accidentally inherit a same-named agent record's workspace.
+    let scope = if auth.user_id.is_none() {
+        match state.agents.find_by_id(&Id::new(&auth.agent_id)).await {
+            Ok(Some(agent)) => Some(agent.workspace_id),
+            Ok(None) => auth.workspace_id.map(Id::new),
+            Err(e) => {
+                tracing::warn!(
+                    agent_id = %auth.agent_id,
+                    error = %e,
+                    "mcp/sse: agent record lookup failed; falling back to JWT workspace claim"
+                );
+                auth.workspace_id.map(Id::new)
             }
         }
-    });
+    } else {
+        auth.workspace_id.map(Id::new)
+    };
+    let unscoped_admin = scope.is_none() && auth.roles.contains(&UserRole::Admin);
+    // Principal-namespace guard for directed delivery, mirroring the ws.rs
+    // bus filter: user principals (user_id set) and the global token (Admin
+    // role, agent_id "system") never match `Destination::Agent(id)`, even
+    // when `auth.agent_id` collides with a real agent's id.
+    let agent_principal = auth.user_id.is_none() && !auth.roles.contains(&UserRole::Admin);
+    let agent_id = auth.agent_id.clone();
+    let rx = state.message_broadcast_tx.subscribe();
+    let event_stream = stream::unfold(
+        (rx, scope, agent_id, unscoped_admin, agent_principal),
+        |(mut rx, scope, agent_id, unscoped_admin, agent_principal)| async move {
+            loop {
+                match rx.recv().await {
+                    Ok(msg) => {
+                        let deliver = match &msg.to {
+                            Destination::Broadcast => true,
+                            Destination::Workspace(ws_id) => match &scope {
+                                Some(scope_ws) => scope_ws == ws_id,
+                                None => unscoped_admin,
+                            },
+                            Destination::Agent(aid) => agent_principal && aid.as_str() == agent_id,
+                        };
+                        if !deliver {
+                            continue;
+                        }
+                        let data = serde_json::to_string(&msg).unwrap_or_default();
+                        // Map MessageKind → AG-UI SSE event name per
+                        // message-bus.md §MCP Integration; kinds outside the
+                        // spec table keep the generic "message" event.
+                        let sse_event = Event::default()
+                            .event(agui_event_name(&msg.kind))
+                            .data(data);
+                        return Some((
+                            Ok::<Event, std::convert::Infallible>(sse_event),
+                            (rx, scope, agent_id, unscoped_admin, agent_principal),
+                        ));
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
+                }
+            }
+        },
+    );
     Sse::new(event_stream).keep_alive(KeepAlive::default())
+}
+
+/// AG-UI SSE event name for a bus `MessageKind` — the spec table in
+/// message-bus.md §MCP Integration. Kinds outside the table (including
+/// `Custom`) keep the generic `message` event name.
+fn agui_event_name(kind: &MessageKind) -> &'static str {
+    match kind {
+        MessageKind::ToolCallStart => "TOOL_CALL_START",
+        MessageKind::ToolCallEnd => "TOOL_CALL_END",
+        MessageKind::RunStarted => "RUN_STARTED",
+        MessageKind::RunFinished => "RUN_FINISHED",
+        MessageKind::TextMessageContent => "TEXT_MESSAGE_CONTENT",
+        MessageKind::StateChanged => "STATE_CHANGED",
+        MessageKind::AgentError => "ERROR",
+        _ => "message",
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -3670,6 +5725,481 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mcp_search_is_access_scoped_to_the_agent_token() {
+        // §Access Scoping: gyre_search derives tenant/workspace/repo scope
+        // from the authenticated agent's token context, never from client
+        // args. Seeded documents span two workspaces and two repos; the
+        // result text (and its "Found N result(s)" count) must exclude
+        // everything outside the caller's scope, and a client-supplied
+        // workspace_id must never widen access.
+        let state = test_state();
+        // Real workspace rows: the workspace_id arg is validated against
+        // the caller's tenant before the search runs (task-146 review round
+        // 3, same rule as the HTTP handler), so ws-a/ws-b must exist as
+        // entities — the documents' workspace labels alone no longer
+        // suffice. Seeding them keeps this test's original meaning: a
+        // client-supplied workspace_id that is valid but outside the
+        // agent's token scope narrows to zero results, never widens.
+        state
+            .workspaces
+            .create(&gyre_domain::Workspace::new(
+                gyre_common::Id::new("ws-a"),
+                gyre_common::Id::new("default"),
+                "Workspace A",
+                "ws-a",
+                0,
+            ))
+            .await
+            .unwrap();
+        state
+            .workspaces
+            .create(&gyre_domain::Workspace::new(
+                gyre_common::Id::new("ws-b"),
+                gyre_common::Id::new("default"),
+                "Workspace B",
+                "ws-b",
+                0,
+            ))
+            .await
+            .unwrap();
+        let mk =
+            |entity_id: &str, ws: &str, repo: Option<&str>| gyre_ports::search::SearchDocument {
+                entity_type: "task".to_string(),
+                entity_id: entity_id.to_string(),
+                title: "needle".to_string(),
+                body: format!("needle {entity_id}"),
+                workspace_id: Some(ws.to_string()),
+                repo_id: repo.map(|r| r.to_string()),
+                tenant_id: Some("default".to_string()),
+                facets: std::collections::HashMap::new(),
+                updated_at: None,
+            };
+        state
+            .search
+            .index(mk("a-repo1", "ws-a", Some("repo-1")))
+            .await
+            .unwrap();
+        state
+            .search
+            .index(mk("a-repo2", "ws-a", Some("repo-2")))
+            .await
+            .unwrap();
+        state
+            .search
+            .index(mk("b-doc", "ws-b", Some("repo-1")))
+            .await
+            .unwrap();
+
+        let app = crate::build_router(Arc::clone(&state));
+        let search_call = |args: serde_json::Value| {
+            json!({
+                "jsonrpc": "2.0",
+                "id": 7,
+                "method": "tools/call",
+                "params": { "name": "gyre_search", "arguments": args }
+            })
+        };
+
+        // Admin (global token): unscoped within the tenant — all three docs.
+        let (_status, json) = mcp_post(app.clone(), search_call(json!({ "q": "needle" }))).await;
+        let text = json["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("Found 3 result(s)"),
+            "admin count wrong: {text}"
+        );
+
+        // Repo orchestrator scoped to (ws-a, repo-1): only its repo's doc.
+        let repo_jwt = state
+            .agent_signing_key
+            .mint_orchestrator(
+                "mcp-repo-agent",
+                "system",
+                &state.base_url,
+                3600,
+                "default",
+                "ws-a",
+                Some("repo-1"),
+                Some("repo-1"),
+                "repo_orchestrator",
+                "repo-orchestrator",
+            )
+            .unwrap();
+        state
+            .kv_store
+            .kv_set("agent_tokens", "mcp-repo-agent", repo_jwt.clone())
+            .await
+            .unwrap();
+        let (_status, json) = mcp_post_with_token(
+            app.clone(),
+            search_call(json!({ "q": "needle" })),
+            &repo_jwt,
+        )
+        .await;
+        let text = json["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("Found 1 result(s)"),
+            "repo scope wrong: {text}"
+        );
+        assert!(text.contains("a-repo1"), "repo doc missing: {text}");
+        assert!(!text.contains("a-repo2"), "other repo leaked: {text}");
+        assert!(!text.contains("b-doc"), "other workspace leaked: {text}");
+
+        // Client-supplied workspace_id cannot widen the agent's scope: under
+        // §1 Token Scoping the mismatch is rejected up front with a clear
+        // PERMISSION_DENIED error (validate_tool_scope), never silently
+        // honored.
+        let (_status, json) = mcp_post_with_token(
+            app.clone(),
+            search_call(json!({ "q": "needle", "workspace_id": "ws-b" })),
+            &repo_jwt,
+        )
+        .await;
+        let text = serde_json::to_string(&json).unwrap_or_default();
+        assert!(
+            json["error"].is_object() && text.contains("PERMISSION_DENIED"),
+            "client workspace_id must be rejected for a scoped agent, got: {text}"
+        );
+
+        // Workspace orchestrator for ws-a: all repos in its workspace,
+        // nothing outside it.
+        let ws_jwt = state
+            .agent_signing_key
+            .mint_orchestrator(
+                "mcp-ws-agent",
+                "system",
+                &state.base_url,
+                3600,
+                "default",
+                "ws-a",
+                None,
+                None,
+                "workspace_orchestrator",
+                "workspace-orchestrator",
+            )
+            .unwrap();
+        state
+            .kv_store
+            .kv_set("agent_tokens", "mcp-ws-agent", ws_jwt.clone())
+            .await
+            .unwrap();
+        let (_status, json) =
+            mcp_post_with_token(app.clone(), search_call(json!({ "q": "needle" })), &ws_jwt).await;
+        let text = json["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("Found 2 result(s)"),
+            "workspace scope wrong: {text}"
+        );
+        assert!(!text.contains("b-doc"), "other workspace leaked: {text}");
+    }
+
+    // ── gyre_search records the search.query analytics event ──────────────
+    // analytics.md §Auto-Emitted Events: the trigger is "Full-text search
+    // executed" — transport-independent. The MCP tool is the
+    // autonomous-agent search path; it must record search.query exactly
+    // like the HTTP endpoint, with caller-bound identity and the same
+    // workspace-scope validation rule. Fails on the old behavior (the MCP
+    // path recorded no event — task-146 review round 3, finding F1).
+    #[tokio::test]
+    async fn gyre_search_records_search_query_analytics_event() {
+        let state = test_state();
+        // Own-tenant and cross-tenant workspaces for the scope-validation
+        // half of the test (same setup as the HTTP handler's regression).
+        state
+            .workspaces
+            .create(&gyre_domain::Workspace::new(
+                gyre_common::Id::new("ws-own"),
+                gyre_common::Id::new("default"),
+                "Own",
+                "own",
+                1000,
+            ))
+            .await
+            .unwrap();
+        state
+            .workspaces
+            .create(&gyre_domain::Workspace::new(
+                gyre_common::Id::new("ws-victim"),
+                gyre_common::Id::new("tenant-other"),
+                "Victim",
+                "victim",
+                1000,
+            ))
+            .await
+            .unwrap();
+
+        let app = crate::build_router(state.clone());
+        // Index a searchable task through the public API so the search port
+        // has a real document (create_task indexes for search).
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/tasks")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({
+                            "title": "Payment reconciliation engine",
+                            "task_type": "implementation",
+                            // The task's search document resolves its tenant
+                            // from the task's workspace row
+                            // (search_scope::index_doc) — a task in a
+                            // workspace that does not exist is tenantless
+                            // and invisible to every tenant-scoped query
+                            // (fail-closed). ws-own exists in the caller's
+                            // tenant, mirroring production where every task
+                            // sits in a real workspace.
+                            "workspace_id": "ws-own"
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        // Search through the MCP tool (the autonomous-agent path).
+        let (status, json) = mcp_post(
+            app.clone(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 61,
+                "method": "tools/call",
+                "params": {
+                    "name": "gyre_search",
+                    "arguments": { "q": "reconciliation" }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            !json["result"]["isError"].as_bool().unwrap_or(false),
+            "search must succeed: {json}"
+        );
+        let text = json["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("Found 1 result(s)"), "result wrong: {text}");
+
+        let events = state
+            .analytics
+            .query(Some("search.query"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            events.len(),
+            1,
+            "gyre_search must record the search.query analytics event"
+        );
+        let ev = &events[0];
+        // Identity is bound to the verified caller (global test token →
+        // the system principal), not a caller-forged value.
+        assert_eq!(ev.agent_id.as_deref(), Some("system"));
+        assert_eq!(ev.event_name, "search.query");
+        assert_eq!(
+            ev.properties["query_length"], 14,
+            "\"reconciliation\" has 14 chars"
+        );
+        assert_eq!(
+            ev.properties["entity_types"],
+            serde_json::json!(["task"]),
+            "entity_types lists the distinct result types"
+        );
+        assert_eq!(ev.properties["result_count"], 1);
+        assert!(
+            ev.properties["duration_ms"].as_u64().is_some(),
+            "duration_ms must be present"
+        );
+
+        // Own-tenant workspace attribution: accepted and recorded.
+        let (_status, json) = mcp_post(
+            app.clone(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 62,
+                "method": "tools/call",
+                "params": {
+                    "name": "gyre_search",
+                    "arguments": { "q": "reconciliation", "workspace_id": "ws-own" }
+                }
+            }),
+        )
+        .await;
+        assert!(
+            !json["result"]["isError"].as_bool().unwrap_or(false),
+            "own-tenant workspace filter must be accepted: {json}"
+        );
+        let events = state
+            .analytics
+            .query(Some("search.query"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[1].workspace_id.as_deref(), Some("ws-own"));
+
+        // Cross-tenant workspace: rejected — no search, no event, no
+        // forged attribution in the victim scope's filtered results.
+        let (_status, json) = mcp_post(
+            app.clone(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 63,
+                "method": "tools/call",
+                "params": {
+                    "name": "gyre_search",
+                    "arguments": { "q": "reconciliation", "workspace_id": "ws-victim" }
+                }
+            }),
+        )
+        .await;
+        assert!(
+            json["result"]["isError"].as_bool().unwrap_or(false),
+            "cross-tenant workspace_id must be rejected: {json}"
+        );
+        let events = state
+            .analytics
+            .query(Some("search.query"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 2, "rejected search records no event");
+        let events = state
+            .analytics
+            .query_filtered(&gyre_ports::AnalyticsQueryFilter {
+                event_name: Some("search.query".into()),
+                workspace_id: Some("ws-victim".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            events.len(),
+            0,
+            "forged search event must not appear in the victim workspace's filtered results"
+        );
+
+        // Unknown workspace: rejected too, not a silent attribution.
+        let (_status, json) = mcp_post(
+            app,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 64,
+                "method": "tools/call",
+                "params": {
+                    "name": "gyre_search",
+                    "arguments": { "q": "reconciliation", "workspace_id": "ws-nope" }
+                }
+            }),
+        )
+        .await;
+        assert!(
+            json["result"]["isError"].as_bool().unwrap_or(false),
+            "unknown workspace_id must be rejected: {json}"
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_agent_complete_terminates_open_session_with_dirty_state() {
+        // Regression (task-258 review): the MCP gyre_agent_complete path
+        // must terminate the agent's open session exactly like the REST
+        // POST /agents/:id/complete surface — a real `git status
+        // --porcelain` in the agent's worktree recording the dirty flag and
+        // uncommitted paths, plus ended_at. Before the fix the session
+        // stayed open (ended_at/dirty null) and a later Ralph-loop respawn
+        // stacked a second session on top of the never-ended first one.
+        let state = test_state();
+        let dir = tempfile::tempdir().unwrap();
+        let main = dir.path().join("main");
+        std::fs::create_dir_all(&main).unwrap();
+        let git = |args: &[&str]| {
+            let ok = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&main)
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@t")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@t")
+                .status()
+                .unwrap()
+                .success();
+            assert!(ok, "git {args:?} failed");
+        };
+        git(&["init", "-b", "main"]);
+        std::fs::write(main.join("src"), "fn main() {}\n").unwrap();
+        git(&["add", "src"]);
+        git(&["commit", "-m", "init"]);
+        let wt_path = dir.path().join("wt");
+        git(&[
+            "worktree",
+            "add",
+            "-b",
+            "feat/spawn",
+            wt_path.to_str().unwrap(),
+        ]);
+
+        let mut agent = gyre_domain::Agent::new(
+            gyre_common::Id::new("agent-mcp-complete"),
+            "mcp-complete",
+            1000,
+        );
+        agent
+            .transition_status(gyre_domain::AgentStatus::Active)
+            .unwrap();
+        state.agents.create(&agent).await.unwrap();
+        let repo = gyre_domain::Repository::new(
+            gyre_common::Id::new("repo-mcp-complete"),
+            gyre_common::Id::new("ws-1"),
+            "r-mcp-complete".to_string(),
+            main.to_str().unwrap().to_string(),
+            1000,
+        );
+        state.repos.create(&repo).await.unwrap();
+        let wt = gyre_domain::AgentWorktree::new(
+            gyre_common::Id::new("wt-mcp-complete"),
+            agent.id.clone(),
+            repo.id.clone(),
+            None,
+            "feat/spawn",
+            wt_path.to_str().unwrap().to_string(),
+            1000,
+        );
+        state.worktrees.create(&wt).await.unwrap();
+        crate::agent_sessions::start_session(&state, &agent.id, &repo.id, "feat/spawn").await;
+
+        // Uncommitted modification present in the worktree at completion.
+        std::fs::write(wt_path.join("src"), "fn main() { changed }\n").unwrap();
+
+        let result =
+            handle_agent_complete(&state, &json!({ "agent_id": "agent-mcp-complete" })).await;
+        assert_eq!(result["isError"], false, "tool must succeed, got: {result}");
+
+        let sessions = state.agent_sessions.find_by_agent(&agent.id).await.unwrap();
+        assert_eq!(sessions.len(), 1);
+        let s = &sessions[0];
+        assert!(s.ended_at.is_some(), "MCP completion must stamp ended_at");
+        assert_eq!(
+            s.dirty,
+            Some(true),
+            "uncommitted edit must record dirty=true, got dirty={:?}",
+            s.dirty
+        );
+        assert!(
+            s.uncommitted_paths.contains(&"src".to_string()),
+            "modified file must be listed, got {:?}",
+            s.uncommitted_paths
+        );
+        // The ended session must no longer resolve as open: a subsequent
+        // respawn opens a fresh session instead of stacking on this one.
+        assert!(state
+            .agent_sessions
+            .find_open_by_agent(&agent.id)
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
     async fn mcp_create_task() {
         let (status, json) = mcp_post(
             app(),
@@ -3693,6 +6223,106 @@ mod tests {
             .unwrap()
             .contains("Created task"));
         assert!(!json["result"]["isError"].as_bool().unwrap());
+    }
+
+    #[tokio::test]
+    async fn mcp_search_query_language() {
+        // §Query Language through the MCP tool: quoted phrases, facet
+        // filters, and facet-over-arg precedence (task-154).
+        use std::collections::HashMap;
+        let state = test_state();
+        let mut in_progress = HashMap::new();
+        in_progress.insert("status".to_string(), "in_progress".to_string());
+        state
+            .search
+            .index(gyre_ports::search::SearchDocument {
+                entity_type: "task".to_string(),
+                entity_id: "t-1".to_string(),
+                title: "Merge queue rules".to_string(),
+                body: "the merge queue ordering rules".to_string(),
+                workspace_id: None,
+                repo_id: None,
+                // Caller is the global test token (Admin, tenant "default") —
+                // §Access Scoping makes the tenant boundary fail-closed, so
+                // the docs must carry the caller's tenant to be visible.
+                tenant_id: Some("default".to_string()),
+                facets: in_progress,
+                updated_at: None,
+            })
+            .await
+            .unwrap();
+        let mut done = HashMap::new();
+        done.insert("status".to_string(), "done".to_string());
+        state
+            .search
+            .index(gyre_ports::search::SearchDocument {
+                entity_type: "task".to_string(),
+                entity_id: "t-2".to_string(),
+                title: "Merge separately".to_string(),
+                body: "merge the queue then ordering".to_string(),
+                workspace_id: None,
+                repo_id: None,
+                tenant_id: Some("default".to_string()),
+                facets: done,
+                updated_at: None,
+            })
+            .await
+            .unwrap();
+
+        let app = crate::build_router(state);
+
+        // Quoted phrase + term: only the adjacent-phrase doc.
+        let (status, json) = mcp_post(
+            app.clone(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 21,
+                "method": "tools/call",
+                "params": {
+                    "name": "gyre_search",
+                    "arguments": { "q": "\"merge queue\" ordering" }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let text = json["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("Merge queue rules"),
+            "phrase match missing: {text}"
+        );
+        assert!(
+            !text.contains("Merge separately"),
+            "non-phrase match leaked: {text}"
+        );
+
+        // Facet filter narrows; a type: facet overrides the entity_type arg.
+        let (status, json) = mcp_post(
+            app,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 22,
+                "method": "tools/call",
+                "params": {
+                    "name": "gyre_search",
+                    "arguments": {
+                        "q": "ordering type:task status:done",
+                        "entity_type": "mr"
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let text = json["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("Merge separately"),
+            "facet-filtered match missing: {text}"
+        );
+        assert!(
+            !text.contains("Merge queue rules"),
+            "facet excluded doc leaked: {text}"
+        );
     }
 
     #[tokio::test]
@@ -3735,6 +6365,545 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         assert!(!json["result"]["isError"].as_bool().unwrap());
+    }
+
+    // ── task-253: GET /mcp/sse workspace filtering + AG-UI event mapping ──
+    // (message-bus.md §MCP Integration)
+
+    use gyre_common::message::{Destination, Message, MessageKind, MessageOrigin};
+
+    /// Mint a workspace-orchestrator JWT (hierarchy claims tenant/workspace)
+    /// and register it in the agent_tokens KV namespace so the auth
+    /// extractor accepts it.
+    fn mint_ws_orchestrator_jwt(
+        state: &crate::AppState,
+        agent_id: &str,
+        tenant: &str,
+        ws: &str,
+    ) -> String {
+        state
+            .agent_signing_key
+            .mint_orchestrator(
+                agent_id,
+                "system",
+                &state.base_url,
+                state.agent_jwt_ttl_secs,
+                tenant,
+                ws,
+                None,
+                None,
+                "workspace_orchestrator",
+                "workspace-orchestrator",
+            )
+            .unwrap()
+    }
+
+    async fn register_agent_token(state: &crate::AppState, agent_id: &str, token: &str) {
+        state
+            .kv_store
+            .kv_set("agent_tokens", agent_id, token.to_string())
+            .await
+            .unwrap();
+    }
+
+    fn bus_message(kind: MessageKind, to: Destination, ws: Option<Id>) -> Message {
+        Message {
+            id: Id::new(uuid::Uuid::new_v4().to_string()),
+            tenant_id: Id::new("default"),
+            from: MessageOrigin::Server,
+            workspace_id: ws,
+            to,
+            kind,
+            payload: Some(json!({"probe": true})),
+            created_at: 1_700_000_000_000,
+            signature: None,
+            key_id: None,
+            acknowledged: false,
+        }
+    }
+
+    /// Open a GET /mcp/sse stream authenticated with `token`. The handler
+    /// subscribes to the bus broadcast channel before returning the
+    /// response, so messages sent after this awaits are buffered for the
+    /// stream.
+    async fn open_sse(app: Router, token: &str) -> axum::body::BodyDataStream {
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/mcp/sse")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        resp.into_body().into_data_stream()
+    }
+
+    /// Collect SSE frames until `quiet_ms` pass with no frame (nothing more
+    /// is coming — the keep-alive interval is far longer than the window).
+    async fn drain_sse(stream: &mut axum::body::BodyDataStream, quiet_ms: u64) -> String {
+        use futures_util::StreamExt as _;
+        let mut received = Vec::<u8>::new();
+        loop {
+            let next =
+                tokio::time::timeout(std::time::Duration::from_millis(quiet_ms), stream.next())
+                    .await;
+            match next {
+                Err(_) => break,
+                Ok(Some(Ok(chunk))) => received.extend_from_slice(&chunk),
+                Ok(Some(Err(_))) | Ok(None) => break,
+            }
+        }
+        String::from_utf8_lossy(&received).to_string()
+    }
+
+    #[tokio::test]
+    async fn mcp_sse_workspace_isolation() {
+        let state = test_state();
+        let app = crate::build_router(state.clone());
+        // Two agents in different workspaces of different tenants.
+        let token_a = mint_ws_orchestrator_jwt(&state, "sse-agent-a", "t1", "ws-a");
+        register_agent_token(&state, "sse-agent-a", &token_a).await;
+        let token_b = mint_ws_orchestrator_jwt(&state, "sse-agent-b", "t2", "ws-b");
+        register_agent_token(&state, "sse-agent-b", &token_b).await;
+
+        let mut stream_a = open_sse(app.clone(), &token_a).await;
+        let mut stream_b = open_sse(app, &token_b).await;
+
+        // Workspace-scoped ToolCallStart telemetry for workspace A only.
+        state
+            .message_broadcast_tx
+            .send(bus_message(
+                MessageKind::ToolCallStart,
+                Destination::Workspace(Id::new("ws-a")),
+                Some(Id::new("ws-a")),
+            ))
+            .unwrap();
+
+        let text_a = drain_sse(&mut stream_a, 300).await;
+        assert!(
+            text_a.contains("event: TOOL_CALL_START"),
+            "workspace A subscriber must receive its workspace's message; got: {text_a}"
+        );
+
+        let text_b = drain_sse(&mut stream_b, 300).await;
+        assert!(
+            !text_b.contains("TOOL_CALL_START"),
+            "workspace B subscriber must not receive workspace A's (or tenant t1's) \
+             message; got: {text_b}"
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_sse_agui_event_mapping() {
+        let state = test_state();
+        let app = crate::build_router(state.clone());
+        let token = mint_ws_orchestrator_jwt(&state, "sse-map-agent", "t1", "ws-map");
+        register_agent_token(&state, "sse-map-agent", &token).await;
+        let mut stream = open_sse(app, &token).await;
+
+        // The seven spec-table kinds, plus one kind outside the table that
+        // must keep the generic default event name.
+        let cases = [
+            (MessageKind::ToolCallStart, "TOOL_CALL_START"),
+            (MessageKind::ToolCallEnd, "TOOL_CALL_END"),
+            (MessageKind::RunStarted, "RUN_STARTED"),
+            (MessageKind::RunFinished, "RUN_FINISHED"),
+            (MessageKind::TextMessageContent, "TEXT_MESSAGE_CONTENT"),
+            (MessageKind::StateChanged, "STATE_CHANGED"),
+            (MessageKind::AgentError, "ERROR"),
+            (MessageKind::TaskCreated, "message"),
+        ];
+        for (kind, _) in &cases {
+            state
+                .message_broadcast_tx
+                .send(bus_message(
+                    kind.clone(),
+                    Destination::Workspace(Id::new("ws-map")),
+                    Some(Id::new("ws-map")),
+                ))
+                .unwrap();
+        }
+
+        let text = drain_sse(&mut stream, 300).await;
+        for (kind, event_name) in &cases {
+            assert!(
+                text.contains(&format!("event: {event_name}")),
+                "MessageKind {} must map to SSE event {event_name}; got: {text}",
+                kind.as_str()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn mcp_sse_directed_delivery() {
+        let state = test_state();
+        let app = crate::build_router(state.clone());
+        let token = mint_ws_orchestrator_jwt(&state, "sse-directed-agent", "t1", "ws-d");
+        register_agent_token(&state, "sse-directed-agent", &token).await;
+        let mut stream = open_sse(app, &token).await;
+
+        // Directed message to the authenticated agent: delivered (with the
+        // default event name — TaskAssignment is outside the spec table).
+        state
+            .message_broadcast_tx
+            .send(bus_message(
+                MessageKind::TaskAssignment,
+                Destination::Agent(Id::new("sse-directed-agent")),
+                Some(Id::new("ws-d")),
+            ))
+            .unwrap();
+        // Directed message to a different agent: never delivered here.
+        state
+            .message_broadcast_tx
+            .send(bus_message(
+                MessageKind::TaskAssignment,
+                Destination::Agent(Id::new("sse-other-agent")),
+                Some(Id::new("ws-d")),
+            ))
+            .unwrap();
+
+        let text = drain_sse(&mut stream, 300).await;
+        assert!(
+            text.contains("sse-directed-agent") && text.contains("event: message"),
+            "directed message to the authenticated agent must be delivered; got: {text}"
+        );
+        assert!(
+            !text.contains("sse-other-agent"),
+            "directed message to another agent must not be delivered; got: {text}"
+        );
+    }
+
+    /// Directed-tier bus message to `aid` carrying a distinctive payload
+    /// marker, so a stream assertion can tell deliveries apart.
+    fn directed_message(aid: &str, marker: &str) -> Message {
+        Message {
+            id: Id::new(uuid::Uuid::new_v4().to_string()),
+            tenant_id: Id::new("default"),
+            from: MessageOrigin::Server,
+            workspace_id: Some(Id::new("ws-c")),
+            to: Destination::Agent(Id::new(aid)),
+            kind: MessageKind::TaskAssignment,
+            payload: Some(json!({"probe": marker})),
+            created_at: 1_700_000_000_000,
+            signature: None,
+            key_id: None,
+            acknowledged: false,
+        }
+    }
+
+    /// Review repair (principal-namespace guard): `Destination::Agent(id)`
+    /// must never match a non-agent principal whose `auth.agent_id`
+    /// collides with a real agent's id — an API-key user whose display_name
+    /// equals an agent's id, and the global token (`agent_id: "system"`,
+    /// Admin role) versus an agent literally named "system". Mirrors the
+    /// ws.rs bus filter (user_id set / Admin role never match).
+    #[tokio::test]
+    async fn mcp_sse_directed_delivery_rejects_principal_namespace_collisions() {
+        let state = test_state();
+        // A real agent whose id collides with a user principal's display
+        // name — the exact confusion class the scope-resolution arm already
+        // guards against for workspaces.
+        let mut agent =
+            gyre_domain::Agent::new(Id::new("sse-collide-agent"), "sse-collide-agent", 1);
+        agent.workspace_id = Id::new("ws-c");
+        state.agents.create(&agent).await.unwrap();
+
+        // API-key user principal whose display_name equals that agent's id.
+        let mut user = gyre_domain::User::new(
+            Id::new("u-collide"),
+            "ext-collide",
+            "sse-collide-agent",
+            1000,
+        );
+        user.tenant_id = Some(Id::new("t1"));
+        state.users.create(&user).await.unwrap();
+        let raw_key = "gyre_sse_collision_key";
+        state
+            .api_keys
+            .create(
+                &crate::auth::hash_api_key(raw_key),
+                &user.id,
+                "sse-collision",
+            )
+            .await
+            .unwrap();
+
+        let app = crate::build_router(state.clone());
+        let mut user_stream = open_sse(app.clone(), raw_key).await;
+        // Global token → system principal (Admin, agent_id "system").
+        let mut admin_stream = open_sse(app, "test-token").await;
+
+        // Directed message to the agent whose id collides with the user's
+        // display name: must NOT land on the user's stream.
+        state
+            .message_broadcast_tx
+            .send(directed_message("sse-collide-agent", "user-collision"))
+            .unwrap();
+        // Directed message to an agent literally named "system": must NOT
+        // land on the global-token admin stream.
+        state
+            .message_broadcast_tx
+            .send(directed_message("system", "admin-collision"))
+            .unwrap();
+
+        let text_user = drain_sse(&mut user_stream, 300).await;
+        assert!(
+            !text_user.contains("user-collision"),
+            "directed message to an agent must not reach an API-key user whose \
+             display_name collides with that agent's id; got: {text_user}"
+        );
+        let text_admin = drain_sse(&mut admin_stream, 300).await;
+        assert!(
+            !text_admin.contains("admin-collision"),
+            "directed message to an agent named 'system' must not reach the \
+             global-token admin stream; got: {text_admin}"
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_sse_admin_connection_still_receives_notifications() {
+        let state = test_state();
+        let app = crate::build_router(state.clone());
+        // Global token → system principal (Admin, no workspace scope).
+        let mut stream = open_sse(app, "test-token").await;
+
+        // Broadcast server→client notification (DataSeeded).
+        state
+            .message_broadcast_tx
+            .send(bus_message(
+                MessageKind::DataSeeded,
+                Destination::Broadcast,
+                None,
+            ))
+            .unwrap();
+
+        let text = drain_sse(&mut stream, 300).await;
+        assert!(
+            text.contains("event: message") && text.contains("data_seeded"),
+            "broadcast server→client notifications must still arrive on the \
+             admin connection; got: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_sse_record_activity_telemetry_reaches_workspace() {
+        let state = test_state();
+        // Agent record for the record_activity caller — the record's
+        // workspace governs both the tool's telemetry destination and the
+        // subscriber filter.
+        let mut agent = gyre_domain::Agent::new(Id::new("sse-ra-worker"), "sse-ra-worker", 1);
+        agent.workspace_id = Id::new("ws-ra");
+        state.agents.create(&agent).await.unwrap();
+
+        // Worker JWT (repo-scoped — the tier gyre_record_activity requires).
+        let worker_token = state
+            .agent_signing_key
+            .mint(
+                "sse-ra-worker",
+                "sse-ra-worker",
+                "system",
+                &state.base_url,
+                state.agent_jwt_ttl_secs,
+                "t1",
+                "ws-ra",
+                "repo-ra",
+                "gyre",
+            )
+            .unwrap();
+        register_agent_token(&state, "sse-ra-worker", &worker_token).await;
+
+        // Subscriber: another agent in the same workspace.
+        let sub_token = mint_ws_orchestrator_jwt(&state, "sse-ra-sub", "t1", "ws-ra");
+        register_agent_token(&state, "sse-ra-sub", &sub_token).await;
+
+        let app = crate::build_router(state.clone());
+        let mut stream = open_sse(app.clone(), &sub_token).await;
+
+        let (status, json) = mcp_post_with_token(
+            app,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {
+                    "name": "gyre_record_activity",
+                    "arguments": {
+                        "agent_id": "sse-ra-worker",
+                        "event_type": "RUN_STARTED",
+                        "description": "Agent started a run"
+                    }
+                }
+            }),
+            &worker_token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(!json["result"]["isError"].as_bool().unwrap(), "{json}");
+
+        let text = drain_sse(&mut stream, 300).await;
+        assert!(
+            text.contains("event: RUN_STARTED"),
+            "record_activity telemetry must surface on same-workspace clients' \
+             streams with the mapped AG-UI event name; got: {text}"
+        );
+        assert!(
+            text.contains("sse-ra-worker"),
+            "the telemetry envelope must identify the reporting agent; got: {text}"
+        );
+    }
+
+    // ── task-119: MCP prompts (agent-runtime.md §5 / platform-model.md §4) ──
+
+    #[tokio::test]
+    async fn mcp_prompts_list_returns_four_system_prompts() {
+        let (status, json) = mcp_post(
+            app(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 71,
+                "method": "prompts/list"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let prompts = json["result"]["prompts"].as_array().unwrap();
+        let names: Vec<&str> = prompts
+            .iter()
+            .map(|p| p["name"].as_str().unwrap())
+            .collect();
+        for expected in [
+            "system://persona",
+            "system://protocol",
+            "system://context",
+            "system://constraints",
+        ] {
+            assert!(
+                names.contains(&expected),
+                "prompts/list must advertise {expected}, got: {names:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn mcp_initialize_advertises_prompts_capability() {
+        let (_status, json) = mcp_post(
+            app(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 72,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2024-11-05",
+                    "clientInfo": { "name": "t", "version": "0" },
+                    "capabilities": {}
+                }
+            }),
+        )
+        .await;
+        assert!(json["result"]["capabilities"]["prompts"].is_object());
+    }
+
+    #[tokio::test]
+    async fn mcp_prompts_get_protocol_delivers_ralph_loop_rules() {
+        let (status, json) = mcp_post(
+            app(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 73,
+                "method": "prompts/get",
+                "params": { "name": "system://protocol" }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let text = json["result"]["messages"][0]["content"]["text"]
+            .as_str()
+            .unwrap();
+        assert!(text.contains("Ralph loop rules"), "protocol prompt: {text}");
+        assert!(
+            text.contains("heartbeat"),
+            "protocol must cover heartbeat: {text}"
+        );
+        assert!(
+            text.contains("gyre_agent_complete"),
+            "protocol must cover completion: {text}"
+        );
+        assert!(
+            text.contains("escalate"),
+            "protocol must cover escalation: {text}"
+        );
+        // platform-model.md §8 protocol norms: MCP tool usage patterns and
+        // the handoff protocol are part of the injected norms.
+        assert!(
+            text.contains("## MCP tools"),
+            "protocol must carry the MCP tool catalog: {text}"
+        );
+        assert!(
+            text.contains("gyre_message_poll"),
+            "tool catalog must name real tools with usage patterns: {text}"
+        );
+        assert!(
+            text.contains("## Handoff protocol"),
+            "protocol must carry the handoff protocol: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_prompts_get_persona_without_record_is_truthful() {
+        let (status, json) = mcp_post(
+            app(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 74,
+                "method": "prompts/get",
+                "params": { "name": "system://persona" }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let text = json["result"]["messages"][0]["content"]["text"]
+            .as_str()
+            .unwrap();
+        assert!(
+            text.contains("No meta-spec prompt set"),
+            "an agent with no assembled set must get a truthful answer, got: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_prompts_get_unknown_prompt_errors() {
+        let (status, json) = mcp_post(
+            app(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 75,
+                "method": "prompts/get",
+                "params": { "name": "system://nonexistent" }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(json["result"]["error"].is_string());
+    }
+
+    #[tokio::test]
+    async fn mcp_prompts_get_missing_name_is_invalid_params() {
+        let (status, json) = mcp_post(
+            app(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 76,
+                "method": "prompts/get",
+                "params": {}
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["error"]["code"], INVALID_PARAMS);
     }
 
     #[tokio::test]
@@ -3861,6 +7030,283 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mcp_tools_list_includes_analytics_decide() {
+        // analytics.md §MCP Tool: gyre_analytics_decide must be in the
+        // tools/list response — the primary agent entry point for decisions.
+        let (status, json) = mcp_post(
+            app(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 33,
+                "method": "tools/list"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let tools = json["result"]["tools"].as_array().unwrap();
+        let decide = tools
+            .iter()
+            .find(|t| t["name"] == "gyre_analytics_decide")
+            .expect("gyre_analytics_decide in tools/list");
+        assert!(decide["description"]
+            .as_str()
+            .unwrap()
+            .contains("feature.promote"));
+        assert!(decide["inputSchema"]["properties"]["context"].is_object());
+    }
+
+    #[tokio::test]
+    async fn mcp_analytics_decide_builtin_via_protocol() {
+        // analytics.md §MCP Tool spec example: feature.promote over a flag
+        // with real adoption events, invoked via the MCP protocol — no raw
+        // HTTP. The response must carry the DecisionResult shape.
+        let state = test_state();
+        let now = now_secs();
+        let day = 86_400u64;
+        for i in 0..100 {
+            let mut cur = gyre_domain::AnalyticsEvent::new(
+                Id::new(format!("ev-cur-{i}")),
+                "feature.used",
+                None,
+                json!({"flag": "new-diff-viewer", "latency_ms": 100}),
+                now - day,
+            );
+            cur.user_id = Some(format!("user-{i}"));
+            state.analytics.record(&cur).await.unwrap();
+            let mut prev = gyre_domain::AnalyticsEvent::new(
+                Id::new(format!("ev-prev-{i}")),
+                "feature.used",
+                None,
+                json!({"flag": "new-diff-viewer", "latency_ms": 100}),
+                now - 8 * day,
+            );
+            prev.user_id = Some(format!("old-{i}"));
+            state.analytics.record(&prev).await.unwrap();
+        }
+        let app = crate::build_router(state);
+
+        let (status, json) = mcp_post(
+            app,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 34,
+                "method": "tools/call",
+                "params": {
+                    "name": "gyre_analytics_decide",
+                    "arguments": {
+                        "decision": "feature.promote",
+                        "context": {"flag": "new-diff-viewer", "baseline_days": 7}
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            !json["result"]["isError"].as_bool().unwrap(),
+            "json: {json}"
+        );
+        let text = json["result"]["content"][0]["text"].as_str().unwrap();
+        let body: serde_json::Value = serde_json::from_str(text).expect("DecisionResult JSON");
+        // DecisionResult shape (same as GET /api/v1/analytics/decide).
+        assert_eq!(body["decision"], json!("feature.promote"));
+        assert_eq!(body["promote"], json!(true), "body: {body}");
+        assert_eq!(body["metrics"]["sample_size"], json!(100));
+        assert_eq!(body["metrics"]["adoption_rate"], json!(1.0));
+        assert!(body["confidence"].as_f64().unwrap() >= 0.9);
+        assert!(body["reason"].as_str().unwrap().contains("Adoption"));
+        assert!(body["evaluated_at"].as_str().unwrap().ends_with('Z'));
+    }
+
+    #[tokio::test]
+    async fn mcp_analytics_decide_unknown_decision_is_tool_error() {
+        let (status, json) = mcp_post(
+            app(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 35,
+                "method": "tools/call",
+                "params": {
+                    "name": "gyre_analytics_decide",
+                    "arguments": {"decision": "feature.explode", "context": {}}
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(json["result"]["isError"].as_bool().unwrap());
+        let text = json["result"]["content"][0]["text"].as_str().unwrap();
+        // The built-in evaluator's rejection (not a generic failure):
+        // unknown names list the six built-in decisions.
+        assert!(text.contains("unknown decision"), "text: {text}");
+        assert!(text.contains("feature.promote"), "text: {text}");
+    }
+
+    #[tokio::test]
+    async fn mcp_analytics_decide_custom_rules_via_protocol() {
+        // custom_rules present → the custom rule DSL evaluator runs (same
+        // core as POST /api/v1/analytics/decide/custom): first matching
+        // rule wins, default otherwise.
+        let state = test_state();
+        let now = now_secs();
+        for i in 0..2 {
+            state
+                .analytics
+                .record(&gyre_domain::AnalyticsEvent::new(
+                    Id::new(format!("ev-spec-{i}")),
+                    "spec.approved",
+                    None,
+                    json!({"spec_path": i}),
+                    now - 100,
+                ))
+                .await
+                .unwrap();
+        }
+        let app = crate::build_router(state);
+
+        let call = |rules: serde_json::Value| {
+            json!({
+                "jsonrpc": "2.0",
+                "id": 36,
+                "method": "tools/call",
+                "params": {
+                    "name": "gyre_analytics_decide",
+                    "arguments": {
+                        "decision": "spec-approval-pace",
+                        "context": {},
+                        "custom_rules": rules,
+                        "default": "hold"
+                    }
+                }
+            })
+        };
+
+        // Threshold 3 > count 2 → no rule matches, default applies.
+        let (status, json) = mcp_post(
+            app.clone(),
+            call(json!([
+                {"metric": "spec.approved", "window": "7d", "threshold": 3, "comparison": "gte", "then": "approve"}
+            ])),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            !json["result"]["isError"].as_bool().unwrap(),
+            "json: {json}"
+        );
+        let body: serde_json::Value =
+            serde_json::from_str(json["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(body["decision"], json!("spec-approval-pace"));
+        assert_eq!(body["outcome"], json!("hold"));
+        assert!(body["matched_rule"].is_null());
+        assert!(body["reason"].as_str().unwrap().contains("count 2"));
+        assert!(body["evaluated_at"].as_str().unwrap().ends_with('Z'));
+
+        // Same store, threshold 2 → rule 0 matches and wins.
+        let (status, json) = mcp_post(
+            app,
+            call(json!([
+                {"metric": "spec.approved", "window": "7d", "threshold": 2, "comparison": "gte", "then": "approve"},
+                {"metric": "spec.approved", "window": "7d", "threshold": 1, "comparison": "gte", "then": "never"}
+            ])),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            !json["result"]["isError"].as_bool().unwrap(),
+            "json: {json}"
+        );
+        let body: serde_json::Value =
+            serde_json::from_str(json["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(body["outcome"], json!("approve"));
+        assert_eq!(body["matched_rule"], json!(0));
+    }
+
+    #[tokio::test]
+    async fn mcp_analytics_decide_invalid_custom_rule_is_tool_error() {
+        // Invalid DSL is rejected by the shared spec parser, naming the field.
+        let (status, json) = mcp_post(
+            app(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 37,
+                "method": "tools/call",
+                "params": {
+                    "name": "gyre_analytics_decide",
+                    "arguments": {
+                        "decision": "bad",
+                        "context": {},
+                        "custom_rules": [
+                            {"metric": "m", "window": "7d", "threshold": 1, "comparison": "approx", "then": "x"}
+                        ]
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(json["result"]["isError"].as_bool().unwrap());
+        let text = json["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("comparison"), "text: {text}");
+    }
+
+    #[tokio::test]
+    async fn handle_analytics_decide_delegates_by_custom_rules_presence() {
+        // Unit test of the delegation contract: without custom_rules the
+        // built-in evaluator runs (unknown built-in name → its rejection,
+        // listing the built-ins); with custom_rules the custom evaluator
+        // runs (the same name is a valid custom decision name and the
+        // rule's outcome is returned).
+        let state = test_state();
+        let now = now_secs();
+        state
+            .analytics
+            .record(&gyre_domain::AnalyticsEvent::new(
+                Id::new("ev-del-1"),
+                "spec.approved",
+                None,
+                json!({"spec_path": 1}),
+                now - 100,
+            ))
+            .await
+            .unwrap();
+        let auth = agent_auth("agent-decide", "ws-decide", None);
+
+        // No custom_rules → built-in path.
+        let result = handle_analytics_decide(
+            &state,
+            &json!({"decision": "feature.explode", "context": {}}),
+            &auth,
+        )
+        .await;
+        assert!(result["isError"].as_bool().unwrap(), "result: {result}");
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("unknown decision"), "text: {text}");
+        assert!(text.contains("feature.promote"), "text: {text}");
+
+        // custom_rules present → custom path: the same decision name is
+        // legal, and the matching rule's outcome is returned.
+        let result = handle_analytics_decide(
+            &state,
+            &json!({
+                "decision": "feature.explode",
+                "context": {},
+                "custom_rules": [
+                    {"metric": "spec.approved", "window": "7d", "threshold": 1, "comparison": "gte", "then": "custom-outcome"}
+                ]
+            }),
+            &auth,
+        )
+        .await;
+        assert!(!result["isError"].as_bool().unwrap(), "result: {result}");
+        let body: serde_json::Value =
+            serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(body["decision"], json!("feature.explode"));
+        assert_eq!(body["outcome"], json!("custom-outcome"));
+        assert_eq!(body["matched_rule"], json!(0));
+    }
+
+    #[tokio::test]
     async fn mcp_write_tool_requires_agent_role() {
         // ReadOnly tokens must be rejected for write tools.
         // The test-state global token is Admin, so we need to use a non-admin token
@@ -3939,13 +7385,17 @@ mod tests {
     #[test]
     fn is_agent_jwt_detects_gyre_jwt() {
         let auth_with_agent_scope = AuthenticatedAgent {
+            auth_mechanism: crate::auth::AuthMechanism::AgentToken,
             agent_id: "agent-1".to_string(),
             user_id: None,
             roles: vec![UserRole::Agent],
             tenant_id: "default".to_string(),
+            workspace_id: None,
+            repo_id: None,
+            scope: vec!["repo:gyre-server:write".to_string()],
             jwt_claims: Some(serde_json::json!({
                 "sub": "agent-1",
-                "scope": "agent",
+                "scope": ["repo:gyre-server:write"],
                 "task_id": "task-1"
             })),
             bearer_token: None,
@@ -3956,10 +7406,14 @@ mod tests {
 
         // Global token has no jwt_claims
         let auth_global = AuthenticatedAgent {
+            auth_mechanism: crate::auth::AuthMechanism::GlobalToken,
             agent_id: "system".to_string(),
             user_id: None,
             roles: vec![UserRole::Admin],
             tenant_id: "default".to_string(),
+            workspace_id: None,
+            repo_id: None,
+            scope: Vec::new(),
             jwt_claims: None,
             bearer_token: None,
             deprecated_token_auth: false,
@@ -3969,10 +7423,14 @@ mod tests {
 
         // Keycloak JWT has jwt_claims but different scope
         let auth_keycloak = AuthenticatedAgent {
+            auth_mechanism: crate::auth::AuthMechanism::UserJwt,
             agent_id: "alice".to_string(),
             user_id: None,
             roles: vec![UserRole::Developer],
             tenant_id: "default".to_string(),
+            workspace_id: None,
+            repo_id: None,
+            scope: Vec::new(),
             jwt_claims: Some(serde_json::json!({
                 "sub": "user-abc",
                 "realm_access": {"roles": ["developer"]}
@@ -4006,6 +7464,290 @@ mod tests {
         assert!(names.contains(&"Spec Files"));
         assert!(names.contains(&"Workspace Agents"));
         assert!(names.contains(&"Merge Queue"));
+    }
+
+    // ── TASK-133: permissions:// resources (abac-policy-engine.md §MCP Integration) ──
+
+    #[tokio::test]
+    async fn mcp_resources_list_includes_permission_resources() {
+        let (status, json) = mcp_post(
+            app(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 60,
+                "method": "resources/list"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let resources = json["result"]["resources"].as_array().unwrap();
+        let me = resources
+            .iter()
+            .find(|r| r["uri"] == "permissions://me")
+            .expect("permissions://me must be listed in resources/list");
+        assert_eq!(me["mimeType"], "application/json");
+        let check = resources
+            .iter()
+            .find(|r| r["uri"] == "permissions://check")
+            .expect("permissions://check must be listed in resources/list");
+        assert_eq!(
+            check["uriTemplate"],
+            "permissions://check?action={action}&resource={type}"
+        );
+    }
+
+    /// `permissions://me` and `permissions://check` must answer from the
+    /// REAL policy set for the CALLER's own attributes. A Gyre-minted
+    /// worker JWT (roles=[Agent]) is allowed read/write/approve on most
+    /// types by `builtin-agent-scoped-access`, and denied `approve` on
+    /// `spec` by the immutable `builtin:require-human-spec-approval` —
+    /// the immutable Deny wins over the role Allow, so both assertions
+    /// can only pass through the real evaluation engine with the caller's
+    /// real subject attributes.
+    #[tokio::test]
+    async fn permissions_resources_evaluate_real_policies_for_agent_jwt() {
+        let state = orch_state().await;
+        let (_id, token) = register_worker(&state, "permw", "r-1").await;
+        let app = crate::build_router(state);
+
+        // Pre-flight check, allowed case.
+        let (status, json) = mcp_post_with_token(
+            app.clone(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 61,
+                "method": "resources/read",
+                "params": { "uri": "permissions://check?action=read&resource=repo" }
+            }),
+            &token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let text = json["result"]["contents"][0]["text"]
+            .as_str()
+            .expect("permissions://check must return a text content");
+        let result: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(result["allowed"], true, "got: {result}");
+        assert_eq!(
+            result["matched_policy"], "builtin-agent-scoped-access",
+            "got: {result}"
+        );
+
+        // Pre-flight check, denied case: the immutable human-only spec
+        // approval Deny beats the agent role Allow.
+        let (status, json) = mcp_post_with_token(
+            app.clone(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 62,
+                "method": "resources/read",
+                "params": { "uri": "permissions://check?action=approve&resource=spec" }
+            }),
+            &token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let text = json["result"]["contents"][0]["text"].as_str().unwrap();
+        let result: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(result["allowed"], false, "got: {result}");
+        assert_eq!(
+            result["matched_policy"], "builtin-require-human-spec-approval",
+            "got: {result}"
+        );
+
+        // permissions://me: per-resource-type allowed action lists, from
+        // the same evaluation. The worker's repo entry must carry the
+        // agent-role actions but NOT push/merge/spawn/delete; the spec and
+        // persona entries must NOT carry approve (human-only Denies).
+        let (status, json) = mcp_post_with_token(
+            app,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 63,
+                "method": "resources/read",
+                "params": { "uri": "permissions://me" }
+            }),
+            &token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let text = json["result"]["contents"][0]["text"].as_str().unwrap();
+        let me: Value = serde_json::from_str(text).unwrap();
+        let entries = me
+            .as_array()
+            .expect("permissions://me returns a JSON array");
+        assert!(
+            entries
+                .iter()
+                .all(|e| e.get("resource_type").is_some() && e["allowed_actions"].is_array()),
+            "every entry must be {{resource_type, allowed_actions: []}}"
+        );
+        let repo = entries
+            .iter()
+            .find(|e| e["resource_type"] == "repo")
+            .expect("canonical resource-type vocabulary includes repo");
+        let repo_actions: Vec<&str> = repo["allowed_actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| a.as_str().unwrap())
+            .collect();
+        for allowed in ["read", "write", "approve"] {
+            assert!(
+                repo_actions.contains(&allowed),
+                "repo must allow {allowed}: {repo_actions:?}"
+            );
+        }
+        for denied in ["push", "merge", "spawn", "delete", "escalate", "generate"] {
+            assert!(
+                !repo_actions.contains(&denied),
+                "repo must not allow {denied}: {repo_actions:?}"
+            );
+        }
+        for human_only in ["spec", "persona"] {
+            let entry = entries
+                .iter()
+                .find(|e| e["resource_type"] == human_only)
+                .unwrap_or_else(|| panic!("{human_only} must appear in permissions://me"));
+            let actions: Vec<&str> = entry["allowed_actions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|a| a.as_str().unwrap())
+                .collect();
+            assert!(
+                !actions.contains(&"approve"),
+                "{human_only} approve must be denied to agents: {actions:?}"
+            );
+        }
+    }
+
+    /// The permissions:// resources answer ONLY for the caller. Two JWT
+    /// callers with different identities get different answers for the
+    /// same action: user A is allowed `push` on `repo` by a custom Allow
+    /// keyed on A's subject.id, user B (no such policy) is denied. If the
+    /// resource ignored the caller's identity (fixed subject, or a
+    /// query-param subject), both callers would get the same answer.
+    #[tokio::test]
+    async fn permissions_check_is_caller_scoped() {
+        use crate::auth::test_helpers::{make_test_state_with_jwt, sign_test_jwt};
+        use gyre_domain::{
+            Condition, ConditionOp, ConditionValue, Policy, PolicyEffect, PolicyScope,
+        };
+
+        let state = make_test_state_with_jwt();
+        // Allow push on repo for exactly one subject id, at priority 2000
+        // (above every seeded builtin, so the matched policy is pinned).
+        state
+            .policies
+            .create(&Policy {
+                id: Id::new("perm-me-push-a"),
+                name: "perm-me-push-a".to_string(),
+                description: String::new(),
+                scope: PolicyScope::Tenant,
+                scope_id: None,
+                priority: 2000,
+                effect: PolicyEffect::Allow,
+                conditions: vec![Condition {
+                    attribute: "subject.id".to_string(),
+                    operator: ConditionOp::Equals,
+                    value: ConditionValue::String("perm-user-a".to_string()),
+                }],
+                actions: vec!["push".to_string()],
+                resource_types: vec!["repo".to_string()],
+                enabled: true,
+                built_in: false,
+                immutable: false,
+                created_by: Id::new("system"),
+                created_at: 0,
+                updated_at: 0,
+            })
+            .await
+            .unwrap();
+
+        let token_a = sign_test_jwt(
+            &serde_json::json!({
+                "sub": "perm-sub-a",
+                "preferred_username": "perm-user-a",
+                "realm_access": {"roles": []}
+            }),
+            3600,
+        );
+        let token_b = sign_test_jwt(
+            &serde_json::json!({
+                "sub": "perm-sub-b",
+                "preferred_username": "perm-user-b",
+                "realm_access": {"roles": []}
+            }),
+            3600,
+        );
+        let app = crate::build_router(state);
+
+        let read_check = json!({
+            "jsonrpc": "2.0",
+            "id": 64,
+            "method": "resources/read",
+            "params": { "uri": "permissions://check?action=push&resource=repo" }
+        });
+        let (status, json) = mcp_post_with_token(app.clone(), read_check.clone(), &token_a).await;
+        assert_eq!(status, StatusCode::OK);
+        let text = json["result"]["contents"][0]["text"].as_str().unwrap();
+        let result: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(result["allowed"], true, "user A: {result}");
+        assert_eq!(result["matched_policy"], "perm-me-push-a");
+
+        let (status, json) = mcp_post_with_token(app, read_check, &token_b).await;
+        assert_eq!(status, StatusCode::OK);
+        let text = json["result"]["contents"][0]["text"].as_str().unwrap();
+        let result: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(result["allowed"], false, "user B: {result}");
+        // The denial is decided by the seeded default-deny catchall
+        // (priority 1, no conditions) — B matches no role Allow and not
+        // A's subject-keyed Allow. Same attribution convention as the
+        // REST policies/evaluate endpoint (api/policies.rs) and the
+        // decision audit trail: a default deny names the catchall, it is
+        // never unattributed and never attributed to another subject's
+        // policy.
+        assert_eq!(result["matched_policy"], "builtin-default-deny");
+    }
+
+    /// Missing query params are a usage error, not a silent deny — an
+    /// agent must not mistake a malformed pre-flight for a policy denial.
+    #[tokio::test]
+    async fn permissions_check_requires_both_params() {
+        let (status, json) = mcp_post(
+            app(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 65,
+                "method": "resources/read",
+                "params": { "uri": "permissions://check?action=push" }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let err = json["result"]["error"].as_str().unwrap();
+        assert!(
+            err.contains("action={action}&resource={type}"),
+            "got: {err}"
+        );
+
+        let (status, json) = mcp_post(
+            app(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 66,
+                "method": "resources/read",
+                "params": { "uri": "permissions://other" }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let err = json["result"]["error"].as_str().unwrap();
+        assert!(
+            err.contains("unknown permissions:// resource"),
+            "got: {err}"
+        );
     }
 
     // ── resources/read — unknown scheme ──────────────────────────────────────
@@ -4083,6 +7825,324 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         assert!(json["result"]["contents"].as_array().is_some());
+    }
+
+    // ── task-299: Phase-5 knowledge boundary on agents:// and queue:// ────────
+
+    /// Seed an Active agent in workspace `wid` (visible to agents:// reads,
+    /// which list Active/Idle agents only).
+    async fn seed_active_agent(state: &std::sync::Arc<crate::AppState>, name: &str, wid: &str) {
+        let mut agent = gyre_domain::Agent::new(Id::new(name), name, 0);
+        agent.workspace_id = Id::new(wid);
+        agent
+            .transition_status(gyre_domain::AgentStatus::Active)
+            .unwrap();
+        state.agents.create(&agent).await.unwrap();
+    }
+
+    /// A worker agent JWT (task-scoped, repo-scoped) must not be able to
+    /// read agents:// or queue:// at all, and its resources/list must not
+    /// even advertise them — the Phase-5 boundary is mechanical
+    /// (agent-runtime.md §1 Phase 5), not prompt-level.
+    #[tokio::test]
+    async fn mcp_worker_jwt_cannot_read_agents_or_queue_resources() {
+        let state = orch_state().await;
+        // Active agents in BOTH workspaces, so any leak is visible.
+        seed_active_agent(&state, "kb-w1", "ws-1").await;
+        seed_active_agent(&state, "kb-w2", "ws-2").await;
+        let (_id, token) = register_worker(&state, "kb", "r-1").await;
+        let app = crate::build_router(state);
+
+        // resources/list omits both resources for the worker tier.
+        let (status, json) = mcp_post_with_token(
+            app.clone(),
+            json!({ "jsonrpc": "2.0", "id": 90, "method": "resources/list" }),
+            &token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let uris: Vec<&str> = json["result"]["resources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["uri"].as_str().unwrap())
+            .collect();
+        assert!(
+            !uris.contains(&"agents://"),
+            "worker resources/list must omit agents://, got: {uris:?}"
+        );
+        assert!(
+            !uris.contains(&"queue://"),
+            "worker resources/list must omit queue://, got: {uris:?}"
+        );
+        assert!(
+            uris.contains(&"spec://"),
+            "unrelated resources must stay advertised, got: {uris:?}"
+        );
+
+        // resources/read returns an error result for every spelling.
+        for (id, uri) in [
+            (91, "agents://"),
+            (92, "agents://ws-1"),
+            (93, "agents://*"),
+            (94, "queue://r-1"),
+            (95, "queue://r-x"),
+        ] {
+            let (status, json) = mcp_post_with_token(
+                app.clone(),
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "method": "resources/read",
+                    "params": { "uri": uri }
+                }),
+                &token,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            let err = json["result"]["error"]
+                .as_str()
+                .unwrap_or_else(|| panic!("expected error result for {uri}, got: {json}"));
+            assert!(err.contains("forbidden"), "got: {err}");
+        }
+    }
+
+    /// A user who is a member of only workspace A must never receive
+    /// workspace B agents from an unscoped agents:// read (no
+    /// cross-workspace enumeration), and reading workspace B's merge
+    /// queue must be Forbidden.
+    #[tokio::test]
+    async fn mcp_agents_resource_scoped_to_member_workspaces() {
+        use crate::auth::test_helpers::{make_test_state_with_jwt, sign_test_jwt};
+
+        let state = make_test_state_with_jwt();
+        for wid in ["ws-a", "ws-b"] {
+            let ws = gyre_domain::Workspace::new(Id::new(wid), Id::new("default"), wid, wid, 0);
+            state.workspaces.create(&ws).await.unwrap();
+        }
+        // Active agents in BOTH workspaces — workspace B's agent must not
+        // leak to a workspace-A member.
+        seed_active_agent(&state, "kb-agent-a1", "ws-a").await;
+        seed_active_agent(&state, "kb-agent-b1", "ws-b").await;
+        // A repo in workspace B for the queue:// probe.
+        let repo = gyre_domain::Repository::new(
+            Id::new("kb-repo-b"),
+            Id::new("ws-b"),
+            "kb-repo-b",
+            "/tmp/kb-repo-b".to_string(),
+            0,
+        );
+        state.repos.create(&repo).await.unwrap();
+
+        // Plain member (no realm roles → not Admin) of workspace A only.
+        let token = sign_test_jwt(
+            &json!({
+                "sub": "mcp-kb-sub",
+                "preferred_username": "mcp-kb-user",
+                "realm_access": { "roles": [] }
+            }),
+            3600,
+        );
+        let app = crate::build_router(state.clone());
+        // First authenticated call auto-provisions the user (UserJwt path).
+        let (status, _json) = mcp_post_with_token(
+            app.clone(),
+            json!({ "jsonrpc": "2.0", "id": 96, "method": "initialize", "params": {} }),
+            &token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let user = state
+            .users
+            .find_by_username("mcp-kb-user")
+            .await
+            .unwrap()
+            .expect("user must be provisioned by the first authenticated call");
+        let membership = gyre_domain::WorkspaceMembership::new(
+            Id::new("kb-membership-a"),
+            user.id.clone(),
+            Id::new("ws-a"),
+            gyre_domain::WorkspaceRole::Developer,
+            Id::new("system"),
+            0,
+        );
+        state
+            .workspace_memberships
+            .create(&membership)
+            .await
+            .unwrap();
+
+        // Unscoped agents:// read: workspace A agents only.
+        let (status, json) = mcp_post_with_token(
+            app.clone(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 97,
+                "method": "resources/read",
+                "params": { "uri": "agents://" }
+            }),
+            &token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let text = json["result"]["contents"][0]["text"]
+            .as_str()
+            .expect("member agents:// read must return contents");
+        let agents: Vec<Value> = serde_json::from_str(text).unwrap();
+        let ids: Vec<&str> = agents.iter().map(|a| a["id"].as_str().unwrap()).collect();
+        assert!(
+            ids.contains(&"kb-agent-a1"),
+            "own-workspace agent must be listed, got: {ids:?}"
+        );
+        assert!(
+            !ids.contains(&"kb-agent-b1"),
+            "cross-workspace enumeration leak: workspace B agent in {ids:?}"
+        );
+
+        // Explicit agents://ws-b: not a member → forbidden.
+        let (status, json) = mcp_post_with_token(
+            app.clone(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 98,
+                "method": "resources/read",
+                "params": { "uri": "agents://ws-b" }
+            }),
+            &token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let err = json["result"]["error"].as_str().unwrap();
+        assert!(err.contains("forbidden"), "got: {err}");
+
+        // queue:// of workspace B's repo: Forbidden for the workspace-A member.
+        let (status, json) = mcp_post_with_token(
+            app.clone(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 99,
+                "method": "resources/read",
+                "params": { "uri": "queue://kb-repo-b" }
+            }),
+            &token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let err = json["result"]["error"].as_str().unwrap();
+        assert!(
+            err.contains("forbidden"),
+            "queue:// of a foreign workspace must be forbidden, got: {err}"
+        );
+    }
+
+    /// A workspace-scoped orchestrator reading agents:// sees only its own
+    /// workspace's agents; a repo orchestrator is additionally confined to
+    /// its own repo's merge queue.
+    #[tokio::test]
+    async fn mcp_agents_and_queue_scoped_to_orchestrator_token() {
+        let state = orch_state().await;
+        seed_active_agent(&state, "kb-orch-w1", "ws-1").await;
+        seed_active_agent(&state, "kb-orch-w2", "ws-2").await;
+        let (_id, ws_token) =
+            register_orchestrator(&state, "kbwo", "ws-1", None, "workspace_orchestrator").await;
+        let app = crate::build_router(state.clone());
+
+        // Unscoped agents:// read: only ws-1 agents (the signed workspace
+        // claim is the boundary).
+        let (status, json) = mcp_post_with_token(
+            app.clone(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 100,
+                "method": "resources/read",
+                "params": { "uri": "agents://" }
+            }),
+            &ws_token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let text = json["result"]["contents"][0]["text"].as_str().unwrap();
+        let agents: Vec<Value> = serde_json::from_str(text).unwrap();
+        let ids: Vec<&str> = agents.iter().map(|a| a["id"].as_str().unwrap()).collect();
+        assert!(
+            ids.contains(&"kb-orch-w1"),
+            "own-workspace agent missing: {ids:?}"
+        );
+        assert!(
+            !ids.contains(&"kb-orch-w2"),
+            "orchestrator must not see other-workspace agents: {ids:?}"
+        );
+
+        // Workspace orchestrator: own-workspace repo queue readable,
+        // foreign-workspace repo queue forbidden.
+        let (status, json) = mcp_post_with_token(
+            app.clone(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 101,
+                "method": "resources/read",
+                "params": { "uri": "queue://r-1" }
+            }),
+            &ws_token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            json["result"]["contents"].as_array().is_some(),
+            "own-workspace queue must be readable, got: {json}"
+        );
+        let (status, json) = mcp_post_with_token(
+            app.clone(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 102,
+                "method": "resources/read",
+                "params": { "uri": "queue://r-x" }
+            }),
+            &ws_token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let err = json["result"]["error"].as_str().unwrap();
+        assert!(err.contains("PERMISSION_DENIED"), "got: {err}");
+
+        // Repo orchestrator: confined to its own repo's queue even within
+        // its own workspace.
+        let (_id, repo_token) =
+            register_orchestrator(&state, "kbro", "ws-1", Some("r-1"), "repo_orchestrator").await;
+        let (status, json) = mcp_post_with_token(
+            app.clone(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 103,
+                "method": "resources/read",
+                "params": { "uri": "queue://r-2" }
+            }),
+            &repo_token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let err = json["result"]["error"].as_str().unwrap();
+        assert!(
+            err.contains("PERMISSION_DENIED"),
+            "repo orchestrator must not read another repo's queue, got: {err}"
+        );
+        let (status, json) = mcp_post_with_token(
+            app.clone(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 104,
+                "method": "resources/read",
+                "params": { "uri": "queue://r-1" }
+            }),
+            &repo_token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            json["result"]["contents"].as_array().is_some(),
+            "own-repo queue must be readable, got: {json}"
+        );
     }
 
     // ── initialize advertises resources capability ─────────────────────────────
@@ -4424,6 +8484,101 @@ mod tests {
         );
     }
 
+    /// message-bus.md §Delivery Guarantees (Agent completion cleanup): the
+    /// MCP gyre_agent_complete tool must perform the same Directed-inbox
+    /// bulk-ack as the REST POST /agents/:id/complete surface —
+    /// count_unacked drops to zero while the rows remain stored for audit
+    /// (acknowledged: true). Fails on the old behavior where the MCP path
+    /// never called acknowledge_all.
+    #[tokio::test]
+    async fn agent_complete_bulk_acks_directed_inbox() {
+        use gyre_common::message::{Destination, Message, MessageKind, MessageOrigin};
+        use gyre_domain::{Agent, Workspace};
+
+        let state = test_state();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        let ws = Workspace::new(
+            Id::new("ws-inbox-ack"),
+            Id::new("default"),
+            "Inbox Ack WS",
+            "inbox-ack-ws",
+            now,
+        );
+        state.workspaces.create(&ws).await.unwrap();
+
+        let mut agent = Agent::new(Id::new("agent-inbox-ack"), "inbox-ack-agent", now);
+        agent.workspace_id = Id::new("ws-inbox-ack");
+        agent
+            .transition_status(gyre_domain::AgentStatus::Active)
+            .unwrap();
+        state.agents.create(&agent).await.unwrap();
+
+        let msg = Message {
+            id: Id::new("mcp-cleanup-msg"),
+            tenant_id: Id::new("default"),
+            from: MessageOrigin::Server,
+            workspace_id: Some(Id::new("ws-inbox-ack")),
+            to: Destination::Agent(Id::new("agent-inbox-ack")),
+            kind: MessageKind::TaskAssignment,
+            payload: None,
+            created_at: now * 1000,
+            signature: None,
+            key_id: None,
+            acknowledged: false,
+        };
+        state.messages.store(&msg).await.unwrap();
+        assert_eq!(
+            state
+                .messages
+                .count_unacked(&Id::new("agent-inbox-ack"))
+                .await
+                .unwrap(),
+            1,
+            "precondition: one unacked Directed message before completion"
+        );
+
+        let app = crate::build_router(state.clone());
+        let (status, json) = mcp_post(
+            app,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 53,
+                "method": "tools/call",
+                "params": {
+                    "name": "gyre_agent_complete",
+                    "arguments": { "agent_id": "agent-inbox-ack" }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(!json["result"]["isError"].as_bool().unwrap());
+
+        assert_eq!(
+            state
+                .messages
+                .count_unacked(&Id::new("agent-inbox-ack"))
+                .await
+                .unwrap(),
+            0,
+            "MCP agent completion must bulk-ack the Directed inbox"
+        );
+        let stored = state
+            .messages
+            .find_by_id(&Id::new("mcp-cleanup-msg"))
+            .await
+            .unwrap()
+            .expect("message must remain stored for audit");
+        assert!(
+            stored.acknowledged,
+            "audit-retained row must be acknowledged"
+        );
+    }
+
     // ── agent_complete with unknown agent returns error ────────────────────────
 
     #[tokio::test]
@@ -4453,6 +8608,178 @@ mod tests {
         assert!(json["result"]["isError"].as_bool().unwrap());
         let text = json["result"]["content"][0]["text"].as_str().unwrap();
         assert!(text.contains("not found") || text.contains("Agent not found"));
+    }
+
+    // ── agent_complete records agent.completed analytics event ────────────────
+    // analytics.md §Auto-Emitted Events: the autonomous path (agent-runner.mjs
+    // calls gyre_agent_complete) must emit agent.completed just like the HTTP
+    // endpoint. Fails on the old behavior where the MCP path recorded nothing.
+    #[tokio::test]
+    async fn agent_complete_records_agent_completed_analytics_event() {
+        let state = test_state();
+        let app = crate::build_router(state.clone());
+
+        // Create an agent through the public API so it exists in storage.
+        // The agent registers Idle; complete requires Active→Idle, so
+        // transition it first via the status endpoint.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/agents")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({"name": "analytics-test-agent"})).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let created: Value = serde_json::from_slice(&bytes).unwrap();
+        let agent_id = created["id"].as_str().expect("agent id").to_string();
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/agents/{agent_id}/status"))
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({"status": "active"})).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "agent must transition Idle→Active before completion"
+        );
+
+        // Complete the agent through the MCP tool (the autonomous path).
+        let (status, json) = mcp_post(
+            app,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 52,
+                "method": "tools/call",
+                "params": {
+                    "name": "gyre_agent_complete",
+                    "arguments": {"agent_id": agent_id}
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            !json["result"]["isError"].as_bool().unwrap_or(false),
+            "agent completion must succeed: {json}"
+        );
+
+        let events = state
+            .analytics
+            .query(Some("agent.completed"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            events.len(),
+            1,
+            "gyre_agent_complete must record the agent.completed analytics event"
+        );
+        let ev = &events[0];
+        assert_eq!(ev.agent_id.as_deref(), Some(agent_id.as_str()));
+        assert_eq!(ev.event_name, "agent.completed");
+        assert!(
+            ev.properties["duration_secs"].as_u64().is_some(),
+            "duration_secs must be present: {}",
+            ev.properties["duration_secs"]
+        );
+    }
+
+    // ── update_task records task.status_changed analytics event ──────────────
+    // analytics.md §Auto-Emitted Events: the MCP tool is the autonomous-agent
+    // path for task status transitions; it must record task.status_changed
+    // like the HTTP endpoint. Fails on the old behavior (no event recorded).
+    #[tokio::test]
+    async fn update_task_records_status_changed_analytics_event() {
+        let state = test_state();
+        let app = crate::build_router(state.clone());
+
+        // Create a task through the public API.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/tasks")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({
+                            "title": "mcp-status-task",
+                            "task_type": "implementation"
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let created: Value = serde_json::from_slice(&bytes).unwrap();
+        let task_id = created["id"].as_str().expect("task id").to_string();
+
+        // Transition it through the MCP tool (the autonomous path).
+        let (status, json) = mcp_post(
+            app,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 53,
+                "method": "tools/call",
+                "params": {
+                    "name": "gyre_update_task",
+                    "arguments": {"id": task_id, "status": "in_progress"}
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            !json["result"]["isError"].as_bool().unwrap_or(false),
+            "task update must succeed: {json}"
+        );
+
+        let events = state
+            .analytics
+            .query(Some("task.status_changed"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            events.len(),
+            1,
+            "gyre_update_task must record the task.status_changed analytics event"
+        );
+        let ev = &events[0];
+        assert_eq!(ev.event_name, "task.status_changed");
+        assert_eq!(ev.properties["task_id"], task_id.as_str());
+        assert_eq!(ev.properties["old_status"], "Backlog");
+        assert_eq!(ev.properties["new_status"], "InProgress");
+        assert!(
+            ev.properties["assigned_to"].is_null(),
+            "unassigned task carries null assigned_to"
+        );
     }
 
     // ── AgentCompleted MessageKind roundtrips ─────────────────────────────────
@@ -4567,6 +8894,11 @@ mod tests {
     #[tokio::test]
     async fn mcp_message_send_directed_succeeds() {
         let state = test_state();
+        // Scoping rule 1 resolves the target's tenant from its workspace
+        // record — seed one (tenant "default", the global token's tenant).
+        let ws_mcp =
+            gyre_domain::Workspace::new(Id::new("ws-mcp"), Id::new("default"), "mcp", "mcp", 0);
+        state.workspaces.create(&ws_mcp).await.unwrap();
         // Create sender agent (test-token maps to agent_id "system")
         let mut sender = gyre_domain::Agent::new(Id::new("system"), "system", 0);
         sender.workspace_id = Id::new("ws-mcp");
@@ -4603,6 +8935,179 @@ mod tests {
         assert!(text.contains("Message sent"));
     }
 
+    /// Scoping rule 1 (message-bus.md §Scoping Rules), mirrored from the
+    /// REST send path: an Agent-directed message whose target belongs to a
+    /// different tenant than the caller's verified tenant is rejected, and
+    /// nothing is stored. The global token's tenant is "default"; the target
+    /// workspace below is tenant-2 — with the tenant comparison removed this
+    /// call succeeds and leaks the message across tenants.
+    #[tokio::test]
+    async fn mcp_message_send_cross_tenant_rejected() {
+        // Cross-tenant target: sender ("system" — the global token's agent
+        // identity) lives in a tenant-2 workspace alongside the target.
+        let state = test_state();
+        let ws_t2 = gyre_domain::Workspace::new(
+            Id::new("ws-mcp-t2"),
+            Id::new("tenant-2"),
+            "mcp-t2",
+            "mcp-t2",
+            0,
+        );
+        state.workspaces.create(&ws_t2).await.unwrap();
+        let mut sender = gyre_domain::Agent::new(Id::new("system"), "system", 0);
+        sender.workspace_id = Id::new("ws-mcp-t2");
+        state.agents.create(&sender).await.unwrap();
+        let mut target = gyre_domain::Agent::new(Id::new("agent-mcp-t2"), "t", 0);
+        target.workspace_id = Id::new("ws-mcp-t2");
+        state.agents.create(&target).await.unwrap();
+
+        let app = crate::build_router(state.clone());
+        let (status, json) = mcp_post(
+            app,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 81,
+                "method": "tools/call",
+                "params": {
+                    "name": "gyre_message_send",
+                    "arguments": {
+                        "to": {"agent": "agent-mcp-t2"},
+                        "kind": "task_assignment",
+                        "payload": {"task_id": "TASK-X-TENANT"}
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "JSON-RPC envelope is 200");
+        assert!(
+            json["result"]["isError"].as_bool().unwrap(),
+            "cross-tenant Directed send must be a tool error: {json}"
+        );
+        let text = json["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(
+            text.contains("different tenant"),
+            "error must name the tenant isolation rejection, got: {text}"
+        );
+        assert_eq!(
+            gyre_ports::MessageRepository::list_unacked(
+                &*state.messages,
+                &Id::new("agent-mcp-t2"),
+                10
+            )
+            .await
+            .unwrap()
+            .len(),
+            0,
+            "a cross-tenant send must not be persisted"
+        );
+
+        // Same-tenant control (caller tenant "default", workspace tenant
+        // "default"): the comparison runs and PASSES — the send succeeds.
+        let state = test_state();
+        let ws_t1 = gyre_domain::Workspace::new(
+            Id::new("ws-mcp-t1"),
+            Id::new("default"),
+            "mcp-t1",
+            "mcp-t1",
+            0,
+        );
+        state.workspaces.create(&ws_t1).await.unwrap();
+        let mut sender = gyre_domain::Agent::new(Id::new("system"), "system", 0);
+        sender.workspace_id = Id::new("ws-mcp-t1");
+        state.agents.create(&sender).await.unwrap();
+        let mut target = gyre_domain::Agent::new(Id::new("agent-mcp-t1"), "t", 0);
+        target.workspace_id = Id::new("ws-mcp-t1");
+        state.agents.create(&target).await.unwrap();
+
+        let app = crate::build_router(state.clone());
+        let (status, json) = mcp_post(
+            app,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 82,
+                "method": "tools/call",
+                "params": {
+                    "name": "gyre_message_send",
+                    "arguments": {
+                        "to": {"agent": "agent-mcp-t1"},
+                        "kind": "task_assignment",
+                        "payload": {"task_id": "TASK-SAME-TENANT"}
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            !json["result"]["isError"].as_bool().unwrap(),
+            "same-tenant Directed send must succeed: {json}"
+        );
+    }
+
+    /// Mirrored fail-closed behavior (review round-4 repair): a target whose
+    /// workspace record is unresolvable (dangling agent after a workspace
+    /// delete) is a tool error, never a skip-and-send — the tenant scope
+    /// being indeterminable must reject the send. With the skip-and-log
+    /// behavior restored, this call succeeds and the message is persisted.
+    #[tokio::test]
+    async fn mcp_message_send_unresolvable_target_workspace_rejected() {
+        let state = test_state();
+        // Sender ("system" — the global token's agent identity) and target
+        // share a workspace whose record is deliberately NOT created.
+        let mut sender = gyre_domain::Agent::new(Id::new("system"), "system", 0);
+        sender.workspace_id = Id::new("ws-mcp-gone");
+        state.agents.create(&sender).await.unwrap();
+        let mut target = gyre_domain::Agent::new(Id::new("agent-mcp-gone"), "t", 0);
+        target.workspace_id = Id::new("ws-mcp-gone");
+        state.agents.create(&target).await.unwrap();
+
+        let app = crate::build_router(state.clone());
+        let (status, json) = mcp_post(
+            app,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 83,
+                "method": "tools/call",
+                "params": {
+                    "name": "gyre_message_send",
+                    "arguments": {
+                        "to": {"agent": "agent-mcp-gone"},
+                        "kind": "task_assignment",
+                        "payload": {"task_id": "TASK-GONE"}
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "JSON-RPC envelope is 200");
+        assert!(
+            json["result"]["isError"].as_bool().unwrap(),
+            "a send with an unresolvable target tenant scope must be a tool error: {json}"
+        );
+        let text = json["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(
+            text.contains("cannot be resolved"),
+            "error must name the unresolvable tenant scope, got: {text}"
+        );
+        assert_eq!(
+            gyre_ports::MessageRepository::list_unacked(
+                &*state.messages,
+                &Id::new("agent-mcp-gone"),
+                10
+            )
+            .await
+            .unwrap()
+            .len(),
+            0,
+            "a send with an unresolvable target tenant scope must not be persisted"
+        );
+    }
+
     #[tokio::test]
     async fn mcp_message_send_rejects_payload_missing_required_field() {
         // message-bus.md §Payload Schemas: the MCP receipt path enforces the same
@@ -4610,6 +9115,16 @@ mod tests {
         // `task_id`; a payload carrying only `spec_ref` must be a tool error and
         // must NOT reach the message store.
         let state = test_state();
+        // Scoping rule 1 resolves the target's tenant from its workspace
+        // record — seed one (tenant "default", the global token's tenant).
+        let ws_schema = gyre_domain::Workspace::new(
+            Id::new("ws-schema"),
+            Id::new("default"),
+            "mcp-schema",
+            "mcp-schema",
+            0,
+        );
+        state.workspaces.create(&ws_schema).await.unwrap();
         let mut sender = gyre_domain::Agent::new(Id::new("system"), "system", 0);
         sender.workspace_id = Id::new("ws-schema");
         state.agents.create(&sender).await.unwrap();
@@ -4705,6 +9220,11 @@ mod tests {
     #[tokio::test]
     async fn mcp_message_send_broadcasts_to_websocket_channel() {
         let state = test_state();
+        // Scoping rule 1 resolves the target's tenant from its workspace
+        // record — seed one (tenant "default", the global token's tenant).
+        let ws_bc =
+            gyre_domain::Workspace::new(Id::new("ws-bc"), Id::new("default"), "bc", "bc", 0);
+        state.workspaces.create(&ws_bc).await.unwrap();
         let mut sender = gyre_domain::Agent::new(Id::new("system"), "system", 0);
         sender.workspace_id = Id::new("ws-bc");
         state.agents.create(&sender).await.unwrap();
@@ -4919,6 +9439,155 @@ mod tests {
         assert!(!json["result"]["isError"].as_bool().unwrap());
         let text = json["result"]["content"][0]["text"].as_str().unwrap();
         assert!(text.contains("1 message(s)"));
+    }
+
+    /// dependency-graph.md §Breaking Change Detection step 3b ("Notify the
+    /// dependent repo's orchestrator via MCP"): the breaking-change cascade
+    /// (`process_breaking_changes`, fed by both the conventional-commit and
+    /// the API-contract detection routes) persists a Directed
+    /// breaking-change message in the dependent repo's live orchestrator
+    /// inbox — the inbox `gyre_message_poll` serves — carrying the payload
+    /// (repo, description, breaking-change id, dependent repo).
+    #[tokio::test]
+    async fn mcp_message_poll_returns_breaking_change_orchestrator_notification() {
+        let state = test_state();
+        let ws = gyre_domain::Workspace::new(
+            Id::new("ws-bcmcp"),
+            Id::new("t-bcmcp"),
+            "bcmcp",
+            "bcmcp",
+            0,
+        );
+        state.workspaces.create(&ws).await.unwrap();
+        let repo_a = gyre_domain::Repository::new(
+            Id::new("repo-a-bcmcp"),
+            Id::new("ws-bcmcp"),
+            "repo-a",
+            "/tmp/repo-a-bcmcp.git",
+            0,
+        );
+        state.repos.create(&repo_a).await.unwrap();
+        let repo_b = gyre_domain::Repository::new(
+            Id::new("repo-b-bcmcp"),
+            Id::new("ws-bcmcp"),
+            "repo-b",
+            "/tmp/repo-b-bcmcp.git",
+            0,
+        );
+        state.repos.create(&repo_b).await.unwrap();
+
+        let edge = gyre_domain::DependencyEdge::new(
+            Id::new("edge-bcmcp"),
+            repo_a.id.clone(),
+            repo_b.id.clone(),
+            gyre_domain::DependencyType::Code,
+            "Cargo.toml",
+            "crate-b",
+            gyre_domain::DetectionMethod::CargoToml,
+            1000,
+        );
+        state.dependencies.save(&edge).await.unwrap();
+
+        // Live repo orchestrator for the DEPENDENT repo (repo-a).
+        let mut orch = gyre_domain::Agent::new(Id::new("orch-bcmcp"), "repo-a orchestrator", 0);
+        orch.workspace_id = Id::new("ws-bcmcp");
+        orch.repo_id = Some(repo_a.id.clone());
+        orch.orchestrator_type = gyre_domain::OrchestratorType::RepoOrchestrator;
+        orch.transition_status(gyre_domain::AgentStatus::Active)
+            .unwrap();
+        state.agents.create(&orch).await.unwrap();
+
+        // Orchestrator JWT so the poll authenticates AS the orchestrator.
+        let token = state
+            .agent_signing_key
+            .mint_orchestrator(
+                "orch-bcmcp",
+                "system",
+                &state.base_url,
+                state.agent_jwt_ttl_secs,
+                "t-bcmcp",
+                "ws-bcmcp",
+                Some(repo_a.id.as_str()),
+                Some("repo-a"),
+                "repo_orchestrator",
+                "repo-orchestrator",
+            )
+            .unwrap();
+        state
+            .kv_store
+            .kv_set("agent_tokens", "orch-bcmcp", token.clone())
+            .await
+            .unwrap();
+
+        // The production cascade — the same function both breaking-change
+        // detection routes feed.
+        let breaking = vec![(
+            "sha-bcmcp".to_string(),
+            "API contract change: removed DELETE /widgets from openapi.yaml".to_string(),
+        )];
+        let dependents = vec![edge.clone()];
+        crate::git_http::process_breaking_changes(
+            &state,
+            &breaking,
+            &dependents,
+            repo_b.id.as_str(),
+            "repo-b",
+            "ws-bcmcp",
+            "t-bcmcp",
+            &gyre_domain::DependencyPolicy::default(),
+            2000,
+        )
+        .await;
+
+        // gyre_message_poll as the orchestrator: the Directed message must
+        // come back, carrying the breaking-change payload.
+        let app = crate::build_router(state.clone());
+        let (status, json) = mcp_post_with_token(
+            app,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 78,
+                "method": "tools/call",
+                "params": {
+                    "name": "gyre_message_poll",
+                    "arguments": { "unacked_only": true }
+                }
+            }),
+            &token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            !json["result"]["isError"].as_bool().unwrap(),
+            "poll should succeed: {json}"
+        );
+        let text = json["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("1 message(s)"), "poll text: {text}");
+        assert!(
+            text.contains("breaking_change_detected"),
+            "poll text: {text}"
+        );
+        assert!(
+            text.contains("API contract change: removed DELETE /widgets from openapi.yaml"),
+            "poll text: {text}"
+        );
+        // Directed at the orchestrator agent.
+        assert!(text.contains("orch-bcmcp"), "poll text: {text}");
+        // Carries the breaking-change id and the dependent repo.
+        let bcs = state
+            .breaking_changes
+            .list_by_source_repo(&repo_b.id)
+            .await
+            .unwrap();
+        assert_eq!(bcs.len(), 1);
+        assert!(
+            text.contains(bcs[0].id.as_str()),
+            "poll text must carry the breaking-change id: {text}"
+        );
+        assert!(
+            text.contains(repo_a.id.as_str()),
+            "poll text must carry the dependent repo id: {text}"
+        );
     }
 
     #[tokio::test]
@@ -5563,6 +10232,7 @@ mod tests {
         let mr = MergeRequest::new(
             Id::new("mr-trace-test"),
             Id::new("repo-1"),
+            Id::new("default"),
             "Test MR",
             "feat/test",
             "main",
@@ -5611,20 +10281,35 @@ mod tests {
     }
 
     fn agent_auth(agent_id: &str, workspace_id: &str, repo_id: Option<&str>) -> AuthenticatedAgent {
+        // §1 Token Scoping format: a Gyre-minted agent JWT carries a
+        // fine-grained scope list plus hierarchy claims. Repo-bound callers
+        // get worker scopes; workspace-only callers get orchestrator scopes.
+        let scope: Vec<String> = match repo_id {
+            Some(r) => vec![format!("repo:{r}:write")],
+            None => vec![
+                format!("workspace:{workspace_id}:read"),
+                format!("workspace:{workspace_id}:spawn"),
+            ],
+        };
         let mut claims = serde_json::json!({
             "sub": agent_id,
-            "scope": "agent",
+            "scope": scope,
             "task_id": agent_id,
+            "tenant_id": "default",
             "workspace_id": workspace_id
         });
         if let Some(r) = repo_id {
             claims["repo_id"] = serde_json::json!(r);
         }
         AuthenticatedAgent {
+            auth_mechanism: crate::auth::AuthMechanism::AgentToken,
             agent_id: agent_id.to_string(),
             user_id: None,
             roles: vec![UserRole::Agent],
             tenant_id: "default".to_string(),
+            workspace_id: Some(workspace_id.to_string()),
+            repo_id: repo_id.map(|r| r.to_string()),
+            scope: scope.clone(),
             jwt_claims: Some(claims),
             bearer_token: None,
             deprecated_token_auth: false,
@@ -5817,10 +10502,14 @@ mod tests {
         let state = seed_secret_state().await;
         // A user token (no agent JWT, no agent record) has no secret scope.
         let auth = AuthenticatedAgent {
+            auth_mechanism: crate::auth::AuthMechanism::ApiKey,
             agent_id: "some-user".to_string(),
             user_id: Some(Id::new("u-1")),
             roles: vec![UserRole::Developer],
             tenant_id: "default".to_string(),
+            workspace_id: None,
+            repo_id: None,
+            scope: Vec::new(),
             jwt_claims: None,
             bearer_token: None,
             deprecated_token_auth: false,
@@ -7151,8 +11840,12 @@ concepts:
     // -- TASK-093: orchestrator tier tools -----------------------------------
 
     /// Seed ws-1 (+ repos r-1, r-2, and r-x in ws-2) and return the state.
+    /// Includes the built-in persona meta-specs via the production startup
+    /// seeder — gyre_spawn_repo_orchestrator enforces that the
+    /// repo-orchestrator persona exists and is approved.
     async fn orch_state() -> std::sync::Arc<crate::AppState> {
         let state = test_state();
+        crate::seed_builtin_meta_specs(&state).await;
         for wid in ["ws-1", "ws-2"] {
             let ws = gyre_domain::Workspace::new(
                 gyre_common::Id::new(wid),
@@ -7212,6 +11905,27 @@ concepts:
             .unwrap();
         state.agents.create(&agent).await.unwrap();
 
+        // §1 Token Scoping test helper: tenant and repo name mirror the
+        // seeded orch_state hierarchy. The workspace was seeded by
+        // orch_state() — a missing row or store error is a broken fixture,
+        // not a "default" tenant (task-097 F3 class).
+        let tenant_id = state
+            .workspaces
+            .find_by_id(&gyre_common::Id::new(workspace_id))
+            .await
+            .unwrap()
+            .map(|ws| ws.tenant_id.to_string())
+            .expect("orch fixture: seeded workspace must resolve with a tenant");
+        let repo_name = if let Some(rid) = repo_id {
+            state
+                .repos
+                .find_by_id(&gyre_common::Id::new(rid))
+                .await
+                .unwrap()
+                .map(|r| r.name)
+        } else {
+            None
+        };
         let token = state
             .agent_signing_key
             .mint_orchestrator(
@@ -7219,9 +11933,16 @@ concepts:
                 "system",
                 &state.base_url,
                 state.agent_jwt_ttl_secs,
+                &tenant_id,
                 workspace_id,
                 repo_id,
+                repo_name.as_deref(),
                 orchestrator_type,
+                match orchestrator_type {
+                    "workspace_orchestrator" => "workspace-orchestrator",
+                    "repo_orchestrator" => "repo-orchestrator",
+                    _ => "worker",
+                },
             )
             .unwrap();
         state
@@ -7273,6 +11994,56 @@ concepts:
     }
 
     #[tokio::test]
+    async fn mcp_spawn_repo_orchestrator_denies_tenant_mismatch() {
+        // task-130 review 29e132008c6748508f2c52ec982d78d6: with the caller's
+        // tenant now derived from the signature-verified claims, the
+        // containment comparison in spawn_repo_orchestrator_core must still
+        // fire — a token whose tenant claim does not match the target
+        // workspace's real tenant is denied, not silently allowed.
+        let state = orch_state().await;
+        // Mint a workspace-orchestrator token claiming ws-1 but a tenant that
+        // does not match ws-1's row (seeded with tenant t1 by orch_state).
+        let token = state
+            .agent_signing_key
+            .mint_orchestrator(
+                "orch-tenant-mismatch",
+                "system",
+                &state.base_url,
+                state.agent_jwt_ttl_secs,
+                "t-other",
+                "ws-1",
+                None,
+                None,
+                "workspace_orchestrator",
+                "workspace-orchestrator",
+            )
+            .unwrap();
+        state
+            .kv_store
+            .kv_set("agent_tokens", "orch-tenant-mismatch", token.clone())
+            .await
+            .unwrap();
+        let app = crate::build_router(state);
+
+        let (_status, json) = mcp_post_with_token(
+            app,
+            tool_call("gyre_spawn_repo_orchestrator", json!({ "repo_id": "r-1" })),
+            &token,
+        )
+        .await;
+        assert!(json["result"]["isError"].as_bool().unwrap());
+        let text = json["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("tenant t1"),
+            "denial must name the workspace's real tenant, got: {text}"
+        );
+        assert!(
+            text.contains("t-other"),
+            "denial must name the caller's claims-derived tenant, got: {text}"
+        );
+    }
+
+    #[tokio::test]
     async fn mcp_spawn_repo_orchestrator_denies_repo_tier() {
         let state = orch_state().await;
         let (_id, token) = register_orchestrator(
@@ -7294,6 +12065,221 @@ concepts:
         assert!(json["result"]["isError"].as_bool().unwrap());
         let text = json["result"]["content"][0]["text"].as_str().unwrap();
         assert!(text.contains("workspace-orchestrator"), "got: {text}");
+    }
+
+    // ── preview agents are denied ceremony tools (meta-spec §5) ───────────────
+
+    /// Register a preview agent (agent row + `preview_agents` discriminator +
+    /// scoped JWT in `agent_tokens`) and return (agent_id, token). Mirrors the
+    /// server-side provisioning in `api::meta_specs` without spawning a
+    /// process — the MCP guard keys off the kv record, not the process.
+    async fn register_preview_agent(state: &std::sync::Arc<crate::AppState>) -> (String, String) {
+        let agent_id = "preview-agent-1".to_string();
+        let mut agent = gyre_domain::Agent::new(gyre_common::Id::new(&agent_id), "preview", 0);
+        agent.workspace_id = gyre_common::Id::new("ws-1");
+        agent
+            .transition_status(gyre_domain::AgentStatus::Active)
+            .unwrap();
+        state.agents.create(&agent).await.unwrap();
+
+        // The discriminator the dispatch guard (and process-exit path) reads.
+        state
+            .kv_store
+            .kv_set(
+                "preview_agents",
+                &agent_id,
+                serde_json::to_string(&serde_json::json!({
+                    "preview_id": "preview-test",
+                    "agent_id": agent_id,
+                    "repo_id": "r-1",
+                    "workspace_id": "ws-1",
+                    "spec_path": "specs/system/search.md",
+                    "branch": "preview/preview-test/search",
+                    "base_sha": "0000000000000000000000000000000000000000",
+                    "worktree_path": "/nonexistent",
+                    "released": false
+                }))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let token = state
+            .agent_signing_key
+            .mint(
+                &agent_id,
+                "preview-test",
+                "system",
+                &state.base_url,
+                300,
+                "default",
+                "ws-1",
+                "r-1",
+                "repo",
+            )
+            .unwrap();
+        state
+            .kv_store
+            .kv_set("agent_tokens", &agent_id, token.clone())
+            .await
+            .unwrap();
+        (agent_id, token)
+    }
+
+    #[tokio::test]
+    async fn mcp_preview_agent_denied_ceremony_tools() {
+        let state = orch_state().await;
+        let (agent_id, token) = register_preview_agent(&state).await;
+        let app = crate::build_router(state.clone());
+
+        // Ceremony tools: each must be refused for a preview agent, even
+        // though the runner's allowedTools list is advisory (client-side).
+        let ceremony_tools = [
+            ("gyre_create_task", json!({ "name": "sneaky task" })),
+            (
+                "gyre_update_task",
+                json!({ "task_id": "t-1", "status": "in_progress" }),
+            ),
+            (
+                "gyre_create_mr",
+                json!({ "repo_id": "r-1", "source_branch": "b", "title": "t" }),
+            ),
+            ("gyre_agent_complete", json!({ "agent_id": agent_id })),
+            ("conversation_upload", json!({ "data": "" })),
+            // Message tools (task-206 review F2): a preview agent injecting
+            // Directed-tier messages into production inboxes leaves a
+            // durable footprint that outlives the throwaway run.
+            (
+                "gyre_message_send",
+                json!({ "to": {"agent": "some-real-agent"}, "kind": "status_update", "payload": {} }),
+            ),
+            ("gyre_message_ack", json!({ "message_id": "m-1" })),
+            // Orchestrator tools (task-206 review repair eb6937c4 F2): they
+            // create tasks / spawn agents — ceremony the preview run must
+            // skip. Defense-in-depth: a preview JWT carries no orchestrator
+            // claims, so token shape would also refuse them; the preview
+            // registry must refuse them on its own.
+            (
+                "gyre_spawn_worker",
+                json!({ "task_id": "t-1", "persona": "worker" }),
+            ),
+            ("gyre_spawn_repo_orchestrator", json!({ "repo_id": "r-1" })),
+            (
+                "gyre_cross_repo_task",
+                json!({ "title": "t", "repo_ids": ["r-1"] }),
+            ),
+            ("gyre_decompose_spec", json!({ "spec_path": "specs/s.md" })),
+        ];
+        for (tool, args) in ceremony_tools {
+            let (_status, json) =
+                mcp_post_with_token(app.clone(), tool_call(tool, args), &token).await;
+            // The guard refuses before dispatch, so the error surfaces as a
+            // JSON-RPC error object, not as a tool result.
+            let text = json["error"]["message"]
+                .as_str()
+                .or(json["result"]["content"][0]["text"].as_str())
+                .unwrap_or_default();
+            assert!(
+                text.contains("PERMISSION_DENIED") && text.contains("preview agent"),
+                "{tool} must be denied for a preview agent; got: {text}"
+            );
+        }
+        // A normal (non-preview) agent with the same token shape is NOT
+        // denied: the guard is keyed off preview membership, not role.
+        state
+            .kv_store
+            .kv_remove("preview_agents", &agent_id)
+            .await
+            .unwrap();
+        let (_status, json) = mcp_post_with_token(
+            app.clone(),
+            tool_call("gyre_agent_heartbeat", json!({ "agent_id": agent_id })),
+            &token,
+        )
+        .await;
+        let text = json["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(
+            !text.contains("preview agent"),
+            "non-preview agent must not trip the preview guard; got: {text}"
+        );
+    }
+
+    /// Task-206 review F2: the identity-scoped tools (heartbeat,
+    /// record_activity) stay available to a preview run's OWN agent — the
+    /// preview prompt instructs self-heartbeat — but a preview agent may
+    /// not target ANOTHER agent with them (keeping a real agent alive
+    /// against stale-reaping, injecting telemetry attributed to it).
+    #[tokio::test]
+    async fn mcp_preview_agent_heartbeat_targets_only_self() {
+        let state = orch_state().await;
+        let (agent_id, token) = register_preview_agent(&state).await;
+        let app = crate::build_router(state.clone());
+
+        // Cross-target heartbeat: refused by the dispatch guard before the
+        // handler (so the SVID check is never reached).
+        let (_status, json) = mcp_post_with_token(
+            app.clone(),
+            tool_call(
+                "gyre_agent_heartbeat",
+                json!({ "agent_id": "real-agent-9", "svid": "x" }),
+            ),
+            &token,
+        )
+        .await;
+        let text = json["error"]["message"]
+            .as_str()
+            .or(json["result"]["content"][0]["text"].as_str())
+            .unwrap_or_default();
+        assert!(
+            text.contains("PERMISSION_DENIED") && text.contains("preview agent"),
+            "cross-target heartbeat must be denied for a preview agent; got: {text}"
+        );
+
+        // Cross-target record_activity: same refusal.
+        let (_status, json) = mcp_post_with_token(
+            app.clone(),
+            tool_call(
+                "gyre_record_activity",
+                json!({ "agent_id": "real-agent-9", "event_type": "RUN_STARTED", "description": "d" }),
+            ),
+            &token,
+        )
+        .await;
+        let text = json["error"]["message"]
+            .as_str()
+            .or(json["result"]["content"][0]["text"].as_str())
+            .unwrap_or_default();
+        assert!(
+            text.contains("PERMISSION_DENIED") && text.contains("preview agent"),
+            "cross-target record_activity must be denied for a preview agent; got: {text}"
+        );
+
+        // Self-target heartbeat passes the dispatch guard. This manually
+        // seeded preview row carries no SVID record, so the handler's SVID
+        // verification is the expected failure here — a different, expected
+        // error, never the preview denial. (A preview agent launched through
+        // the production path DOES carry a session SVID — see
+        // `preview_agent_heartbeats_keep_long_runs_active` in meta_specs.rs —
+        // so its self-heartbeat verifies and keeps the run alive.)
+        let (_status, json) = mcp_post_with_token(
+            app.clone(),
+            tool_call(
+                "gyre_agent_heartbeat",
+                json!({ "agent_id": agent_id, "svid": "x" }),
+            ),
+            &token,
+        )
+        .await;
+        let text = json["error"]["message"]
+            .as_str()
+            .or(json["result"]["content"][0]["text"].as_str())
+            .unwrap_or_default();
+        assert!(
+            !text.contains("preview agent"),
+            "self-target heartbeat must not trip the preview guard; got: {text}"
+        );
     }
 
     #[tokio::test]
@@ -7408,7 +12394,15 @@ concepts:
             &token,
         )
         .await;
-        assert!(json["result"]["isError"].as_bool().unwrap());
+        // The pre-dispatch validate_tool_scope gate denies the foreign-parent
+        // call with a JSON-RPC error naming the task and its repo.
+        assert!(json["error"].is_object(), "got: {json}");
+        let msg = json["error"]["message"].as_str().unwrap();
+        assert!(msg.contains("PERMISSION_DENIED"), "got: {msg}");
+        assert!(
+            msg.contains("parent-2") && msg.contains("r-x"),
+            "error must name the target task and repo: {msg}"
+        );
 
         let (_status, json) = mcp_post_with_token(
             app,
@@ -7459,5 +12453,626 @@ concepts:
         assert!(json["result"]["isError"].as_bool().unwrap());
         let text = json["result"]["content"][0]["text"].as_str().unwrap();
         assert!(text.contains("repo-orchestrator"), "got: {text}");
+    }
+
+    // ── §1 Token Scoping: MCP validates scope on every tool call ─────────────
+
+    /// Register a worker agent (entity + repo-scoped JWT in agent_tokens).
+    /// Mirrors spawn_agent_core's mint: scope = ["repo:{name}:write"].
+    async fn register_worker(
+        state: &std::sync::Arc<crate::AppState>,
+        name: &str,
+        repo_id: &str,
+    ) -> (String, String) {
+        let agent_id = format!("worker-{name}");
+        let mut agent = gyre_domain::Agent::new(gyre_common::Id::new(&agent_id), name, 0);
+        let repo = state
+            .repos
+            .find_by_id(&gyre_common::Id::new(repo_id))
+            .await
+            .unwrap()
+            .expect("repo seeded");
+        agent.workspace_id = repo.workspace_id.clone();
+        agent.repo_id = Some(repo.id.clone());
+        agent
+            .transition_status(gyre_domain::AgentStatus::Active)
+            .unwrap();
+        state.agents.create(&agent).await.unwrap();
+        // Spawned workers always carry a worktree (spawn_agent_core creates
+        // and persists one); TASK-216's repo-scope check on gyre_create_mr
+        // reads it back from the worktrees store.
+        let wt = gyre_domain::AgentWorktree::new(
+            gyre_common::Id::new(format!("wt-{agent_id}")),
+            agent.id.clone(),
+            repo.id.clone(),
+            Some(gyre_common::Id::new("task-1")),
+            "feat/w",
+            format!("/tmp/worktrees/{agent_id}"),
+            0,
+        );
+        state.worktrees.create(&wt).await.unwrap();
+        let tenant_id = state
+            .workspaces
+            .find_by_id(&repo.workspace_id)
+            .await
+            .unwrap()
+            .map(|ws| ws.tenant_id.to_string())
+            .expect("worker fixture: seeded workspace must resolve with a tenant");
+
+        let token = state
+            .agent_signing_key
+            .mint(
+                &agent_id,
+                "task-1",
+                "system",
+                &state.base_url,
+                state.agent_jwt_ttl_secs,
+                &tenant_id,
+                &repo.workspace_id.to_string(),
+                repo_id,
+                &repo.name,
+            )
+            .unwrap();
+        state
+            .kv_store
+            .kv_set("agent_tokens", &agent_id, token.clone())
+            .await
+            .unwrap();
+        (agent_id, token)
+    }
+
+    #[tokio::test]
+    async fn mcp_scope_worker_cannot_create_mr_in_other_repo() {
+        let state = orch_state().await;
+        let (_id, token) = register_worker(&state, "w1", "r-1").await;
+        let app = crate::build_router(state);
+
+        // The worker's token is scoped to r-1; creating an MR in r-2 must be
+        // rejected by scope validation with a clear PERMISSION_DENIED error.
+        let (_status, json) = mcp_post_with_token(
+            app,
+            tool_call("gyre_create_mr", json!({ "repository_id": "r-2" })),
+            &token,
+        )
+        .await;
+        assert!(
+            json["error"].is_object(),
+            "scope denial must be a JSON-RPC error, got: {json}"
+        );
+        let msg = json["error"]["message"].as_str().unwrap();
+        assert!(msg.contains("PERMISSION_DENIED"), "got: {msg}");
+        assert!(
+            msg.contains("r-2"),
+            "error must name the target repo: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_scope_worker_create_mr_own_repo_passes_scope_gate() {
+        let state = orch_state().await;
+        let (_id, token) = register_worker(&state, "w2", "r-1").await;
+        let app = crate::build_router(state);
+
+        // Same-repo call passes the scope gate (it may still fail later on
+        // missing worktree/branch data — that is the tool's own validation,
+        // not a scope rejection).
+        let (_status, json) = mcp_post_with_token(
+            app,
+            tool_call("gyre_create_mr", json!({ "repository_id": "r-1" })),
+            &token,
+        )
+        .await;
+        let msg = serde_json::to_string(&json).unwrap();
+        assert!(
+            !msg.contains("PERMISSION_DENIED"),
+            "in-scope call must not be scope-denied: {msg}"
+        );
+    }
+
+    /// AC (task-263, identity-security.md §Task-Scoped JWT Claims): the
+    /// task-mutating MCP tools compare the caller's `task_id` claim
+    /// against the target — gyre_update_task and gyre_decompose_spec
+    /// (parent) return PERMISSION_DENIED for a foreign task even when the
+    /// tier scope alone would allow it (task-2 lives in the worker's own
+    /// workspace), and gyre_create_mr is denied outside the claim's task
+    /// repo. The caller's own task passes the boundary.
+    #[tokio::test]
+    async fn mcp_agent_jwt_task_scope_on_task_and_mr_tools() {
+        let state = orch_state().await;
+        // task-1 is the worker's claim target (repo r-1); task-2 lives in
+        // r-2, the SAME workspace — repo/workspace-tier containment alone
+        // would allow acting on it; the task claim must not.
+        for (tid, rid) in [("task-1", "r-1"), ("task-2", "r-2")] {
+            let mut t = gyre_domain::Task::new(gyre_common::Id::new(tid), tid, 0);
+            t.workspace_id = gyre_common::Id::new("ws-1");
+            t.repo_id = gyre_common::Id::new(rid);
+            state.tasks.create(&t).await.unwrap();
+        }
+        let (_id, token) = register_worker(&state, "w-task-scope", "r-1").await;
+        let app = crate::build_router(state.clone());
+
+        // gyre_update_task on the foreign task → PERMISSION_DENIED naming
+        // the claim and the target.
+        let (_s, json) = mcp_post_with_token(
+            app.clone(),
+            tool_call(
+                "gyre_update_task",
+                json!({ "id": "task-2", "title": "hijacked", "status": "done" }),
+            ),
+            &token,
+        )
+        .await;
+        assert!(json["error"].is_object(), "got: {json}");
+        let msg = json["error"]["message"].as_str().unwrap();
+        assert!(msg.contains("PERMISSION_DENIED"), "got: {msg}");
+        assert!(
+            msg.contains("task-1") && msg.contains("task-2"),
+            "error must name the claim and the target: {msg}"
+        );
+        // The foreign task was not mutated.
+        let t2 = state
+            .tasks
+            .find_by_id(&gyre_common::Id::new("task-2"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(t2.title, "task-2");
+        assert_eq!(t2.status, gyre_domain::TaskStatus::Backlog);
+
+        // The caller's own task passes the boundary and updates.
+        let (_s, json) = mcp_post_with_token(
+            app.clone(),
+            tool_call(
+                "gyre_update_task",
+                json!({ "id": "task-1", "title": "own-task edit" }),
+            ),
+            &token,
+        )
+        .await;
+        assert!(
+            !json["result"]["isError"].as_bool().unwrap_or(false),
+            "own-task update must pass the boundary: {json}"
+        );
+
+        // gyre_decompose_spec with the foreign task as parent → denied.
+        let (_s, json) = mcp_post_with_token(
+            app.clone(),
+            tool_call(
+                "gyre_decompose_spec",
+                json!({ "parent_task_id": "task-2", "subtasks": [{ "title": "Nope" }] }),
+            ),
+            &token,
+        )
+        .await;
+        assert!(json["error"].is_object(), "got: {json}");
+        let msg = json["error"]["message"].as_str().unwrap();
+        assert!(msg.contains("PERMISSION_DENIED"), "got: {msg}");
+        assert!(
+            msg.contains("task-2"),
+            "error must name the parent target: {msg}"
+        );
+
+        // gyre_create_mr outside the claim's task repo → denied (the
+        // worker's claim resolves to task-1 in r-1; r-2 is foreign).
+        let (_s, json) = mcp_post_with_token(
+            app.clone(),
+            tool_call("gyre_create_mr", json!({ "repository_id": "r-2" })),
+            &token,
+        )
+        .await;
+        assert!(json["error"].is_object(), "got: {json}");
+        let msg = json["error"]["message"].as_str().unwrap();
+        assert!(msg.contains("PERMISSION_DENIED"), "got: {msg}");
+        assert!(
+            msg.contains("r-2"),
+            "error must name the target repo: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_scope_worker_list_mrs_no_repo_clamped_to_own_repo() {
+        // task-130 review F1: gyre_list_mrs treats repository_id as
+        // optional and fell back to the shared unfiltered store — a worker
+        // scoped to a single repo received every MR across all
+        // workspaces/tenants. The fallback listing must be clamped to the
+        // caller's own repo.
+        let state = orch_state().await;
+        let seed_mr = |id: &str, repo: &str, ws: &str, title: &str| {
+            gyre_domain::MergeRequest::new(
+                gyre_common::Id::new(id),
+                gyre_common::Id::new(repo),
+                gyre_common::Id::new(ws),
+                title,
+                "feat/a",
+                "main",
+                0,
+            )
+        };
+        state
+            .merge_requests
+            .create(&seed_mr("mr-own", "r-1", "ws-1", "mr-own-r1"))
+            .await
+            .unwrap();
+        state
+            .merge_requests
+            .create(&seed_mr("mr-sibling", "r-2", "ws-1", "mr-sibling-r2"))
+            .await
+            .unwrap();
+        state
+            .merge_requests
+            .create(&seed_mr("mr-foreign", "r-x", "ws-2", "mr-foreign-rx"))
+            .await
+            .unwrap();
+        let (worker_id, token) = register_worker(&state, "w-lm", "r-1").await;
+        let app = crate::build_router(state.clone());
+
+        // No repository_id: the fallback listing is clamped to the
+        // caller's own repo (r-1) — not the shared unfiltered store.
+        let (_status, json) =
+            mcp_post_with_token(app.clone(), tool_call("gyre_list_mrs", json!({})), &token).await;
+        assert!(
+            json["error"].is_null(),
+            "in-scope fallback listing must not be scope-denied: {json}"
+        );
+        let text = json["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("mr-own-r1"), "own-repo MR missing: {text}");
+        assert!(
+            !text.contains("mr-sibling-r2"),
+            "same-workspace sibling repo MR leaked: {text}"
+        );
+        assert!(
+            !text.contains("mr-foreign-rx"),
+            "cross-workspace MR leaked: {text}"
+        );
+
+        // Explicit own repo stays allowed.
+        let (_status, json) = mcp_post_with_token(
+            app.clone(),
+            tool_call("gyre_list_mrs", json!({ "repository_id": "r-1" })),
+            &token,
+        )
+        .await;
+        assert!(
+            json["error"].is_null(),
+            "explicit own repo must pass: {json}"
+        );
+
+        // Sanity: the caller really is the r-1 worker.
+        assert_eq!(worker_id, "worker-w-lm");
+    }
+
+    #[tokio::test]
+    async fn mcp_scope_workspace_orchestrator_list_mrs_requires_repo() {
+        // task-130 review F1: a workspace-tier token carries no repo scope
+        // to clamp the fallback listing to — it must address a repository
+        // explicitly instead of receiving the unfiltered store.
+        let state = orch_state().await;
+        let (_id, token) =
+            register_orchestrator(&state, "ws-orch-lm", "ws-1", None, "workspace_orchestrator")
+                .await;
+        let app = crate::build_router(state);
+
+        let (_status, json) =
+            mcp_post_with_token(app.clone(), tool_call("gyre_list_mrs", json!({})), &token).await;
+        assert!(
+            json["error"].is_object(),
+            "workspace-tier fallback listing must be denied, got: {json}"
+        );
+        let msg = json["error"]["message"].as_str().unwrap();
+        assert!(msg.contains("PERMISSION_DENIED"), "got: {msg}");
+        assert!(
+            msg.contains("repository_id"),
+            "error must tell the caller to pass repository_id: {msg}"
+        );
+
+        // Explicit repo inside the caller's workspace still passes the gate.
+        let (_status, json) = mcp_post_with_token(
+            app,
+            tool_call("gyre_list_mrs", json!({ "repository_id": "r-1" })),
+            &token,
+        )
+        .await;
+        assert!(
+            json["error"].is_null(),
+            "explicit in-workspace repo must pass: {json}"
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_scope_worker_cannot_heartbeat_foreign_agent() {
+        // task-130 review F2: gyre_agent_heartbeat accepted a caller-chosen
+        // agent_id with no target binding — a worker scoped to r-1 could
+        // heartbeat any agent in any other repo/workspace/tenant, updating
+        // the foreign agent's last_seen and defeating stale-agent reaping.
+        let state = orch_state().await;
+        let (worker_id, token) = register_worker(&state, "w-hb", "r-1").await;
+        // Foreign target: a worker of r-x (workspace ws-2).
+        let (foreign_id, _foreign_token) = register_worker(&state, "w-hb-x", "r-x").await;
+        let app = crate::build_router(state.clone());
+
+        // The heartbeat surface verifies the session's X.509-SVID
+        // (identity-security.md Layer 1, task-261): seed the worker's
+        // SVID-backed record through the issuance path and present the
+        // issued chain + bound stack fingerprint on the self heartbeat.
+        let svid = crate::spiffe::issue_session_svid(
+            &state,
+            &worker_id,
+            "worker",
+            "local",
+            "sha256:hb-test-stack",
+        )
+        .await
+        .expect("test SVID issuance must succeed");
+
+        // Self heartbeat passes and records.
+        let (_status, json) = mcp_post_with_token(
+            app.clone(),
+            tool_call(
+                "gyre_agent_heartbeat",
+                json!({
+                    "agent_id": worker_id,
+                    "svid": svid.record.chain_pem,
+                    "stack_fingerprint": "sha256:hb-test-stack",
+                }),
+            ),
+            &token,
+        )
+        .await;
+        assert!(json["error"].is_null(), "self heartbeat must pass: {json}");
+        let text = json["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("Heartbeat recorded"), "got: {text}");
+
+        // Foreign agent: denied pre-dispatch, naming the target. The denial
+        // is a scope decision made before the handler runs — it must not
+        // depend on (or be bypassable by) the payload's SVID presentation.
+        let (_status, json) = mcp_post_with_token(
+            app.clone(),
+            tool_call(
+                "gyre_agent_heartbeat",
+                json!({
+                    "agent_id": foreign_id,
+                    "svid": svid.record.chain_pem,
+                    "stack_fingerprint": "sha256:hb-test-stack",
+                }),
+            ),
+            &token,
+        )
+        .await;
+        assert!(
+            json["error"].is_object(),
+            "foreign-agent heartbeat must be a JSON-RPC error, got: {json}"
+        );
+        let msg = json["error"]["message"].as_str().unwrap();
+        assert!(msg.contains("PERMISSION_DENIED"), "got: {msg}");
+        assert!(
+            msg.contains("r-x"),
+            "error must name the target repo: {msg}"
+        );
+
+        // The foreign agent's heartbeat must not have been touched.
+        let foreign = state
+            .agents
+            .find_by_id(&gyre_common::Id::new(&foreign_id))
+            .await
+            .unwrap()
+            .expect("foreign agent seeded");
+        assert!(
+            foreign.last_heartbeat.is_none(),
+            "denied heartbeat must not update the foreign agent's last_seen"
+        );
+
+        // Same binding covers gyre_record_activity's caller-chosen agent_id.
+        let (_status, json) = mcp_post_with_token(
+            app,
+            tool_call(
+                "gyre_record_activity",
+                json!({ "agent_id": foreign_id, "event_type": "RUN_STARTED", "description": "d" }),
+            ),
+            &token,
+        )
+        .await;
+        assert!(
+            json["error"].is_object(),
+            "foreign-agent record_activity must be a JSON-RPC error, got: {json}"
+        );
+        let msg = json["error"]["message"].as_str().unwrap();
+        assert!(msg.contains("PERMISSION_DENIED"), "got: {msg}");
+    }
+
+    #[tokio::test]
+    async fn mcp_scope_worker_cannot_spawn_workers() {
+        let state = orch_state().await;
+        let (_id, token) = register_worker(&state, "w3", "r-1").await;
+        let app = crate::build_router(state);
+
+        // A worker token carries repo:...:write, not repo:...:spawn —
+        // spawning must be rejected even for its own repo.
+        let (_status, json) = mcp_post_with_token(
+            app,
+            tool_call(
+                "gyre_spawn_worker",
+                json!({ "task_id": "t-1", "repo_id": "r-1", "name": "w", "branch": "b" }),
+            ),
+            &token,
+        )
+        .await;
+        assert!(json["error"].is_object(), "got: {json}");
+        let msg = json["error"]["message"].as_str().unwrap();
+        assert!(msg.contains("PERMISSION_DENIED"), "got: {msg}");
+    }
+
+    #[tokio::test]
+    async fn mcp_scope_workspace_orchestrator_cannot_write_repo() {
+        let state = orch_state().await;
+        let (_id, token) =
+            register_orchestrator(&state, "ws-orch-2", "ws-1", None, "workspace_orchestrator")
+                .await;
+        let app = crate::build_router(state);
+
+        // The workspace orchestrator's scope is workspace:ws-1:read|spawn —
+        // it must NOT carry repo write scope, so gyre_create_mr in any repo
+        // of the workspace is rejected by token scope.
+        let (_status, json) = mcp_post_with_token(
+            app,
+            tool_call("gyre_create_mr", json!({ "repository_id": "r-1" })),
+            &token,
+        )
+        .await;
+        assert!(json["error"].is_object(), "got: {json}");
+        let msg = json["error"]["message"].as_str().unwrap();
+        assert!(msg.contains("PERMISSION_DENIED"), "got: {msg}");
+    }
+
+    #[tokio::test]
+    async fn mcp_scope_workspace_orchestrator_own_workspace_allowed() {
+        let state = orch_state().await;
+        let (_id, token) =
+            register_orchestrator(&state, "ws-orch-3", "ws-1", None, "workspace_orchestrator")
+                .await;
+        let app = crate::build_router(state);
+
+        // Workspace-tier tools within the caller's workspace pass the scope gate.
+        let (_status, json) = mcp_post_with_token(
+            app,
+            tool_call(
+                "gyre_list_repo_orchestrators",
+                json!({ "workspace_id": "ws-1" }),
+            ),
+            &token,
+        )
+        .await;
+        assert!(
+            json["error"].is_null(),
+            "in-scope workspace call must pass: {json}"
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_scope_workspace_orchestrator_other_workspace_rejected() {
+        let state = orch_state().await;
+        let (_id, token) =
+            register_orchestrator(&state, "ws-orch-4", "ws-1", None, "workspace_orchestrator")
+                .await;
+        let app = crate::build_router(state);
+
+        let (_status, json) = mcp_post_with_token(
+            app,
+            tool_call(
+                "gyre_list_repo_orchestrators",
+                json!({ "workspace_id": "ws-2" }),
+            ),
+            &token,
+        )
+        .await;
+        assert!(json["error"].is_object(), "got: {json}");
+        let msg = json["error"]["message"].as_str().unwrap();
+        assert!(msg.contains("PERMISSION_DENIED"), "got: {msg}");
+        assert!(
+            msg.contains("ws-2"),
+            "error must name the target workspace: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_scope_global_token_unaffected() {
+        // Global token (Admin, no jwt_claims) is not token-scoped — the
+        // pre-existing ABAC/RBAC layers govern it.
+        let state = orch_state().await;
+        let app = crate::build_router(state);
+        let (_status, json) = mcp_post(
+            app,
+            tool_call(
+                "gyre_list_repo_orchestrators",
+                json!({ "workspace_id": "ws-1" }),
+            ),
+        )
+        .await;
+        assert!(json["error"].is_null(), "got: {json}");
+    }
+
+    #[tokio::test]
+    async fn mcp_message_send_denies_readonly_api_key() {
+        // task-093 F7: gyre_message_send persists via state.messages.store,
+        // so it is a write tool — a ReadOnly principal must be denied at the
+        // RBAC gate with a JSON-RPC error (not an isError tool result).
+        let state = orch_state().await;
+
+        // ReadOnly user + API key (auth.rs API-key path: roles come from the
+        // user record; User::new defaults to [ReadOnly]). The user is bound
+        // to orch_state's tenant t1: the API-key auth path fails closed for
+        // users without a tenant binding (auth.rs F1 — a plain-text 403,
+        // which would never reach the RBAC gate this test asserts).
+        let mut user =
+            gyre_domain::User::new(gyre_common::Id::new("ro-user"), "ro-ext", "ro-user", 0);
+        user.tenant_id = Some(gyre_common::Id::new("t1"));
+        state.users.create(&user).await.unwrap();
+        let raw_key = "ro-test-api-key";
+        let hashed = crate::auth::hash_api_key(raw_key);
+        state
+            .api_keys
+            .create(&hashed, &gyre_common::Id::new("ro-user"), "test")
+            .await
+            .unwrap();
+
+        let app = crate::build_router(state.clone());
+        let (status, json) = mcp_post_with_token(
+            app,
+            tool_call(
+                "gyre_message_send",
+                json!({
+                    "to": { "agent": "orch-ro-target" },
+                    "kind": "Custom",
+                    "payload": { "note": "hi" }
+                }),
+            ),
+            raw_key,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            json["error"]["code"].as_i64(),
+            Some(-32603),
+            "expected PERMISSION_DENIED jsonrpc error, got: {json}"
+        );
+
+        // Nothing was persisted.
+        let msgs = state
+            .messages
+            .list_unacked(&gyre_common::Id::new("orch-ro-target"), 100)
+            .await
+            .unwrap();
+        assert!(
+            msgs.is_empty(),
+            "no message may be stored for a denied send"
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_message_send_allows_agent_role() {
+        // Positive control: an Agent-role (or higher) caller passes the gate
+        // and reaches the handler.
+        let state = orch_state().await;
+        let (agent_id, token) =
+            register_orchestrator(&state, "sender", "ws-1", None, "workspace_orchestrator").await;
+        let app = crate::build_router(state.clone());
+
+        let (status, json) = mcp_post_with_token(
+            app,
+            tool_call(
+                "gyre_message_send",
+                json!({
+                    "to": { "agent": agent_id },
+                    "kind": "Custom",
+                    "payload": { "note": "self" }
+                }),
+            ),
+            &token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            json["error"].is_null(),
+            "Agent-role caller must pass the RBAC gate, got: {json}"
+        );
     }
 }

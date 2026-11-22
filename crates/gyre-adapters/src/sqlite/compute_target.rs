@@ -90,10 +90,13 @@ impl ComputeTargetRepository for SqliteStorage {
     async fn get_by_id(&self, id: &Id) -> Result<Option<ComputeTargetEntity>> {
         let pool = Arc::clone(&self.pool);
         let id = id.clone();
+        let tenant = self.tenant_id.clone();
         tokio::task::spawn_blocking(move || -> Result<Option<ComputeTargetEntity>> {
             let mut conn = pool.get().context("get db connection")?;
+            // Spec hierarchy-enforcement.md §3: id lookups must verify tenant.
             let result = compute_targets::table
                 .find(id.as_str())
+                .filter(compute_targets::tenant_id.eq(&tenant))
                 .first::<ComputeTargetRow>(&mut *conn)
                 .optional()
                 .context("get compute target by id")?;
@@ -173,9 +176,14 @@ impl ComputeTargetRepository for SqliteStorage {
     async fn has_workspace_references(&self, id: &Id) -> Result<bool> {
         let pool = Arc::clone(&self.pool);
         let id = id.clone();
+        let tenant = self.tenant_id.clone();
         tokio::task::spawn_blocking(move || -> Result<bool> {
             let mut conn = pool.get().context("get db connection")?;
+            // Spec hierarchy-enforcement.md §3: every read filters by tenant_id.
+            // The count is scoped to the storage's tenant: a compute target is
+            // tenant-owned, so only same-tenant workspaces can reference it.
             let count: i64 = workspaces::table
+                .filter(workspaces::tenant_id.eq(&tenant))
                 .filter(workspaces::compute_target_id.eq(id.as_str()))
                 .count()
                 .get_result(&mut *conn)
@@ -213,8 +221,8 @@ mod tests {
 
     #[tokio::test]
     async fn create_and_get_round_trip() {
-        let s = storage();
         let tid = tenant_id();
+        let s = storage().with_tenant(tid.as_str());
         let ct = make_target(&tid, "my-container", ComputeTargetType::Container);
         let id = ct.id.clone();
         s.create(&ct).await.expect("create");
@@ -246,8 +254,8 @@ mod tests {
 
     #[tokio::test]
     async fn update_changes_fields() {
-        let s = storage();
         let tid = tenant_id();
+        let s = storage().with_tenant(tid.as_str());
         let mut ct = make_target(&tid, "orig", ComputeTargetType::Ssh);
         s.create(&ct).await.expect("create");
         ct.name = "renamed".to_string();

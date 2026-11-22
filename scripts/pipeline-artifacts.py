@@ -27,6 +27,18 @@ def resolve_generated_conflicts(repo,base):
     conflicts=git(repo,'diff','--name-only','--diff-filter=U').splitlines()
     generated=[name for name in conflicts if name.startswith('web/dist/')]
     if generated:restore_generated(repo,base)
+    summary='specs/coverage/SUMMARY.md'
+    if summary in conflicts and not any(name.startswith('specs/coverage/') and name!=summary for name in conflicts):
+        import importlib.util
+        from datetime import date
+        parser=Path(__file__).with_name('dev-coverage.py')
+        spec=importlib.util.spec_from_file_location('trusted_coverage',parser)
+        module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+        matrices={str(path.relative_to(repo)):path.read_text() for path in (Path(repo)/'specs/coverage').rglob('*.md') if path.name!='SUMMARY.md'}
+        if not matrices or any(re.search(r'(?m)^(<<<<<<< |=======|>>>>>>> )',body) for body in matrices.values()):
+            raise ValueError('Cannot regenerate coverage summary from missing or conflicted matrices')
+        (Path(repo)/summary).write_text(module.summary(matrices,date.today().isoformat()))
+        git(repo,'add','--',summary);generated.append(summary)
     return generated,git(repo,'diff','--name-only','--diff-filter=U').splitlines()
 
 

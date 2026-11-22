@@ -5,7 +5,7 @@ import { dirname, extname, join, normalize, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { attemptLog, attemptLogPath, collectController, controllerPaths, coverageHistory, coverageMetrics, retryAllTasks, retryTask, setSlots, setPriority, taskPullRequests, taskTitles } from "./dev-controller.mjs";
+import { attemptLog, attemptLogPath, collectController, controllerPaths, coverageHistory, coverageMetrics, retryAllTasks, retryTask, setSlots, setPriority, chooseDecision, taskPullRequests, taskTitles } from "./dev-controller.mjs";
 
 const MIME = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
   ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml" };
@@ -111,6 +111,12 @@ export function createDashboardServer({ root }) {
     };
     try {
       if (url.pathname === "/api/snapshot" && req.method === "GET") return json(200, snapshot);
+      if (url.pathname === "/api/decision" && req.method === "POST") {
+        const { id, option } = await body();
+        const result = await chooseDecision(paths, String(id || ""), String(option || ""));
+        await refreshSnapshot();
+        return json(200, result);
+      }
       if (url.pathname === "/api/slots" && req.method === "POST") {
         const { value } = await body();
         await setSlots(paths, value);
@@ -151,7 +157,7 @@ export function createDashboardServer({ root }) {
         "cache-control": "no-cache", etag });
       res.end(data);
     } catch (error) {
-      const status = error.code === "ENOENT" ? 404 : 400;
+      const status = Number.isInteger(error.status) ? error.status : error.code === "ENOENT" ? 404 : 400;
       json(status, { error: String(error.message || error) });
     }
   });

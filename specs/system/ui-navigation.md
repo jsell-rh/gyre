@@ -1,6 +1,8 @@
 # UI Navigation Model
 
 > **Status: Draft.** This spec redefines Gyre's navigation structure. It **supersedes `human-system-interface.md` §1** (the "stable sidebar, adaptive content" model and the six-item sidebar) and **amends `ui-layout.md` §1** (the application shell). All other HSI sections (§2-§12) remain valid — this spec changes only how the user navigates between them.
+>
+> **Amendment (2026-11-16, decision `16871182b1370b61693fc691`):** Operator decision (option_c, delegated selection recorded by jsell) amended this spec's blanket "no sidebar" rule (former Design Principle 5) and retired task-082's literal six-fixed-items binding. The two-mode model is preserved; a third, optional navigation pattern — a context-dependent collapsible navigation rail on navigation-heavy screens — is added as §1a below. See §1a for the pattern and the full decision record.
 
 ## Why a New Navigation Model
 
@@ -23,9 +25,9 @@ The vision ("What Humans Do" §1-§5) defines what humans do: decide what to bui
 
 3. **GitHub muscle memory.** Repo list → click repo → horizontal tabs. Developers already know this flow. Adapt the pattern; don't invent a new one.
 
-4. **Decisions are always visible.** The notification bell in the top bar shows the count globally. Workspace home leads with decisions. Repo view has a Decisions tab. Human judgment is never more than one click away.
+4. **Decisions are always visible.** The notification bell in the top bar shows the unread notification count globally and opens the notification drawer (user-management.md §In-App Notification UI; amended, see §1 note). Workspace home leads with decisions. Repo view has a Decisions tab. Human judgment is never more than one click away.
 
-5. **No sidebar.** The workspace home is a dashboard. The repo view has horizontal tabs. There's no persistent sidebar that needs to morph between scopes — the two contexts are visually distinct pages.
+5. **No permanent sidebar.** The workspace home is a dashboard. The repo view has horizontal tabs. There is no persistent, global sidebar that needs to morph between scopes — the two contexts are visually distinct pages. Navigation-heavy screens MAY additionally offer the optional, collapsible, scope-labelled navigation rail defined in §1a; that rail is per-mode, collapsed by default, and never a global fixed menu. (Amended 2026-11-16, decision `16871182b1370b61693fc691`: the original blanket "No sidebar" wording is superseded by "no permanent sidebar".)
 
 ---
 
@@ -42,7 +44,18 @@ The vision ("What Humans Do" §1-§5) defines what humans do: decide what to bui
 - **[≡] Hamburger** (mobile only): Toggles the workspace home sections on narrow viewports.
 - **Workspace selector** (`Payments ▾`): Dropdown to switch workspaces. Shows workspace name. Clicking the name (not the arrow) navigates to the workspace home. Clicking the arrow opens the switcher dropdown.
 - **Search** (`⌘K`): Global search — specs, types, concepts, agents, repos. Opens a command palette overlay. Same as HSI §1.
-- **Decisions badge** (`🔔 3`): Count of unresolved items requiring human judgment across all repos in this workspace. Clicking navigates to the workspace home with the Decisions section expanded. Uses the notification system (not raw MR/spec counts).
+- **Notification bell** (`🔔 3`): Unread notification count (user-management.md §In-App Notification UI). Clicking opens the notification drawer — recent active notifications grouped by priority with deep links to the acting surface. Uses the notification system (not raw MR/spec counts).
+
+> **Bell amendment (2026-11, task-127):** The top-bar bell was previously
+> specced here as a *decisions-count* badge whose click navigated to the
+> workspace home with the Decisions section expanded (repo mode: the
+> Decisions tab). `user-management.md` §In-App Notification UI and §UI Pages
+> (Notification Drawer — "slide-out panel from bell icon", "notification
+> bell in top nav with unread count badge") supersede that behavior: the
+> bell shows the **unread** count and opens the notification drawer.
+> Decisions remain one click away — the drawer's items deep-link to the
+> acting surface — and the workspace home still leads with the Decisions
+> section (§2), which continues to show the active-decisions count.
 - **User avatar**: Dropdown with Profile (HSI §12), Sign out.
 
 **In repo mode**, the top bar adds a back arrow and repo context:
@@ -55,7 +68,7 @@ The vision ("What Humans Do" §1-§5) defines what humans do: decide what to bui
 
 - **[←] Back arrow**: Returns to workspace home. Always visible in repo mode.
 - **Workspace / Repo path**: Shows context. Clicking "Payments" returns to workspace home (same as back arrow). The repo name is not clickable (you're already there).
-- **Decisions badge**: In repo mode, shows count for THIS repo only (excludes workspace-scoped notifications with `repo_id: NULL` per HSI §1). This is intentional — workspace-scoped items are visible on the workspace home, which the user sees first on every app open. Clicking opens the Decisions tab.
+- **Notification bell**: Shows the same unread count as workspace mode (the unread-count endpoint does not yet support repo-scoped filtering; workspace-scoped items are visible on the workspace home, which the user sees first on every app open). Clicking opens the notification drawer, same as workspace mode (2026-11, task-127 amendment above).
 
 ### Status Bar (bottom, always visible)
 
@@ -66,6 +79,55 @@ The vision ("What Humans Do" §1-§5) defines what humans do: decide what to bui
 ```
 
 Same as `ui-layout.md` §1. Trust level, budget usage, WebSocket status, presence avatars for the current workspace.
+
+---
+
+## 1a. Collapsible Navigation Rail (Optional)
+
+> **Implementation status: shipped (task-082).** The rail ships as `web/src/components/NavRail.svelte`, rendered by `App.svelte` on workspace home and repo mode (without an open entity detail); the narrow-viewport drawer offers the same per-mode item set. Covered by `web/src/__tests__/NavRail.test.js`; `web/src/__tests__/NoSidebar.test.js` still guards the absence of a *permanent* sidebar (this section's "never a permanent global sidebar" rule).
+
+Added by operator decision `16871182b1370b61693fc691` (2026-11-16, option_c — decision record at the end of this section). This section adds a third navigation pattern **alongside** the two-mode model. It does not replace the two-mode model: the workspace-home dashboard, the repo horizontal tabs, ⌘K search, and the keyboard shortcuts (§6) remain the base navigation and must stay fully functional without the rail.
+
+### Pattern
+
+An optional, collapsible, scope-labelled left panel — the **navigation rail** — on navigation-heavy screens:
+
+- **Where it appears:** workspace home (§2) and repo mode (§3) only. It does NOT appear on focused editor/canvas surfaces — the Editor Split layout (`ui-layout.md` §9), popped-out detail panels, and full-screen modals keep the full content width; the rail is hidden (or stays collapsed to icon-only) there to preserve canvas/editor space.
+- **Scope-labelled:** the rail is headed by the current scope — workspace name on the workspace home; workspace / repo path in repo mode. The item set is per-mode; there is never one global menu shared across modes.
+- **Stable ordering within each mode:** item order is fixed per mode so users build muscle memory — the surviving benefit of the old HSI §1.3 "stable sidebar" intent, without its fixed-global-menu cost. Items never move, appear, or disappear within a mode.
+- **Collapsed by default:** the rail renders icon-only (48px) by default to preserve dashboard/canvas space. A toggle expands it to the labelled form (240px). The expanded/collapsed preference is persisted per user per mode (`localStorage`); the default on first use is collapsed.
+- **Optional, never load-bearing:** every rail destination must remain reachable without the rail (dashboard sections, tab strip, ⌘K search, `g`-prefixed shortcuts). A screen may omit the rail entirely. The rail must never become the only path to a destination and must never grow into a permanent global sidebar of the kind §9 retires.
+
+### Item set per mode
+
+The rail mirrors the mode's existing navigation surfaces — it introduces no new destinations and no second source of truth:
+
+- **Workspace-home rail** — the workspace-home sections (§2) in their canonical dashboard order, then workspace Settings:
+  1. Decisions
+  2. Specs
+  3. Architecture
+  4. Repos
+  5. Briefing
+  6. Agent Rules
+  7. Settings
+
+  Selecting a section item scrolls to (and, for Architecture, expands) that section on the workspace home; Settings navigates to the workspace settings page (§2 Workspace Settings).
+- **Repo-mode rail** — the repo-mode tab strip (§3) in canonical tab order. The tab strip is the source of truth for the item set and the rail mirrors it exactly, including any additional repo tabs shipped at implementation time (e.g. Tasks, MRs, Agents, Dependencies), each keeping its shipped tab position. Selecting a rail item activates the corresponding tab (same route as clicking the tab). The horizontal tab strip remains visible in repo mode — the rail is a shortcut/switcher, not a replacement for the tabs.
+
+The active destination is highlighted in the rail exactly as it is in the tab strip / dashboard section.
+
+### Narrow viewports (<768px)
+
+On narrow viewports the rail is not rendered as a persistent rail. Its per-mode item set is offered through the hamburger drawer defined in §8 (Mobile) — the drawer is the narrow-viewport form of this pattern. The drawer overlays content and dismisses on selection or `Esc`.
+
+### Decision record
+
+- **Decision id:** `16871182b1370b61693fc691` (parent task-082; applied by amendment task-246)
+- **Question:** retire task-082 as superseded, restore the permanent 6-item sidebar, or amend toward a context-dependent collapsible sidebar?
+- **Selection:** option_c — "Amend toward a context-dependent collapsible sidebar on navigation-heavy screens", recorded 2026-11-16 by jsell (chat delegation; context-sensitive recommendation informed by IBM Carbon's left-panel guidance and Microsoft's navigation-basics guidance — application-specific inference, no claim of universal expert consensus).
+- **Operator instruction:** "whatever industry experts say, I suspect sidebar might make some sense...but may differ based on context. Prefer scope-labelled collapsible navigation where frequent switching helps, focused editor/canvas views, and a narrow-screen drawer."
+- **Supersedes:** (a) the former blanket Design Principle 5 "No sidebar" (now "No permanent sidebar"), and (b) task-082's literal binding to HSI §1.3's six-fixed-items sidebar (task-082 is retargeted to this section; see its record).
+- **Preserves:** the two-mode model (§2, §3), the horizontal tab strip, all keyboard shortcuts (§6), and the URL structure (§7).
 
 ---
 
@@ -434,7 +496,7 @@ This is the **creative surface** for encoding organizational judgment (vision §
 ### Daily Flow
 
 1. Open app → **always workspace home first** (even if last repo is stored). This ensures workspace-scoped decisions (with `repo_id: NULL`) are never missed. The last-used repo is remembered and highlighted in the workspace home Repos section, one click away. If there are zero unresolved decisions, the user can click their repo immediately.
-2. Glance at Decisions count in top bar — any urgent items?
+2. Glance at the unread count on the top-bar bell — any urgent items?
 3. If decisions exist: handle them (approve specs, retry gates)
 4. Click repo to focus → Specs tab shows implementation progress
 5. Write or edit specs as needed
@@ -443,9 +505,9 @@ This is the **creative surface** for encoding organizational judgment (vision §
 
 ### Exception Flow
 
-1. Decision badge shows `🔔 3`
-2. Click badge → workspace home, Decisions section expanded
-3. "Gate failure in payment-api" → click → enters repo mode, Decisions tab, gate failure detail
+1. Notification bell shows `🔔 3`
+2. Click bell → notification drawer opens, grouped by priority
+3. "Gate failure in payment-api" → click the notification → its deep link enters repo mode, Decisions tab, gate failure detail
 4. Review diff, gate output → Retry or Override
 5. Back arrow → workspace home
 
@@ -529,6 +591,7 @@ Same layout, detail panels become full-width overlays instead of side panels.
 
 ### Mobile (<768px)
 - Top bar: hamburger icon opens a navigation drawer listing workspace home sections (Decisions, Specs, Repos, Briefing, Agent Rules) as links — not full content, just navigation to scroll anchors on the workspace home page
+- Navigation rail (§1a), if shipped, is not rendered as a rail on mobile; its per-mode item set is offered through the same hamburger drawer (§1a Narrow viewports)
 - Repo mode: tabs become a **scrollable horizontal strip** pinned below the top bar (not a bottom tab bar — bottom bars conflict with mobile browser chrome)
 - Detail panels become full-screen modals
 - Meta-spec editor: left/right panels stack vertically (registry above, editor below)
@@ -542,7 +605,7 @@ Same layout, detail panels become full-width overlays instead of side panels.
 
 | Old (HSI §1) | New (this spec) | Rationale |
 |---|---|---|
-| 6-item sidebar (Inbox, Briefing, Explorer, Specs, Meta-specs, Admin) | Workspace home dashboard + repo horizontal tabs | Sidebar grouped by data type; new model groups by user activity |
+| 6-item sidebar (Inbox, Briefing, Explorer, Specs, Meta-specs, Admin) | Workspace home dashboard + repo horizontal tabs + optional collapsible rail (§1a) | Sidebar grouped by data type; new model groups by user activity. The 2026-11-16 amendment (decision `16871182b1370b61693fc691`) added the optional per-mode rail |
 | "Stable sidebar, adaptive content" | Two distinct modes (workspace home, repo mode) | Same buttons with different content was confusing |
 | Breadcrumb as primary scope control | Workspace dropdown + repo click + back arrow | Breadcrumb scope model was hidden; new model is explicit |
 | Scope: tenant → workspace → repo (content adapts) | Workspace home (overview) → repo (focused tabs) | Three scope levels with adaptive content was unpredictable |
@@ -554,7 +617,7 @@ Same layout, detail panels become full-width overlays instead of side panels.
 
 | Old (ui-layout §1) | New (this spec) | Rationale |
 |---|---|---|
-| Sidebar (240px, collapsible to 48px) | No persistent sidebar | Two-mode design doesn't need a sidebar |
+| Sidebar (240px, collapsible to 48px) | No permanent sidebar; optional collapsible rail (§1a) | Two-mode design doesn't need a global sidebar; the §1a rail is per-mode, optional, and collapsed by default |
 | Topbar with breadcrumb + user menu | Topbar with workspace selector + search + decisions + user | Breadcrumb replaced by simpler workspace/repo display |
 | Content area adapts to nav + scope | Workspace home is a dashboard; repo mode uses tabs | Content is predictable per mode |
 
@@ -606,7 +669,8 @@ The workspace selector dropdown shows workspaces the user is a member of. Worksp
 | Spec | Amendment |
 |---|---|
 | `human-system-interface.md` §1 | Navigation model replaced by this spec. The nav scope table (what each nav item shows at each scope) is replaced by §2-§3 of this spec. Deep link URLs change to the new structure (§7). Keyboard shortcuts updated (§6). |
-| `ui-layout.md` §1 | Application shell changes: no persistent sidebar, topbar layout updated. Content area layouts (§2-§4 of ui-layout) remain valid. Status bar unchanged. |
+| `human-system-interface.md` §1.3 | The supersession of the "Stable Sidebar, Adaptive Content" subsection is now recorded in HSI itself (operator decision `16871182b1370b61693fc691`, 2026-11-16). The current requirement for left-panel navigation is §1a of this spec. |
+| `ui-layout.md` §1 | Application shell changes: no permanent sidebar (optional collapsible rail per §1a), topbar layout updated. Content area layouts (§2-§4 of ui-layout) remain valid. Status bar unchanged. |
 | `ui-layout.md` §2 | Full-Width layout used by workspace home and repo Decisions/Code tabs. Split layout used by repo Specs tab + detail panel. Canvas+Controls used by Architecture tab. Editor Split used by meta-spec management. All layouts preserved; the views that USE them change. |
 | `ui-layout.md` §5 | The Explorer's Code sub-tab (Architecture/Code toggle in the control bar) is moved to a separate repo-mode tab. The Architecture tab no longer has a Code sub-tab — Code is a peer tab. |
 | `system-explorer.md` header note | Ghost overlays are NOT deferred — they are Phase 1 priority (consistent with system-explorer.md §3 body text, which says "more valuable than the thorough preview"). The header deferral note should be removed. The header's reference to the "6-item app sidebar" should be updated to reference the new horizontal tab model from this spec. |

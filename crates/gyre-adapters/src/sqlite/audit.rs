@@ -13,7 +13,7 @@ use crate::schema::audit_events;
 #[derive(Queryable, Selectable)]
 #[diesel(table_name = audit_events)]
 #[diesel(check_for_backend(diesel::sqlite::Sqlite))]
-struct AuditEventRow {
+pub(crate) struct AuditEventRow {
     id: String,
     event_type: String,
     agent_id: Option<String>,
@@ -39,7 +39,11 @@ impl AuditEventRow {
     /// the row is compressed. Decompression or JSON parse failure of a
     /// compressed payload is a hard error: a corrupted audit record must
     /// surface, not silently degrade to an empty detail object.
-    fn into_event(self) -> Result<AuditEvent> {
+    ///
+    /// Shared by every audit_events read path in this adapter (AuditRepository
+    /// query/since_timestamp and the JudgmentLedgerRepository source-2 query)
+    /// so compressed rows decompress transparently everywhere.
+    pub(crate) fn into_event(self) -> Result<AuditEvent> {
         let detail = match self.detail_zstd {
             Some(z) if !z.is_empty() => {
                 let raw =
@@ -164,6 +168,22 @@ impl AuditRepository for SqliteStorage {
         .await?
     }
 
+    async fn count_filtered(&self, filter: &AuditQueryFilter) -> Result<u64> {
+        let pool = Arc::clone(&self.pool);
+        let filter = filter.clone();
+        tokio::task::spawn_blocking(move || -> Result<u64> {
+            let mut conn = pool.get().context("get db connection")?;
+            // `limit` deliberately not applied: the count covers the full
+            // filtered set (port contract).
+            let n = apply_filters(audit_events::table.into_boxed(), &filter)
+                .count()
+                .get_result::<i64>(&mut *conn)
+                .context("count audit_events (filtered)")?;
+            Ok(n as u64)
+        })
+        .await?
+    }
+
     async fn stats_by_type(&self) -> Result<Vec<(String, u64)>> {
         let pool = Arc::clone(&self.pool);
         tokio::task::spawn_blocking(move || -> Result<Vec<(String, u64)>> {
@@ -277,6 +297,9 @@ fn apply_filters(mut query: BoxedAuditQuery, filter: &AuditQueryFilter) -> Boxed
     }
     if let Some(u) = &filter.user_id {
         query = query.filter(audit_events::user_id.eq(u.clone()));
+    }
+    if let Some(r) = &filter.repo_id {
+        query = query.filter(audit_events::repo_id.eq(r.clone()));
     }
     if let Some(rt) = &filter.resource_type {
         query = query.filter(audit_events::resource_type.eq(rt.clone()));
@@ -522,6 +545,42 @@ mod tests {
         assert!(results
             .iter()
             .all(|e| e.timestamp >= 200 && e.timestamp <= 400));
+    }
+
+    #[tokio::test]
+    async fn audit_query_by_repo_and_count_filtered() {
+        // `repo_id` narrows both `query` and `count_filtered`; the count
+        // ignores `limit` (port contract) so a total is never bounded by
+        // the page size used to fetch the list.
+        let (_tmp, s) = setup();
+        let mut e1 = make_event("e1", "agent-1", AuditEventType::FileAccess, 100);
+        e1.repo_id = Some(Id::new("repo-1"));
+        let mut e2 = make_event("e2", "agent-1", AuditEventType::Syscall, 200);
+        e2.repo_id = Some(Id::new("repo-1"));
+        let mut e3 = make_event("e3", "agent-2", AuditEventType::Syscall, 300);
+        e3.repo_id = Some(Id::new("repo-2"));
+        record(&s, &e1).await;
+        record(&s, &e2).await;
+        record(&s, &e3).await;
+
+        let filter = AuditQueryFilter {
+            repo_id: Some("repo-1".to_string()),
+            // Deliberately tiny: count_filtered must ignore it.
+            limit: 1,
+            ..all()
+        };
+        let results = AuditRepository::query(&s, &filter).await.unwrap();
+        assert_eq!(results.len(), 1, "list honors limit");
+        assert!(results.iter().all(|e| e.repo_id == Some(Id::new("repo-1"))));
+        let count = AuditRepository::count_filtered(&s, &filter).await.unwrap();
+        assert_eq!(
+            count, 2,
+            "count covers the full filtered set, ignoring limit"
+        );
+
+        // No repo filter → counts everything.
+        let count = AuditRepository::count_filtered(&s, &all()).await.unwrap();
+        assert_eq!(count, 3);
     }
 
     #[tokio::test]

@@ -35,12 +35,14 @@ gyre-common = { workspace = true }
 gyre-ports = { workspace = true }
 gyre-domain = { workspace = true }
 gyre-adapters = { workspace = true }
+gyre-spiffe = { workspace = true }
 async-trait = { workspace = true }
 uuid = { workspace = true }
 jsonwebtoken = { workspace = true }
 reqwest = { workspace = true }
 url = { workspace = true }
 serde_yaml = { workspace = true }
+toml = { workspace = true }
 sha2 = "0.10"
 sha1 = "0.10"
 hex = { workspace = true }
@@ -52,7 +54,7 @@ pem = "3.0"
 base64 = "0.22"
 zstd = { workspace = true }
 tempfile = "3"
-time = "0.3"
+time = { version = "0.3", features = ["parsing"] }
 # OTLP gRPC trace receiver (HSI §3a): tonic gRPC server + generated OTLP proto types.
 tonic = { version = "0.12", default-features = false, features = ["transport", "codegen", "prost"] }
 opentelemetry-proto = { version = "0.27", default-features = false, features = ["gen-tonic", "trace"] }

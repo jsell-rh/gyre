@@ -15,6 +15,21 @@ use tracing::{info, instrument, warn};
 use crate::auth::AuthenticatedAgent;
 use crate::{AppState, PresenceEntry};
 
+/// Serialize a bus Message for WebSocket delivery.
+///
+/// message-bus.md §Message Envelope (`acknowledged` field contract): the
+/// delivery-state field is excluded from send (POST) responses AND WebSocket
+/// pushes via conditional serialization — the field IS included in GET inbox
+/// responses (crash recovery). Same manual-removal pattern as `send_response`
+/// in api/messages.rs.
+fn ws_message_payload(msg: &gyre_common::message::Message) -> String {
+    let mut v = serde_json::to_value(msg).unwrap_or_default();
+    if let Some(obj) = v.as_object_mut() {
+        obj.remove("acknowledged");
+    }
+    v.to_string()
+}
+
 /// GET /ws - WebSocket upgrade endpoint.
 pub async fn ws_handler(
     ws: WebSocketUpgrade,
@@ -95,7 +110,13 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                                     // Record session_id for this connection (presence tracking).
                                     connection_session_id = session_id;
 
-                                    // Validate each requested workspace belongs to caller's tenant.
+                                    // Validate each requested workspace: tenant containment
+                                    // (preserved) plus real workspace membership
+                                    // (message-bus.md §Telemetry Store, Subscription
+                                    // authorization: "a client cannot subscribe to a
+                                    // workspace it doesn't belong to"). Users verify
+                                    // via WorkspaceMembershipRepository; agents verify
+                                    // against their own agent record's workspace.
                                     let mut authorized_workspaces: Vec<gyre_common::Id> = vec![];
                                     let mut rejected_workspaces: Vec<String> = vec![];
 
@@ -104,15 +125,69 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                                         match state.workspaces.find_by_id(ws_id).await {
                                             Ok(Some(workspace)) => {
                                                 // Admin bypass (global token): allow all workspaces.
-                                                let tenant_match = caller.roles.contains(&gyre_domain::UserRole::Admin)
-                                                    || workspace.tenant_id.as_str() == caller.tenant_id;
-                                                if tenant_match {
+                                                if caller.roles.contains(&gyre_domain::UserRole::Admin) {
                                                     authorized_workspaces.push(ws_id.clone());
-                                                } else {
+                                                    continue;
+                                                }
+                                                // Tenant containment: the workspace must belong
+                                                // to the caller's tenant.
+                                                if workspace.tenant_id.as_str() != caller.tenant_id {
                                                     warn!(
                                                         workspace_id = %ws_id,
                                                         caller_tenant = %caller.tenant_id,
                                                         "Subscribe: workspace belongs to different tenant, rejecting"
+                                                    );
+                                                    rejected_workspaces.push(ws_id.to_string());
+                                                    continue;
+                                                }
+                                                // Workspace membership: a same-tenant non-member
+                                                // must not receive the workspace's telemetry or
+                                                // bus messages (the buffer has no tenant isolation
+                                                // of its own — this check is the isolation).
+                                                let is_member = if let Some(user_id) = &caller.user_id {
+                                                    match state
+                                                        .workspace_memberships
+                                                        .find_by_user_and_workspace(user_id, ws_id)
+                                                        .await
+                                                    {
+                                                        Ok(Some(_)) => true,
+                                                        Ok(None) => false,
+                                                        Err(e) => {
+                                                            warn!(
+                                                                workspace_id = %ws_id,
+                                                                error = %e,
+                                                                "Subscribe: membership lookup error; rejecting"
+                                                            );
+                                                            false
+                                                        }
+                                                    }
+                                                } else {
+                                                    // Agent connection: subscribes to its own
+                                                    // workspace per its agent record.
+                                                    match state
+                                                        .agents
+                                                        .find_by_id(&gyre_common::Id::new(&caller.agent_id))
+                                                        .await
+                                                    {
+                                                        Ok(Some(agent)) => agent.workspace_id == *ws_id,
+                                                        Ok(None) => false,
+                                                        Err(e) => {
+                                                            warn!(
+                                                                workspace_id = %ws_id,
+                                                                agent_id = %caller.agent_id,
+                                                                error = %e,
+                                                                "Subscribe: agent record lookup error; rejecting"
+                                                            );
+                                                            false
+                                                        }
+                                                    }
+                                                };
+                                                if is_member {
+                                                    authorized_workspaces.push(ws_id.clone());
+                                                } else {
+                                                    warn!(
+                                                        workspace_id = %ws_id,
+                                                        "Subscribe: caller is not a member of this workspace, rejecting"
                                                     );
                                                     rejected_workspaces.push(ws_id.to_string());
                                                 }
@@ -148,37 +223,83 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                                     state.ws_connection_workspaces.write().await
                                         .insert(connection_id, subscribed_workspaces.clone());
 
-                                    // Replay Event-tier messages since last_seen, oldest-first.
-                                    let mut replayed = 0usize;
-                                    let replay_limit = 1000usize;
-                                    let mut truncated = false;
+                                    // Replay Event-tier messages strictly newer than
+                                    // last_seen (message-bus.md §Delivery/WebSocket):
+                                    // the NEWEST 1000 qualifying messages across ALL
+                                    // subscribed workspaces combined, delivered
+                                    // oldest-first, plus a single ReplayCatchUp
+                                    // signal exactly when more than 1000 qualified.
+                                    const REPLAY_LIMIT: usize = 1000;
 
+                                    // Strictly-greater boundary: the spec requires
+                                    // created_at > last_seen, but list_by_workspace's
+                                    // `since` filter is an inclusive lower bound (the
+                                    // documented REST workspace-query semantics, kept
+                                    // intact for that endpoint). The replay path
+                                    // therefore shifts the bound by 1ms: for integer
+                                    // epoch milliseconds, created_at >= last_seen + 1
+                                    // <=> created_at > last_seen, so a message created
+                                    // exactly at the client's last_seen is NOT
+                                    // re-delivered on reconnect. Both storage
+                                    // backends see the same shifted bound, so the
+                                    // observable replay contract is identical on mem
+                                    // and SQLite/Postgres.
+                                    let since_ms = match last_seen {
+                                        Some(ts) => ts.saturating_add(1),
+                                        None => 0,
+                                    };
+
+                                    // Fetch the newest REPLAY_LIMIT+1 qualifying
+                                    // messages per workspace (newest-first, as the
+                                    // adapters return them). min(qualifying, LIMIT+1)
+                                    // per workspace is sufficient both to decide
+                                    // whether more than LIMIT qualified in total and
+                                    // to select the newest LIMIT across all workspaces
+                                    // combined: the combined newest-LIMIT window can
+                                    // draw at most LIMIT messages from any single
+                                    // workspace, and LIMIT+1 >= LIMIT.
+                                    let mut pool: Vec<gyre_common::message::Message> = Vec::new();
                                     for ws_id in &subscribed_workspaces {
-                                        let since_ms = last_seen.unwrap_or(0);
-                                        if let Ok(mut messages) = state.messages.list_by_workspace(
+                                        if let Ok(messages) = state.messages.list_by_workspace(
                                             ws_id,
                                             None,
                                             Some(since_ms),
                                             None,
                                             None,
-                                            Some(replay_limit + 1),
-                                        ).await {
-                                            // list_by_workspace returns newest-first; reverse to oldest-first.
-                                            messages.reverse();
-                                            for m in messages {
-                                                if replayed >= replay_limit {
-                                                    truncated = true;
-                                                    break;
-                                                }
-                                                let payload = serde_json::to_string(&m).unwrap();
-                                                if sender.send(Message::Text(payload)).await.is_err() {
-                                                    return;
-                                                }
-                                                replayed += 1;
-                                            }
+                                            Some(REPLAY_LIMIT + 1),
+                                        )
+                                        .await
+                                        {
+                                            pool.extend(messages);
                                         }
-                                        if truncated {
-                                            break;
+                                    }
+
+                                    // Newest-first across all subscribed workspaces
+                                    // combined, ties broken by id — the same
+                                    // composite (created_at DESC, id DESC) order the
+                                    // adapters use within a workspace.
+                                    pool.sort_by(|a, b| {
+                                        b.created_at
+                                            .cmp(&a.created_at)
+                                            .then_with(|| b.id.as_str().cmp(a.id.as_str()))
+                                    });
+                                    let truncated = pool.len() > REPLAY_LIMIT;
+                                    if truncated {
+                                        // Drain in place rather than
+                                        // Vec::truncate — the byte-slice lint
+                                        // textually flags *.truncate(CONST).
+                                        pool.drain(REPLAY_LIMIT..);
+                                    }
+                                    // Deliver the selected window oldest-first.
+                                    // `acknowledged` is stripped here too: the
+                                    // field's contract excludes it from ALL
+                                    // WebSocket pushes (live and replay), while
+                                    // GET inbox responses keep it.
+                                    pool.reverse();
+                                    for m in pool {
+                                        let payload = ws_message_payload(&m);
+                                        if sender.send(Message::Text(payload)).await.is_err() {
+                                            return;
                                         }
                                     }
 
@@ -434,10 +555,29 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                                 // Must be subscribed AND workspace must be in caller's tenant.
                                 subscribed_workspaces.contains(ws_id)
                             }
-                            Destination::Agent(_) => false, // Agent-directed: not delivered via WS
+                            Destination::Agent(aid) => {
+                                // Agent-directed messages reach the WS only on
+                                // the agent's OWN live session (agent-gates.md
+                                // §Gate Failure Feedback: "For live sessions:
+                                // also broadcast via WebSocket for immediate
+                                // reaction"). Identity, not subscription,
+                                // gates delivery: the caller was verified
+                                // against the per-agent token store, so a
+                                // match on the verified agent id IS the
+                                // destination. User identities (user_id set)
+                                // and the global token (Admin role,
+                                // agent_id "system") never match — they see
+                                // agent inboxes through the REST/MCP read
+                                // paths, not the bus.
+                                caller.user_id.is_none()
+                                    && !caller
+                                        .roles
+                                        .contains(&gyre_domain::UserRole::Admin)
+                                    && caller.agent_id == aid.as_str()
+                            }
                         };
                         if deliver {
-                            let payload = serde_json::to_string(&msg).unwrap();
+                            let payload = ws_message_payload(&msg);
                             if sender.send(Message::Text(payload)).await.is_err() {
                                 break;
                             }
@@ -708,6 +848,339 @@ mod tests {
         }
     }
 
+    // ── Agent-directed WS delivery (agent-gates.md §Gate Failure Feedback:
+    // "For live sessions: also broadcast via WebSocket for immediate
+    // reaction") ────────────────────────────────────────────────────────
+
+    /// Seed a per-agent token + a workspace so a live agent session can
+    /// authenticate over WS and the bus emission resolves its tenant scope.
+    async fn seed_agent_ws_identity(state: &Arc<AppState>, agent_id: &str, token: &str) {
+        let ws = gyre_domain::Workspace::new(
+            gyre_common::Id::new("ws-live-agents"),
+            gyre_common::Id::new("default"),
+            "live-agents",
+            "live-agents",
+            now_secs(),
+        );
+        state.workspaces.create(&ws).await.unwrap();
+        state
+            .kv_store
+            .kv_set("agent_tokens", agent_id, token.to_string())
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn ws_agent_directed_message_reaches_own_live_session_only() {
+        let (url, state) = start_test_server("tok").await;
+        seed_agent_ws_identity(&state, "agent-ws-live", "live-agent-token").await;
+        seed_agent_ws_identity(&state, "agent-ws-other", "other-agent-token").await;
+
+        let (mut ws_live, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        auth_ws(&mut ws_live, "live-agent-token").await;
+        let (mut ws_other, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        auth_ws(&mut ws_other, "other-agent-token").await;
+
+        // The forge emits a GateResult addressed to the live agent's inbox
+        // (the exact §Gate Failure Feedback message shape).
+        state
+            .emit_event(
+                gyre_common::Id::new("ws-live-agents"),
+                gyre_common::message::Destination::Agent(gyre_common::Id::new("agent-ws-live")),
+                gyre_common::message::MessageKind::GateResult,
+                Some(serde_json::json!({
+                    "mr_id": "mr-42",
+                    "gate_name": "security-review",
+                    "gate_type": "AgentReview",
+                    "status": "Failed",
+                    "output": "ChangesRequested: SQL query uses string interpolation",
+                    "spec_ref": "specs/system/identity-security@abc123",
+                    "attempt": 2,
+                    "gate_agent_id": "security-gate-7",
+                })),
+            )
+            .await;
+
+        // The agent's own live session receives it immediately.
+        let msg = ws_live.next().await.unwrap().unwrap();
+        if let tungstenite::Message::Text(text) = msg {
+            let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+            assert_eq!(v["kind"], "gate_result");
+            assert_eq!(v["to"], serde_json::json!({"agent": "agent-ws-live"}));
+            assert_eq!(v["payload"]["mr_id"], "mr-42");
+            assert_eq!(v["payload"]["attempt"], 2);
+            assert_eq!(v["payload"]["gate_name"], "security-review");
+        } else {
+            panic!("expected text message");
+        }
+
+        // A different agent's live session does not receive it: identity,
+        // not subscription, gates agent-directed delivery.
+        let got =
+            tokio::time::timeout(std::time::Duration::from_millis(300), ws_other.next()).await;
+        // Pass on timeout (Err) or clean stream close (Ok(None)); any
+        // delivered message means agent-directed delivery leaked.
+        let leaked = got.ok().flatten().is_some();
+        assert!(
+            !leaked,
+            "agent-directed message must not reach another agent's session"
+        );
+    }
+
+    // ── Subscribe workspace-membership authorization (message-bus.md
+    // §Telemetry Store: "The server verifies workspace membership when
+    // processing Subscribe messages — a client cannot subscribe to a
+    // workspace it doesn't belong to") ──────────────────────────────
+
+    /// Seed a user + API key bound to tenant "default" WITHOUT any
+    /// workspace membership — the same-tenant non-member the spec's
+    /// subscription-authorization requirement is about.
+    async fn seed_nonmember_api_key_user(state: &Arc<AppState>, user_id: &str, raw_key: &str) {
+        use gyre_domain::User;
+        let user = User {
+            tenant_id: Some(gyre_common::Id::new("default")),
+            ..User::new(
+                gyre_common::Id::new(user_id),
+                format!("ext-{user_id}"),
+                format!("user-{user_id}"),
+                1000,
+            )
+        };
+        state.users.create(&user).await.unwrap();
+        state
+            .api_keys
+            .create(&crate::auth::hash_api_key(raw_key), &user.id, "ws-leak-key")
+            .await
+            .unwrap();
+    }
+
+    /// Seed a workspace in tenant "default" and grant `user_id` membership.
+    async fn seed_member_workspace(
+        state: &Arc<AppState>,
+        workspace_id: &str,
+        user_id: Option<&str>,
+    ) {
+        let ws = gyre_domain::Workspace::new(
+            gyre_common::Id::new(workspace_id),
+            gyre_common::Id::new("default"),
+            workspace_id,
+            workspace_id,
+            now_secs(),
+        );
+        state.workspaces.create(&ws).await.unwrap();
+        if let Some(user_id) = user_id {
+            let membership = gyre_domain::WorkspaceMembership::new(
+                gyre_common::Id::new(format!("mem-{workspace_id}-{user_id}")),
+                gyre_common::Id::new(user_id),
+                ws.id.clone(),
+                gyre_domain::WorkspaceRole::Viewer,
+                gyre_common::Id::new("ws-leak-inviter"),
+                now_secs(),
+            );
+            state
+                .workspace_memberships
+                .create(&membership)
+                .await
+                .unwrap();
+        }
+    }
+
+    /// Read the next JSON frame on the socket (text frames only), or None
+    /// on timeout — used to prove a connection receives NOTHING.
+    async fn next_json_frame(
+        ws: &mut tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+        timeout: std::time::Duration,
+    ) -> Option<serde_json::Value> {
+        let msg = tokio::time::timeout(timeout, ws.next()).await.ok()??.ok()?;
+        match msg {
+            tungstenite::Message::Text(text) => serde_json::from_str(&text).ok(),
+            _ => None,
+        }
+    }
+
+    #[tokio::test]
+    async fn ws_subscribe_rejects_same_tenant_non_member() {
+        // Leak probe (task verification intent): a user in tenant T with no
+        // membership record for workspace W (which belongs to T) subscribes
+        // to W. The pre-fix handler accepted the subscription on tenant
+        // match alone and delivered W's telemetry and bus messages — this
+        // test asserts the connection receives NOTHING for W, so it fails
+        // against the tenant-match-only handler and passes only when the
+        // WorkspaceMembershipRepository check gates Subscribe.
+        let (url, state) = start_test_server("tok").await;
+        seed_member_workspace(&state, "ws-leak", Some("u-member")).await;
+        seed_nonmember_api_key_user(&state, "u-outsider", "key-out").await;
+        // The member needs an API key too (same tenant, member of W).
+        {
+            let user = gyre_domain::User {
+                tenant_id: Some(gyre_common::Id::new("default")),
+                ..gyre_domain::User::new(
+                    gyre_common::Id::new("u-member"),
+                    "ext-u-member",
+                    "user-u-member",
+                    1000,
+                )
+            };
+            state.users.create(&user).await.unwrap();
+            state
+                .api_keys
+                .create(
+                    &crate::auth::hash_api_key("key-member"),
+                    &user.id,
+                    "ws-leak-key",
+                )
+                .await
+                .unwrap();
+        }
+
+        // Non-member connection: Subscribe for W must be rejected.
+        let (mut outsider, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        auth_ws(&mut outsider, "key-out").await;
+        subscribe_ws(&mut outsider, "ws-leak", None).await;
+        let frame = next_json_frame(&mut outsider, std::time::Duration::from_secs(5))
+            .await
+            .expect("Subscribe for a non-member workspace must produce a SubscribeError");
+        assert_eq!(frame["type"], "SubscribeError");
+        assert_eq!(
+            frame["rejected_workspaces"],
+            serde_json::json!(["ws-leak"]),
+            "the non-member workspace must be named in the rejection"
+        );
+
+        // Member connection: Subscribe for W is accepted (no error frame —
+        // the next frame is the accepted subscription's empty replay, and
+        // in any case NOT a SubscribeError).
+        let (mut member, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        auth_ws(&mut member, "key-member").await;
+        subscribe_ws(&mut member, "ws-leak", None).await;
+        // The outsider's rejected Subscribe can never place "ws-leak" in
+        // the connection index, so observing it there proves the MEMBER's
+        // subscription was authorized before the emits below.
+        await_ws_subscription(&state, "ws-leak").await;
+
+        // Emit telemetry AND a workspace-scoped bus message to W.
+        state
+            .emit_telemetry(
+                gyre_common::Id::new("ws-leak"),
+                gyre_common::message::MessageKind::ToolCallStart,
+                Some(serde_json::json!({
+                    "agent_id": "agent-leak",
+                    "tool_name": "Read",
+                })),
+            )
+            .await;
+        state
+            .emit_event(
+                gyre_common::Id::new("ws-leak"),
+                gyre_common::message::Destination::Workspace(gyre_common::Id::new("ws-leak")),
+                gyre_common::message::MessageKind::TaskCreated,
+                Some(serde_json::json!({ "task_id": "TASK-LEAK" })),
+            )
+            .await;
+
+        // The member receives both the telemetry and the bus message.
+        let mut saw_telemetry = false;
+        let mut saw_event = false;
+        for _ in 0..8 {
+            let Some(frame) = next_json_frame(&mut member, std::time::Duration::from_secs(5)).await
+            else {
+                break;
+            };
+            match frame["kind"].as_str() {
+                Some("tool_call_start") => saw_telemetry = true,
+                Some("task_created") => saw_event = true,
+                _ => {}
+            }
+            if saw_telemetry && saw_event {
+                break;
+            }
+        }
+        assert!(
+            saw_telemetry && saw_event,
+            "a member of the workspace must receive its telemetry and bus messages"
+        );
+
+        // The non-member connection receives NOTHING for W — neither the
+        // telemetry nor the workspace-scoped bus message.
+        let leaked = next_json_frame(&mut outsider, std::time::Duration::from_millis(300)).await;
+        assert!(
+            leaked.is_none(),
+            "same-tenant non-member must not receive workspace telemetry or bus messages"
+        );
+    }
+
+    #[tokio::test]
+    async fn ws_subscribe_agent_scoped_to_own_workspace_record() {
+        // Agent connections subscribe to their own workspace per their
+        // agent record (task required behavior): an agent in W may
+        // subscribe to W; subscribing to a different workspace of the same
+        // tenant is rejected with no delivery.
+        let (url, state) = start_test_server("tok").await;
+        seed_member_workspace(&state, "ws-agent-own", None).await;
+        seed_member_workspace(&state, "ws-agent-other", None).await;
+
+        let mut agent =
+            gyre_domain::Agent::new(gyre_common::Id::new("agent-own-ws"), "agent-own-ws", 0);
+        agent.workspace_id = gyre_common::Id::new("ws-agent-own");
+        state.agents.create(&agent).await.unwrap();
+        state
+            .kv_store
+            .kv_set(
+                "agent_tokens",
+                "agent-own-ws",
+                "agent-own-token".to_string(),
+            )
+            .await
+            .unwrap();
+
+        // Own workspace: accepted (no SubscribeError follows).
+        let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        auth_ws(&mut ws, "agent-own-token").await;
+        subscribe_ws(&mut ws, "ws-agent-own", None).await;
+        // Synchronize on the server having authorized the subscription
+        // before emitting — otherwise the telemetry broadcast is consumed
+        // while the connection's subscribed list is still empty.
+        await_ws_subscription(&state, "ws-agent-own").await;
+
+        state
+            .emit_telemetry(
+                gyre_common::Id::new("ws-agent-own"),
+                gyre_common::message::MessageKind::RunStarted,
+                Some(serde_json::json!({ "agent_id": "agent-own-ws" })),
+            )
+            .await;
+        let frame = next_json_frame(&mut ws, std::time::Duration::from_secs(5))
+            .await
+            .expect("agent must receive its own workspace's telemetry");
+        assert_eq!(frame["kind"], "run_started");
+
+        // A different workspace in the same tenant: rejected, no delivery.
+        subscribe_ws(&mut ws, "ws-agent-other", None).await;
+        let frame = next_json_frame(&mut ws, std::time::Duration::from_secs(5))
+            .await
+            .expect("Subscribe for a non-own workspace must produce a SubscribeError");
+        assert_eq!(frame["type"], "SubscribeError");
+        assert_eq!(
+            frame["rejected_workspaces"],
+            serde_json::json!(["ws-agent-other"])
+        );
+
+        state
+            .emit_telemetry(
+                gyre_common::Id::new("ws-agent-other"),
+                gyre_common::message::MessageKind::RunStarted,
+                Some(serde_json::json!({ "agent_id": "agent-other" })),
+            )
+            .await;
+        let leaked = next_json_frame(&mut ws, std::time::Duration::from_millis(300)).await;
+        assert!(
+            leaked.is_none(),
+            "agent must not receive another workspace's telemetry"
+        );
+    }
+
     #[tokio::test]
     async fn ws_ping_pong() {
         let (url, _state) = start_test_server("tok").await;
@@ -728,6 +1201,426 @@ mod tests {
         } else {
             panic!("expected text message");
         }
+    }
+
+    // ── Subscribe replay window (message-bus.md §Delivery/WebSocket) ──────
+    // The replay contract: persisted Event-tier messages with
+    // created_at > last_seen (strictly greater — no re-delivery on
+    // reconnect), the NEWEST 1000 across all subscribed workspaces
+    // combined, delivered oldest-first, plus exactly one
+    // ReplayCatchUp{truncated:true} when more than 1000 qualified. These
+    // tests run against the mem-backed test AppState;
+    // tests/message_persistence.rs proves the same contract on the wired
+    // SQLite adapter (task-250).
+
+    type WsConn = tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >;
+
+    /// An Event-tier workspace message for replay seeding (created_at is
+    /// caller-controlled so the window/boundary behavior is deterministic).
+    fn replay_event(
+        id: &str,
+        workspace_id: &str,
+        created_at: u64,
+    ) -> gyre_common::message::Message {
+        gyre_common::message::Message {
+            id: gyre_common::Id::new(id),
+            tenant_id: gyre_common::Id::new("default"),
+            from: gyre_common::message::MessageOrigin::Server,
+            workspace_id: Some(gyre_common::Id::new(workspace_id)),
+            to: gyre_common::message::Destination::Workspace(gyre_common::Id::new(workspace_id)),
+            kind: MessageKind::TaskCreated,
+            payload: None,
+            created_at,
+            signature: None,
+            key_id: None,
+            acknowledged: false,
+        }
+    }
+
+    /// A Directed (agent-inbox) message in the same workspace — must never
+    /// be replayed (replay is Event-tier only).
+    fn replay_directed(
+        id: &str,
+        workspace_id: &str,
+        agent_id: &str,
+        created_at: u64,
+    ) -> gyre_common::message::Message {
+        gyre_common::message::Message {
+            to: gyre_common::message::Destination::Agent(gyre_common::Id::new(agent_id)),
+            ..replay_event(id, workspace_id, created_at)
+        }
+    }
+
+    /// Create a workspace in the shared-token caller's tenant so Subscribe's
+    /// per-workspace tenant validation accepts it.
+    async fn seed_replay_workspace(state: &Arc<AppState>, workspace_id: &str) {
+        let ws = gyre_domain::Workspace::new(
+            gyre_common::Id::new(workspace_id),
+            gyre_common::Id::new("default"),
+            workspace_id,
+            workspace_id,
+            now_secs(),
+        );
+        state.workspaces.create(&ws).await.unwrap();
+    }
+
+    /// Subscribe with an explicit last_seen (the replay boundary under test).
+    async fn subscribe_with_last_seen(
+        ws: &mut WsConn,
+        workspace_ids: &[&str],
+        last_seen: Option<u64>,
+    ) {
+        let sub = WsMessage::Subscribe {
+            scopes: workspace_ids
+                .iter()
+                .map(|w| gyre_common::SubscribeScope {
+                    workspace_id: gyre_common::Id::new(*w),
+                })
+                .collect(),
+            last_seen,
+            session_id: None,
+        };
+        ws.send(tungstenite::Message::Text(
+            serde_json::to_string(&sub).unwrap(),
+        ))
+        .await
+        .unwrap();
+    }
+
+    /// Ping/Pong fence: the socket message loop handles one client message
+    /// at a time, and the Subscribe handler emits the whole replay window
+    /// (plus the catch-up signal) synchronously before returning to the
+    /// loop. A Ping sent after the Subscribe therefore fences the complete
+    /// replay response: every frame received before the Pong is the entire
+    /// Subscribe output, nothing more follows it.
+    async fn fenced_replay_frames(ws: &mut WsConn) -> Vec<serde_json::Value> {
+        let ping = WsMessage::Ping { timestamp: 0 };
+        ws.send(tungstenite::Message::Text(
+            serde_json::to_string(&ping).unwrap(),
+        ))
+        .await
+        .unwrap();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
+        let mut frames = Vec::new();
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            assert!(
+                !remaining.is_zero(),
+                "timed out waiting for the Pong fence — incomplete replay response"
+            );
+            let msg = tokio::time::timeout(remaining, ws.next())
+                .await
+                .expect("timed out waiting for the Pong fence")
+                .expect("socket must stay open")
+                .expect("frame must be ok");
+            let tungstenite::Message::Text(text) = msg else {
+                continue;
+            };
+            let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+            if v.get("type").and_then(|t| t.as_str()) == Some("Pong") {
+                return frames;
+            }
+            frames.push(v);
+        }
+    }
+
+    /// Split a fenced replay response into (message frames, catch-up
+    /// frames). Replayed `Message` envelopes have no `type` key; control
+    /// frames (AuthResult/Pong/SubscribeError) and ReplayCatchUp do.
+    fn split_replay_frames(
+        frames: Vec<serde_json::Value>,
+    ) -> (Vec<serde_json::Value>, Vec<serde_json::Value>) {
+        let mut messages = Vec::new();
+        let mut catchups = Vec::new();
+        for f in frames {
+            match f.get("type").and_then(|t| t.as_str()) {
+                Some("ReplayCatchUp") => catchups.push(f),
+                Some(other) => panic!("unexpected control frame in replay response: {other}"),
+                None => messages.push(f),
+            }
+        }
+        (messages, catchups)
+    }
+
+    #[tokio::test]
+    async fn ws_replay_delivers_newest_1000_with_single_truncation_signal() {
+        let (url, state) = start_test_server("tok").await;
+        seed_replay_workspace(&state, "ws-replay").await;
+
+        // 1001 Event-tier messages with distinct created_at. The newest
+        // (replay-m-1000) is the one the old oldest-1000-of-newest-1001
+        // window silently dropped.
+        let base_ts = 1_700_000_000u64;
+        for i in 0..=1000u64 {
+            state
+                .messages
+                .store(&replay_event(
+                    &format!("replay-m-{i:04}"),
+                    "ws-replay",
+                    base_ts + i,
+                ))
+                .await
+                .unwrap();
+        }
+        // A Directed (agent-inbox) message, newer than everything else —
+        // replay is Event-tier only, so it must never appear.
+        state
+            .messages
+            .store(&replay_directed(
+                "replay-directed",
+                "ws-replay",
+                "replay-agent",
+                base_ts + 5_000,
+            ))
+            .await
+            .unwrap();
+
+        let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        auth_ws(&mut ws, "tok").await;
+        subscribe_with_last_seen(&mut ws, &["ws-replay"], Some(0)).await;
+        let (messages, catchups) = split_replay_frames(fenced_replay_frames(&mut ws).await);
+
+        // Exactly 1000 messages qualify for the window (1001 exist) and
+        // exactly one truncation signal, emitted after the window.
+        assert_eq!(
+            messages.len(),
+            1000,
+            "replay must deliver exactly 1000 messages"
+        );
+        assert_eq!(
+            catchups.len(),
+            1,
+            "more than 1000 qualified: exactly one ReplayCatchUp must be sent"
+        );
+        assert_eq!(
+            catchups[0]["truncated"],
+            serde_json::json!(true),
+            "the catch-up signal must carry truncated:true"
+        );
+
+        // The delivered set is the NEWEST 1000: the single newest message
+        // IS delivered, the oldest one is the message dropped.
+        let ids: Vec<&str> = messages
+            .iter()
+            .map(|m| m["id"].as_str().expect("message id"))
+            .collect();
+        assert!(
+            ids.contains(&"replay-m-1000"),
+            "the NEWEST message must be inside the replay window"
+        );
+        assert!(
+            !ids.contains(&"replay-m-0000"),
+            "the oldest message must be the one dropped when truncating"
+        );
+        assert_eq!(
+            ids.iter().filter(|id| **id == "replay-directed").count(),
+            0,
+            "Directed (agent-inbox) messages must be excluded from replay"
+        );
+        // The window is exactly the newest 1000 of the 1001 seeded events.
+        let expected: Vec<String> = (1..=1000).map(|i| format!("replay-m-{i:04}")).collect();
+        assert_eq!(
+            ids.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+            expected,
+            "the window must be the newest 1000 messages, delivered oldest-first"
+        );
+
+        // Delivery ordering is oldest-first.
+        let created: Vec<u64> = messages
+            .iter()
+            .map(|m| m["created_at"].as_u64().expect("created_at"))
+            .collect();
+        assert!(
+            created.windows(2).all(|w| w[0] <= w[1]),
+            "replay must be delivered oldest-first"
+        );
+    }
+
+    #[tokio::test]
+    async fn ws_replay_no_truncation_signal_at_exactly_1000_messages() {
+        let (url, state) = start_test_server("tok").await;
+        seed_replay_workspace(&state, "ws-replay").await;
+
+        // Exactly 1000 qualifying messages — the sharp edge of the cap: the
+        // per-workspace fetch asks for 1001, gets 1000 back, and no
+        // ReplayCatchUp may be sent.
+        let base_ts = 1_700_000_000u64;
+        for i in 0..1000u64 {
+            state
+                .messages
+                .store(&replay_event(
+                    &format!("replay-m-{i:04}"),
+                    "ws-replay",
+                    base_ts + i,
+                ))
+                .await
+                .unwrap();
+        }
+
+        let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        auth_ws(&mut ws, "tok").await;
+        subscribe_with_last_seen(&mut ws, &["ws-replay"], Some(0)).await;
+        let (messages, catchups) = split_replay_frames(fenced_replay_frames(&mut ws).await);
+
+        assert_eq!(
+            messages.len(),
+            1000,
+            "all 1000 qualifying messages must be replayed"
+        );
+        assert_eq!(
+            catchups.len(),
+            0,
+            "1000 qualifying messages is not truncation: no ReplayCatchUp"
+        );
+        assert!(
+            messages.iter().any(|m| m["id"] == "replay-m-0999"),
+            "the newest message must be delivered"
+        );
+    }
+
+    #[tokio::test]
+    async fn ws_replay_cross_workspace_combined_newest_1000() {
+        let (url, state) = start_test_server("tok").await;
+        seed_replay_workspace(&state, "ws-replay-a").await;
+        seed_replay_workspace(&state, "ws-replay-b").await;
+
+        // 600 messages per workspace with globally distinct timestamps:
+        // ws-replay-a owns the even millis 0..=1198, ws-replay-b the odd
+        // millis 1..=1199. 1200 qualify in total, so the newest 1000 across
+        // BOTH workspaces combined is exactly the set with created_at >= 200
+        // (500 from each workspace). A per-workspace cap (the old behavior)
+        // would deliver 600 from the first-subscribed workspace instead.
+        for i in 0..600u64 {
+            state
+                .messages
+                .store(&replay_event(
+                    &format!("replay-a-{i:04}"),
+                    "ws-replay-a",
+                    i * 2,
+                ))
+                .await
+                .unwrap();
+            state
+                .messages
+                .store(&replay_event(
+                    &format!("replay-b-{i:04}"),
+                    "ws-replay-b",
+                    i * 2 + 1,
+                ))
+                .await
+                .unwrap();
+        }
+
+        let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        auth_ws(&mut ws, "tok").await;
+        subscribe_with_last_seen(&mut ws, &["ws-replay-a", "ws-replay-b"], Some(0)).await;
+        let (messages, catchups) = split_replay_frames(fenced_replay_frames(&mut ws).await);
+
+        assert_eq!(
+            messages.len(),
+            1000,
+            "the 1000-message cap is total across subscribed workspaces"
+        );
+        assert_eq!(
+            catchups.len(),
+            1,
+            "1200 qualified: the truncation signal must be sent"
+        );
+
+        let from_a = messages
+            .iter()
+            .filter(|m| m["workspace_id"] == "ws-replay-a")
+            .count();
+        let from_b = messages
+            .iter()
+            .filter(|m| m["workspace_id"] == "ws-replay-b")
+            .count();
+        assert_eq!(
+            (from_a, from_b),
+            (500, 500),
+            "the combined newest-1000 window draws 500 from each workspace, \
+             not a per-workspace cap"
+        );
+
+        // The delivered set is the newest 1000 across both workspaces:
+        // everything with created_at >= 200, nothing older.
+        for m in &messages {
+            let ts = m["created_at"].as_u64().expect("created_at");
+            assert!(
+                ts >= 200,
+                "message older than the combined newest-1000 window must not be replayed"
+            );
+        }
+        let delivered_newest = messages
+            .iter()
+            .map(|m| m["created_at"].as_u64().expect("created_at"))
+            .collect::<std::collections::BTreeSet<_>>();
+        let expected: std::collections::BTreeSet<u64> = (200..=1199).collect();
+        assert_eq!(
+            delivered_newest, expected,
+            "the window must be exactly the 1000 newest timestamps across both workspaces"
+        );
+
+        // Oldest-first across workspaces combined.
+        let created: Vec<u64> = messages
+            .iter()
+            .map(|m| m["created_at"].as_u64().expect("created_at"))
+            .collect();
+        assert!(
+            created.windows(2).all(|w| w[0] <= w[1]),
+            "cross-workspace replay must be delivered oldest-first"
+        );
+    }
+
+    #[tokio::test]
+    async fn ws_replay_strict_last_seen_boundary_on_mem() {
+        let (url, state) = start_test_server("tok").await;
+        seed_replay_workspace(&state, "ws-replay").await;
+
+        // Three events around the boundary: strictly older, exactly at, and
+        // 1ms after the client's last_seen.
+        for (id, ts) in [
+            ("boundary-old", 5_000u64),
+            ("boundary-at", 6_000),
+            ("boundary-after", 6_001),
+        ] {
+            state
+                .messages
+                .store(&replay_event(id, "ws-replay", ts))
+                .await
+                .unwrap();
+        }
+
+        // last_seen == 6_000: the message created exactly at last_seen must
+        // NOT be re-delivered (the old >= filter re-delivered it on every
+        // reconnect); only the strictly newer one is replayed.
+        let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        auth_ws(&mut ws, "tok").await;
+        subscribe_with_last_seen(&mut ws, &["ws-replay"], Some(6_000)).await;
+        let (messages, catchups) = split_replay_frames(fenced_replay_frames(&mut ws).await);
+        assert_eq!(
+            messages.len(),
+            1,
+            "only strictly-newer messages qualify: exactly the 1ms-later one"
+        );
+        assert_eq!(messages[0]["id"], "boundary-after");
+        assert_eq!(catchups.len(), 0);
+
+        // last_seen == 5_999: both the at-boundary and the later message
+        // qualify — the boundary itself is delivered only when last_seen is
+        // strictly below it.
+        let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        auth_ws(&mut ws, "tok").await;
+        subscribe_with_last_seen(&mut ws, &["ws-replay"], Some(5_999)).await;
+        let (messages, catchups) = split_replay_frames(fenced_replay_frames(&mut ws).await);
+        let ids: Vec<&str> = messages
+            .iter()
+            .map(|m| m["id"].as_str().expect("message id"))
+            .collect();
+        assert_eq!(ids, vec!["boundary-at", "boundary-after"]);
+        assert_eq!(catchups.len(), 0);
     }
 
     // ── Presence departure rebroadcast (HSI §7 Presence Awareness) ────────
@@ -765,6 +1658,22 @@ mod tests {
             )
         };
         state.users.create(&user).await.unwrap();
+        // Subscribe requires workspace membership (message-bus.md §Telemetry
+        // Store) — seed the membership the production invitation-accept flow
+        // would have written, so the subject can subscribe for presence.
+        let membership = gyre_domain::WorkspaceMembership::new(
+            gyre_common::Id::new(format!("mem-{user_id}")),
+            user.id.clone(),
+            ws.id.clone(),
+            gyre_domain::WorkspaceRole::Viewer,
+            gyre_common::Id::new("presence-test-inviter"),
+            now_secs(),
+        );
+        state
+            .workspace_memberships
+            .create(&membership)
+            .await
+            .unwrap();
         state
             .api_keys
             .create(
@@ -808,6 +1717,39 @@ mod tests {
         ))
         .await
         .unwrap();
+    }
+
+    /// Wait until the server has actually processed a Subscribe that
+    /// authorized `workspace_id` for a connection: poll the per-connection
+    /// workspace index until some connection's authorized list contains it.
+    ///
+    /// `subscribe_ws` only awaits the CLIENT-side send. On the current-thread
+    /// #[tokio::test] runtime the connection task is not polled until the
+    /// test task yields, so telemetry emitted immediately after `subscribe_ws`
+    /// would be broadcast (and consumed, and dropped) while the connection's
+    /// `subscribed_workspaces` is still empty — telemetry is never replayed
+    /// from the buffer, so it would be lost for good. Observing the index
+    /// entry (the Subscribe handler inserts it after authorization, before
+    /// returning to its select loop) synchronizes the emits with the
+    /// subscription deterministically, unlike a fixed sleep. A rejected
+    /// workspace never appears in the index, so this only returns for
+    /// accepted subscriptions.
+    async fn await_ws_subscription(state: &Arc<AppState>, workspace_id: &str) {
+        let ws_id = gyre_common::Id::new(workspace_id);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            {
+                let index = state.ws_connection_workspaces.read().await;
+                if index.values().any(|scopes| scopes.contains(&ws_id)) {
+                    return;
+                }
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "subscription for {workspace_id} was not authorized on the server within 5s"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
     }
 
     fn now_secs() -> u64 {
@@ -1300,6 +2242,121 @@ mod tests {
                 assert_eq!(view, "disconnected");
             }
             other => panic!("expected UserPresence departure, got {other:?}"),
+        }
+    }
+
+    // ── `acknowledged` exclusion from WebSocket pushes (message-bus.md
+    // §Message Envelope: the field is excluded from send (POST) responses
+    // AND WebSocket pushes via conditional serialization — it IS included
+    // in GET inbox responses for crash recovery) ─────────────────────
+
+    /// Live bus-delivery arm: a Message pushed on the bus to a subscribed
+    /// agent session must NOT carry the `acknowledged` key in the JSON.
+    #[tokio::test]
+    async fn ws_live_delivery_strips_acknowledged() {
+        let (url, state) = start_test_server("tok").await;
+        seed_agent_ws_identity(&state, "agent-live-ack", "live-ack-token").await;
+
+        let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        auth_ws(&mut ws, "live-ack-token").await;
+
+        state
+            .emit_event(
+                gyre_common::Id::new("ws-live-agents"),
+                gyre_common::message::Destination::Agent(gyre_common::Id::new("agent-live-ack")),
+                gyre_common::message::MessageKind::TaskAssignment,
+                Some(serde_json::json!({"task_id": "TASK-ACK-1"})),
+            )
+            .await;
+
+        let msg = ws.next().await.unwrap().unwrap();
+        let tungstenite::Message::Text(text) = msg else {
+            panic!("expected text message");
+        };
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(v["kind"], "task_assignment");
+        assert_eq!(v["payload"]["task_id"], "TASK-ACK-1");
+        assert!(
+            v.get("acknowledged").is_none(),
+            "live WS delivery must exclude `acknowledged`, got: {v}"
+        );
+    }
+
+    /// Subscribe replay arm (review round-3 correction): connect, Subscribe
+    /// with last_seen=0 against a workspace with a persisted Event-tier
+    /// message, and assert the replayed JSON also lacks the `acknowledged`
+    /// key — BOTH WebSocket Message serialization sites strip it, not just
+    /// the live arm.
+    #[tokio::test]
+    async fn ws_subscribe_replay_strips_acknowledged() {
+        let (url, state) = start_test_server("tok").await;
+
+        // A persisted Event-tier message in a workspace the (Admin) global
+        // token is authorized to subscribe to.
+        let ws_id = gyre_common::Id::new("ws-replay-ack");
+        let workspace = gyre_domain::Workspace::new(
+            ws_id.clone(),
+            gyre_common::Id::new("default"),
+            "replay-ack",
+            "replay-ack",
+            now_secs(),
+        );
+        state.workspaces.create(&workspace).await.unwrap();
+        let msg = gyre_common::message::Message {
+            id: gyre_common::Id::new("msg-replay-ack"),
+            tenant_id: gyre_common::Id::new("default"),
+            from: gyre_common::message::MessageOrigin::Server,
+            workspace_id: Some(ws_id.clone()),
+            to: gyre_common::message::Destination::Workspace(ws_id.clone()),
+            kind: gyre_common::message::MessageKind::TaskCreated,
+            payload: Some(serde_json::json!({"task_id": "TASK-REPLAY-1"})),
+            created_at: 1_000,
+            signature: None,
+            key_id: None,
+            acknowledged: false,
+        };
+        state.messages.store(&msg).await.unwrap();
+
+        let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        auth_ws(&mut ws, "tok").await;
+
+        // Subscribe with last_seen=0 to force a full replay.
+        let sub = WsMessage::Subscribe {
+            scopes: vec![gyre_common::SubscribeScope {
+                workspace_id: gyre_common::Id::new("ws-replay-ack"),
+            }],
+            last_seen: Some(0),
+            session_id: None,
+        };
+        ws.send(tungstenite::Message::Text(
+            serde_json::to_string(&sub).unwrap(),
+        ))
+        .await
+        .unwrap();
+
+        // Read frames until the replayed message arrives (skipping any
+        // unrelated frames).
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            assert!(!remaining.is_zero(), "timed out waiting for replay");
+            let frame = tokio::time::timeout(remaining, ws.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            let tungstenite::Message::Text(text) = frame else {
+                continue;
+            };
+            let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+            if v["id"] == "msg-replay-ack" {
+                assert_eq!(v["kind"], "task_created");
+                assert!(
+                    v.get("acknowledged").is_none(),
+                    "replayed WS message must exclude `acknowledged`, got: {v}"
+                );
+                break;
+            }
         }
     }
 }

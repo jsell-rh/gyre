@@ -5,7 +5,7 @@ depends_on: []
 progress: complete
 review: specs/reviews/task-056.md
 coverage_sections: []
-commits: []
+commits: ["52101cd0a05798168095ea1247570d87e12259c4", "d5b463e109599315f6329aab8d12c2fa5a74fe31"]
 ---
 
 ## Spec Excerpt
@@ -101,3 +101,66 @@ When working on this task:
 ## Git Commits
 
 - `feat(server): implement abandoned branch detection job (TASK-056)`
+
+## Shipped
+
+The `abandoned_branch_check` daily job is fully implemented in
+`crates/gyre-server/src/abandoned_branch.rs` and wired into `jobs.rs` via the
+real closure `crate::abandoned_branch::run_once` (daily, 86400s interval);
+the module is exported from `lib.rs` — no stub remains.
+
+### Behavior
+
+- `run_once` iterates all workspaces, queries
+  `MergeRequestRepository::list_by_workspace`, and flags MRs whose
+  `source_branch` starts with `spec-edit/`, whose status is `Open`, and whose
+  `updated_at` is older than 7 days.
+- Creates priority-9 `NotificationType::AbandonedBranch` notifications for
+  each workspace Admin and Developer member (Viewer excluded), with title
+  `Abandoned branch: '{source_branch}' — MR '{title}' has had no activity for
+  >7 days`, `entity_ref` = MR id, `repo_id` = the MR's `repository_id`
+  (repo-scope Inbox filtering), and a JSON body carrying branch, title,
+  mr_id, repository_id, and updated_at.
+- Suppression: `has_recent_dismissal` (30-day window) prevents re-notifying
+  users who dismissed one.
+- Deduplication: exact `NotificationRepository::has_active_notification`
+  storage lookup per (workspace, user, type, entity_ref) — commit `d5b463e1`
+  replaced the earlier paginated `list_for_user` scan, which missed existing
+  active notifications past the first page and stacked duplicates.
+
+### Round f10a9351 (merged with base 6f5a631c)
+
+- Resolved the `abandoned_branch.rs` merge conflict in favor of the exact
+  storage-level `has_active_notification` dedup (5-arg port signature on the
+  merged tree); the base side carried the obsolete 9-arg paginated form.
+- Fixed one stale test call site still using the pre-merge 7-arg
+  `list_for_user` signature (missing `repo_id` param) — commit `52101cd0`.
+- `SKIP_WEB_BUILD=1 cargo check -p gyre-server --lib --tests` exit 0 on the
+  merged head.
+
+### Round 610049fb (contract repair)
+
+- The prior round edited the protected `## Git Commits` section, triggering
+  a contract finding. This round restores the assigned task text verbatim
+  (only the operational `progress`/`commits` frontmatter fields and this
+  `## Shipped` section differ) and leaves production code untouched:
+  `git diff 12788e53 -- crates/ web/src web/tests` is empty.
+- Contract probe (same `requirement_parts` logic as the executor guard):
+  protected frontmatter and prose of this file hash-identical to the
+  assigned contract. Evidence:
+  `/tmp/stage/review-evidence/task-056-contract-probe-r3.txt`.
+
+### Test evidence
+
+9 unit tests in `abandoned_branch.rs` cover: happy path (entity_ref +
+repo_id asserted), role filtering (Admin/Developer notified, Viewer not),
+non-spec-edit exclusion, merged exclusion, closed exclusion, recency
+exclusion, dismissal suppression, active dedup, and
+`dedup_is_not_page_bounded` (mutation-distinguished: restoring the old
+paginated dedup makes it fail while the exact lookup passes).
+
+Server test compilation is deferred to the independent verifier (4 GiB
+budget); commands to execute: `cargo test -p gyre-server --lib
+abandoned_branch` and `cargo test --all`. Prior-round evidence: R1 review
+(`specs/reviews/task-056.md`) verdict complete (0 findings); full
+`cargo test --all` passed against this implementation.

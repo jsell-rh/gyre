@@ -8,13 +8,13 @@
 //! The ledger is synced from the manifest on every push to the default branch.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::process::Command;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 
-pub use gyre_domain::{ApprovalStatus, SpecApprovalEvent, SpecLedgerEntry};
+pub use gyre_domain::spec_links::{SpecLinkEntry, SpecLinkType};
+pub use gyre_domain::{ApprovalStatus, SpecApprovalEvent, SpecLedgerEntry, TaskPriority};
 
 // ---------------------------------------------------------------------------
 // Manifest structs (parsed from specs/manifest.yaml)
@@ -40,6 +40,11 @@ pub struct ManifestDefaults {
     pub auto_create_tasks: bool,
     #[serde(default = "default_true")]
     pub auto_invalidate_on_change: bool,
+    /// Default lifecycle-task priority override (spec-registry.md §15:
+    /// "manifest can override default task priority"). `None` keeps the
+    /// change-kind default chosen by the lifecycle hook.
+    #[serde(default)]
+    pub priority: Option<TaskPriority>,
 }
 
 impl Default for ManifestDefaults {
@@ -48,35 +53,12 @@ impl Default for ManifestDefaults {
             requires_approval: true,
             auto_create_tasks: true,
             auto_invalidate_on_change: true,
+            priority: None,
         }
     }
 }
 fn default_true() -> bool {
     true
-}
-/// Link type between specs — drives mechanical enforcement.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "snake_case")]
-pub enum SpecLinkType {
-    Implements,
-    Supersedes,
-    DependsOn,
-    ConflictsWith,
-    Extends,
-    References,
-}
-
-impl std::fmt::Display for SpecLinkType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            SpecLinkType::Implements => write!(f, "implements"),
-            SpecLinkType::Supersedes => write!(f, "supersedes"),
-            SpecLinkType::DependsOn => write!(f, "depends_on"),
-            SpecLinkType::ConflictsWith => write!(f, "conflicts_with"),
-            SpecLinkType::Extends => write!(f, "extends"),
-            SpecLinkType::References => write!(f, "references"),
-        }
-    }
 }
 
 /// A link declared in the manifest between specs.
@@ -111,6 +93,11 @@ pub struct SpecEntry {
     pub auto_create_tasks: Option<bool>,
     /// Overrides `defaults.auto_invalidate_on_change` for this spec.
     pub auto_invalidate_on_change: Option<bool>,
+    /// Overrides the lifecycle-task priority for changes to this spec
+    /// (spec-registry.md §15). `None` falls back to `defaults.priority`,
+    /// then to the change-kind default.
+    #[serde(default)]
+    pub priority: Option<TaskPriority>,
     /// If set, this spec has been superseded by another.
     pub superseded_by: Option<String>,
     /// Links to other specs (machine-readable graph edges).
@@ -130,6 +117,15 @@ impl SpecEntry {
     pub fn effective_auto_invalidate(&self, defaults: &ManifestDefaults) -> bool {
         self.auto_invalidate_on_change
             .unwrap_or(defaults.auto_invalidate_on_change)
+    }
+
+    /// Effective lifecycle-task priority override for this spec
+    /// (spec-registry.md §15): per-entry override, else the manifest
+    /// `defaults:` priority, else `None` (caller keeps its change-kind
+    /// default). Never hardcodes a priority — an override is applied only
+    /// when the manifest declares one.
+    pub fn effective_priority(&self, defaults: &ManifestDefaults) -> Option<TaskPriority> {
+        self.priority.clone().or_else(|| defaults.priority.clone())
     }
 
     pub fn effective_approval_mode(&self) -> ApprovalMode {
@@ -185,6 +181,75 @@ pub struct GateConfig {
     pub stack_hash: Option<String>,
 }
 
+// ---------------------------------------------------------------------------
+// Ledger types (runtime state tracked per spec)
+// ---------------------------------------------------------------------------
+
+// NOTE: the in-memory store aliases in this section are legacy debt grandfathered
+// in scripts/in-memory-state-stores-exemptions.txt at frozen line coordinates.
+
+// ApprovalStatus, SpecLedgerEntry, SpecApprovalEvent are re-exported from gyre_domain above.
+// The former in-memory `SpecLedger` / `SpecApprovalHistory` store aliases were
+// removed: the ledger is port-backed (`gyre_ports::SpecLedgerRepository`) and
+// approval events are persisted through `gyre_ports::SpecApprovalEventRepository`,
+// both wired via the `store!` macro in `build_state`. Tests build local map
+// fixtures instead (see the test module below).
+
+// in-memory-state-stores:ok — hot cache of the durable `spec_links` table
+// (spec-links.md §Forge-Maintained Spec Graph): the SQL table behind
+// `AppState.spec_link_repo` is authoritative, every mutation writes through,
+// and boot reloads via `load_spec_links_into_store` (lib.rs).
+pub type SpecLinksStore = Arc<Mutex<Vec<SpecLinkEntry>>>; // in-memory-state-stores:ok — see above
+
+/// A stale inbound link collected for side-effect processing (sync step 6b):
+/// drift-review task creation (F5/F7) and extends-specific approval
+/// invalidation. Named struct instead of a positional 4-tuple so source and
+/// target paths cannot be swapped silently (TASK-048 F1 hazard class).
+#[derive(Debug, Clone)]
+struct StaleInboundLink {
+    source_path: String,
+    target_path: String,
+    source_repo_id: Option<String>,
+    link_type: SpecLinkType,
+}
+
+/// Read the manifest from a commit and return the set of registered spec paths.
+///
+/// Returns an empty set if the manifest is absent or unparseable.
+pub async fn read_manifest_paths(repo_path: &str, sha: &str) -> std::collections::HashSet<String> {
+    read_manifest(repo_path, sha)
+        .await
+        .map(|m| m.specs.iter().map(|e| e.path.clone()).collect())
+        .unwrap_or_default()
+}
+
+// ---------------------------------------------------------------------------
+// Manifest reading and path resolution (used by the ledger sync and
+// the spec lifecycle hooks)
+// ---------------------------------------------------------------------------
+
+/// Normalize a spec path to the manifest's canonical identity: relative to
+/// `specs/`, with no leading `specs/` prefix (the same form `sync_spec_ledger`
+/// uses when it prefixes entries with `specs/` and `GET /api/v1/specs/:path`
+/// accepts).
+fn normalize_spec_rel_path(path: &str) -> &str {
+    path.strip_prefix("specs/").unwrap_or(path)
+}
+
+/// Resolve the manifest `SpecEntry` for a changed file path from a git diff
+/// (e.g. `specs/system/foo.md`). For renames, callers pass the NEW path —
+/// the manifest at the pushed HEAD describes where the spec lives now.
+pub fn manifest_entry_for_path<'a>(
+    manifest: &'a SpecManifest,
+    path: &str,
+) -> Option<&'a SpecEntry> {
+    let rel = normalize_spec_rel_path(path);
+    manifest
+        .specs
+        .iter()
+        .find(|e| normalize_spec_rel_path(&e.path) == rel)
+}
+
 /// Parse YAML text into a SpecManifest.
 pub fn parse_manifest(yaml: &str) -> Result<SpecManifest, serde_yaml::Error> {
     serde_yaml::from_str(yaml)
@@ -206,56 +271,6 @@ pub async fn read_manifest(repo_path: &str, sha: &str) -> Option<SpecManifest> {
             None
         }
     }
-}
-
-// ---------------------------------------------------------------------------
-// Ledger types (runtime state tracked per spec)
-// ---------------------------------------------------------------------------
-
-// ApprovalStatus, SpecLedgerEntry, SpecApprovalEvent are re-exported from gyre_domain above.
-
-/// Type alias for the shared ledger store (in-memory, used by tests and sync_spec_ledger).
-pub type SpecLedger = Arc<Mutex<HashMap<String, SpecLedgerEntry>>>;
-/// Type alias for the shared approval history store (in-memory).
-pub type SpecApprovalHistory = Arc<Mutex<Vec<SpecApprovalEvent>>>;
-
-/// A resolved link entry stored in the forge's spec link graph.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SpecLinkEntry {
-    pub id: String,
-    /// Source spec path (the spec that declares this link).
-    pub source_path: String,
-    /// Repo ID that owns the source spec (for cross-workspace link scoping).
-    pub source_repo_id: Option<String>,
-    pub link_type: SpecLinkType,
-    /// Target spec path (within the target repo, without leading @workspace/repo prefix).
-    pub target_path: String,
-    /// Resolved target repo UUID. None for unresolved cross-workspace links.
-    pub target_repo_id: Option<String>,
-    /// Human-readable composite path preserved from the manifest `target` field
-    /// (e.g. "@platform-core/api-svc/system/auth.md"). Used for display and staleness checking.
-    /// None for same-repo links.
-    pub target_display: Option<String>,
-    /// SHA the link was pinned to.
-    pub target_sha: Option<String>,
-    pub reason: Option<String>,
-    /// Link health: "active" | "stale" | "broken" | "conflicted" | "unresolved"
-    pub status: String,
-    pub created_at: u64,
-    pub stale_since: Option<u64>,
-}
-
-/// Type alias for the shared spec links store.
-pub type SpecLinksStore = Arc<Mutex<Vec<SpecLinkEntry>>>;
-
-/// Read the manifest from a commit and return the set of registered spec paths.
-///
-/// Returns an empty set if the manifest is absent or unparseable.
-pub async fn read_manifest_paths(repo_path: &str, sha: &str) -> std::collections::HashSet<String> {
-    read_manifest(repo_path, sha)
-        .await
-        .map(|m| m.specs.iter().map(|e| e.path.clone()).collect())
-        .unwrap_or_default()
 }
 
 // ---------------------------------------------------------------------------
@@ -384,6 +399,16 @@ pub enum CrossWorkspaceTarget {
 /// - Same-repo:       `"system/spec.md"`                          (no `@` prefix)
 /// - Cross-repo:      `"@repo-name/system/spec.md"`               (single segment before path)
 /// - Cross-workspace: `"@ws-slug/repo-name/system/spec.md"`       (two segments before path)
+///
+/// NOTE: a three-segment target is syntactically ambiguous between the
+/// cross-repo form (repo name + slashed spec path) and the cross-workspace
+/// form (workspace slug + repo name + spec path) — a pure string split
+/// cannot tell them apart. This parser always yields the cross-workspace
+/// interpretation; resolution sites (push-time sync and the staleness
+/// re-resolution pass) disambiguate by existence: the workspace form takes
+/// precedence, and when no workspace with that slug exists in the tenant
+/// the target is treated as `@{repo_name}/{spec_path}` within the source
+/// workspace.
 pub fn parse_cross_workspace_target(target: &str) -> CrossWorkspaceTarget {
     if let Some(rest) = target.strip_prefix('@') {
         // Split into at most 3 parts: first two are the address segments, rest is the path.
@@ -428,12 +453,24 @@ pub fn parse_cross_workspace_target(target: &str) -> CrossWorkspaceTarget {
 ///   and approval_status is invalidated to Pending.
 /// - Push-time inbound staleness: when a spec's SHA changes, ALL existing links targeting
 ///   that spec are marked stale immediately (spec-links.md §Automatic Staleness Detection).
-/// - Cross-workspace `@` targets: resolved to target_repo_id via workspace slug lookup.
-///   Unresolved targets stored with `status = "unresolved"` and `target_repo_id = None`.
+/// - Cross-repo `@repo/path` and cross-workspace `@ws/repo/path` targets are validated
+///   per spec-links.md §Cross-Repo and Cross-Workspace Links: target workspace exists
+///   (tenant-scoped) and the linking principal has read access, target repo exists
+///   within that workspace, and the target spec path is declared in the target
+///   repo's current manifest. Same-workspace `@repo/path` links resolve within the
+///   SOURCE workspace. Targets failing any check are stored with
+///   `status = "unresolved"` and `target_repo_id = None`.
+/// - Access-denied cross-workspace links record a durable denial marker so the
+///   staleness checker (which cannot recover the pushing principal from the link
+///   row) never silently flips them "active".
 #[allow(clippy::too_many_arguments)]
 pub async fn sync_spec_ledger(
     ledger: &Arc<dyn gyre_ports::SpecLedgerRepository>,
     links_store: &SpecLinksStore,
+    // Durable spec-link graph repository (spec-links.md §Forge-Maintained Spec
+    // Graph). All link mutations below are written through so the SQL table is
+    // the authoritative graph across restarts.
+    link_repo: &Arc<dyn gyre_ports::SpecLinkRepository>,
     repo_path: &str,
     new_sha: &str,
     now: u64,
@@ -443,6 +480,15 @@ pub async fn sync_spec_ledger(
     workspaces: Option<&Arc<dyn gyre_ports::WorkspaceRepository>>,
     repos: Option<&Arc<dyn gyre_ports::RepoRepository>>,
     tenant_id: Option<&gyre_common::Id>,
+    // Linking-principal context (spec-links.md §Cross-Repo and Cross-Workspace
+    // Links: "the linking user has read access"). `principal` is the
+    // authenticated pusher at push-triggered syncs (git_http push handler,
+    // POST /repos/:id/sync-specs); `None` for server-originated syncs (mirror
+    // fetches, background jobs) — no linking user, exempt from the check.
+    principal: Option<&LinkPrincipal>,
+    memberships: Option<&Arc<dyn gyre_ports::WorkspaceMembershipRepository>>,
+    // KV store for durable cross-workspace access-denial markers.
+    kv: Option<&Arc<dyn gyre_ports::KvJsonStore>>,
     // Task repository for creating drift-review tasks (TASK-016 F2).
     tasks: Option<&Arc<dyn gyre_ports::TaskRepository>>,
 ) {
@@ -474,6 +520,10 @@ pub async fn sync_spec_ledger(
     // 4. For each manifest entry, compute blob SHA and sync ledger.
     // Track specs whose SHAs changed for inbound staleness detection (TASK-016 F1).
     let mut changed_spec_paths: Vec<String> = Vec::new();
+    // Per-spec current blob SHA (from HEAD) — reused as `source_sha` on the
+    // spec's link entries (spec-links.md §Forge-Maintained Spec Graph).
+    let mut manifest_sha_by_path: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
     for entry in &manifest.specs {
         let spec_file_path = format!("specs/{}", entry.path);
         let blob_sha = match get_blob_sha(&git_bin, repo_path, new_sha, &spec_file_path).await {
@@ -487,6 +537,7 @@ pub async fn sync_spec_ledger(
                 "".to_string()
             }
         };
+        manifest_sha_by_path.insert(entry.path.clone(), blob_sha.clone());
 
         let approval_mode = entry.effective_approval_mode().to_string();
         let auto_invalidate = entry.effective_auto_invalidate(&manifest.defaults);
@@ -563,72 +614,55 @@ pub async fn sync_spec_ledger(
         let mut new_links: Vec<SpecLinkEntry> = Vec::new();
         for entry in &manifest.specs {
             for link in &entry.links {
-                let id = format!("{}-{}-{}", entry.path, link.link_type, link.target);
+                let id = gyre_domain::spec_links::spec_link_id(
+                    source_repo_id,
+                    &entry.path,
+                    &link.link_type,
+                    &link.target,
+                );
                 let parsed = parse_cross_workspace_target(&link.target);
+                let resolved = resolve_manifest_link_target(
+                    &parsed,
+                    &entry.path,
+                    &link.target,
+                    source_workspace_id,
+                    workspaces,
+                    repos,
+                    tenant_id,
+                    memberships,
+                    principal,
+                )
+                .await;
+                let (target_path, target_repo_id, target_display, status, access_denied) = (
+                    resolved.target_path,
+                    resolved.target_repo_id,
+                    resolved.target_display,
+                    resolved.status,
+                    resolved.access_denied,
+                );
 
-                let (target_path, target_repo_id, target_display, status) = match &parsed {
-                    CrossWorkspaceTarget::SameRepo { path } => {
-                        (path.clone(), None, None, "active".to_string())
+                // Keep the durable access-denial marker in step with this
+                // push (every default-branch push fully re-declares the
+                // manifest's links): a denial records the current principal
+                // so the staleness pass — which cannot recover the pusher
+                // from the link row — never silently flips the link
+                // "active"; any other outcome clears an earlier denial.
+                if let Some(kv) = kv {
+                    if access_denied {
+                        record_link_denial(kv, &id, principal, &link.target, now).await;
+                    } else {
+                        clear_link_denial(kv, &id).await;
                     }
-                    CrossWorkspaceTarget::CrossRepo { repo_name, path } => {
-                        // Resolve repo name → repo_id within the source workspace.
-                        let display = format!("@{}/{}", repo_name, path);
-                        let resolved_repo_id = resolve_repo_by_name(
-                            repos, workspaces, tenant_id,
-                            None, // same workspace — we'll look up by name across all
-                            repo_name,
-                        )
-                        .await;
-                        if resolved_repo_id.is_none() {
-                            warn!(
-                                source = %entry.path,
-                                target = %link.target,
-                                "spec-registry: cross-repo target unresolved (repo not found)"
-                            );
-                        }
-                        let status = if resolved_repo_id.is_some() {
-                            "active".to_string()
-                        } else {
-                            "unresolved".to_string()
-                        };
-                        (path.clone(), resolved_repo_id, Some(display), status)
-                    }
-                    CrossWorkspaceTarget::CrossWorkspace {
-                        workspace_slug,
-                        repo_name,
-                        path,
-                    } => {
-                        let display = format!("@{}/{}/{}", workspace_slug, repo_name, path);
-                        let resolved_repo_id = resolve_cross_workspace_repo(
-                            workspaces,
-                            repos,
-                            tenant_id,
-                            workspace_slug,
-                            repo_name,
-                        )
-                        .await;
-                        if resolved_repo_id.is_none() {
-                            warn!(
-                                source = %entry.path,
-                                target = %link.target,
-                                workspace_slug = %workspace_slug,
-                                repo_name = %repo_name,
-                                "spec-registry: cross-workspace target unresolved"
-                            );
-                        }
-                        let status = if resolved_repo_id.is_some() {
-                            "active".to_string()
-                        } else {
-                            "unresolved".to_string()
-                        };
-                        (path.clone(), resolved_repo_id, Some(display), status)
-                    }
-                };
+                }
 
                 new_links.push(SpecLinkEntry {
                     id,
                     source_path: entry.path.clone(),
                     source_repo_id: source_repo_id.map(|s| s.to_string()),
+                    source_sha: manifest_sha_by_path
+                        .get(&entry.path)
+                        .cloned()
+                        .unwrap_or_default(),
                     link_type: link.link_type.clone(),
                     target_path,
                     target_repo_id,
@@ -715,13 +749,50 @@ pub async fn sync_spec_ledger(
             }
         }
 
-        // Replace all links originating from specs in this manifest (full refresh).
+        // Replace all links originating from specs in this manifest (full refresh),
+        // in memory AND in the durable repository (spec-links.md
+        // §Forge-Maintained Spec Graph — the SQL table is authoritative).
+        // Both stores use the same (source_repo_id, source_path) scoping so
+        // they can never diverge: a push from one repo replaces only that
+        // repo's rows for the manifest's paths.
         {
             let source_paths: std::collections::HashSet<String> =
                 manifest.specs.iter().map(|e| e.path.clone()).collect();
-            let mut store = links_store.lock().await;
-            store.retain(|l| !source_paths.contains(&l.source_path));
-            store.extend(new_links);
+            let repo_scope = source_repo_id.unwrap_or("");
+            {
+                let mut store = links_store.lock().await;
+                store.retain(|l| {
+                    let link_repo_key = l.source_repo_id.as_deref().unwrap_or("");
+                    !(link_repo_key == repo_scope && source_paths.contains(&l.source_path))
+                });
+                store.extend(new_links.iter().cloned());
+            }
+            // One replace_for_source call per source spec in this manifest —
+            // including specs whose link set is now EMPTY, so links removed
+            // from the manifest are deleted from the durable table too (an
+            // empty set must clear the persisted rows, not skip them).
+            let links_by_path: std::collections::HashMap<&str, Vec<SpecLinkEntry>> = new_links
+                .iter()
+                .fold(std::collections::HashMap::new(), |mut acc, link| {
+                    acc.entry(link.source_path.as_str())
+                        .or_default()
+                        .push(link.clone());
+                    acc
+                });
+            for entry in &manifest.specs {
+                let empty: Vec<SpecLinkEntry> = Vec::new();
+                let links = links_by_path.get(entry.path.as_str()).unwrap_or(&empty);
+                if let Err(e) = link_repo
+                    .replace_for_source(repo_scope, &entry.path, links)
+                    .await
+                {
+                    warn!(
+                        source_repo_id = repo_scope,
+                        source_path = %entry.path,
+                        "spec-registry: failed to persist spec links: {e}"
+                    );
+                }
+            }
         }
     }
 
@@ -735,6 +806,9 @@ pub async fn sync_spec_ledger(
         let changed_set: std::collections::HashSet<&str> =
             changed_spec_paths.iter().map(|s| s.as_str()).collect();
         let mut store = links_store.lock().await;
+        // Links mutated to stale in this pass — persisted below so the SQL
+        // table stays authoritative (spec-links.md §Forge-Maintained Spec Graph).
+        let mut mutated: Vec<SpecLinkEntry> = Vec::new();
         for link in store.iter_mut() {
             // Only update links that target a changed spec and aren't already stale/broken.
             if changed_set.contains(link.target_path.as_str())
@@ -749,6 +823,7 @@ pub async fn sync_spec_ledger(
                 );
                 link.status = "stale".to_string();
                 link.stale_since = Some(now);
+                mutated.push(link.clone());
             }
         }
         // Drop the lock before doing ledger updates and task creation.
@@ -756,55 +831,60 @@ pub async fn sync_spec_ledger(
         // - Includes source_repo_id and link_type for correct task assignment (F5).
         // - Covers all link types for drift-review task creation (F7).
         // - Excludes links from the current manifest (already processed in step 6) (F6).
-        let inbound_stale_links: Vec<(String, String, Option<String>, SpecLinkType)> = store
+        let inbound_stale_links: Vec<StaleInboundLink> = store
             .iter()
             .filter(|l| {
                 l.stale_since == Some(now)
                     && changed_set.contains(l.target_path.as_str())
                     && !manifest_paths.contains(&l.source_path)
             })
-            .map(|l| {
-                (
-                    l.source_path.clone(),
-                    l.target_path.clone(),
-                    l.source_repo_id.clone(),
-                    l.link_type.clone(),
-                )
+            .map(|l| StaleInboundLink {
+                source_path: l.source_path.clone(),
+                target_path: l.target_path.clone(),
+                source_repo_id: l.source_repo_id.clone(),
+                link_type: l.link_type.clone(),
             })
             .collect();
         drop(store);
 
+        // Write staleness transitions through to the durable graph.
+        for link in &mutated {
+            if let Err(e) = link_repo.save(link).await {
+                warn!(link_id = %link.id, "spec-registry: failed to persist stale link: {e}");
+            }
+        }
+
         // Apply side effects for inbound stale links.
-        for (source_path, target_path, link_repo_id, link_type) in &inbound_stale_links {
+        for link in &inbound_stale_links {
             // Look up source spec's ledger entry for workspace_id (F5).
-            let maybe_source = ledger.find_by_path(source_path).await.ok().flatten();
+            let maybe_source = ledger.find_by_path(&link.source_path).await.ok().flatten();
             let ws_id = maybe_source.as_ref().and_then(|e| e.workspace_id.clone());
 
             // Step 3 (generic): drift-review task for stale inbound links.
             // Excludes `references` — spec says "No mechanical enforcement."
-            if *link_type == SpecLinkType::References {
+            if link.link_type == SpecLinkType::References {
                 continue;
             }
             create_drift_review_task(
                 tasks,
-                source_path,
-                target_path,
-                link_type,
-                link_repo_id.as_deref(),
+                &link.source_path,
+                &link.target_path,
+                &link.link_type,
+                link.source_repo_id.as_deref(),
                 ws_id.as_deref(),
                 now,
             )
             .await;
 
             // Step 4 (extends-specific): drift_status + approval invalidation.
-            if *link_type == SpecLinkType::Extends {
+            if link.link_type == SpecLinkType::Extends {
                 if let Some(mut source_entry) = maybe_source {
                     source_entry.drift_status = "drifted".to_string();
                     source_entry.approval_status = ApprovalStatus::Pending;
                     source_entry.updated_at = now;
                     let _ = ledger.save(&source_entry).await;
                     info!(
-                        spec_path = %source_path,
+                        spec_path = %link.source_path,
                         "spec-registry: inbound extends — approval invalidated, drift_status = drifted"
                     );
                 }
@@ -940,59 +1020,469 @@ async fn create_drift_review_task(
 }
 
 // ---------------------------------------------------------------------------
-// Cross-workspace resolution helpers
+// Cross-repo / cross-workspace link validation
+// (spec-links.md §Cross-Repo and Cross-Workspace Links)
 // ---------------------------------------------------------------------------
 
-/// Resolve a cross-workspace `@workspace_slug/repo_name/spec_path` link to a target repo ID.
+/// Identity of the principal whose push triggered this ledger sync — the
+/// "linking user" in spec-links.md §Cross-Repo and Cross-Workspace Links
+/// ("Target workspace exists and the linking user has read access").
 ///
-/// Resolution is tenant-scoped: looks up the workspace by slug within the caller's tenant,
-/// then finds the repo by name within that workspace.
-async fn resolve_cross_workspace_repo(
+/// Threaded from the authenticated caller at push-triggered syncs (git_http
+/// push handler, POST /repos/:id/sync-specs). Server-originated syncs
+/// (mirror fetches, background jobs) pass `None` — no linking principal.
+#[derive(Debug, Clone)]
+pub struct LinkPrincipal {
+    /// Authenticated agent id (a user's display name for API-key / user-JWT
+    /// auth — the same value the auth extractor reports).
+    pub agent_id: String,
+    /// Backing user id when the principal authenticated as a user.
+    /// `None` for agent JWTs and the global system token.
+    pub user_id: Option<gyre_common::Id>,
+    /// Workspace scope from the validated token hierarchy claims, when
+    /// present (workspace-scoped agent JWTs).
+    pub workspace_id: Option<String>,
+    /// True for the genuine system principal (global dev/system token) —
+    /// exempt from cross-workspace read-access validation.
+    pub is_system: bool,
+}
+
+impl LinkPrincipal {
+    /// Derive the linking principal from the auth extractor's resolved
+    /// identity. Reuses `AuthenticatedAgent::is_system_principal` (never a
+    /// bare agent_id string match — a user *named* "system" authenticates
+    /// with their own user_id and must not be exempt).
+    pub fn from_auth(auth: &crate::auth::AuthenticatedAgent) -> Self {
+        Self {
+            agent_id: auth.agent_id.clone(),
+            user_id: auth.user_id.clone(),
+            workspace_id: auth.workspace_id.clone(),
+            is_system: auth.is_system_principal(),
+        }
+    }
+}
+
+/// Durable record that a link id was denied resolution because the linking
+/// principal lacked read access to the target workspace. The staleness
+/// checker consults it so a denied link is never silently flipped
+/// "active": the pushing principal is not recoverable from the link row
+/// (the spec's spec_links schema has no principal column), so the denial
+/// travels in the KV store instead. Every re-push of the source manifest
+/// refreshes it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LinkAccessDenial {
+    /// Principal that was denied (agent_id / display name).
+    pub principal: String,
+    /// The link target as declared in the manifest.
+    pub target: String,
+    /// When the denial was recorded (unix seconds).
+    pub at: u64,
+}
+
+/// KV namespace for [`LinkAccessDenial`] markers, keyed by link id.
+pub(crate) const LINK_DENIAL_NAMESPACE: &str = "spec_link_denials";
+
+/// Record (or refresh) the access-denial marker for a link id.
+pub(crate) async fn record_link_denial(
+    kv: &Arc<dyn gyre_ports::KvJsonStore>,
+    link_id: &str,
+    principal: Option<&LinkPrincipal>,
+    target: &str,
+    now: u64,
+) {
+    let denial = LinkAccessDenial {
+        principal: principal
+            .map(|p| p.agent_id.clone())
+            .unwrap_or_else(|| "<unknown>".to_string()),
+        target: target.to_string(),
+        at: now,
+    };
+    match serde_json::to_string(&denial) {
+        Ok(value) => {
+            if let Err(e) = kv.kv_set(LINK_DENIAL_NAMESPACE, link_id, value).await {
+                warn!(
+                    link_id,
+                    error = %e,
+                    "spec-registry: failed to persist link access denial"
+                );
+            }
+        }
+        Err(e) => warn!(
+            link_id,
+            error = %e,
+            "spec-registry: failed to serialize link access denial"
+        ),
+    }
+}
+
+/// Clear the access-denial marker for a link id (the link resolved, or was
+/// re-declared by a push that is not access-denied).
+pub(crate) async fn clear_link_denial(kv: &Arc<dyn gyre_ports::KvJsonStore>, link_id: &str) {
+    if let Err(e) = kv.kv_remove(LINK_DENIAL_NAMESPACE, link_id).await {
+        warn!(
+            link_id,
+            error = %e,
+            "spec-registry: failed to clear link access denial"
+        );
+    }
+}
+
+/// Read the access-denial marker for a link id, if any.
+pub(crate) async fn link_denial(
+    kv: &Arc<dyn gyre_ports::KvJsonStore>,
+    link_id: &str,
+) -> Option<LinkAccessDenial> {
+    let raw = kv.kv_get(LINK_DENIAL_NAMESPACE, link_id).await.ok()??;
+    serde_json::from_str(&raw).ok()
+}
+
+/// spec-links.md §Cross-Repo and Cross-Workspace Links: "Target workspace
+/// exists and the linking user has read access."
+///
+/// - `principal: None` — server-originated sync (mirror fetch, background
+///   job): no linking user to validate, exempt.
+/// - System principal — exempt.
+/// - User principal — read access is workspace membership (any role grants
+///   workspace read; an unaccepted invitation is not access).
+/// - Agent principal — agents are workspace-scoped (platform-model.md §1
+///   hierarchy enforcement): read access exists only when the validated
+///   token's workspace scope IS the target workspace.
+///
+/// Fails closed when a user principal's membership cannot be checked
+/// (missing repo handle or lookup error): an unvalidatable principal must
+/// not get cross-workspace resolution.
+async fn principal_has_read_access(
+    memberships: Option<&Arc<dyn gyre_ports::WorkspaceMembershipRepository>>,
+    principal: Option<&LinkPrincipal>,
+    target_workspace_id: &gyre_common::Id,
+) -> bool {
+    let Some(p) = principal else {
+        return true; // server-originated sync — no linking user
+    };
+    if p.is_system {
+        return true;
+    }
+    match &p.user_id {
+        Some(user_id) => match memberships {
+            Some(memberships) => {
+                match memberships
+                    .find_by_user_and_workspace(user_id, target_workspace_id)
+                    .await
+                {
+                    Ok(Some(membership)) => membership.accepted,
+                    Ok(None) => false,
+                    Err(e) => {
+                        warn!(
+                            principal = %p.agent_id,
+                            workspace_id = %target_workspace_id,
+                            error = %e,
+                            "spec-registry: membership lookup failed — denying cross-workspace link (fail closed)"
+                        );
+                        false
+                    }
+                }
+            }
+            None => false, // cannot validate a user principal — fail closed
+        },
+        None => p.workspace_id.as_deref() == Some(target_workspace_id.as_str()),
+    }
+}
+
+/// spec-links.md §Cross-Repo and Cross-Workspace Links: "Target spec path
+/// exists in the target repo's manifest." Reads the target repo's current
+/// default-branch `specs/manifest.yaml` via the same git-show mechanism the
+/// sync itself uses and requires the target path to be declared. A missing
+/// or unparseable manifest declares nothing — the path does not exist.
+pub(crate) async fn target_manifest_declares_path(
+    repo: &gyre_domain::Repository,
+    target_path: &str,
+) -> bool {
+    let refname = format!("refs/heads/{}", repo.default_branch);
+    match read_manifest(&repo.path, &refname).await {
+        Some(manifest) => manifest
+            .specs
+            .iter()
+            .any(|e| normalize_spec_rel_path(&e.path) == normalize_spec_rel_path(target_path)),
+        None => false,
+    }
+}
+
+/// A manifest link target resolved exactly the way `sync_spec_ledger`
+/// stores it (task-293): the push-time cycle check reuses this resolution so
+/// the graph it validates is attributed identically to the graph the sync
+/// persists — attribution parity is what makes cross-repo cycle detection
+/// sound.
+pub(crate) struct ResolvedManifestTarget {
+    /// Target spec path within the target repo (no `@`-prefix).
+    pub target_path: String,
+    /// Resolved target repo id. `None` for same-repo links (target lives in
+    /// the source repo) and for unresolved cross-repo targets.
+    pub target_repo_id: Option<String>,
+    /// Human-readable composite path preserved from the manifest `target`
+    /// field. `None` for same-repo links.
+    pub target_display: Option<String>,
+    /// Link health after validation: "active" or "unresolved".
+    pub status: String,
+    /// Cross-workspace read-access denial marker (see `record_link_denial`).
+    pub access_denied: bool,
+}
+
+/// Resolve a parsed manifest link target per spec-links.md §Cross-Repo and
+/// Cross-Workspace Links: same-repo targets need no resolution; same-workspace
+/// cross-repo targets (`@repo_name/spec_path`) resolve within the SOURCE
+/// workspace; three-segment targets disambiguate by workspace existence
+/// (the fully-qualified workspace form takes precedence, with a
+/// same-workspace cross-repo fallback). Targets failing validation resolve
+/// to `target_repo_id = None` / `status = "unresolved"`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn resolve_manifest_link_target(
+    parsed: &CrossWorkspaceTarget,
+    entry_path: &str,
+    link_target: &str,
+    source_workspace_id: Option<&str>,
     workspaces: Option<&Arc<dyn gyre_ports::WorkspaceRepository>>,
     repos: Option<&Arc<dyn gyre_ports::RepoRepository>>,
     tenant_id: Option<&gyre_common::Id>,
-    workspace_slug: &str,
-    repo_name: &str,
-) -> Option<String> {
-    let workspaces = workspaces?;
-    let repos = repos?;
-    let tenant_id = tenant_id?;
-
-    // 1. Resolve workspace slug → workspace ID (tenant-scoped).
-    let workspace = workspaces
-        .find_by_slug(tenant_id, workspace_slug)
-        .await
-        .ok()
-        .flatten()?;
-
-    // 2. Resolve repo name within that workspace.
-    repos
-        .find_by_name_and_workspace(&workspace.id, repo_name)
-        .await
-        .ok()
-        .flatten()
-        .map(|r| r.id.to_string())
+    memberships: Option<&Arc<dyn gyre_ports::WorkspaceMembershipRepository>>,
+    principal: Option<&LinkPrincipal>,
+) -> ResolvedManifestTarget {
+    match parsed {
+        CrossWorkspaceTarget::SameRepo { path } => ResolvedManifestTarget {
+            target_path: path.clone(),
+            target_repo_id: None,
+            target_display: None,
+            status: "active".to_string(),
+            access_denied: false,
+        },
+        CrossWorkspaceTarget::CrossRepo { repo_name, path } => {
+            // Same-workspace cross-repo (spec-links.md:
+            // "@{repo_name}/{spec_path} (no workspace prefix)") —
+            // resolved within the SOURCE workspace. No separate
+            // read-access check: the push itself required write
+            // access to that workspace, which subsumes read.
+            let display = format!("@{repo_name}/{path}");
+            let (repo_id, status) = validate_cross_repo_target(
+                repos,
+                source_workspace_id,
+                entry_path,
+                link_target,
+                repo_name,
+                path,
+            )
+            .await;
+            ResolvedManifestTarget {
+                target_path: path.clone(),
+                target_repo_id: repo_id,
+                target_display: Some(display),
+                status,
+                access_denied: false,
+            }
+        }
+        CrossWorkspaceTarget::CrossWorkspace {
+            workspace_slug,
+            repo_name,
+            path,
+        } => {
+            let display = format!("@{workspace_slug}/{repo_name}/{path}");
+            // Three-segment targets are syntactically
+            // ambiguous between the cross-workspace form
+            // (@{workspace_slug}/{repo_name}/{spec_path})
+            // and the same-workspace cross-repo form
+            // (@{repo_name}/{spec_path}) whenever the spec
+            // path itself contains a slash — spec-links.md
+            // declares both formats. The fully-qualified
+            // workspace form takes precedence; only when
+            // no workspace with that slug exists in the
+            // tenant is the target the same-workspace
+            // cross-repo form, resolved within the SOURCE
+            // workspace (whose write access the push
+            // already required, subsuming read).
+            let ws_exists = match (workspaces, tenant_id) {
+                (Some(workspaces), Some(tenant_id)) => !matches!(
+                    workspaces.find_by_slug(tenant_id, workspace_slug).await,
+                    Ok(None)
+                ),
+                // No workspace context to disambiguate with:
+                // keep the cross-workspace interpretation
+                // (which cannot resolve without context).
+                _ => true,
+            };
+            if ws_exists {
+                let (repo_id, status, denied) = validate_cross_workspace_target(
+                    workspaces,
+                    repos,
+                    tenant_id,
+                    memberships,
+                    principal,
+                    entry_path,
+                    link_target,
+                    workspace_slug,
+                    repo_name,
+                    path,
+                )
+                .await;
+                ResolvedManifestTarget {
+                    target_path: path.clone(),
+                    target_repo_id: repo_id,
+                    target_display: Some(display),
+                    status,
+                    access_denied: denied,
+                }
+            } else {
+                // Fallback: seg1 is the repo name, the rest
+                // is the slashed spec path.
+                let fallback_path = format!("{repo_name}/{path}");
+                let (repo_id, status) = validate_cross_repo_target(
+                    repos,
+                    source_workspace_id,
+                    entry_path,
+                    link_target,
+                    workspace_slug,
+                    &fallback_path,
+                )
+                .await;
+                ResolvedManifestTarget {
+                    target_path: fallback_path,
+                    target_repo_id: repo_id,
+                    target_display: Some(display),
+                    status,
+                    access_denied: false,
+                }
+            }
+        }
+    }
 }
 
-/// Resolve a cross-repo same-workspace link (`@repo_name/spec_path`) to a target repo ID.
+/// Validate and resolve a same-workspace cross-repo target
+/// (`@repo_name/spec_path`) at push time. Returns
+/// `(target_repo_id, status)`.
 ///
-/// Looks up a repo by name within the given workspace. Returns None if no workspace_id
-/// is provided (same-workspace resolution requires knowing the current workspace).
-async fn resolve_repo_by_name(
+/// Validation chain: the repo exists within the SOURCE workspace, and the
+/// target path is declared in the target repo's current manifest.
+async fn validate_cross_repo_target(
     repos: Option<&Arc<dyn gyre_ports::RepoRepository>>,
-    _workspaces: Option<&Arc<dyn gyre_ports::WorkspaceRepository>>,
-    _tenant_id: Option<&gyre_common::Id>,
-    workspace_id: Option<&gyre_common::Id>,
+    source_workspace_id: Option<&str>,
+    entry_path: &str,
+    link_target: &str,
     repo_name: &str,
-) -> Option<String> {
-    let repos = repos?;
-    let ws_id = workspace_id?;
-    repos
-        .find_by_name_and_workspace(ws_id, repo_name)
-        .await
-        .ok()
-        .flatten()
-        .map(|r| r.id.to_string())
+    path: &str,
+) -> (Option<String>, String) {
+    let ws_id = source_workspace_id.map(gyre_common::Id::new);
+    let repo = match (repos, ws_id.as_ref()) {
+        (Some(repos), Some(ws_id)) => repos
+            .find_by_name_and_workspace(ws_id, repo_name)
+            .await
+            .ok()
+            .flatten(),
+        _ => None,
+    };
+    let Some(repo) = repo else {
+        warn!(
+            source = entry_path,
+            target = link_target,
+            repo_name,
+            "spec-registry: cross-repo target unresolved (repo not found in source workspace)"
+        );
+        return (None, "unresolved".to_string());
+    };
+    if !target_manifest_declares_path(&repo, path).await {
+        warn!(
+            source = entry_path,
+            target = link_target,
+            spec_path = path,
+            repo_id = %repo.id,
+            "spec-registry: cross-repo target unresolved (path not declared in target repo manifest)"
+        );
+        return (None, "unresolved".to_string());
+    }
+    (Some(repo.id.to_string()), "active".to_string())
+}
+
+/// Validate and resolve a cross-workspace target
+/// (`@workspace_slug/repo_name/spec_path`) at push time. Returns
+/// `(target_repo_id, status, access_denied)`.
+///
+/// Validation chain per spec-links.md §Cross-Repo and Cross-Workspace
+/// Links: target workspace exists (tenant-scoped) → the linking principal
+/// has read access → target repo exists within that workspace → target
+/// path is declared in the target repo's current manifest.
+#[allow(clippy::too_many_arguments)]
+async fn validate_cross_workspace_target(
+    workspaces: Option<&Arc<dyn gyre_ports::WorkspaceRepository>>,
+    repos: Option<&Arc<dyn gyre_ports::RepoRepository>>,
+    tenant_id: Option<&gyre_common::Id>,
+    memberships: Option<&Arc<dyn gyre_ports::WorkspaceMembershipRepository>>,
+    principal: Option<&LinkPrincipal>,
+    entry_path: &str,
+    link_target: &str,
+    workspace_slug: &str,
+    repo_name: &str,
+    path: &str,
+) -> (Option<String>, String, bool) {
+    // 1. Target workspace exists (tenant-scoped — never a fabricated tenant).
+    let target_ws = match (workspaces, tenant_id) {
+        (Some(workspaces), Some(tenant_id)) => workspaces
+            .find_by_slug(tenant_id, workspace_slug)
+            .await
+            .ok()
+            .flatten(),
+        _ => None,
+    };
+    let Some(target_ws) = target_ws else {
+        warn!(
+            source = entry_path,
+            target = link_target,
+            workspace_slug,
+            "spec-registry: cross-workspace target unresolved (workspace not found in tenant)"
+        );
+        return (None, "unresolved".to_string(), false);
+    };
+
+    // 2. The linking principal has read access to the target workspace.
+    if !principal_has_read_access(memberships, principal, &target_ws.id).await {
+        warn!(
+            source = entry_path,
+            target = link_target,
+            principal = principal.map(|p| p.agent_id.as_str()).unwrap_or("<none>"),
+            workspace_id = %target_ws.id,
+            "spec-registry: cross-workspace link DENIED — linking principal lacks read access to target workspace; storing unresolved"
+        );
+        return (None, "unresolved".to_string(), true);
+    }
+
+    // 3. Target repo exists within that workspace.
+    let repo = match repos {
+        Some(repos) => repos
+            .find_by_name_and_workspace(&target_ws.id, repo_name)
+            .await
+            .ok()
+            .flatten(),
+        None => None,
+    };
+    let Some(repo) = repo else {
+        warn!(
+            source = entry_path,
+            target = link_target,
+            workspace_slug,
+            repo_name,
+            "spec-registry: cross-workspace target unresolved (repo not found in workspace)"
+        );
+        return (None, "unresolved".to_string(), false);
+    };
+
+    // 4. Target spec path exists in the target repo's manifest.
+    if !target_manifest_declares_path(&repo, path).await {
+        warn!(
+            source = entry_path,
+            target = link_target,
+            spec_path = path,
+            repo_id = %repo.id,
+            "spec-registry: cross-workspace target unresolved (path not declared in target repo manifest)"
+        );
+        return (None, "unresolved".to_string(), false);
+    }
+
+    (Some(repo.id.to_string()), "active".to_string(), false)
 }
 
 /// Read a file from a specific git commit using `git show <sha>:<path>`.
@@ -1143,15 +1633,99 @@ pub async fn check_manifest_coverage(
 // Cycle detection for spec link graph (TASK-019)
 // spec-links.md §Cycle Detection: "The forge rejects manifest changes that
 // would create cycles in the spec graph."
-// Only `depends_on` and `implements` links are checked.
+// Only `depends_on`, `implements`, and `extends` links are checked.
 // `conflicts_with` is bidirectional by nature (not a cycle).
 // `references` and `supersedes` are excluded from cycle detection.
+//
+// task-293: detection runs over the TENANT-WIDE forge graph — every stored
+// link in the durable spec_links table plus the pushed manifest's edges —
+// not just the single manifest being pushed. A cycle whose edges are
+// declared in two different manifests or repos (the enterprise case the
+// spec's Problem section exists for) is therefore rejected at receive time.
+//
+// task-293 review repair (round 2), two scope corrections:
+// - FAIL CLOSED on storage errors: if the durable spec_links table cannot
+//   be read, the push is rejected — never silently degraded to the
+//   pushed manifest's own edges (the pre-task-293 scope).
+// - REJECT ONLY CYCLES THE PUSH CREATES: a cycle is reported only when at
+//   least one edge contributed by the pushed manifest participates in it.
+//   Stored-only cycles (legacy pre-gate rows, ungated mirror-synced edges)
+//   are not created by this push and must not block unrelated repos that
+//   have no remedy of their own.
 // ---------------------------------------------------------------------------
 
-/// Check the manifest's spec links for cycles in `depends_on` and `implements`
-/// link types. Returns `Ok(())` if no cycles, `Err(message)` with the cycle
-/// path if a cycle is detected.
-pub async fn check_spec_link_cycles(repo_path: &str, sha: &str) -> Result<(), String> {
+/// Node identity in the tenant-wide spec graph: (repo id, spec path).
+/// The empty repo id is the legacy unscoped bucket (links recorded before
+/// repo scoping existed).
+type SpecGraphKey = (String, String);
+
+fn spec_graph_key(repo: &str, path: &str) -> SpecGraphKey {
+    (repo.to_string(), path.to_string())
+}
+
+/// Render a graph node for the rejection message: `repo_id:path`, or just
+/// the path for the legacy unscoped bucket.
+fn display_spec_graph_key(key: &SpecGraphKey) -> String {
+    if key.0.is_empty() {
+        key.1.clone()
+    } else {
+        format!("{}:{}", key.0, key.1)
+    }
+}
+
+/// Whether a link type participates in cycle detection per spec-links.md
+/// §Cycle Detection: `conflicts_with` is bidirectional by nature (not a
+/// cycle), `references` and `supersedes` are excluded; every other directed
+/// type (`depends_on`, `implements`, `extends`) participates.
+fn participates_in_cycle_detection(link_type: &SpecLinkType) -> bool {
+    !matches!(
+        link_type,
+        SpecLinkType::ConflictsWith | SpecLinkType::References | SpecLinkType::Supersedes
+    )
+}
+
+/// Context for tenant-wide cycle detection (task-293): the durable
+/// spec-links table plus the resolution context needed to attribute the
+/// pushed manifest's cross-repo edges to their repos. `None` for the
+/// context degrades `check_spec_link_cycles` to the pushed manifest's own
+/// edges only (the pre-task-293 scope).
+pub struct TenantCycleContext<'a> {
+    /// Durable spec-link graph (spec-links.md §Forge-Maintained Spec Graph).
+    /// `None` skips the stored-links half of the combined graph.
+    pub link_repo: Option<&'a Arc<dyn gyre_ports::SpecLinkRepository>>,
+    /// Repo the manifest is being pushed to: the pushed manifest's entries
+    /// (and its same-repo targets) are attributed to it.
+    pub source_repo_id: Option<&'a str>,
+    /// Workspace of the push — same-workspace cross-repo targets resolve
+    /// within it.
+    pub source_workspace_id: Option<&'a str>,
+    /// Cross-workspace / cross-repo resolution context (mirrors what
+    /// `sync_spec_ledger` receives so attribution matches the stored graph).
+    pub workspaces: Option<&'a Arc<dyn gyre_ports::WorkspaceRepository>>,
+    pub repos: Option<&'a Arc<dyn gyre_ports::RepoRepository>>,
+    pub tenant_id: Option<&'a gyre_common::Id>,
+    pub memberships: Option<&'a Arc<dyn gyre_ports::WorkspaceMembershipRepository>>,
+    /// The authenticated pusher — cross-workspace targets the pusher cannot
+    /// read resolve unresolved and therefore never become graph edges,
+    /// exactly as `sync_spec_ledger` stores them.
+    pub principal: Option<&'a LinkPrincipal>,
+    /// KV store holding durable link access-denial markers. An unresolved
+    /// cross-repo row denied at push time never activates (the staleness
+    /// pass skips it), so it must not contribute an edge to the combined
+    /// graph. `None` skips the denial check.
+    pub kv: Option<&'a Arc<dyn gyre_ports::KvJsonStore>>,
+}
+
+/// Check the pushed manifest's spec links for cycles over the TENANT-WIDE
+/// forge graph: all stored links in the durable spec_links table plus the
+/// pushed manifest's edges, with node identity (repo, path). Returns
+/// `Ok(())` if no cycles, `Err(message)` naming the cycle if one is
+/// detected. `tenant = None` checks the manifest's own edges only.
+pub async fn check_spec_link_cycles(
+    repo_path: &str,
+    sha: &str,
+    tenant: Option<&TenantCycleContext<'_>>,
+) -> Result<(), String> {
     let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
 
     let manifest_yaml = match read_git_file(&git_bin, repo_path, sha, "specs/manifest.yaml").await {
@@ -1164,94 +1738,425 @@ pub async fn check_spec_link_cycles(repo_path: &str, sha: &str) -> Result<(), St
         Err(_) => return Ok(()), // Parse error handled by sync_spec_ledger.
     };
 
-    detect_link_cycles(&manifest)
+    match tenant {
+        None => detect_link_cycles(&manifest),
+        Some(ctx) => {
+            let graph = build_tenant_cycle_graph(&manifest, ctx).await?;
+            detect_graph_cycles(&graph)
+        }
+    }
 }
 
-/// Detect cycles in the spec link graph from a parsed manifest.
-/// Checks `depends_on`, `implements`, and `extends` links.
-/// Excludes `conflicts_with` (bidirectional), `references`, and `supersedes`
-/// per spec-links.md §Cycle Detection.
-pub fn detect_link_cycles(manifest: &SpecManifest) -> Result<(), String> {
-    use std::collections::{HashMap, HashSet, VecDeque};
+/// The combined tenant-wide spec-link graph used for cycle detection:
+/// adjacency over (repo, path) nodes plus the list of edges contributed
+/// by the manifest being pushed. Only cycles containing at least one
+/// pushed edge are cycles THIS push creates (spec-links.md §Cycle
+/// Detection: the forge "rejects manifest changes that WOULD CREATE
+/// cycles") — a stored-only cycle (legacy pre-gate rows, ungated
+/// mirror-synced edges) exists regardless of the push.
+struct SpecCycleGraph {
+    adj: std::collections::HashMap<SpecGraphKey, Vec<SpecGraphKey>>,
+    /// Edges contributed by the pushed manifest: (from, to) pairs. A cycle
+    /// is reported only when one of these edges participates in it.
+    pushed: Vec<(SpecGraphKey, SpecGraphKey)>,
+}
 
-    // Build adjacency list: source → [targets] for cycle-relevant link types.
-    let mut adj: HashMap<String, Vec<String>> = HashMap::new();
+impl SpecCycleGraph {
+    fn add_edge(&mut self, from: SpecGraphKey, to: SpecGraphKey, pushed: bool) {
+        if pushed {
+            self.pushed.push((from.clone(), to.clone()));
+        }
+        self.adj.entry(from).or_default().push(to);
+    }
+}
+
+/// Build the combined tenant-wide cycle graph (task-293):
+///
+/// 1. All stored links in the durable spec_links table — every repo's
+///    previously synced edges — EXCEPT the pushed repo's links for source
+///    paths declared in the pushed manifest: the push replaces exactly
+///    those rows (`sync_spec_ledger`'s `replace_for_source` scoping), so
+///    counting the pre-push versions alongside the manifest's new edges
+///    would reject pushes that REMOVE a cycle, not create one.
+/// 2. The pushed manifest's edges: entries attributed to the source repo,
+///    cross-repo/cross-workspace targets resolved to their repos via the
+///    same resolution the sync uses, same-repo targets attributed to the
+///    source repo. Unresolved cross-repo targets have no attributable
+///    target node — the sync stores them unresolved, so they are not edges
+///    in the stored graph either.
+///
+/// Unresolved cross-repo STORED rows (target_repo_id NULL, target_display
+/// `@…`) are attributed exactly when the staleness pass
+/// (`resolve_unresolved_cross_workspace_links`) will activate them — the
+/// same source-scope derivation and the same target-manifest requirement,
+/// with the pushed manifest standing in for the target repo's current
+/// manifest when the target repo is the one being pushed (review repair,
+/// round 3: a pending row the daily job will deterministically flip into
+/// an active attributed edge already belongs in the graph this push is
+/// checked against, otherwise a cycle whose edges arrive as an unresolved
+/// row plus a later declaring push lands permanently with no push ever
+/// rejected). Rows that cannot activate (denied at push time, scope
+/// underivable, target repo missing, target path still undeclared) stay
+/// unattributed — the graph must not fabricate edges that will never
+/// exist.
+///
+/// FAILS CLOSED (review repair, round 2): a `list_all` storage error is
+/// propagated as `Err` — the push is rejected when the durable graph
+/// cannot be read, mirroring the task-264 signing-gate contract
+/// ("enumeration failure REJECTS the push ... never a silent pass").
+/// Silently skipping the stored half would re-open the pre-task-293
+/// detection scope exactly when the graph is unreadable.
+async fn build_tenant_cycle_graph(
+    manifest: &SpecManifest,
+    ctx: &TenantCycleContext<'_>,
+) -> Result<SpecCycleGraph, String> {
+    let mut graph = SpecCycleGraph {
+        adj: std::collections::HashMap::new(),
+        pushed: Vec::new(),
+    };
+    let repo_scope = ctx.source_repo_id.unwrap_or("");
+    let manifest_paths: std::collections::HashSet<&str> =
+        manifest.specs.iter().map(|e| e.path.as_str()).collect();
+
+    // 1. Stored links, minus the rows this push replaces.
+    if let Some(link_repo) = ctx.link_repo {
+        let stored = link_repo.list_all().await.map_err(|e| {
+            warn!(
+                error = %e,
+                "spec-registry: cannot read stored spec links for cycle check — failing closed"
+            );
+            format!("spec link cycle check failed: unable to read the stored spec link graph: {e}")
+        })?;
+        for link in stored {
+            if !participates_in_cycle_detection(&link.link_type) {
+                continue;
+            }
+            let link_repo_key = link.source_repo_id.as_deref().unwrap_or("");
+            if link_repo_key == repo_scope && manifest_paths.contains(link.source_path.as_str()) {
+                continue; // replaced by the pushed manifest's edges below
+            }
+            let target_repo = match link.target_repo_id.as_deref() {
+                Some(r) => r.to_string(),
+                // Same-repo link: the target lives in the source repo.
+                None if link.target_display.is_none() => link_repo_key.to_string(),
+                // Unresolved cross-repo row (review repair, round 3):
+                // attributed exactly when the staleness pass will activate
+                // it — see `attribute_unresolved_stored_link`.
+                None => {
+                    let Some(attributed) =
+                        attribute_unresolved_stored_link(&link, manifest, repo_scope, ctx).await
+                    else {
+                        continue; // cannot activate — not an edge in the graph
+                    };
+                    attributed
+                }
+            };
+            graph.add_edge(
+                spec_graph_key(link_repo_key, &link.source_path),
+                spec_graph_key(&target_repo, &link.target_path),
+                false,
+            );
+        }
+    }
+
+    // 2. The pushed manifest's edges.
     for entry in &manifest.specs {
         for link in &entry.links {
-            match link.link_type {
-                // spec-links.md §Cycle Detection: excluded types
-                SpecLinkType::ConflictsWith
-                | SpecLinkType::References
-                | SpecLinkType::Supersedes => {}
-                // All other directed link types participate in cycle detection
-                _ => {
-                    // For cross-workspace targets, use only the path portion.
-                    let target_path = match parse_cross_workspace_target(&link.target) {
-                        CrossWorkspaceTarget::SameRepo { path } => path,
-                        CrossWorkspaceTarget::CrossRepo { path, .. } => path,
-                        CrossWorkspaceTarget::CrossWorkspace { path, .. } => path,
-                    };
-                    adj.entry(entry.path.clone()).or_default().push(target_path);
+            if !participates_in_cycle_detection(&link.link_type) {
+                continue;
+            }
+            let parsed = parse_cross_workspace_target(&link.target);
+            let resolved = resolve_manifest_link_target(
+                &parsed,
+                &entry.path,
+                &link.target,
+                ctx.source_workspace_id,
+                ctx.workspaces,
+                ctx.repos,
+                ctx.tenant_id,
+                ctx.memberships,
+                ctx.principal,
+            )
+            .await;
+            // Same-repo targets attribute to the source repo; cross-repo
+            // targets to their resolved repo. Unresolved cross-repo targets
+            // are not edges in the graph the sync will store.
+            let target_repo = match resolved.target_repo_id.as_deref() {
+                Some(r) => r.to_string(),
+                None if resolved.target_display.is_none() => repo_scope.to_string(),
+                None => continue,
+            };
+            graph.add_edge(
+                spec_graph_key(repo_scope, &entry.path),
+                spec_graph_key(&target_repo, &resolved.target_path),
+                true,
+            );
+        }
+    }
+
+    Ok(graph)
+}
+
+/// Attribute an unresolved cross-repo stored row to its target repo for
+/// the combined cycle graph (review repair, round 3): the row is counted
+/// as an edge exactly when the staleness pass
+/// (`resolve_unresolved_cross_workspace_links`) will activate it — the
+/// same source-scope derivation (source repo → workspace → tenant, never
+/// a fabricated scope identity), the same target-display disambiguation,
+/// and the same target-manifest requirement. When the target repo is the
+/// repo being pushed, its "current manifest" is the pushed manifest
+/// itself, so the activation (and therefore the edge) is deterministic
+/// given this push's own content.
+///
+/// Returns the resolved target repo id, or `None` when the row cannot
+/// activate — denied at push time, scope underivable, target repo
+/// missing, or target path not declared in the target repo's current
+/// manifest — in which case it must not contribute an edge.
+async fn attribute_unresolved_stored_link(
+    link: &SpecLinkEntry,
+    manifest: &SpecManifest,
+    repo_scope: &str,
+    ctx: &TenantCycleContext<'_>,
+) -> Option<String> {
+    // Only rows the staleness pass considers for activation: unresolved
+    // status with a composite cross-repo display target.
+    if link.status != "unresolved" {
+        return None;
+    }
+    let display = link.target_display.as_deref()?;
+    if !display.starts_with('@') {
+        return None;
+    }
+    // Access-denied at push time: the denial stands until the source
+    // manifest is pushed again by a principal with read access — the row
+    // never activates, so it is not an edge in the graph.
+    if let Some(kv) = ctx.kv {
+        if link_denial(kv, &link.id).await.is_some() {
+            return None;
+        }
+    }
+    let repos = ctx.repos?;
+    let workspaces = ctx.workspaces?;
+    // Source scope: source repo → workspace (→ tenant). Skip when
+    // underivable — never fabricate a scope identity (the same rule the
+    // staleness pass follows).
+    let source_repo_id = link.source_repo_id.as_deref()?;
+    let source_repo = repos
+        .find_by_id(&gyre_common::Id::new(source_repo_id))
+        .await
+        .ok()??;
+    let source_ws = workspaces
+        .find_by_id(&source_repo.workspace_id)
+        .await
+        .ok()??;
+
+    let parsed = parse_cross_workspace_target(display);
+    let target_repo = match &parsed {
+        CrossWorkspaceTarget::CrossWorkspace {
+            workspace_slug,
+            repo_name,
+            ..
+        } => {
+            // Tenant-scoped workspace lookup under the SOURCE link's
+            // tenant — the same disambiguation the staleness pass uses.
+            match workspaces
+                .find_by_slug(&source_ws.tenant_id, workspace_slug)
+                .await
+            {
+                Ok(Some(target_ws)) => repos
+                    .find_by_name_and_workspace(&target_ws.id, repo_name)
+                    .await
+                    .ok()
+                    .flatten(),
+                // No workspace with that slug in the source tenant: the
+                // ambiguous three-segment form — the first segment is a
+                // repo name in the source link's workspace.
+                Ok(None) => repos
+                    .find_by_name_and_workspace(&source_ws.id, workspace_slug)
+                    .await
+                    .ok()
+                    .flatten(),
+                // Lookup failed — cannot disambiguate; leave unattributed.
+                Err(_) => None,
+            }
+        }
+        CrossWorkspaceTarget::CrossRepo { repo_name, .. } => {
+            // Same-workspace cross-repo: the source link's repo →
+            // workspace gives the scope the repo name resolves within.
+            repos
+                .find_by_name_and_workspace(&source_ws.id, repo_name)
+                .await
+                .ok()
+                .flatten()
+        }
+        CrossWorkspaceTarget::SameRepo { .. } => return None,
+    }?;
+
+    let target_repo_id = target_repo.id.to_string();
+    if target_repo_id == repo_scope {
+        // The pushed manifest IS the target repo's new manifest: the row
+        // activates after this push lands iff the pushed manifest
+        // declares the target path (the same normalization
+        // `target_manifest_declares_path` applies).
+        let declared = manifest.specs.iter().any(|e| {
+            normalize_spec_rel_path(&e.path) == normalize_spec_rel_path(&link.target_path)
+        });
+        if !declared {
+            return None;
+        }
+    } else if !target_manifest_declares_path(&target_repo, &link.target_path).await {
+        // Same manifest-declaration requirement as the staleness pass: a
+        // target path absent from the target repo's current manifest
+        // leaves the row unresolved.
+        return None;
+    }
+    Some(target_repo_id)
+}
+
+/// Would activating the pending link `link` — attributing its target to
+/// `target_repo_id` — create a cycle in the given spec-link graph rows?
+/// Returns `Some(cycle)` with the repo-attributed cycle nodes joined by
+/// ` → ` when it would, `None` when the activation is safe. Used by the
+/// staleness pass's activation gate (task-293 round 3): the durable graph
+/// the push-time cycle gate protects must not acquire a cycle through
+/// unresolved-link activation either.
+pub(crate) fn link_activation_creates_cycle(
+    graph_rows: &[SpecLinkEntry],
+    link: &SpecLinkEntry,
+    target_repo_id: &str,
+) -> Option<String> {
+    let mut adj: std::collections::HashMap<SpecGraphKey, Vec<SpecGraphKey>> =
+        std::collections::HashMap::new();
+    for row in graph_rows {
+        if row.id == link.id {
+            continue; // the candidate itself is not an edge yet
+        }
+        if !participates_in_cycle_detection(&row.link_type) {
+            continue;
+        }
+        let source_repo = row.source_repo_id.as_deref().unwrap_or("");
+        let row_target_repo = match row.target_repo_id.as_deref() {
+            Some(r) => r,
+            // Same-repo link: the target lives in the source repo.
+            None if row.target_display.is_none() => source_repo,
+            // Unresolved cross-repo row: no attributed edge yet.
+            None => continue,
+        };
+        adj.entry(spec_graph_key(source_repo, &row.source_path))
+            .or_default()
+            .push(spec_graph_key(row_target_repo, &row.target_path));
+    }
+    // The activated edge is u → v (u = source node, v = target node); it
+    // closes a cycle exactly when u is reachable from v through the graph.
+    let source_repo = link.source_repo_id.as_deref().unwrap_or("");
+    let u = spec_graph_key(source_repo, &link.source_path);
+    let v = spec_graph_key(target_repo_id, &link.target_path);
+    let chain = bfs_path(&adj, &v, &u)?;
+    let mut named: Vec<String> = vec![display_spec_graph_key(&u)];
+    named.extend(chain.iter().map(|k| display_spec_graph_key(k)));
+    Some(named.join(" → "))
+}
+
+/// BFS shortest path from `start` to `goal` through `adj`; returns the
+/// node chain start → … → goal (inclusive, in walk order) when reachable.
+/// Shared by the push-time cycle check and the staleness activation gate.
+fn bfs_path<'a>(
+    adj: &'a std::collections::HashMap<SpecGraphKey, Vec<SpecGraphKey>>,
+    start: &'a SpecGraphKey,
+    goal: &'a SpecGraphKey,
+) -> Option<Vec<&'a SpecGraphKey>> {
+    use std::collections::{HashMap, HashSet, VecDeque};
+    let mut visited: HashSet<&SpecGraphKey> = HashSet::new();
+    let mut parent: HashMap<&SpecGraphKey, &SpecGraphKey> = HashMap::new();
+    let mut queue: VecDeque<&SpecGraphKey> = VecDeque::new();
+    queue.push_back(start);
+    visited.insert(start);
+    while let Some(node) = queue.pop_front() {
+        if node == goal {
+            // Reconstruct the chain: walk the parent links from the goal
+            // back to the BFS root, then reverse.
+            let mut chain: Vec<&SpecGraphKey> = Vec::new();
+            let mut cur = node;
+            loop {
+                chain.push(cur);
+                match parent.get(cur) {
+                    Some(&p) => cur = p,
+                    None => break,
+                }
+            }
+            chain.reverse();
+            return Some(chain);
+        }
+        if let Some(targets) = adj.get(node) {
+            for next in targets {
+                if visited.insert(next) {
+                    parent.insert(next, node);
+                    queue.push_back(next);
                 }
             }
         }
     }
+    None
+}
 
-    // DFS-based cycle detection from each node.
-    let all_nodes: HashSet<&str> = adj
-        .keys()
-        .map(|s| s.as_str())
-        .chain(adj.values().flat_map(|vs| vs.iter().map(|v| v.as_str())))
-        .collect();
-
-    for start_node in &all_nodes {
-        // BFS from each neighbor of start_node to see if we can reach start_node.
-        if let Some(targets) = adj.get(*start_node) {
-            for target in targets {
-                if target == *start_node {
-                    return Err(format!(
-                        "spec link cycle detected: {} → {}",
-                        start_node, start_node
-                    ));
-                }
-                let mut visited: HashSet<String> = HashSet::new();
-                let mut queue: VecDeque<String> = VecDeque::new();
-                let mut parent: HashMap<String, String> = HashMap::new();
-                queue.push_back(target.clone());
-                parent.insert(target.clone(), start_node.to_string());
-                while let Some(node) = queue.pop_front() {
-                    if node == *start_node {
-                        // Reconstruct cycle path.
-                        let mut path = vec![start_node.to_string()];
-                        let mut cur = node.clone();
-                        while cur != *start_node || path.len() == 1 {
-                            path.push(cur.clone());
-                            cur = match parent.get(&cur) {
-                                Some(p) => p.clone(),
-                                None => break,
-                            };
-                        }
-                        path.reverse();
-                        return Err(format!("spec link cycle detected: {}", path.join(" → ")));
-                    }
-                    if visited.contains(&node) {
-                        continue;
-                    }
-                    visited.insert(node.clone());
-                    if let Some(node_targets) = adj.get(&node) {
-                        for next in node_targets {
-                            if !visited.contains(next) {
-                                parent.entry(next.clone()).or_insert(node.clone());
-                                queue.push_back(next.clone());
-                            }
-                        }
-                    }
-                }
-            }
+/// Detect cycles the PUSHED MANIFEST would create in the (repo, path)-keyed
+/// spec link graph (review repair, round 2: only cycles in which at least
+/// one edge contributed by the pushed manifest participates are reported —
+/// a stored-only cycle is not created by this push). A cycle contains the
+/// pushed edge (u → v) exactly when u is reachable from v through the
+/// combined graph, so each pushed edge is checked with a BFS from its
+/// target back to its source. Checks `depends_on`, `implements`, and
+/// `extends` links; excludes `conflicts_with` (bidirectional), `references`,
+/// and `supersedes` per spec-links.md §Cycle Detection (callers filter
+/// edges by [`participates_in_cycle_detection`]). The error message names
+/// the cycle with repo-attributed nodes joined by ` → `.
+fn detect_graph_cycles(graph: &SpecCycleGraph) -> Result<(), String> {
+    for (u, v) in &graph.pushed {
+        // BFS from v back to u: if u is reachable, the pushed edge u → v
+        // closes a cycle u → v → … → u.
+        if let Some(chain) = bfs_path(&graph.adj, v, u) {
+            let mut named: Vec<String> = vec![display_spec_graph_key(u)];
+            named.extend(chain.iter().map(|k| display_spec_graph_key(k)));
+            return Err(format!("spec link cycle detected: {}", named.join(" → ")));
         }
     }
 
     Ok(())
+}
+
+/// Detect cycles in the spec link graph from a parsed manifest (its own
+/// edges only, all nodes attributed to one scope — the pre-task-293
+/// single-manifest check, kept for manifests pushed without tenant
+/// context). Every edge comes from the manifest, so every edge is a
+/// "pushed" edge: any cycle in the manifest's own edges is a cycle this
+/// push creates. Checks `depends_on`, `implements`, and `extends` links.
+/// Excludes `conflicts_with` (bidirectional), `references`, and `supersedes`
+/// per spec-links.md §Cycle Detection.
+pub fn detect_link_cycles(manifest: &SpecManifest) -> Result<(), String> {
+    let mut graph = SpecCycleGraph {
+        adj: std::collections::HashMap::new(),
+        pushed: Vec::new(),
+    };
+    for entry in &manifest.specs {
+        for link in &entry.links {
+            if !participates_in_cycle_detection(&link.link_type) {
+                continue;
+            }
+            // Without tenant context, cross-repo targets contribute only
+            // their path portion (single-bucket attribution).
+            let target_path = match parse_cross_workspace_target(&link.target) {
+                CrossWorkspaceTarget::SameRepo { path } => path,
+                CrossWorkspaceTarget::CrossRepo { path, .. } => path,
+                CrossWorkspaceTarget::CrossWorkspace { path, .. } => path,
+            };
+            graph.add_edge(
+                spec_graph_key("", &entry.path),
+                spec_graph_key("", &target_path),
+                true,
+            );
+        }
+    }
+    detect_graph_cycles(&graph)
 }
 
 // ---------------------------------------------------------------------------
@@ -1261,6 +2166,13 @@ pub fn detect_link_cycles(manifest: &SpecManifest) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+
+    /// Test-only in-memory ledger fixture. Production state never uses this:
+    /// the ledger is port-backed (`gyre_ports::SpecLedgerRepository`, wired
+    /// via `store!` in `build_state`), so the alias lives inside the test
+    /// module rather than production code.
+    type SpecLedger = Arc<Mutex<HashMap<String, SpecLedgerEntry>>>;
 
     const SAMPLE_MANIFEST: &str = r#"
 version: 1
@@ -1459,15 +2371,23 @@ concepts:
         let ledger: Arc<dyn gyre_ports::SpecLedgerRepository> =
             Arc::new(crate::mem::MemSpecLedgerRepository::default());
         let links_store: SpecLinksStore = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        // Durable link repo (Mem is enough here: this test asserts ledger
+        // population, not link durability, but the sync path requires one).
+        let link_repo: Arc<dyn gyre_ports::SpecLinkRepository> =
+            Arc::new(crate::mem::MemSpecLinkRepository::default());
 
         sync_spec_ledger(
             &ledger,
             &links_store,
+            &link_repo,
             dir.path().to_str().unwrap(),
             &sha,
             1_700_000_000,
             Some("repo-1"),
             Some("ws-1"),
+            None,
+            None,
+            None,
             None,
             None,
             None,
@@ -1525,6 +2445,66 @@ concepts:
     fn test_parse_invalid_yaml() {
         let result = parse_manifest("not: valid: yaml: ][");
         assert!(result.is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // §15 manifest helpers — path resolution and priority overrides
+    // -----------------------------------------------------------------------
+
+    const PRIORITY_MANIFEST: &str = r#"
+version: 1
+defaults:
+  priority: Low
+specs:
+  - path: system/spec-a.md
+    title: Spec A
+    owner: user:jsell
+    priority: Critical
+  - path: system/spec-b.md
+    title: Spec B
+    owner: user:jsell
+  - path: development/spec-c.md
+    title: Spec C
+    owner: user:jsell
+"#;
+
+    #[test]
+    fn manifest_entry_for_path_resolves_with_and_without_prefix() {
+        let m = parse_manifest(PRIORITY_MANIFEST).unwrap();
+        // Diff paths carry the specs/ prefix; manifest entries do not.
+        let a = manifest_entry_for_path(&m, "specs/system/spec-a.md").unwrap();
+        assert_eq!(a.path, "system/spec-a.md");
+        // The same identity without the prefix also resolves.
+        let b = manifest_entry_for_path(&m, "system/spec-b.md").unwrap();
+        assert_eq!(b.title, "Spec B");
+        // Unregistered files do not resolve.
+        assert!(manifest_entry_for_path(&m, "specs/system/unregistered.md").is_none());
+        assert!(manifest_entry_for_path(&m, "src/main.rs").is_none());
+    }
+
+    #[test]
+    fn effective_priority_entry_override_beats_defaults() {
+        let m = parse_manifest(PRIORITY_MANIFEST).unwrap();
+        let a = manifest_entry_for_path(&m, "specs/system/spec-a.md").unwrap();
+        assert_eq!(
+            a.effective_priority(&m.defaults),
+            Some(TaskPriority::Critical)
+        );
+    }
+
+    #[test]
+    fn effective_priority_falls_back_to_defaults_then_none() {
+        let m = parse_manifest(PRIORITY_MANIFEST).unwrap();
+        // No per-entry override: manifest defaults priority applies.
+        let b = manifest_entry_for_path(&m, "specs/system/spec-b.md").unwrap();
+        assert_eq!(b.effective_priority(&m.defaults), Some(TaskPriority::Low));
+        // No override anywhere (defaults has none): caller keeps its default.
+        let bare = parse_manifest(
+            "version: 1\nspecs:\n  - path: system/x.md\n    title: X\n    owner: user:t\n",
+        )
+        .unwrap();
+        let x = &bare.specs[0];
+        assert_eq!(x.effective_priority(&bare.defaults), None);
     }
 
     // -----------------------------------------------------------------------
@@ -2031,6 +3011,7 @@ specs:
             id: "test".to_string(),
             source_path: "system/a.md".to_string(),
             source_repo_id: Some("repo-1".to_string()),
+            source_sha: "src-sha".to_string(),
             link_type: SpecLinkType::DependsOn,
             target_path: "system/contract.md".to_string(),
             target_repo_id: None,
@@ -2085,6 +3066,7 @@ specs:
             id: id.to_string(),
             source_path: source.to_string(),
             source_repo_id: Some(source_repo_id.to_string()),
+            source_sha: "src-sha".to_string(),
             link_type,
             target_path: target.to_string(),
             target_repo_id: None,
@@ -2616,6 +3598,7 @@ specs:
             link_type: SpecLinkType::References,
             target_sha: Some("old_sha".to_string()),
             source_repo_id: Some("repo_notes".to_string()),
+            source_sha: "src-sha".to_string(),
             target_repo_id: None,
             target_display: None,
             reason: None,
@@ -2702,6 +3685,34 @@ specs:
         let sha = run(&["rev-parse", "HEAD"]);
 
         (dir, sha)
+    }
+
+    /// Helper: overwrite files in an existing test repo, commit, and return
+    /// the new HEAD SHA (models a second push).
+    fn add_commit(dir: &tempfile::TempDir, files: &[(&str, &str)]) -> String {
+        let path = dir.path();
+        let run = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(path)
+                .output()
+                .expect("git command failed");
+            assert!(
+                out.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        for (file_path, content) in files {
+            let full = path.join(file_path);
+            std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+            std::fs::write(&full, content).unwrap();
+            run(&["add", file_path]);
+        }
+        run(&["commit", "-m", "update"]);
+        run(&["rev-parse", "HEAD"])
     }
 
     #[tokio::test]
@@ -2857,6 +3868,1015 @@ specs:
         assert!(
             result.is_ok(),
             "should accept when all specs are registered"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Task-198: persistent forge-maintained spec-link graph
+    // (spec-links.md §Forge-Maintained Spec Graph)
+    // -----------------------------------------------------------------------
+
+    /// The in-memory graph must be loadable from the durable repository at
+    /// boot: seed via a real `sync_spec_ledger` push, then simulate a restart
+    /// by building a fresh store from the same repository and asserting the
+    /// graph is non-empty and identical — before any re-push.
+    ///
+    /// This is the section-closing restart-durability evidence: it fails
+    /// against the pre-task empty-init behavior (fresh store starts empty and
+    /// the graph is lost until every repo pushes again).
+    #[tokio::test]
+    async fn restart_rebuilds_spec_link_graph_from_persisted_table() {
+        use crate::mem::{MemRepoRepository, MemSpecLedgerRepository, MemWorkspaceRepository};
+
+        // Manifest with two specs and a cross-spec depends_on link pinned to a
+        // SHA that does not match the target's ledger SHA — the staleness
+        // checker must see it after a restart too.
+        let manifest = r#"version: 1
+specs:
+  - path: system/parent.md
+    title: Parent
+    owner: user:test
+  - path: system/child.md
+    title: Child
+    owner: user:test
+    links:
+      - type: depends_on
+        target: system/parent.md
+        target_sha: old_pinned_sha
+        reason: needs parent guarantees"#;
+        let (dir, sha) = make_test_repo(&[
+            ("specs/manifest.yaml", manifest),
+            ("specs/system/parent.md", "# P"),
+            ("specs/system/child.md", "# C"),
+        ])
+        .await;
+
+        // "Push" phase: run sync against the real durable repo (a real
+        // SQLite database, exactly as the server wires it in build_state).
+        let db = tempfile::NamedTempFile::new().unwrap();
+        let db_path = db.path().to_str().unwrap().to_string();
+        let link_repo: Arc<dyn gyre_ports::SpecLinkRepository> = {
+            let storage = gyre_adapters::SqliteStorage::new(&db_path).unwrap();
+            Arc::new(storage)
+        };
+        let ledger: Arc<dyn gyre_ports::SpecLedgerRepository> =
+            Arc::new(MemSpecLedgerRepository::default());
+        let links_store: SpecLinksStore = Arc::new(Mutex::new(Vec::new()));
+
+        // Target spec already in the ledger at a DIFFERENT SHA than the pinned
+        // one, so the link is stale — the post-restart staleness check below
+        // must observe the same state.
+        let parent = make_test_ledger_entry(
+            "system/parent.md",
+            "new_current_sha",
+            ApprovalStatus::Approved,
+        );
+        ledger.save(&parent).await.unwrap();
+
+        // Context repos for cross-workspace resolution (None-linked tests
+        // don't resolve, but pass real stores to match server wiring).
+        let ws_ctx: Arc<dyn gyre_ports::WorkspaceRepository> =
+            Arc::new(MemWorkspaceRepository::default());
+        let repos_ctx: Arc<dyn gyre_ports::RepoRepository> = Arc::new(MemRepoRepository::default());
+        sync_spec_ledger(
+            &ledger,
+            &links_store,
+            &link_repo,
+            dir.path().to_str().unwrap(),
+            &sha,
+            1_700_000_000,
+            Some("repo-1"),
+            Some("ws-1"),
+            Some(&ws_ctx),
+            Some(&repos_ctx),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+
+        let before_restart: Vec<SpecLinkEntry> = links_store.lock().await.clone();
+        assert_eq!(
+            before_restart.len(),
+            1,
+            "sync must record the depends_on link"
+        );
+        let pushed = &before_restart[0];
+        assert_eq!(pushed.source_path, "system/child.md");
+        assert_eq!(pushed.target_path, "system/parent.md");
+        assert_eq!(pushed.link_type, SpecLinkType::DependsOn);
+        assert_eq!(pushed.target_sha.as_deref(), Some("old_pinned_sha"));
+        // source_sha must be the source spec's real blob SHA from the push —
+        // not a placeholder.
+        assert!(
+            !pushed.source_sha.is_empty(),
+            "source_sha must be populated from the source spec's blob SHA"
+        );
+
+        // ── Simulated restart: brand-new store over the SAME durable repo. ──
+        let restarted_store: SpecLinksStore = Arc::new(Mutex::new(Vec::new()));
+        crate::load_spec_links_into_store(&link_repo, &restarted_store);
+        let after_restart: Vec<SpecLinkEntry> = restarted_store.lock().await.clone();
+
+        assert!(
+            !after_restart.is_empty(),
+            "graph must be non-empty after restart without any re-push"
+        );
+        assert_eq!(
+            after_restart, before_restart,
+            "restarted graph must be identical to the pre-restart graph"
+        );
+
+        // A NEW server process would open a NEW storage handle on the same DB
+        // file — verify the data is in the file, not just this handle.
+        drop(link_repo);
+        let reopened: Arc<dyn gyre_ports::SpecLinkRepository> = {
+            let storage = gyre_adapters::SqliteStorage::new(&db_path).unwrap();
+            Arc::new(storage)
+        };
+        let third_boot_store: SpecLinksStore = Arc::new(Mutex::new(Vec::new()));
+        crate::load_spec_links_into_store(&reopened, &third_boot_store);
+        let from_file: Vec<SpecLinkEntry> = third_boot_store.lock().await.clone();
+        assert_eq!(
+            from_file, before_restart,
+            "graph must survive a fresh storage handle on the same database file"
+        );
+    }
+
+    /// The staleness checker must return the same answer against a restarted
+    /// (loaded-from-disk) graph as it would right after the push — the graph
+    /// consumers (staleness, gates, patrol) must not silently degrade to an
+    /// empty graph across a restart.
+    #[tokio::test]
+    async fn staleness_query_parity_after_restart() {
+        use crate::mem::{MemRepoRepository, MemSpecLedgerRepository, MemWorkspaceRepository};
+
+        // The link is pinned to the target's CURRENT ledger SHA at push time,
+        // so it is active after the push. The staleness verdict is then
+        // re-derived AFTER a restart, once the target spec has drifted —
+        // the checker must compare the persisted pinned SHA against the
+        // ledger's current SHA and mark the link stale on the restarted
+        // graph, exactly as it would right after the push.
+        let manifest = r#"version: 1
+specs:
+  - path: system/child.md
+    title: Child
+    owner: user:test
+    links:
+      - type: depends_on
+        target: system/parent.md
+        target_sha: sha_v1"#;
+        let (dir, sha) = make_test_repo(&[
+            ("specs/manifest.yaml", manifest),
+            ("specs/system/child.md", "# C"),
+        ])
+        .await;
+
+        let db = tempfile::NamedTempFile::new().unwrap();
+        let db_path = db.path().to_str().unwrap().to_string();
+        let link_repo: Arc<dyn gyre_ports::SpecLinkRepository> = {
+            let storage = gyre_adapters::SqliteStorage::new(&db_path).unwrap();
+            Arc::new(storage)
+        };
+        let ledger: Arc<dyn gyre_ports::SpecLedgerRepository> =
+            Arc::new(MemSpecLedgerRepository::default());
+        let links_store: SpecLinksStore = Arc::new(Mutex::new(Vec::new()));
+
+        // Target spec is in the ledger at the pinned SHA — the link is
+        // healthy at push time.
+        let parent_v1 =
+            make_test_ledger_entry("system/parent.md", "sha_v1", ApprovalStatus::Approved);
+        ledger.save(&parent_v1).await.unwrap();
+
+        let ws_ctx: Arc<dyn gyre_ports::WorkspaceRepository> =
+            Arc::new(MemWorkspaceRepository::default());
+        let repos_ctx: Arc<dyn gyre_ports::RepoRepository> = Arc::new(MemRepoRepository::default());
+        sync_spec_ledger(
+            &ledger,
+            &links_store,
+            &link_repo,
+            dir.path().to_str().unwrap(),
+            &sha,
+            1_700_000_000,
+            Some("repo-1"),
+            Some("ws-1"),
+            Some(&ws_ctx),
+            Some(&repos_ctx),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+
+        // Right after the push: pinned SHA matches the ledger — the link is
+        // active, not stale.
+        let post_push: Vec<SpecLinkEntry> = links_store.lock().await.clone();
+        assert_eq!(post_push.len(), 1);
+        assert_eq!(
+            post_push[0].status, "active",
+            "pinned SHA matches the ledger at push time — link must be active"
+        );
+        assert_eq!(post_push[0].target_sha.as_deref(), Some("sha_v1"));
+
+        // ── Restart: fresh store loaded from the durable repo. ──
+        let restarted_store: SpecLinksStore = Arc::new(Mutex::new(Vec::new()));
+        crate::load_spec_links_into_store(&link_repo, &restarted_store);
+        let after_restart: Vec<SpecLinkEntry> = restarted_store.lock().await.clone();
+        assert_eq!(
+            after_restart, post_push,
+            "restarted graph must be identical to the post-push graph"
+        );
+
+        // ── The target spec now drifts (ledger SHA advances). ──
+        let parent_v2 =
+            make_test_ledger_entry("system/parent.md", "sha_v2", ApprovalStatus::Approved);
+        ledger.save(&parent_v2).await.unwrap();
+
+        // ── Run the REAL staleness checker against the restarted graph. ──
+        // The verdict must be re-derived from the persisted pinned SHA vs
+        // the ledger's current SHA — two independent sources. Against the
+        // pre-task empty-init behavior this fails: an empty restarted graph
+        // gives the checker nothing to mark stale.
+        let base = crate::mem::test_state();
+        let state = Arc::new(crate::AppState {
+            spec_links_store: restarted_store.clone(),
+            spec_link_repo: link_repo.clone(),
+            spec_ledger: ledger.clone(),
+            ..(*base).clone()
+        });
+        crate::spec_link_staleness::run_once(&state).await.unwrap();
+
+        let rechecked: Vec<SpecLinkEntry> = restarted_store.lock().await.clone();
+        assert_eq!(rechecked.len(), 1, "checker must see the restarted graph");
+        assert_eq!(
+            rechecked[0].status, "stale",
+            "checker must re-derive 'stale' from ledger SHA vs persisted pinned SHA"
+        );
+        assert!(
+            rechecked[0].stale_since.is_some(),
+            "checker must stamp stale_since on the restarted graph"
+        );
+
+        // The checker's verdict is written through to the durable table —
+        // the next restart loads the stale verdict, not a reset one.
+        let persisted: Vec<SpecLinkEntry> = link_repo.list_all().await.unwrap();
+        assert_eq!(persisted.len(), 1);
+        assert_eq!(persisted[0].status, "stale");
+        assert_eq!(persisted[0].stale_since, rechecked[0].stale_since);
+    }
+
+    /// Regression (task-198): two repos may carry the same spec path. A push
+    /// from repo B must replace ONLY repo B's rows for that path — repo A's
+    /// links survive in both the hot cache and the durable table, and the two
+    /// stores never diverge (a restart must not resurrect or drop links).
+    #[tokio::test]
+    async fn sync_replaces_links_scoped_to_source_repo() {
+        use crate::mem::{MemRepoRepository, MemSpecLedgerRepository, MemWorkspaceRepository};
+
+        // The IDENTICAL manifest pushed by both repos — same spec path, same
+        // link type, same target. Under an id format without repo scope the
+        // two links collapse to one id, repo B's replace_for_source INSERT
+        // hits repo A's row's PRIMARY KEY, the transaction rolls back, and
+        // the swallowed error silently loses one repo's durable row (after a
+        // restart that repo's link is gone from the tenant-wide graph).
+        let manifest = r#"version: 1
+specs:
+  - path: system/shared.md
+    title: Shared
+    owner: user:test
+    links:
+      - type: depends_on
+        target: system/target.md"#;
+        let (dir, sha) = make_test_repo(&[
+            ("specs/manifest.yaml", manifest),
+            ("specs/system/shared.md", "# S"),
+        ])
+        .await;
+
+        let db = tempfile::NamedTempFile::new().unwrap();
+        let db_path = db.path().to_str().unwrap().to_string();
+        let link_repo: Arc<dyn gyre_ports::SpecLinkRepository> = {
+            let storage = gyre_adapters::SqliteStorage::new(&db_path).unwrap();
+            Arc::new(storage)
+        };
+        let ledger: Arc<dyn gyre_ports::SpecLedgerRepository> =
+            Arc::new(MemSpecLedgerRepository::default());
+        let links_store: SpecLinksStore = Arc::new(Mutex::new(Vec::new()));
+
+        let ws_ctx: Arc<dyn gyre_ports::WorkspaceRepository> =
+            Arc::new(MemWorkspaceRepository::default());
+        let repos_ctx: Arc<dyn gyre_ports::RepoRepository> = Arc::new(MemRepoRepository::default());
+
+        // Real push from repo A, then a real push from repo B with the same
+        // manifest (both use the production id construction).
+        sync_spec_ledger(
+            &ledger,
+            &links_store,
+            &link_repo,
+            dir.path().to_str().unwrap(),
+            &sha,
+            1_700_000_000,
+            Some("repo-a"),
+            Some("ws-1"),
+            Some(&ws_ctx),
+            Some(&repos_ctx),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+        sync_spec_ledger(
+            &ledger,
+            &links_store,
+            &link_repo,
+            dir.path().to_str().unwrap(),
+            &sha,
+            1_700_000_500,
+            Some("repo-b"),
+            Some("ws-1"),
+            Some(&ws_ctx),
+            Some(&repos_ctx),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+
+        // Cache: both repos' links present with distinct ids.
+        let cache: Vec<SpecLinkEntry> = links_store.lock().await.clone();
+        assert_eq!(cache.len(), 2, "both repos' links must be in the cache");
+        assert!(
+            cache
+                .iter()
+                .any(|l| l.source_repo_id.as_deref() == Some("repo-a")),
+            "repo A's link must survive a repo-B push"
+        );
+        assert!(
+            cache
+                .iter()
+                .any(|l| l.source_repo_id.as_deref() == Some("repo-b")),
+            "repo B's new link must be present"
+        );
+        let distinct_ids: std::collections::HashSet<&str> =
+            cache.iter().map(|l| l.id.as_str()).collect();
+        assert_eq!(
+            distinct_ids.len(),
+            2,
+            "same-path links from different repos must have distinct ids"
+        );
+
+        // Durable table must match the cache exactly (the invariant the
+        // boot-load path relies on) — a third boot from the same file sees
+        // both links without any re-push.
+        let persisted: Vec<SpecLinkEntry> = link_repo.list_all().await.unwrap();
+        assert_eq!(persisted.len(), 2, "both repos' rows must be in the table");
+        let mut sorted_cache: Vec<SpecLinkEntry> = cache.clone();
+        sorted_cache.sort_by(|a, b| a.id.cmp(&b.id));
+        let mut sorted_persisted = persisted.clone();
+        sorted_persisted.sort_by(|a, b| a.id.cmp(&b.id));
+        assert_eq!(
+            sorted_persisted, sorted_cache,
+            "durable table must match the cache (collision must not drop a repo's row)"
+        );
+
+        // Restart: a fresh store over the same durable table must contain
+        // BOTH repos' links — the collision previously left only one.
+        let restarted_store: SpecLinksStore = Arc::new(Mutex::new(Vec::new()));
+        crate::load_spec_links_into_store(&link_repo, &restarted_store);
+        let after_restart: Vec<SpecLinkEntry> = restarted_store.lock().await.clone();
+        assert_eq!(
+            after_restart.len(),
+            2,
+            "restart must rebuild BOTH repos' links (id collision previously dropped one)"
+        );
+        assert!(after_restart
+            .iter()
+            .any(|l| l.source_repo_id.as_deref() == Some("repo-a")));
+        assert!(after_restart
+            .iter()
+            .any(|l| l.source_repo_id.as_deref() == Some("repo-b")));
+    }
+
+    /// Regression (task-198): when a manifest edit REMOVES a spec's links, the
+    /// durable rows must be deleted too — otherwise a restart resurrects
+    /// links that were removed from the manifest. The empty link set must
+    /// still issue a replace (delete) for that source spec.
+    #[tokio::test]
+    async fn sync_clears_durable_rows_when_links_removed_from_manifest() {
+        use crate::mem::{MemRepoRepository, MemSpecLedgerRepository, MemWorkspaceRepository};
+
+        let with_link = r#"version: 1
+specs:
+  - path: system/child.md
+    title: Child
+    owner: user:test
+    links:
+      - type: depends_on
+        target: system/parent.md"#;
+        let without_link = r#"version: 1
+specs:
+  - path: system/child.md
+    title: Child
+    owner: user:test"#;
+
+        let (dir, sha_with_link) = make_test_repo(&[
+            ("specs/manifest.yaml", with_link),
+            ("specs/system/child.md", "# C"),
+        ])
+        .await;
+
+        let db = tempfile::NamedTempFile::new().unwrap();
+        let db_path = db.path().to_str().unwrap().to_string();
+        let link_repo: Arc<dyn gyre_ports::SpecLinkRepository> = {
+            let storage = gyre_adapters::SqliteStorage::new(&db_path).unwrap();
+            Arc::new(storage)
+        };
+        let ledger: Arc<dyn gyre_ports::SpecLedgerRepository> =
+            Arc::new(MemSpecLedgerRepository::default());
+        let links_store: SpecLinksStore = Arc::new(Mutex::new(Vec::new()));
+        let ws_ctx: Arc<dyn gyre_ports::WorkspaceRepository> =
+            Arc::new(MemWorkspaceRepository::default());
+        let repos_ctx: Arc<dyn gyre_ports::RepoRepository> = Arc::new(MemRepoRepository::default());
+
+        // First push: manifest declares the link.
+        sync_spec_ledger(
+            &ledger,
+            &links_store,
+            &link_repo,
+            dir.path().to_str().unwrap(),
+            &sha_with_link,
+            1_700_000_000,
+            Some("repo-1"),
+            Some("ws-1"),
+            Some(&ws_ctx),
+            Some(&repos_ctx),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(links_store.lock().await.len(), 1);
+        assert_eq!(link_repo.list_all().await.unwrap().len(), 1);
+
+        // Second push: same spec, link removed from the manifest. Commit the
+        // edited manifest and sync the new HEAD.
+        let sha_without_link = add_commit(&dir, &[("specs/manifest.yaml", without_link)]);
+        sync_spec_ledger(
+            &ledger,
+            &links_store,
+            &link_repo,
+            dir.path().to_str().unwrap(),
+            &sha_without_link,
+            1_700_000_500,
+            Some("repo-1"),
+            Some("ws-1"),
+            Some(&ws_ctx),
+            Some(&repos_ctx),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+
+        // Cache dropped the link…
+        assert!(
+            links_store.lock().await.is_empty(),
+            "removed link must be dropped from the hot cache"
+        );
+        // …and the durable table must agree (this is the bug: skipping the
+        // replace for an empty link set left the row behind, resurrecting it
+        // on the next boot load).
+        let persisted: Vec<SpecLinkEntry> = link_repo.list_all().await.unwrap();
+        assert!(
+            persisted.is_empty(),
+            "removed link must be deleted from the durable table, got {persisted:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // task-287: cross-repo / cross-workspace link validation
+    // (spec-links.md §Cross-Repo and Cross-Workspace Links)
+    // -----------------------------------------------------------------------
+
+    fn make_workspace_in_tenant(id: &str, tenant: &str, slug: &str) -> gyre_domain::Workspace {
+        gyre_domain::Workspace {
+            id: gyre_common::Id::new(id),
+            tenant_id: gyre_common::Id::new(tenant),
+            name: format!("ws-{id}"),
+            slug: slug.to_string(),
+            description: None,
+            budget: None,
+            max_repos: None,
+            max_agents_per_repo: None,
+            trust_level: gyre_domain::TrustLevel::Guided,
+            llm_model: None,
+            created_at: 1_000_000,
+            compute_target_id: None,
+        }
+    }
+
+    fn make_repo_entity(id: &str, name: &str, ws_id: &str, path: &str) -> gyre_domain::Repository {
+        gyre_domain::Repository {
+            id: gyre_common::Id::new(id),
+            name: name.to_string(),
+            path: path.to_string(),
+            workspace_id: gyre_common::Id::new(ws_id),
+            default_branch: "main".to_string(),
+            is_mirror: false,
+            mirror_url: None,
+            mirror_interval_secs: None,
+            last_mirror_sync: None,
+            description: None,
+            status: gyre_domain::RepoStatus::Active,
+            created_at: 1_000_000,
+            updated_at: 1_000_000,
+            max_agents: None,
+            max_agent_iterations: None,
+            budget: None,
+        }
+    }
+
+    fn make_membership_entity(
+        user_id: &str,
+        ws_id: &str,
+        role: gyre_domain::WorkspaceRole,
+    ) -> gyre_domain::WorkspaceMembership {
+        gyre_domain::WorkspaceMembership {
+            id: gyre_common::Id::new(uuid::Uuid::new_v4().to_string()),
+            user_id: gyre_common::Id::new(user_id),
+            workspace_id: gyre_common::Id::new(ws_id),
+            role,
+            invited_by: gyre_common::Id::new("admin"),
+            accepted: true,
+            accepted_at: Some(1_000_000),
+            created_at: 1_000_000,
+        }
+    }
+
+    /// Blob SHA of a file at a commit (same mechanism sync_spec_ledger uses
+    /// for ledger current_sha and link target_sha pinning).
+    fn blob_sha_at(dir: &tempfile::TempDir, sha: &str, file: &str) -> String {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir.path())
+            .args(["rev-parse", &format!("{sha}:{file}")])
+            .output()
+            .expect("git rev-parse failed");
+        assert!(
+            out.status.success(),
+            "git rev-parse {sha}:{file} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// AC 1: a manifest in repo A (workspace W) declaring depends_on
+    /// @B/system/auth.md, where repo B exists in W, resolves to B's repo id
+    /// with status "active" — and a subsequent change to B's target spec
+    /// marks A's link stale (push-time inbound staleness, step 6b).
+    ///
+    /// Against the pre-task code this fails at the first assertion:
+    /// push-time resolution passed None as the workspace to the repo-name
+    /// lookup (which returns None without a workspace scope), so every
+    /// same-workspace @repo/path link was stored "unresolved" forever.
+    #[tokio::test]
+    async fn cross_repo_same_workspace_link_resolves_active_then_stale_on_target_change() {
+        use crate::mem::{MemRepoRepository, MemSpecLedgerRepository, MemWorkspaceRepository};
+
+        // Target repo B in workspace ws-1 (tenant "tenant-287", ≠ the
+        // literal "default" — the scope the fabricated-tenant bug broke).
+        let (dir_b, sha_b) = make_test_repo(&[
+            (
+                "specs/manifest.yaml",
+                "version: 1\nspecs:\n  - path: system/auth.md\n    title: Auth\n    owner: user:test\n",
+            ),
+            ("specs/system/auth.md", "# Auth v1\n"),
+        ])
+        .await;
+
+        // Source repo A links @B/system/auth.md pinned to B's current blob SHA.
+        let auth_blob_v1 = blob_sha_at(&dir_b, &sha_b, "specs/system/auth.md");
+        let manifest_a = format!(
+            "version: 1\nspecs:\n  - path: system/a.md\n    title: A\n    owner: user:test\n    links:\n      - type: depends_on\n        target: \"@B/system/auth.md\"\n        target_sha: {auth_blob_v1}\n"
+        );
+        let (dir_a, sha_a) = make_test_repo(&[
+            ("specs/manifest.yaml", manifest_a.as_str()),
+            ("specs/system/a.md", "# A\n"),
+        ])
+        .await;
+
+        let ledger: Arc<dyn gyre_ports::SpecLedgerRepository> =
+            Arc::new(MemSpecLedgerRepository::default());
+        let links_store: SpecLinksStore = Arc::new(Mutex::new(Vec::new()));
+        let link_repo: Arc<dyn gyre_ports::SpecLinkRepository> =
+            Arc::new(crate::mem::MemSpecLinkRepository::default());
+
+        let ws_ctx: Arc<dyn gyre_ports::WorkspaceRepository> =
+            Arc::new(MemWorkspaceRepository::default());
+        let ws = make_workspace_in_tenant("ws-1", "tenant-287", "ws-one");
+        ws_ctx.create(&ws).await.unwrap();
+        let repos_ctx: Arc<dyn gyre_ports::RepoRepository> = Arc::new(MemRepoRepository::default());
+        repos_ctx
+            .create(&make_repo_entity(
+                "repo-a",
+                "A",
+                "ws-1",
+                dir_a.path().to_str().unwrap(),
+            ))
+            .await
+            .unwrap();
+        repos_ctx
+            .create(&make_repo_entity(
+                "repo-b",
+                "B",
+                "ws-1",
+                dir_b.path().to_str().unwrap(),
+            ))
+            .await
+            .unwrap();
+        let tenant = gyre_common::Id::new("tenant-287");
+
+        // Push B first: registers system/auth.md in the ledger at v1.
+        sync_spec_ledger(
+            &ledger,
+            &links_store,
+            &link_repo,
+            dir_b.path().to_str().unwrap(),
+            &sha_b,
+            1_700_000_000,
+            Some("repo-b"),
+            Some("ws-1"),
+            Some(&ws_ctx),
+            Some(&repos_ctx),
+            Some(&tenant),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+
+        // Push A: the same-workspace cross-repo link must resolve to
+        // repo-b's id and be active (pinned SHA matches the ledger).
+        sync_spec_ledger(
+            &ledger,
+            &links_store,
+            &link_repo,
+            dir_a.path().to_str().unwrap(),
+            &sha_a,
+            1_700_000_100,
+            Some("repo-a"),
+            Some("ws-1"),
+            Some(&ws_ctx),
+            Some(&repos_ctx),
+            Some(&tenant),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+
+        let links: Vec<SpecLinkEntry> = links_store.lock().await.clone();
+        assert_eq!(links.len(), 1, "A's depends_on link must be recorded");
+        assert_eq!(links[0].target_repo_id.as_deref(), Some("repo-b"));
+        assert_eq!(links[0].status, "active");
+        assert_eq!(
+            links[0].target_display.as_deref(),
+            Some("@B/system/auth.md")
+        );
+
+        // Subsequent change to B's target spec: A's link must go stale via
+        // push-time inbound staleness (sync step 6b).
+        let sha_b2 = add_commit(&dir_b, &[("specs/system/auth.md", "# Auth v2\n")]);
+        sync_spec_ledger(
+            &ledger,
+            &links_store,
+            &link_repo,
+            dir_b.path().to_str().unwrap(),
+            &sha_b2,
+            1_700_000_200,
+            Some("repo-b"),
+            Some("ws-1"),
+            Some(&ws_ctx),
+            Some(&repos_ctx),
+            Some(&tenant),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+
+        let links: Vec<SpecLinkEntry> = links_store.lock().await.clone();
+        assert_eq!(
+            links[0].status, "stale",
+            "a change to B's target spec must mark A's link stale, got {:?}",
+            links[0]
+        );
+        assert!(links[0].stale_since.is_some());
+    }
+
+    /// AC 3 / verification-intent probe 2: a link whose target repo resolves
+    /// but whose target path is absent from the target repo's manifest is
+    /// stored "unresolved" with the missing path named in the warning.
+    /// Against the pre-task code this fails: the link was marked "active"
+    /// on repo existence alone.
+    #[tokio::test]
+    async fn cross_repo_link_unresolved_when_target_path_not_in_target_manifest() {
+        use crate::mem::{MemRepoRepository, MemSpecLedgerRepository, MemWorkspaceRepository};
+
+        let (dir_b, sha_b) = make_test_repo(&[
+            (
+                "specs/manifest.yaml",
+                "version: 1\nspecs:\n  - path: system/auth.md\n    title: Auth\n    owner: user:test\n",
+            ),
+            ("specs/system/auth.md", "# Auth\n"),
+        ])
+        .await;
+        // A links a path B's manifest does NOT declare.
+        let manifest_a = "version: 1\nspecs:\n  - path: system/a.md\n    title: A\n    owner: user:test\n    links:\n      - type: depends_on\n        target: \"@B/system/nonexistent.md\"\n";
+        let (dir_a, sha_a) = make_test_repo(&[
+            ("specs/manifest.yaml", manifest_a),
+            ("specs/system/a.md", "# A\n"),
+        ])
+        .await;
+
+        let ledger: Arc<dyn gyre_ports::SpecLedgerRepository> =
+            Arc::new(MemSpecLedgerRepository::default());
+        let links_store: SpecLinksStore = Arc::new(Mutex::new(Vec::new()));
+        let link_repo: Arc<dyn gyre_ports::SpecLinkRepository> =
+            Arc::new(crate::mem::MemSpecLinkRepository::default());
+        let ws_ctx: Arc<dyn gyre_ports::WorkspaceRepository> =
+            Arc::new(MemWorkspaceRepository::default());
+        ws_ctx
+            .create(&make_workspace_in_tenant("ws-1", "tenant-287", "ws-one"))
+            .await
+            .unwrap();
+        let repos_ctx: Arc<dyn gyre_ports::RepoRepository> = Arc::new(MemRepoRepository::default());
+        repos_ctx
+            .create(&make_repo_entity(
+                "repo-a",
+                "A",
+                "ws-1",
+                dir_a.path().to_str().unwrap(),
+            ))
+            .await
+            .unwrap();
+        // repo-b exists (its manifest just doesn't declare the target path).
+        repos_ctx
+            .create(&make_repo_entity(
+                "repo-b",
+                "B",
+                "ws-1",
+                dir_b.path().to_str().unwrap(),
+            ))
+            .await
+            .unwrap();
+        let tenant = gyre_common::Id::new("tenant-287");
+        let _ = sha_b;
+
+        sync_spec_ledger(
+            &ledger,
+            &links_store,
+            &link_repo,
+            dir_a.path().to_str().unwrap(),
+            &sha_a,
+            1_700_000_000,
+            Some("repo-a"),
+            Some("ws-1"),
+            Some(&ws_ctx),
+            Some(&repos_ctx),
+            Some(&tenant),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+
+        let links: Vec<SpecLinkEntry> = links_store.lock().await.clone();
+        assert_eq!(links.len(), 1);
+        assert_eq!(
+            links[0].status, "unresolved",
+            "a target path absent from the target repo's manifest must be unresolved, got {:?}",
+            links[0]
+        );
+        assert_eq!(links[0].target_repo_id, None);
+        assert_eq!(links[0].target_path, "system/nonexistent.md");
+    }
+
+    /// AC 2: a cross-workspace link pushed by a principal without read
+    /// access to the target workspace is stored "unresolved" (never
+    /// "active"), with the denial named in the durable marker (and the
+    /// warning). Positive control: once the principal holds membership in
+    /// the target workspace, a re-push resolves the link active and clears
+    /// the marker.
+    #[tokio::test]
+    async fn cross_workspace_link_denied_without_read_access_stays_unresolved() {
+        use crate::mem::{
+            MemKvStore, MemRepoRepository, MemSpecLedgerRepository,
+            MemWorkspaceMembershipRepository, MemWorkspaceRepository,
+        };
+
+        // Target repo C in workspace ws-two (same tenant, different workspace).
+        let (dir_c, _sha_c) = make_test_repo(&[
+            (
+                "specs/manifest.yaml",
+                "version: 1\nspecs:\n  - path: system/spec.md\n    title: Spec\n    owner: user:test\n",
+            ),
+            ("specs/system/spec.md", "# Spec\n"),
+        ])
+        .await;
+        let manifest_a = "version: 1\nspecs:\n  - path: system/a.md\n    title: A\n    owner: user:test\n    links:\n      - type: depends_on\n        target: \"@ws-two/C/system/spec.md\"\n";
+        let (dir_a, sha_a) = make_test_repo(&[
+            ("specs/manifest.yaml", manifest_a),
+            ("specs/system/a.md", "# A\n"),
+        ])
+        .await;
+
+        let ledger: Arc<dyn gyre_ports::SpecLedgerRepository> =
+            Arc::new(MemSpecLedgerRepository::default());
+        let links_store: SpecLinksStore = Arc::new(Mutex::new(Vec::new()));
+        let link_repo: Arc<dyn gyre_ports::SpecLinkRepository> =
+            Arc::new(crate::mem::MemSpecLinkRepository::default());
+
+        let ws_ctx: Arc<dyn gyre_ports::WorkspaceRepository> =
+            Arc::new(MemWorkspaceRepository::default());
+        ws_ctx
+            .create(&make_workspace_in_tenant(
+                "ws-one-id",
+                "tenant-287",
+                "ws-one",
+            ))
+            .await
+            .unwrap();
+        ws_ctx
+            .create(&make_workspace_in_tenant(
+                "ws-two-id",
+                "tenant-287",
+                "ws-two",
+            ))
+            .await
+            .unwrap();
+        let repos_ctx: Arc<dyn gyre_ports::RepoRepository> = Arc::new(MemRepoRepository::default());
+        repos_ctx
+            .create(&make_repo_entity(
+                "repo-a",
+                "A",
+                "ws-one-id",
+                dir_a.path().to_str().unwrap(),
+            ))
+            .await
+            .unwrap();
+        repos_ctx
+            .create(&make_repo_entity(
+                "repo-c",
+                "C",
+                "ws-two-id",
+                dir_c.path().to_str().unwrap(),
+            ))
+            .await
+            .unwrap();
+
+        // The pushing principal is a user with membership in the SOURCE
+        // workspace only — no read access to ws-two.
+        let memberships: Arc<dyn gyre_ports::WorkspaceMembershipRepository> =
+            Arc::new(MemWorkspaceMembershipRepository::default());
+        memberships
+            .create(&make_membership_entity(
+                "u-1",
+                "ws-one-id",
+                gyre_domain::WorkspaceRole::Developer,
+            ))
+            .await
+            .unwrap();
+        let kv: Arc<dyn gyre_ports::KvJsonStore> = Arc::new(MemKvStore::default());
+        let principal = LinkPrincipal {
+            agent_id: "user-one".to_string(),
+            user_id: Some(gyre_common::Id::new("u-1")),
+            workspace_id: Some("ws-one-id".to_string()),
+            is_system: false,
+        };
+        let tenant = gyre_common::Id::new("tenant-287");
+
+        /// Shared port context for the `sync_a` helper; bundling the
+        /// references keeps the helper under clippy's `too_many_arguments`
+        /// threshold.
+        struct SyncCtx<'a> {
+            ledger: &'a Arc<dyn gyre_ports::SpecLedgerRepository>,
+            links_store: &'a SpecLinksStore,
+            link_repo: &'a Arc<dyn gyre_ports::SpecLinkRepository>,
+            ws_ctx: &'a Arc<dyn gyre_ports::WorkspaceRepository>,
+            repos_ctx: &'a Arc<dyn gyre_ports::RepoRepository>,
+            memberships: &'a Arc<dyn gyre_ports::WorkspaceMembershipRepository>,
+            kv: &'a Arc<dyn gyre_ports::KvJsonStore>,
+            tenant: &'a gyre_common::Id,
+        }
+
+        async fn sync_a(
+            ctx: &SyncCtx<'_>,
+            principal: Option<&LinkPrincipal>,
+            dir_a: &str,
+            sha_a: &str,
+        ) {
+            sync_spec_ledger(
+                ctx.ledger,
+                ctx.links_store,
+                ctx.link_repo,
+                dir_a,
+                sha_a,
+                1_700_000_000,
+                Some("repo-a"),
+                Some("ws-one-id"),
+                Some(ctx.ws_ctx),
+                Some(ctx.repos_ctx),
+                Some(ctx.tenant),
+                principal,
+                Some(ctx.memberships),
+                Some(ctx.kv),
+                None,
+            )
+            .await
+        }
+
+        let ctx = SyncCtx {
+            ledger: &ledger,
+            links_store: &links_store,
+            link_repo: &link_repo,
+            ws_ctx: &ws_ctx,
+            repos_ctx: &repos_ctx,
+            memberships: &memberships,
+            kv: &kv,
+            tenant: &tenant,
+        };
+
+        // Push by the principal WITHOUT read access to ws-two: the link
+        // must be stored unresolved with target_repo_id NULL.
+        sync_a(
+            &ctx,
+            Some(&principal),
+            dir_a.path().to_str().unwrap(),
+            &sha_a,
+        )
+        .await;
+        let links: Vec<SpecLinkEntry> = links_store.lock().await.clone();
+        assert_eq!(links.len(), 1);
+        assert_eq!(
+            links[0].status, "unresolved",
+            "a cross-workspace link pushed without read access must never be active, got {:?}",
+            links[0]
+        );
+        assert_eq!(links[0].target_repo_id, None);
+
+        // The denial is durably recorded, naming the principal and target
+        // (the staleness pass consults this so it cannot flip the link).
+        let denial = link_denial(&kv, &links[0].id).await;
+        let denial = denial.expect("access denial must be recorded for the denied link");
+        assert_eq!(denial.principal, "user-one");
+        assert_eq!(denial.target, "@ws-two/C/system/spec.md");
+
+        // Positive control: grant the principal Viewer membership in the
+        // target workspace and re-push — the link resolves active and the
+        // denial marker clears.
+        memberships
+            .create(&make_membership_entity(
+                "u-1",
+                "ws-two-id",
+                gyre_domain::WorkspaceRole::Viewer,
+            ))
+            .await
+            .unwrap();
+        sync_a(
+            &ctx,
+            Some(&principal),
+            dir_a.path().to_str().unwrap(),
+            &sha_a,
+        )
+        .await;
+        let links: Vec<SpecLinkEntry> = links_store.lock().await.clone();
+        assert_eq!(links.len(), 1);
+        assert_eq!(
+            links[0].status, "active",
+            "a cross-workspace link pushed by a target-workspace member must resolve active, got {:?}",
+            links[0]
+        );
+        assert_eq!(links[0].target_repo_id.as_deref(), Some("repo-c"));
+        assert!(
+            link_denial(&kv, &links[0].id).await.is_none(),
+            "re-push by an authorized principal must clear the denial marker"
         );
     }
 
@@ -3148,6 +5168,883 @@ specs:
         assert!(
             result.is_err(),
             "mixed extends/depends_on cycle should be detected"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // task-293: tenant-wide cycle detection (durable spec_links table +
+    // pushed manifest edges, node identity (repo, path))
+    // -----------------------------------------------------------------------
+
+    /// Seed a stored (already-synced) link row in the durable graph.
+    fn stored_link(
+        source_repo: &str,
+        source_path: &str,
+        link_type: SpecLinkType,
+        target_repo: Option<&str>,
+        target_path: &str,
+    ) -> SpecLinkEntry {
+        let target_display = target_repo.map(|_| format!("@B/{target_path}"));
+        SpecLinkEntry {
+            id: format!("{source_repo}:{source_path}:{link_type}:{target_path}"),
+            source_path: source_path.to_string(),
+            source_repo_id: Some(source_repo.to_string()),
+            source_sha: "sha".to_string(),
+            link_type,
+            target_path: target_path.to_string(),
+            target_repo_id: target_repo.map(str::to_string),
+            target_display,
+            target_sha: None,
+            reason: None,
+            status: "active".to_string(),
+            created_at: 1_700_000_000,
+            stale_since: None,
+        }
+    }
+
+    /// Shared fixture: workspace ws-1 (tenant-293) with real git repos
+    /// repo-a ("A") and repo-b ("B") registered in a mem RepoRepository so
+    /// `@A/...` / `@B/...` manifest targets resolve to their repo ids.
+    async fn two_repo_workspace(
+        dir_a: &tempfile::TempDir,
+        dir_b: &tempfile::TempDir,
+    ) -> (
+        Arc<dyn gyre_ports::WorkspaceRepository>,
+        Arc<dyn gyre_ports::RepoRepository>,
+        gyre_common::Id,
+    ) {
+        use crate::mem::{MemRepoRepository, MemWorkspaceRepository};
+        let ws_ctx: Arc<dyn gyre_ports::WorkspaceRepository> =
+            Arc::new(MemWorkspaceRepository::default());
+        ws_ctx
+            .create(&make_workspace_in_tenant("ws-1", "tenant-293", "ws-one"))
+            .await
+            .unwrap();
+        let repos_ctx: Arc<dyn gyre_ports::RepoRepository> = Arc::new(MemRepoRepository::default());
+        repos_ctx
+            .create(&make_repo_entity(
+                "repo-a",
+                "A",
+                "ws-1",
+                dir_a.path().to_str().unwrap(),
+            ))
+            .await
+            .unwrap();
+        repos_ctx
+            .create(&make_repo_entity(
+                "repo-b",
+                "B",
+                "ws-1",
+                dir_b.path().to_str().unwrap(),
+            ))
+            .await
+            .unwrap();
+        (ws_ctx, repos_ctx, gyre_common::Id::new("tenant-293"))
+    }
+
+    /// AC 1: pushing A depends_on @B/b in repo 1 succeeds; then pushing
+    /// B depends_on @A/a in repo 2 is rejected with the cycle named.
+    /// Against the pre-task-293 code this fails at the second check: each
+    /// push only saw its own manifest's edges, so both landed cleanly and
+    /// the cycle lived permanently in the forge graph.
+    #[tokio::test]
+    async fn tenant_cycle_cross_repo_second_push_rejected() {
+        use crate::mem::{MemSpecLedgerRepository, MemSpecLinkRepository};
+
+        // Repo B declares system/b.md (no links yet).
+        let (dir_b, _sha_b1) = make_test_repo(&[
+            (
+                "specs/manifest.yaml",
+                "version: 1\nspecs:\n  - path: system/b.md\n    title: B\n    owner: user:test\n",
+            ),
+            ("specs/system/b.md", "# B\n"),
+        ])
+        .await;
+        // Repo A declares system/a.md depending on @B/system/b.md.
+        let (dir_a, sha_a) = make_test_repo(&[
+            (
+                "specs/manifest.yaml",
+                "version: 1\nspecs:\n  - path: system/a.md\n    title: A\n    owner: user:test\n    links:\n      - type: depends_on\n        target: \"@B/system/b.md\"\n",
+            ),
+            ("specs/system/a.md", "# A\n"),
+        ])
+        .await;
+
+        let (ws_ctx, repos_ctx, tenant) = two_repo_workspace(&dir_a, &dir_b).await;
+        let link_repo: Arc<dyn gyre_ports::SpecLinkRepository> =
+            Arc::new(MemSpecLinkRepository::default());
+
+        // Push 1 (repo A): accepted — no back-edge exists anywhere yet.
+        let ctx_a = TenantCycleContext {
+            link_repo: Some(&link_repo),
+            source_repo_id: Some("repo-a"),
+            source_workspace_id: Some("ws-1"),
+            workspaces: Some(&ws_ctx),
+            repos: Some(&repos_ctx),
+            tenant_id: Some(&tenant),
+            memberships: None,
+            principal: None,
+            kv: None,
+        };
+        check_spec_link_cycles(dir_a.path().to_str().unwrap(), &sha_a, Some(&ctx_a))
+            .await
+            .expect("first push (A depends_on @B/b) must be accepted");
+
+        // The accepted push lands: the post-receive sync stores A's edge in
+        // the durable graph with the target attributed to repo B.
+        let ledger: Arc<dyn gyre_ports::SpecLedgerRepository> =
+            Arc::new(MemSpecLedgerRepository::default());
+        let links_store: SpecLinksStore = Arc::new(Mutex::new(Vec::new()));
+        sync_spec_ledger(
+            &ledger,
+            &links_store,
+            &link_repo,
+            dir_a.path().to_str().unwrap(),
+            &sha_a,
+            1_700_000_000,
+            Some("repo-a"),
+            Some("ws-1"),
+            Some(&ws_ctx),
+            Some(&repos_ctx),
+            Some(&tenant),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+        let stored = link_repo.list_all().await.unwrap();
+        assert_eq!(stored.len(), 1, "push 1 must store exactly one link");
+        assert_eq!(
+            stored[0].target_repo_id.as_deref(),
+            Some("repo-b"),
+            "A's @B/system/b.md edge must be attributed to repo B: {:?}",
+            stored[0]
+        );
+
+        // Push 2 (repo B): manifest now adds B depends_on @A/system/a.md.
+        let sha_b2 = add_commit(
+            &dir_b,
+            &[(
+                "specs/manifest.yaml",
+                "version: 1\nspecs:\n  - path: system/b.md\n    title: B\n    owner: user:test\n    links:\n      - type: depends_on\n        target: \"@A/system/a.md\"\n",
+            )],
+        );
+        let ctx_b = TenantCycleContext {
+            link_repo: Some(&link_repo),
+            source_repo_id: Some("repo-b"),
+            source_workspace_id: Some("ws-1"),
+            workspaces: Some(&ws_ctx),
+            repos: Some(&repos_ctx),
+            tenant_id: Some(&tenant),
+            memberships: None,
+            principal: None,
+            kv: None,
+        };
+        let err = check_spec_link_cycles(dir_b.path().to_str().unwrap(), &sha_b2, Some(&ctx_b))
+            .await
+            .expect_err("second push (B depends_on @A/a) must be rejected: the cycle A→B→A now exists across two repos");
+        assert!(
+            err.contains("spec link cycle detected"),
+            "rejection must name the cycle: {err}"
+        );
+        assert!(
+            err.contains("repo-a:system/a.md") && err.contains("repo-b:system/b.md"),
+            "cycle message must name both cross-repo nodes with repo attribution: {err}"
+        );
+    }
+
+    /// AC 3 (companion): a references-typed B→A second push is accepted —
+    /// the detection was widened, not made indiscriminate.
+    #[tokio::test]
+    async fn tenant_cycle_references_back_edge_accepted() {
+        use crate::mem::MemSpecLinkRepository;
+
+        let (dir_b, _sha_b1) = make_test_repo(&[
+            (
+                "specs/manifest.yaml",
+                "version: 1\nspecs:\n  - path: system/b.md\n    title: B\n    owner: user:test\n",
+            ),
+            ("specs/system/b.md", "# B\n"),
+        ])
+        .await;
+        let (dir_a, _sha_a) = make_test_repo(&[
+            (
+                "specs/manifest.yaml",
+                "version: 1\nspecs:\n  - path: system/a.md\n    title: A\n    owner: user:test\n    links:\n      - type: depends_on\n        target: \"@B/system/b.md\"\n",
+            ),
+            ("specs/system/a.md", "# A\n"),
+        ])
+        .await;
+
+        let (ws_ctx, repos_ctx, tenant) = two_repo_workspace(&dir_a, &dir_b).await;
+        let link_repo: Arc<dyn gyre_ports::SpecLinkRepository> =
+            Arc::new(MemSpecLinkRepository::default());
+        // A's accepted push already landed: its edge is in the durable graph.
+        link_repo
+            .save(&stored_link(
+                "repo-a",
+                "system/a.md",
+                SpecLinkType::DependsOn,
+                Some("repo-b"),
+                "system/b.md",
+            ))
+            .await
+            .unwrap();
+
+        // B pushes a references-typed back-edge: references is excluded
+        // from cycle detection, so this push must be accepted.
+        let sha_b2 = add_commit(
+            &dir_b,
+            &[(
+                "specs/manifest.yaml",
+                "version: 1\nspecs:\n  - path: system/b.md\n    title: B\n    owner: user:test\n    links:\n      - type: references\n        target: \"@A/system/a.md\"\n",
+            )],
+        );
+        let ctx_b = TenantCycleContext {
+            link_repo: Some(&link_repo),
+            source_repo_id: Some("repo-b"),
+            source_workspace_id: Some("ws-1"),
+            workspaces: Some(&ws_ctx),
+            repos: Some(&repos_ctx),
+            tenant_id: Some(&tenant),
+            memberships: None,
+            principal: None,
+            kv: None,
+        };
+        check_spec_link_cycles(dir_b.path().to_str().unwrap(), &sha_b2, Some(&ctx_b))
+            .await
+            .expect("references-typed back-edge must be accepted (excluded from cycle detection)");
+    }
+
+    /// AC 3: conflicts_with bidirectionality across repos is not reported
+    /// as a cycle — neither stored conflicts_with edges nor the pushed
+    /// manifest's own.
+    #[tokio::test]
+    async fn tenant_cycle_conflicts_with_bidirectional_not_a_cycle() {
+        use crate::mem::MemSpecLinkRepository;
+
+        let (dir_b, _sha_b1) = make_test_repo(&[
+            (
+                "specs/manifest.yaml",
+                "version: 1\nspecs:\n  - path: system/b.md\n    title: B\n    owner: user:test\n",
+            ),
+            ("specs/system/b.md", "# B\n"),
+        ])
+        .await;
+        let (dir_a, _sha_a) = make_test_repo(&[
+            (
+                "specs/manifest.yaml",
+                "version: 1\nspecs:\n  - path: system/a.md\n    title: A\n    owner: user:test\n",
+            ),
+            ("specs/system/a.md", "# A\n"),
+        ])
+        .await;
+
+        let (ws_ctx, repos_ctx, tenant) = two_repo_workspace(&dir_a, &dir_b).await;
+        let link_repo: Arc<dyn gyre_ports::SpecLinkRepository> =
+            Arc::new(MemSpecLinkRepository::default());
+        // Stored conflicts_with edge A→B (repo-a → repo-b).
+        link_repo
+            .save(&stored_link(
+                "repo-a",
+                "system/a.md",
+                SpecLinkType::ConflictsWith,
+                Some("repo-b"),
+                "system/b.md",
+            ))
+            .await
+            .unwrap();
+
+        // B pushes the conflicts_with back-edge: conflicts_with is
+        // bidirectional by nature, not a cycle.
+        let sha_b2 = add_commit(
+            &dir_b,
+            &[(
+                "specs/manifest.yaml",
+                "version: 1\nspecs:\n  - path: system/b.md\n    title: B\n    owner: user:test\n    links:\n      - type: conflicts_with\n        target: \"@A/system/a.md\"\n",
+            )],
+        );
+        let ctx_b = TenantCycleContext {
+            link_repo: Some(&link_repo),
+            source_repo_id: Some("repo-b"),
+            source_workspace_id: Some("ws-1"),
+            workspaces: Some(&ws_ctx),
+            repos: Some(&repos_ctx),
+            tenant_id: Some(&tenant),
+            memberships: None,
+            principal: None,
+            kv: None,
+        };
+        check_spec_link_cycles(dir_b.path().to_str().unwrap(), &sha_b2, Some(&ctx_b))
+            .await
+            .expect("conflicts_with bidirectionality must not be reported as a cycle");
+    }
+
+    /// AC 2: single-manifest cycles are still rejected with the full
+    /// tenant context in scope — no regression from the widened graph.
+    #[tokio::test]
+    async fn tenant_cycle_single_manifest_cycle_rejected_with_tenant_context() {
+        use crate::mem::MemSpecLinkRepository;
+
+        let (dir_b, sha_b1) = make_test_repo(&[
+            (
+                "specs/manifest.yaml",
+                "version: 1\nspecs:\n  - path: system/a.md\n    title: A\n    owner: user:test\n    links:\n      - type: depends_on\n        target: system/b.md\n  - path: system/b.md\n    title: B\n    owner: user:test\n    links:\n      - type: depends_on\n        target: system/a.md\n",
+            ),
+            ("specs/system/a.md", "# A\n"),
+            ("specs/system/b.md", "# B\n"),
+        ])
+        .await;
+        let (dir_a, _sha_a) = make_test_repo(&[(
+            "specs/manifest.yaml",
+            "version: 1\nspecs:\n  - path: system/a.md\n    title: A\n    owner: user:test\n",
+        )])
+        .await;
+
+        let (ws_ctx, repos_ctx, tenant) = two_repo_workspace(&dir_a, &dir_b).await;
+        let link_repo: Arc<dyn gyre_ports::SpecLinkRepository> =
+            Arc::new(MemSpecLinkRepository::default());
+        let ctx = TenantCycleContext {
+            link_repo: Some(&link_repo),
+            source_repo_id: Some("repo-b"),
+            source_workspace_id: Some("ws-1"),
+            workspaces: Some(&ws_ctx),
+            repos: Some(&repos_ctx),
+            tenant_id: Some(&tenant),
+            memberships: None,
+            principal: None,
+            kv: None,
+        };
+        let err = check_spec_link_cycles(dir_b.path().to_str().unwrap(), &sha_b1, Some(&ctx))
+            .await
+            .expect_err("single-manifest cycle must still be rejected");
+        assert!(
+            err.contains("spec link cycle detected"),
+            "rejection must name the cycle: {err}"
+        );
+    }
+
+    /// Replace semantics: the pushed manifest's edges supersede the stored
+    /// rows for its (repo, source path) scope — a push that REMOVES the
+    /// cycle-participating edge is accepted even though the stale stored
+    /// row still carries it. Without the replacement scoping, counting the
+    /// pre-push row alongside the manifest's (empty) edge set would reject
+    /// the very push that fixes the graph.
+    #[tokio::test]
+    async fn tenant_cycle_push_removing_edge_accepted() {
+        use crate::mem::MemSpecLinkRepository;
+
+        let (dir_b, _sha_b1) = make_test_repo(&[
+            (
+                "specs/manifest.yaml",
+                "version: 1\nspecs:\n  - path: system/b.md\n    title: B\n    owner: user:test\n",
+            ),
+            ("specs/system/b.md", "# B\n"),
+        ])
+        .await;
+        // Repo A's initial manifest carries the A→B edge — the state that
+        // produced the legacy stored row below.
+        let (dir_a, _sha_a) = make_test_repo(&[
+            (
+                "specs/manifest.yaml",
+                "version: 1\nspecs:\n  - path: system/a.md\n    title: A\n    owner: user:test\n    links:\n      - type: depends_on\n        target: \"@B/system/b.md\"\n",
+            ),
+            ("specs/system/a.md", "# A\n"),
+        ])
+        .await;
+
+        let (ws_ctx, repos_ctx, tenant) = two_repo_workspace(&dir_a, &dir_b).await;
+        let link_repo: Arc<dyn gyre_ports::SpecLinkRepository> =
+            Arc::new(MemSpecLinkRepository::default());
+        // Legacy cyclic rows (recorded before the gate existed): A→B and B→A.
+        link_repo
+            .save(&stored_link(
+                "repo-a",
+                "system/a.md",
+                SpecLinkType::DependsOn,
+                Some("repo-b"),
+                "system/b.md",
+            ))
+            .await
+            .unwrap();
+        link_repo
+            .save(&stored_link(
+                "repo-b",
+                "system/b.md",
+                SpecLinkType::DependsOn,
+                Some("repo-a"),
+                "system/a.md",
+            ))
+            .await
+            .unwrap();
+
+        // Repo A pushes a manifest that drops its link entirely.
+        let sha_a2 = add_commit(
+            &dir_a,
+            &[(
+                "specs/manifest.yaml",
+                "version: 1\nspecs:\n  - path: system/a.md\n    title: A\n    owner: user:test\n",
+            )],
+        );
+        let ctx_a = TenantCycleContext {
+            link_repo: Some(&link_repo),
+            source_repo_id: Some("repo-a"),
+            source_workspace_id: Some("ws-1"),
+            workspaces: Some(&ws_ctx),
+            repos: Some(&repos_ctx),
+            tenant_id: Some(&tenant),
+            memberships: None,
+            principal: None,
+            kv: None,
+        };
+        check_spec_link_cycles(dir_a.path().to_str().unwrap(), &sha_a2, Some(&ctx_a))
+            .await
+            .expect("a push that removes the cycle-participating edge must be accepted");
+
+        // Negative control in the same fixture: re-declaring the edge while
+        // B's stored back-edge exists is still a cycle in the combined graph.
+        let sha_a3 = add_commit(
+            &dir_a,
+            &[(
+                "specs/manifest.yaml",
+                "version: 1\nspecs:\n  - path: system/a.md\n    title: A\n    owner: user:test\n    links:\n      - type: depends_on\n        target: \"@B/system/b.md\"\n",
+            )],
+        );
+        check_spec_link_cycles(dir_a.path().to_str().unwrap(), &sha_a3, Some(&ctx_a))
+            .await
+            .expect_err("re-declaring the edge while the stored back-edge exists must be rejected");
+    }
+
+    /// Unresolved cross-repo stored links have no attributable target node
+    /// (the sync stores them with target_repo_id NULL) — they must not be
+    /// silently re-attributed to the source repo, which would fabricate
+    /// self-repo edges and false cycles.
+    ///
+    /// Fixture: repo-a carries an unresolved cross-repo row
+    /// (system/c.md → @B/system/b.md, target never resolved) and a
+    /// same-repo row (system/b.md → system/c.md). The pushed manifest
+    /// declares neither source path, so both rows survive the push. The
+    /// only real edge is b→c — no cycle. If the unresolved row's target
+    /// were mis-attributed to repo-a, the graph would gain
+    /// c→(repo-a, b), closing the false cycle c→b→c.
+    #[tokio::test]
+    async fn tenant_cycle_unresolved_stored_edge_not_attributed() {
+        use crate::mem::MemSpecLinkRepository;
+
+        let (dir_b, _sha_b1) = make_test_repo(&[
+            (
+                "specs/manifest.yaml",
+                "version: 1\nspecs:\n  - path: system/b.md\n    title: B\n    owner: user:test\n",
+            ),
+            ("specs/system/b.md", "# B\n"),
+        ])
+        .await;
+        let (dir_a, sha_a) = make_test_repo(&[
+            (
+                "specs/manifest.yaml",
+                "version: 1\nspecs:\n  - path: system/a.md\n    title: A\n    owner: user:test\n",
+            ),
+            ("specs/system/a.md", "# A\n"),
+        ])
+        .await;
+
+        let (ws_ctx, repos_ctx, tenant) = two_repo_workspace(&dir_a, &dir_b).await;
+        let link_repo: Arc<dyn gyre_ports::SpecLinkRepository> =
+            Arc::new(MemSpecLinkRepository::default());
+        // Unresolved cross-repo row from repo A (target repo never resolved:
+        // stored with target_repo_id NULL and a composite display target).
+        let mut unresolved = stored_link(
+            "repo-a",
+            "system/c.md",
+            SpecLinkType::DependsOn,
+            None,
+            "system/b.md",
+        );
+        unresolved.status = "unresolved".to_string();
+        // Unresolved cross-repo rows keep their composite display target
+        // with target_repo_id NULL — the storage form the sync produces for
+        // a target that failed validation.
+        unresolved.target_display = Some("@B/system/b.md".to_string());
+        link_repo.save(&unresolved).await.unwrap();
+        // Same-repo back-edge b→c in repo A (target attributed to the
+        // source repo — the normal same-repo storage form).
+        link_repo
+            .save(&stored_link(
+                "repo-a",
+                "system/b.md",
+                SpecLinkType::DependsOn,
+                None,
+                "system/c.md",
+            ))
+            .await
+            .unwrap();
+
+        let ctx_a = TenantCycleContext {
+            link_repo: Some(&link_repo),
+            source_repo_id: Some("repo-a"),
+            source_workspace_id: Some("ws-1"),
+            workspaces: Some(&ws_ctx),
+            repos: Some(&repos_ctx),
+            tenant_id: Some(&tenant),
+            memberships: None,
+            principal: None,
+            kv: None,
+        };
+        check_spec_link_cycles(dir_a.path().to_str().unwrap(), &sha_a, Some(&ctx_a))
+            .await
+            .expect("an unresolved stored cross-repo row must not fabricate a cycle");
+    }
+
+    /// Review repair (round 3), deferred cross-repo cycle bypass: a push
+    /// whose cross-repo edge is stored UNRESOLVED (the target repo does
+    /// not declare the target path yet — the documented purpose of
+    /// unresolved links) is activated later by the staleness pass once the
+    /// target repo's manifest declares the path. The pending row's edge
+    /// therefore belongs in the combined cycle graph exactly when that
+    /// activation is deterministic — otherwise the A→B→A cycle arrives as
+    /// push 1 (unresolved B→A) + push 2 (A→B) + staleness activation, and
+    /// lands permanently in the forge graph with no push ever rejected.
+    /// Against the round-2 candidate this fails: the pending B→A row was
+    /// dropped from the graph, so the step-2 check returned Ok.
+    #[tokio::test]
+    async fn tenant_cycle_deferred_unresolved_back_edge_rejected() {
+        use crate::mem::{MemSpecLedgerRepository, MemSpecLinkRepository};
+
+        // Step 1 fixture: repo B declares system/b.md and links it to
+        // @A/system/a.md; repo A does NOT declare system/a.md yet, so the
+        // edge can only be stored unresolved (target_repo_id NULL).
+        let (dir_b, sha_b1) = make_test_repo(&[
+            (
+                "specs/manifest.yaml",
+                "version: 1\nspecs:\n  - path: system/b.md\n    title: B\n    owner: user:test\n    links:\n      - type: depends_on\n        target: \"@A/system/a.md\"\n",
+            ),
+            ("specs/system/b.md", "# B\n"),
+        ])
+        .await;
+        let (dir_a, _sha_a1) = make_test_repo(&[
+            (
+                "specs/manifest.yaml",
+                "version: 1\nspecs:\n  - path: system/other.md\n    title: Other\n    owner: user:test\n",
+            ),
+            ("specs/system/other.md", "# Other\n"),
+        ])
+        .await;
+
+        let (ws_ctx, repos_ctx, tenant) = two_repo_workspace(&dir_a, &dir_b).await;
+        let link_repo: Arc<dyn gyre_ports::SpecLinkRepository> =
+            Arc::new(MemSpecLinkRepository::default());
+
+        // Step 1 (push to repo B): the pushed edge is unresolved (repo A
+        // does not declare system/a.md), so the push is accepted — the
+        // documented purpose of unresolved links.
+        let ctx_b = TenantCycleContext {
+            link_repo: Some(&link_repo),
+            source_repo_id: Some("repo-b"),
+            source_workspace_id: Some("ws-1"),
+            workspaces: Some(&ws_ctx),
+            repos: Some(&repos_ctx),
+            tenant_id: Some(&tenant),
+            memberships: None,
+            principal: None,
+            kv: None,
+        };
+        check_spec_link_cycles(dir_b.path().to_str().unwrap(), &sha_b1, Some(&ctx_b))
+            .await
+            .expect("push 1 (unresolved B depends_on @A/a) must be accepted");
+
+        // The accepted push lands: the sync stores B's edge UNRESOLVED —
+        // the exact deferred state the staleness pass later activates.
+        let ledger: Arc<dyn gyre_ports::SpecLedgerRepository> =
+            Arc::new(MemSpecLedgerRepository::default());
+        let links_store: SpecLinksStore = Arc::new(Mutex::new(Vec::new()));
+        sync_spec_ledger(
+            &ledger,
+            &links_store,
+            &link_repo,
+            dir_b.path().to_str().unwrap(),
+            &sha_b1,
+            1_700_000_000,
+            Some("repo-b"),
+            Some("ws-1"),
+            Some(&ws_ctx),
+            Some(&repos_ctx),
+            Some(&tenant),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+        let stored = link_repo.list_all().await.unwrap();
+        assert_eq!(stored.len(), 1, "push 1 must store exactly one link");
+        assert_eq!(
+            stored[0].status, "unresolved",
+            "the deferred state must be reproduced: {:?}",
+            stored[0]
+        );
+        assert_eq!(stored[0].target_repo_id, None);
+        assert_eq!(stored[0].target_display.as_deref(), Some("@A/system/a.md"));
+
+        // Step 2 (push to repo A): the manifest now declares system/a.md
+        // and links it to @B/system/b.md. The pending B→A row activates
+        // deterministically given this push's own content (target repo =
+        // the pushed repo, path declared by the pushed manifest), so its
+        // edge is in the combined graph — the push must be rejected with
+        // the cycle named. Against the round-2 candidate this returns Ok
+        // and the staleness pass then lands the A→B→A cycle permanently.
+        let sha_a2 = add_commit(
+            &dir_a,
+            &[(
+                "specs/manifest.yaml",
+                "version: 1\nspecs:\n  - path: system/a.md\n    title: A\n    owner: user:test\n    links:\n      - type: depends_on\n        target: \"@B/system/b.md\"\n",
+            )],
+        );
+        let ctx_a = TenantCycleContext {
+            link_repo: Some(&link_repo),
+            source_repo_id: Some("repo-a"),
+            source_workspace_id: Some("ws-1"),
+            workspaces: Some(&ws_ctx),
+            repos: Some(&repos_ctx),
+            tenant_id: Some(&tenant),
+            memberships: None,
+            principal: None,
+            kv: None,
+        };
+        let err = check_spec_link_cycles(dir_a.path().to_str().unwrap(), &sha_a2, Some(&ctx_a))
+            .await
+            .expect_err(
+                "the step-2 push must be rejected: the pending B→A row activates deterministically \
+                 given this push, closing the A→B→A cycle",
+            );
+        assert!(
+            err.contains("spec link cycle detected"),
+            "rejection must name the cycle: {err}"
+        );
+        assert!(
+            err.contains("repo-a:system/a.md") && err.contains("repo-b:system/b.md"),
+            "cycle message must name both cross-repo nodes with repo attribution: {err}"
+        );
+    }
+
+    /// Test-only SpecLinkRepository whose `list_all` fails, modeling the
+    /// storage-error path (SQLite "database is locked" under concurrent
+    /// receive-packs, pool/disk failure) the cycle gate must FAIL CLOSED
+    /// on — never silently degrade to the pushed manifest's own edges.
+    struct FailingSpecLinkRepository;
+
+    #[async_trait::async_trait]
+    impl gyre_ports::SpecLinkRepository for FailingSpecLinkRepository {
+        async fn list_all(&self) -> anyhow::Result<Vec<SpecLinkEntry>> {
+            anyhow::bail!("storage unavailable (test)")
+        }
+        async fn replace_for_source(
+            &self,
+            _source_repo_id: &str,
+            _source_path: &str,
+            _links: &[SpecLinkEntry],
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn save(&self, _entry: &SpecLinkEntry) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn delete_by_source_repo(&self, _source_repo_id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Review repair (round 2), fail-closed: when the durable spec_links
+    /// table cannot be read, the push is REJECTED — the check must not
+    /// silently fall back to the pushed manifest's own edges (the
+    /// pre-task-293 scope). Against the round-1 code this fails: the
+    /// `if let Ok(stored)` guard skipped the stored half and the B→A push
+    /// returned Ok even though the A→B row was in the table.
+    #[tokio::test]
+    async fn tenant_cycle_list_all_error_fails_closed() {
+        // Repo A's edge A→B is already stored (its push landed earlier).
+        let (dir_b, _sha_b1) = make_test_repo(&[
+            (
+                "specs/manifest.yaml",
+                "version: 1\nspecs:\n  - path: system/b.md\n    title: B\n    owner: user:test\n",
+            ),
+            ("specs/system/b.md", "# B\n"),
+        ])
+        .await;
+        let (dir_a, _sha_a) = make_test_repo(&[(
+            "specs/manifest.yaml",
+            "version: 1\nspecs:\n  - path: system/a.md\n    title: A\n    owner: user:test\n",
+        )])
+        .await;
+
+        let (ws_ctx, repos_ctx, tenant) = two_repo_workspace(&dir_a, &dir_b).await;
+        // The storage backend errors on read — the exact state the round-1
+        // code silently ignored.
+        let link_repo: Arc<dyn gyre_ports::SpecLinkRepository> =
+            Arc::new(FailingSpecLinkRepository);
+
+        // Repo B pushes the back-edge B depends_on @A/a.
+        let sha_b2 = add_commit(
+            &dir_b,
+            &[(
+                "specs/manifest.yaml",
+                "version: 1\nspecs:\n  - path: system/b.md\n    title: B\n    owner: user:test\n    links:\n      - type: depends_on\n        target: \"@A/system/a.md\"\n",
+            )],
+        );
+        let ctx_b = TenantCycleContext {
+            link_repo: Some(&link_repo),
+            source_repo_id: Some("repo-b"),
+            source_workspace_id: Some("ws-1"),
+            workspaces: Some(&ws_ctx),
+            repos: Some(&repos_ctx),
+            tenant_id: Some(&tenant),
+            memberships: None,
+            principal: None,
+            kv: None,
+        };
+        let err = check_spec_link_cycles(dir_b.path().to_str().unwrap(), &sha_b2, Some(&ctx_b))
+            .await
+            .expect_err(
+                "a storage error reading the durable graph must reject the push (fail closed), \
+                 not silently degrade to the manifest's own edges",
+            );
+        assert!(
+            err.contains("spec link cycle check failed"),
+            "fail-closed rejection must say the graph could not be read: {err}"
+        );
+    }
+
+    /// Review repair (round 2), push-scoped detection: a stored-only cycle
+    /// (legacy pre-gate rows — the exact state the task's discovery
+    /// evidence describes, and equally reachable via the ungated
+    /// mirror-sync paths) must NOT block a push that creates no cycle.
+    /// Against the round-1 code this fails: detect_graph_cycles scanned
+    /// every node of the combined graph, so any manifest push was rejected
+    /// while a stored cycle existed anywhere. The companion assertion
+    /// (re-declaring a cycle-participating edge in the same fixture is
+    /// still rejected) proves the gate was scoped, not disabled.
+    #[tokio::test]
+    async fn tenant_cycle_legacy_stored_cycle_does_not_block_unrelated_push() {
+        use crate::mem::{MemRepoRepository, MemSpecLinkRepository, MemWorkspaceRepository};
+
+        let (dir_b, _sha_b1) = make_test_repo(&[
+            (
+                "specs/manifest.yaml",
+                "version: 1\nspecs:\n  - path: system/b.md\n    title: B\n    owner: user:test\n",
+            ),
+            ("specs/system/b.md", "# B\n"),
+        ])
+        .await;
+        let (dir_a, _sha_a) = make_test_repo(&[(
+            "specs/manifest.yaml",
+            "version: 1\nspecs:\n  - path: system/a.md\n    title: A\n    owner: user:test\n",
+        )])
+        .await;
+        // Repo C: unrelated to the stored cycle, pushing a real edge of
+        // its own (C depends_on @A/a — acyclic).
+        let (dir_c, sha_c1) = make_test_repo(&[
+            (
+                "specs/manifest.yaml",
+                "version: 1\nspecs:\n  - path: system/c.md\n    title: C\n    owner: user:test\n    links:\n      - type: depends_on\n        target: \"@A/system/a.md\"\n",
+            ),
+        ])
+        .await;
+
+        // Three-repo workspace fixture (repo C must resolve @A/... too).
+        let ws_ctx: Arc<dyn gyre_ports::WorkspaceRepository> =
+            Arc::new(MemWorkspaceRepository::default());
+        ws_ctx
+            .create(&make_workspace_in_tenant("ws-1", "tenant-293", "ws-one"))
+            .await
+            .unwrap();
+        let repos_ctx: Arc<dyn gyre_ports::RepoRepository> = Arc::new(MemRepoRepository::default());
+        for (id, name, dir) in [
+            ("repo-a", "A", &dir_a),
+            ("repo-b", "B", &dir_b),
+            ("repo-c", "C", &dir_c),
+        ] {
+            repos_ctx
+                .create(&make_repo_entity(
+                    id,
+                    name,
+                    "ws-1",
+                    dir.path().to_str().unwrap(),
+                ))
+                .await
+                .unwrap();
+        }
+        let tenant = gyre_common::Id::new("tenant-293");
+
+        let link_repo: Arc<dyn gyre_ports::SpecLinkRepository> =
+            Arc::new(MemSpecLinkRepository::default());
+        // Legacy stored cycle A↔B (recorded before the gate existed, or
+        // mirror-synced past it): both directions in the durable table.
+        link_repo
+            .save(&stored_link(
+                "repo-a",
+                "system/a.md",
+                SpecLinkType::DependsOn,
+                Some("repo-b"),
+                "system/b.md",
+            ))
+            .await
+            .unwrap();
+        link_repo
+            .save(&stored_link(
+                "repo-b",
+                "system/b.md",
+                SpecLinkType::DependsOn,
+                Some("repo-a"),
+                "system/a.md",
+            ))
+            .await
+            .unwrap();
+
+        // Repo C pushes its own acyclic edge while the legacy cycle sits in
+        // the stored graph: the push creates no cycle, so it is accepted.
+        let ctx_c = TenantCycleContext {
+            link_repo: Some(&link_repo),
+            source_repo_id: Some("repo-c"),
+            source_workspace_id: Some("ws-1"),
+            workspaces: Some(&ws_ctx),
+            repos: Some(&repos_ctx),
+            tenant_id: Some(&tenant),
+            memberships: None,
+            principal: None,
+            kv: None,
+        };
+        check_spec_link_cycles(dir_c.path().to_str().unwrap(), &sha_c1, Some(&ctx_c))
+            .await
+            .expect("a stored-only legacy cycle must not block a push that creates no cycle");
+
+        // Companion: a push that DOES contribute an edge participating in
+        // the stored cycle is still rejected — the gate was scoped, not
+        // disabled. Repo A re-declares A depends_on @B/b; the stored B→A
+        // back-edge closes the cycle through the pushed edge.
+        let sha_a2 = add_commit(
+            &dir_a,
+            &[(
+                "specs/manifest.yaml",
+                "version: 1\nspecs:\n  - path: system/a.md\n    title: A\n    owner: user:test\n    links:\n      - type: depends_on\n        target: \"@B/system/b.md\"\n",
+            )],
+        );
+        let ctx_a = TenantCycleContext {
+            link_repo: Some(&link_repo),
+            source_repo_id: Some("repo-a"),
+            source_workspace_id: Some("ws-1"),
+            workspaces: Some(&ws_ctx),
+            repos: Some(&repos_ctx),
+            tenant_id: Some(&tenant),
+            memberships: None,
+            principal: None,
+            kv: None,
+        };
+        let err = check_spec_link_cycles(dir_a.path().to_str().unwrap(), &sha_a2, Some(&ctx_a))
+            .await
+            .expect_err("a push contributing a cycle-participating edge must still be rejected");
+        assert!(
+            err.contains("spec link cycle detected"),
+            "rejection must name the cycle: {err}"
         );
     }
 }

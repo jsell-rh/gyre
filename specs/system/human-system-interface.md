@@ -1,6 +1,8 @@
 # Human-System Interface
 
 > This spec defines how humans interact with a fully autonomous software development system. It **supersedes `ui-journeys.md`** (which is deprecated — its navigation model, journeys, and keyboard shortcuts are replaced by this spec). It extends `system-explorer.md` with concrete interaction patterns for trust calibration, agent interrogation, scoped communication, and LLM-driven architectural exploration.
+>
+> **§1 (Navigation Model) is superseded by `ui-navigation.md`** (two-mode model: workspace home + repo horizontal tabs), which §1.3 below records for the stable-sidebar subsection, including the 2026-11-16 amendment (decision `16871182b1370b61693fc691`) toward a context-dependent collapsible navigation rail (`ui-navigation.md` §1a). All other sections of this spec remain valid.
 
 ## The Novel Problem
 
@@ -19,9 +21,32 @@ Every surface in this spec exists to serve one of those five activities. If it d
 
 ## 1. Navigation Model
 
-### Stable Sidebar, Adaptive Content
+> **Superseded (amended 2026-11-10, task-082 re-dispatch):** The navigation model
+> in this section — the permanent six-item sidebar, the scope-adaptive content
+> matrix, and the breadcrumb as primary scope control — is **superseded by
+> [`ui-navigation.md`](ui-navigation.md)** (its header note and Principle 5 "No
+> sidebar", §9 "From HSI §1"). The active navigation contract is the
+> workspace-home + repo-tabs shell defined there; the active shell requirement is
+> tracked in the ui-navigation coverage matrix. Sections §2-§12 of this spec
+> remain valid. The six-item sidebar was implemented by task-082 (commits
+> `d99ace7b`..`79323318`, reviewed through R10) and subsequently removed by
+> task-210's 2026-10-09 navigation binding correction, which resolved the
+> recorded ui-navigation coverage row-3 contradiction in favor of the replacement
+> model. The text below is retained as the historical record.
 
-The sidebar is **permanent and unchanging** regardless of scope. Users build muscle memory for nav item positions. The *content area* adapts to the current scope (tenant, workspace, repo), not the sidebar.
+### Stable Sidebar, Adaptive Content (superseded — see ui-navigation.md)
+
+> **Amendment (2026-11-10, task-082 re-dispatch):** This subsection is obsolete.
+> `ui-navigation.md` Principle 5 mandates "No sidebar"; the shell is a top bar +
+> status bar with a workspace-home dashboard and repo-mode horizontal tabs.
+> Task-082 is the historical implementation of this text, not an instruction to
+> reintroduce the sidebar. Historical text follows.
+
+> **SUPERSEDED — do not implement.** The permanent six-item sidebar described below is no longer the navigation contract. It was superseded by `ui-navigation.md` (two-mode model: workspace home dashboard + repo horizontal tabs, Principle 5 "no permanent sidebar"), and then — by operator decision `16871182b1370b61693fc691` (2026-11-16, option_c, recorded by jsell; see `specs/tasks/task-246.md`) — amended toward a **context-dependent collapsible navigation rail** on navigation-heavy screens. The current requirement is `ui-navigation.md` §1a (Collapsible Navigation Rail): optional, scope-labelled, per-mode item sets with stable ordering, collapsed by default to preserve canvas/editor space, and a drawer on narrow viewports. The historical text is preserved below for intent only.
+
+**Historical text (superseded — preserved for intent, not for implementation):**
+
+The sidebar was specified as **permanent and unchanging** regardless of scope. Users build muscle memory for nav item positions. The *content area* adapts to the current scope (tenant, workspace, repo), not the sidebar.
 
 ```
 Sidebar (always visible, always these items):
@@ -36,6 +61,8 @@ Sidebar (always visible, always these items):
 Six items. That's it.
 
 **Why not scope-dependent sidebar?** Changing the sidebar when the user navigates between scopes is disorienting — the same navigation item moves position or disappears. Notion, Backstage, and VS Code all keep the primary nav stable. The content area is where scope manifests.
+
+*(Superseding note: the 2026-11-16 operator decision accepted the muscle-memory argument in scoped form — stable ordering **within each mode** of `ui-navigation.md` §1a — while rejecting the fixed global menu, which the two-mode rework had shown to be scope-ambiguous.)*
 
 ### Scope Indicator (Breadcrumb)
 
@@ -239,7 +266,7 @@ This policy is **immutable** — it exists at every trust level, including Custo
 
 The Custom trust editor grays out immutable policies with tooltip: "This policy cannot be removed or overridden." Per `platform-model.md` §2, agents cannot approve specs that define their own behavior.
 
-Budget warnings (priority 7 in the Inbox) remain visible at Autonomous trust because `platform-model.md` §5 defines budget exhaustion as requiring human action.
+Budget warnings (High priority, rank 4 in the Inbox per the unified notification taxonomy in `user-management.md` §Notification Entity) remain visible at Autonomous trust because `platform-model.md` §5 defines budget exhaustion as requiring human action.
 
 **Custom:** opens the ABAC policy editor within the **Admin** view at workspace scope (a new "Policies" tab alongside "Workspace settings, budget, trust level, teams"). The editor queries `GET /api/v1/policies?scope=Workspace&scope_id=<workspace_id>` to list policies for this workspace. The editor uses the Full-Width layout (per `ui-layout.md` §2) with three sections: (1) a policy list table grouped by prefix (`builtin:` / `trust:` / user-created), (2) a visual condition builder panel (form-based, not raw YAML) for creating/editing policies, (3) a dry-run simulator panel where users can test "would this request be allowed?" against the current policy set. Immutable policies are grayed out with tooltip. Layout details follow the standard Full-Width pattern — no custom layout needed.
 
@@ -930,7 +957,7 @@ When an agent completes a task (`agent.complete`), it produces a structured summ
 |---|---|---|
 | 1 | Agent clarification | Synchronous in `agent.complete` handler (reliability-critical) |
 | 2 | Spec pending approval | Synchronous in `specs/save` handler (human spec-edit MRs). For agent-authored specs: the `agent.complete` handler creates the notification when the agent's MR enters the merge queue with a pending spec approval gate (the gate evaluation detects the unapproved spec and creates the notification). Note: spec lifecycle's default-branch push handler creates *approval-invalidation* notifications, not *pending-approval* notifications. |
-| 3 | Gate failure | Synchronous in gate evaluation handler |
+| 3 | Gate failure | Via `MessageConsumer` consuming `GateFailure` events (amended by message-bus.md §Relationship to Notifications — the gate executor emits the `GateFailure` Event-tier message; the notification bridge derives the priority-3 Inbox item from it. Single creation path, off the gate hot path.) |
 | 4 | Cross-workspace spec change | Synchronous in spec lifecycle push handler (the push hook must query `spec_links` for inbound cross-workspace links and create notifications for dependent workspace members — amend `spec-lifecycle.md` to add this notification step alongside the existing task creation). One notification is created per dependent repo (the one that has the inbound link), so each repo-scope Inbox shows its own notification. The notification's `repo_id` is set to the dependent repo, not the changed repo. |
 | 5 | Conflicting interpretations | Synchronous in post-extraction divergence check |
 | 6 | Meta-spec drift | Via `MessageConsumer` consuming `ReconciliationCompleted` events |
@@ -1403,10 +1430,16 @@ The User Profile is a **lean settings + judgment ledger** view. It is NOT an act
 **Identity & Access**
 - Display name, avatar, email, timezone, locale (editable via `PUT /api/v1/users/me`)
 - API tokens for CLI and MCP access (create, revoke, list — `POST /api/v1/users/me/tokens`, `DELETE /api/v1/users/me/tokens/:id`, `GET /api/v1/users/me/tokens`)
-- Auth provider info (OIDC issuer, last login — read-only)
+- Auth provider info (OIDC issuer, last login — read-only, served by `GET /api/v1/users/me` as
+  `oidc_issuer` / `last_login_at`). Both are recorded by the server during OIDC/JWT authentication —
+  the issuer is the verified `iss` claim, `last_login_at` the most recent successful OIDC
+  authentication, written at most once per debounce window so per-request token validation does not
+  write a row per request. Never client-editable: `PUT /api/v1/users/me` has no field for either.
+  Users who authenticated only by API key have `null` for both.
 
 **Notification Preferences**
-- Per-notification-type toggles (enable/disable each of the 10 `NotificationType` variants)
+- Per-notification-type toggles (enable/disable any `NotificationType` variant; the stored
+  `notification_type` is the canonical `NotificationType::as_str()` name)
 - Delivery channel preference (in-app only for now; email/webhook are future extension points)
 - Stored in a `user_notification_preferences` table:
 ```sql
@@ -1417,7 +1450,16 @@ CREATE TABLE user_notification_preferences (
     PRIMARY KEY (user_id, notification_type)
 );
 ```
-- The Inbox query filters out disabled notification types before returning results. Default: all enabled.
+- The Inbox query filters out disabled notification types before returning results. Default: all
+  enabled (no preference row = enabled; only an explicit `enabled = 0` disables).
+  The filter is applied in the storage query, not after pagination, so it holds for **both** the
+  inbox list (`GET /api/v1/users/me/notifications`) and the unread badge
+  (`GET /api/v1/users/me/notifications/count`) — a disabled type must never inflate the badge — and
+  for the MCP inbox tool. Background jobs that scan the inbox for de-duplication are exempt: they
+  must see every notification regardless of the recipient's toggles.
+- `PUT /api/v1/users/me/notification-preferences` MUST reject a `notification_type` that
+  `NotificationType::parse` does not recognize (400). A stored typo would never match a real
+  notification, silently making the toggle — and the inbox filter it drives — inert.
 
 **Workspace Memberships**
 - List of workspaces the user belongs to, with their role in each (Owner, Admin, Developer, Viewer)
@@ -1431,7 +1473,33 @@ CREATE TABLE user_notification_preferences (
   - Trust level changes (from → to, workspace)
   - Meta-spec edits published (persona/principle/standard, workspace)
 - This is the human's **compounding asset** — the record of every decision that shaped the system
-- Endpoint: `GET /api/v1/users/me/judgments` — returns a paginated, reverse-chronological list aggregated from existing tables (spec_approvals, gate overrides, workspace audit log, meta-spec commit history). Query params: `?workspace_id=`, `?type=` (approval/gate/trust/meta-spec), `?since=`, `?limit=`, `?offset=`
+- Endpoint: `GET /api/v1/users/me/judgments` — returns a paginated, reverse-chronological list
+  aggregated from the sources below. Query params: `?workspace_id=` (**filters** the result to that
+  workspace — an entry with no known workspace is excluded when it is set), `?type=`
+  (`approval` / `rejection` / `gate` / `trust` / `meta-spec` — exactly the `JudgmentType` wire
+  strings), `?since=`, `?limit=`, `?offset=`. `limit`/`offset` apply to the merged, sorted stream,
+  never per source.
+- Sources (each category must have a real writer, or the category is inert):
+  |Category|Table|Human attribution|Workspace attribution|
+  |---|---|---|---|
+  |`approval`|`spec_approvals` where `approved_at` is set (active)|`approver_id` — the approver's **canonical user Id** (what `/users/me` resolves for the caller), written by `POST /specs/:path/approve`|`spec_ledger_entries.workspace_id` joined on `spec_approvals.spec_path = spec_ledger_entries.path`|
+  |`rejection`|`spec_approvals` where `rejected_at`/`revoked_at` is set|`rejected_by`/`revoked_by` — the canonical user Id of the human who declined or withdrew it (written by `POST /specs/:path/reject` and `POST /specs/:path/revoke`); a rejection is attributed to the declining human, NOT to the original approver whose approval they overrode|same join as `approval`|
+  |`gate`|`audit_events` where `event_type = 'gate_override'`|`user_id`|`workspace_id` column|
+  |`trust`|`audit_events` where `event_type = 'trust_change'`|`user_id`|`workspace_id` column|
+  |`meta-spec`|`audit_events` where `event_type = 'meta_spec_publish'`|`user_id`|`workspace_id` column (from the meta-spec's own `scope`/`scope_id`)|
+- `audit_events.agent_id` names the *agent* an event is about and `spec_approval_events.approver_id`
+  carries the KeyBinding identity key (`user:<display name>`), so neither is the human attribution
+  key for this ledger; `audit_events.user_id` is the authenticated human. For the same reason the
+  approve/reject/revoke endpoints write the **canonical user Id** (not the KeyBinding label) into
+  `spec_approvals.approver_id`/`rejected_by`/`revoked_by` — the label and the user Id are different
+  strings for JWT/API-key users, and mixing them makes the writer's rows invisible to the reader.
+  Agents and the global system token have no user Id and keep their `agent:<id>`/`user:<name>` labels
+  (they are not human ledger subjects).
+- A gate override is recorded when a human approves an MR whose gate results contain a failure: one
+  `gate_override` event per failed gate, carrying `mr_id`, the gate type, and the status transition.
+  A trust change is recorded by `PUT /api/v1/workspaces/:id` on the successful transition only,
+  carrying `from`/`to`. A meta-spec publish is recorded on registry create and update, carrying
+  `kind`, `name`, `version`, `content_hash`.
 - ABAC: per-handler auth (user-scoped, like `/users/me/notifications`)
 
 ### What the Profile Is NOT
@@ -1453,7 +1521,7 @@ CREATE TABLE user_notification_preferences (
 | `hierarchy-enforcement.md` §4 ABAC-exempt additions | Add `GET /api/v1/trace-spans/:span_id/payload` to the ABAC-exempt list (per-handler auth — resolves MR → workspace from span's gate run). |
 | `hierarchy-enforcement.md` §4 | ABAC bypass must match by `subject.id == "gyre-system-token"`, not by `subject.type == "system"`. Internal services (merge processor) are `system` type but subject to ABAC. Add to ABAC-exempt endpoint list (per-handler auth, like git HTTP): `GET /api/v1/conversations/:sha`, `GET /api/v1/users/me/notifications`, `POST /api/v1/notifications/:id/dismiss`, `POST /api/v1/notifications/:id/resolve`, `GET /api/v1/users/me/judgments`, `GET /api/v1/users/me/tokens`, `POST /api/v1/users/me/tokens`, `DELETE /api/v1/users/me/tokens/:id`. Add `user_workspace_state` and `user_notification_preferences` to `check-tenant-filter.sh` skip list. |
 | `api-conventions.md` §6 | Acknowledge per-handler auth as a third authorization mechanism alongside "no auth (public)" and "ABAC middleware." Per-handler auth is used for endpoints where the resource key is not a UUID (e.g., conversations by SHA) or where the resource is implicitly the authenticated user (e.g., `/users/me/*`). These endpoints are listed in the ABAC-exempt endpoint list in `hierarchy-enforcement.md` §4. |
-| `message-bus.md` `MessageKind` | Add `AgentCompleted` (Event tier, server-only, payload schema defined in §4 of this spec). Add `ReconciliationCompleted` (Event tier, server-only — migrated from domain event in `meta-spec-reconciliation.md` §11; consumed by `MessageConsumer` to create priority-6 Inbox notifications). Extend `SpecChanged` payload with optional `dependent_workspace_id` and `source_workspace_slug` fields for cross-workspace notifications — the same kind reused with extra context, no new kind needed. |
+| `message-bus.md` `MessageKind` | Add `AgentCompleted` (Event tier, server-only, payload schema defined in §4 of this spec). Add `ReconciliationCompleted` (Event tier, server-only — migrated from domain event in `meta-spec-reconciliation.md` §11; consumed by `MessageConsumer` to create priority-6 Inbox notifications). Extend `SpecChanged` payload with optional `dependent_workspace_id` and `source_workspace_slug` fields for cross-workspace notifications — the same kind reused with extra context, no new kind needed. `GateFailure` (already Event tier) is consumed by `MessageConsumer` to create priority-3 Inbox notifications — the gate executor's synchronous p3 creation path is removed (single creation path via the notification bridge, per message-bus.md §Relationship to Notifications). |
 | `abac-policy-engine.md` §"Resource attributes" | Add `explorer_view` (attributes: `workspace_id`, `created_by`), `message` (attributes: `workspace_id`, `to_agent_id`), and `conversation` (attributes: `workspace_id`, `agent_id`) to the resource type list. The `explorer-views/generate` endpoint uses `resource_type: "explorer_view"`. |
 | `abac-policy-engine.md` §"Action attributes" | Add `generate` action (used by `explorer-views/generate`, `specs/assist`, and `prompts/save` endpoints — distinct from `write` to allow policies that permit LLM generation while restricting CRUD). Applies to resource types: `explorer_view`, `spec`. |
 | `abac-policy-engine.md` §"Built-In Policies" or `hierarchy-enforcement.md` §"Built-In Policies" | Add `developer-generate-access` (Allow, priority 800): Developer and Admin roles can perform `generate` action on `explorer_view` and `spec` resource types. Without this policy, `default-deny` blocks all LLM generation and prompt editing. |

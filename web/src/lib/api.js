@@ -33,12 +33,16 @@ async function request(path, options = {}) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 15000);
   try {
-    const { headers: customHeaders, ...restOptions } = options;
+    // skipAuth: magic-link token flows — the 256-bit token in the URL is
+    // the auth factor, and a logged-in session of a DIFFERENT user must
+    // not be presented on those calls (the server rejects a mismatched
+    // authenticated identity, and an anonymous accept is the normal path).
+    const { headers: customHeaders, skipAuth = false, ...restOptions } = options;
     const res = await fetch(`${API_BASE}${path}`, {
       ...restOptions,
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${getAuthToken()}`,
+        ...(skipAuth ? {} : { 'Authorization': `Bearer ${getAuthToken()}` }),
         ...customHeaders,
       },
       signal: controller.signal,
@@ -50,7 +54,12 @@ async function request(path, options = {}) {
       if (res.status === 401) {
         throw new Error('Session expired — please re-authenticate.');
       }
-      throw new Error(`API ${path}: ${res.status} ${res.statusText}`);
+      const err = new Error(`API ${path}: ${res.status} ${res.statusText}`);
+      // Attach the HTTP status so callers can branch on it (e.g. the
+      // invitation accept page's 404 not-found state) instead of
+      // parsing the message string.
+      err.status = res.status;
+      throw err;
     }
     if (res.status === 204) return null;
     return res.json();
@@ -105,6 +114,15 @@ export const api = {
   mergeRequests: (params = {}) => {
     const qs = new URLSearchParams(params).toString();
     return request(`/merge-requests${qs ? '?' + qs : ''}`);
+  },
+  // Workspace-scoped MR list (GET /workspaces/:id/merge-requests). Supports
+  // `has_trace` + `limit` (HSI §3 MR ID discovery for flow-layout
+  // trace_source) — the has_trace filter uses the same get_by_mr lookup
+  // GET /merge-requests/:id/trace serves, so the list cannot drift from
+  // what the trace endpoint returns.
+  workspaceMergeRequests: (workspaceId, params = {}) => {
+    const qs = new URLSearchParams(params).toString();
+    return request(`/workspaces/${workspaceId}/merge-requests${qs ? '?' + qs : ''}`);
   },
   mergeRequest: (id) => request(`/merge-requests/${id}`),
   mrStatus: (id, status) => request(`/merge-requests/${id}/status`, { method: 'PUT', body: JSON.stringify({ status }) }),
@@ -316,6 +334,8 @@ export const api = {
   repoGates: (id) => request(`/repos/${id}/gates`),
   createRepoGate: (id, data) =>
     request(`/repos/${id}/gates`, { method: 'POST', body: JSON.stringify(data) }),
+  updateRepoGate: (id, gateId, data) =>
+    request(`/repos/${id}/gates/${gateId}`, { method: 'PUT', body: JSON.stringify(data) }),
   deleteRepoGate: (id, gateId) =>
     request(`/repos/${id}/gates/${gateId}`, { method: 'DELETE' }),
   repoPushGates: (id) => request(`/repos/${id}/push-gates`),
@@ -441,17 +461,17 @@ export const api = {
   // Meta-spec registry (M32 / agent-runtime §2)
   getMetaSpecs: (params = {}) => {
     const qs = new URLSearchParams(params).toString();
-    return request(`/meta-specs-registry${qs ? '?' + qs : ''}`);
+    return request(`/meta-specs${qs ? '?' + qs : ''}`);
   },
-  getMetaSpec: (id) => request(`/meta-specs-registry/${id}`),
+  getMetaSpec: (id) => request(`/meta-specs/${id}`),
   createMetaSpec: (data) =>
-    request('/meta-specs-registry', { method: 'POST', body: JSON.stringify(data) }),
+    request('/meta-specs', { method: 'POST', body: JSON.stringify(data) }),
   updateMetaSpec: (id, data) =>
-    request(`/meta-specs-registry/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+    request(`/meta-specs/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
   deleteMetaSpec: (id) =>
-    request(`/meta-specs-registry/${id}`, { method: 'DELETE' }),
-  getMetaSpecVersions: (id) => request(`/meta-specs-registry/${id}/versions`),
-  getMetaSpecVersion: (id, ver) => request(`/meta-specs-registry/${id}/versions/${ver}`),
+    request(`/meta-specs/${id}`, { method: 'DELETE' }),
+  getMetaSpecVersions: (id) => request(`/meta-specs/${id}/versions`),
+  getMetaSpecVersion: (id, ver) => request(`/meta-specs/${id}/versions/${ver}`),
   getMetaSpecBlastRadius: (path) => request(`/meta-specs/${encodeURIComponent(path)}/blast-radius`),
   getWorkspaceMetaSpecSet: (id) => request(`/workspaces/${id}/meta-spec-set`),
   setWorkspaceMetaSpecSet: (id, data) =>
@@ -523,6 +543,63 @@ export const api = {
     request(`/workspaces/${id}/members`, { method: 'POST', body: JSON.stringify(data) }),
   removeWorkspaceMember: (id, userId) =>
     request(`/workspaces/${id}/members/${userId}`, { method: 'DELETE' }),
+  // Workspace membership management (user-management.md §API > Workspace
+  // Membership): role change incl. ownership transfer. Invitation paths
+  // are task-110's WorkspaceInvitation model: invite, listing (status +
+  // expiry), authenticated invitee accept/decline, and revoke.
+  updateMemberRole: (id, userId, { role, reason } = {}) =>
+    request(`/workspaces/${id}/members/${userId}/role`, { method: 'PUT', body: JSON.stringify({ role, reason }) }),
+  inviteWorkspaceMember: (id, data) =>
+    request(`/workspaces/${id}/invite`, { method: 'POST', body: JSON.stringify(data) }),
+  workspaceInvitations: (id) => request(`/workspaces/${id}/invitations`),
+  // Invitee-facing pending workspace invitations (task-110):
+  // { invitations: [{ id, workspace_id, user_id, role, status,
+  // expires_at, created_at, accepted_at }] }
+  myInvitations: () => request('/users/me/invitations'),
+  acceptWorkspaceInvitation: (id) =>
+    request(`/workspaces/${id}/invite/accept`, { method: 'POST' }),
+  declineWorkspaceInvitation: (id) =>
+    request(`/workspaces/${id}/invite/decline`, { method: 'POST' }),
+  revokeWorkspaceInvitation: (id, invitationId) =>
+    request(`/workspaces/${id}/invitations/${invitationId}`, { method: 'DELETE' }),
+  // Tenant invitation management (user-management.md §UI Pages > Tenant
+  // Invitation Management; task-110 endpoints): TenantAdmin-gated list
+  // (status filter), single + bulk invite (create responses carry the
+  // one-time magic-link invite_url), and revoke.
+  tenantInvitations: (status) =>
+    request(`/tenant/invitations${status ? `?status=${encodeURIComponent(status)}` : ''}`),
+  inviteToTenant: (data) =>
+    request('/tenant/invite', { method: 'POST', body: JSON.stringify(data) }),
+  bulkInviteToTenant: (data) =>
+    request('/tenant/invite/bulk', { method: 'POST', body: JSON.stringify(data) }),
+  revokeTenantInvitation: (id) =>
+    request(`/tenant/invitations/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  // Magic-link token surface for the /invite/{token} accept page
+  // (task-110): the 256-bit token in the URL is the auth factor, so these
+  // skip the Bearer header. The preview is read-only (kind, status,
+  // invited email/role, workspace names); accept returns the local-mode
+  // account's first API key exactly once.
+  invitationPreview: (token) =>
+    request(`/invite/${encodeURIComponent(token)}/preview`, { skipAuth: true }),
+  acceptTenantInvitationByToken: (token, data = {}) =>
+    request(`/invite/${encodeURIComponent(token)}/accept`, { method: 'POST', body: JSON.stringify(data), skipAuth: true }),
+  declineTenantInvitationByToken: (token) =>
+    request(`/invite/${encodeURIComponent(token)}/decline`, { method: 'POST', body: JSON.stringify({}), skipAuth: true }),
+  acceptWorkspaceInvitationByToken: (token) =>
+    request(`/workspaces/invitations/${encodeURIComponent(token)}/accept`, { method: 'POST', skipAuth: true }),
+  declineWorkspaceInvitationByToken: (token) =>
+    request(`/workspaces/invitations/${encodeURIComponent(token)}/decline`, { method: 'POST', skipAuth: true }),
+  // Teams (user-management.md §API > Teams, task-122/125)
+  createTeam: (id, data) =>
+    request(`/workspaces/${id}/teams`, { method: 'POST', body: JSON.stringify(data) }),
+  updateTeam: (id, teamId, data) =>
+    request(`/workspaces/${id}/teams/${teamId}`, { method: 'PUT', body: JSON.stringify(data) }),
+  deleteTeam: (id, teamId) =>
+    request(`/workspaces/${id}/teams/${teamId}`, { method: 'DELETE' }),
+  addTeamMember: (id, teamId, userId) =>
+    request(`/workspaces/${id}/teams/${teamId}/members`, { method: 'POST', body: JSON.stringify({ user_id: userId }) }),
+  removeTeamMember: (id, teamId, userId) =>
+    request(`/workspaces/${id}/teams/${teamId}/members/${userId}`, { method: 'DELETE' }),
   // Personas (M22.5)
   personas: () => request('/personas'),
   persona: (id) => request(`/personas/${id}`),
@@ -551,6 +628,35 @@ export const api = {
   me: () => request('/users/me'),
   updateMe: (data) =>
     request('/users/me', { method: 'PUT', body: JSON.stringify(data) }),
+  // Tenant-public profile by username (user-management.md §API > User
+  // Management, task-124): { id, username, display_name, avatar_url,
+  // timezone, created_at, memberships: [...] }
+  userByUsername: (username) => request(`/users/${encodeURIComponent(username)}`),
+  // Tenant user management (task-124): TenantAdmin-only paginated listing,
+  // soft deactivation, and admin user provisioning.
+  listUsers: (params = {}) => {
+    const qs = new URLSearchParams(params).toString();
+    return request(`/users${qs ? '?' + qs : ''}`);
+  },
+  deactivateUser: (id, reason) =>
+    request(`/users/${id}/deactivate`, { method: 'PUT', body: JSON.stringify({ reason }) }),
+  // Inline global-role management (user-management.md §UI Pages > Tenant
+  // User Management "role management (TenantAdmin only)"): role is the
+  // tenant-level GlobalRole ("Member" | "TenantAdmin"), same vocabulary
+  // as the invitation API.
+  updateUserGlobalRole: (id, { role, reason } = {}) =>
+    request(`/users/${encodeURIComponent(id)}/role`, { method: 'PUT', body: JSON.stringify({ role, reason }) }),
+  provisionUser: (data) =>
+    request('/users', { method: 'POST', body: JSON.stringify(data) }),
+  // Active sessions (user-management.md §UI Pages > Session Management;
+  // endpoints from task-111 §Session Management): list is active-only and
+  // never exposes token hashes; revoke-all is "sign out everywhere" —
+  // every session revoked also invalidates the API key itself.
+  listMySessions: () => request('/users/me/sessions'),
+  revokeMySession: (id) =>
+    request(`/users/me/sessions/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  revokeAllMySessions: () =>
+    request('/users/me/sessions/revoke-all', { method: 'POST' }),
   myNotifications: (params = {}) => {
     const qs = new URLSearchParams(params).toString();
     return request(`/users/me/notifications${qs ? '?' + qs : ''}`);
@@ -559,8 +665,33 @@ export const api = {
     const qs = workspaceId ? `?workspace_id=${encodeURIComponent(workspaceId)}` : '';
     return request(`/users/me/notifications/count${qs}`).then(r => r?.count ?? 0);
   },
+  // Spec notification paths (user-management.md §API > Notifications and
+  // §In-App Notification UI; task-125 endpoints, task-113 UI consumers):
+  // listing with filters, unread count, read/unread, bulk read, preferences.
+  notifications: (params = {}) => {
+    const qs = new URLSearchParams(params).toString();
+    return request(`/notifications${qs ? '?' + qs : ''}`);
+  },
+  unreadNotificationCount: (workspaceId) => {
+    const qs = workspaceId ? `?workspace_id=${encodeURIComponent(workspaceId)}` : '';
+    return request(`/notifications/unread-count${qs}`).then(r => r?.count ?? 0);
+  },
+  // PUT is the spec method for mark-read (user-management.md §API >
+  // Notifications; the server keeps POST as a legacy alias).
   markNotificationRead: (id) =>
+    request(`/notifications/${id}/read`, { method: 'PUT' }),
+  markNotificationUnread: (id) =>
+    request(`/notifications/${id}/unread`, { method: 'POST' }),
+  // Spec-path preferences (task-125): GET/PUT /notifications/preferences.
+  notificationChannels: () => request('/notifications/preferences'),
+  updateNotificationChannels: (body) =>
+    request('/notifications/preferences', { method: 'PUT', body: JSON.stringify(body) }),
+  dismissNotification: (id) =>
     request(`/notifications/${id}/dismiss`, { method: 'POST' }),
+  markAllNotificationsRead: (workspaceId) => {
+    const qs = workspaceId ? `?workspace_id=${encodeURIComponent(workspaceId)}` : '';
+    return request(`/notifications/mark-all-read${qs}`, { method: 'POST' });
+  },
   resolveNotification: (id) =>
     request(`/notifications/${id}/resolve`, { method: 'POST' }),
   // Notification preferences (HSI §12)
@@ -571,6 +702,15 @@ export const api = {
     const qs = params ? new URLSearchParams(params).toString() : '';
     return request(`/users/me/judgments${qs ? '?' + qs : ''}`);
   },
+  // Public user profile (user-management.md §User Profile Page, /@{username}):
+  // tenant-scoped profile, activity feed (public actions only), and
+  // aggregate stats. Cross-tenant or unknown handles 404.
+  publicUserProfile: (username) => request(`/users/${encodeURIComponent(username)}`),
+  publicUserActivity: (username, params = {}) => {
+    const qs = new URLSearchParams(params).toString();
+    return request(`/users/${encodeURIComponent(username)}/activity${qs ? '?' + qs : ''}`);
+  },
+  publicUserStats: (username) => request(`/users/${encodeURIComponent(username)}/stats`),
   // Knowledge graph (TASK-174/TASK-175)
   repoGraph: (id) => request(`/repos/${id}/graph`),
   repoGraphNode: (repoId, nodeId) => request(`/repos/${repoId}/graph/node/${nodeId}`),
@@ -578,6 +718,7 @@ export const api = {
   repoGraphModules: (id) => request(`/repos/${id}/graph/modules`),
   repoGraphRisks: (id) => request(`/repos/${id}/graph/risks`),
   getGraphConcept: (repoId, name) => request(`/repos/${repoId}/graph/concept/${encodeURIComponent(name)}`),
+  repoGraphConcepts: (repoId) => request(`/repos/${repoId}/graph/concepts`),
   repoGraphTimeline: (id, since, until) => {
     const params = new URLSearchParams();
     if (since != null) params.set('since', since);
@@ -585,21 +726,40 @@ export const api = {
     const qs = params.toString();
     return request(`/repos/${id}/graph/timeline${qs ? '?' + qs : ''}`);
   },
+  // Point-in-time knowledge graph (system-explorer.md §6 Architectural
+  // Timeline): `at` is unix epoch seconds or an RFC 3339 timestamp. The
+  // server reconstructs nodes/edges that existed at that instant,
+  // including ones soft-deleted since.
+  repoGraphAt: (id, at) => request(`/repos/${id}/graph?at=${encodeURIComponent(at)}`),
+  // Workspace message bus — GET lists messages, optionally filtered by
+  // kind (?kind=reconciliation_completed for timeline key moments).
+  workspaceMessages: (workspaceId, params) => {
+    const qs = params ? new URLSearchParams(params).toString() : '';
+    return request(`/workspaces/${workspaceId}/messages${qs ? '?' + qs : ''}`);
+  },
   workspaceGraph: (id) => request(`/workspaces/${id}/graph`),
-  // Meta-spec preview loop (S4.6)
-  previewPersona: (workspaceId, data) =>
-    request(`/workspaces/${workspaceId}/meta-specs/preview`, { method: 'POST', body: JSON.stringify(data) }),
-  previewPersonaStatus: (workspaceId, previewId) =>
-    request(`/workspaces/${workspaceId}/meta-specs/preview/${previewId}`),
+  // Meta-spec preview mode (meta-spec-reconciliation.md §5) — global routes
+  previewMetaSpec: (data) =>
+    request('/meta-specs/preview', { method: 'POST', body: JSON.stringify(data) }),
+  previewMetaSpecStatus: (previewId) => request(`/meta-specs/preview/${previewId}`),
+  deleteMetaSpecPreview: (previewId) => request(`/meta-specs/preview/${previewId}`, { method: 'DELETE' }),
   publishPersona: (_workspaceId, personaId, data) =>
-    request(`/meta-specs-registry/${personaId}`, { method: 'PUT', body: JSON.stringify({ prompt: data.content }) }),
+    request(`/meta-specs/${personaId}`, { method: 'PUT', body: JSON.stringify({ prompt: data.content }) }),
   // Workspace admin (S4.7)
   updateWorkspace: (id, data) =>
     request(`/workspaces/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
-  // Tenant-level ABAC policies
-  policies: () => request('/policies'),
+  // Tenant-level ABAC policies. `params` carries the §UI scope filter
+  // (`?scope=Workspace&scope_id=<id>` — the GLOBAL policy endpoints;
+  // workspace scoping is a query filter, never a workspace-prefixed URL).
+  policies: (params = {}) => {
+    if (params == null) return request('/policies');
+    const qs = new URLSearchParams(params).toString();
+    return request(`/policies${qs ? '?' + qs : ''}`);
+  },
   createPolicy: (data) =>
     request('/policies', { method: 'POST', body: JSON.stringify(data) }),
+  updatePolicy: (id, data) =>
+    request(`/policies/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
   deletePolicy: (id) =>
     request(`/policies/${id}`, { method: 'DELETE' }),
   policyDecisions: (params = {}) => {
@@ -613,6 +773,19 @@ export const api = {
     request(`/policies/${policyId}`, { method: 'DELETE' }),
   simulateAbacPolicy: (id, data) =>
     request('/policies/evaluate', { method: 'POST', body: JSON.stringify(data) }),
+  // Dry-run simulator — POST /api/v1/policies/evaluate (global endpoint,
+  // never workspace-prefixed; the id parameter of simulateAbacPolicy is
+  // ignored server-side and kept only for call-site compatibility).
+  evaluatePolicy: (data) =>
+    request('/policies/evaluate', { method: 'POST', body: JSON.stringify(data) }),
+  // Effective permissions — GET /api/v1/policies/effective?subject={id}
+  // (the documented `subject` spelling; the server accepts `subject_id`
+  // as an alias). Optional resource_type/workspace_id/repo_id/tenant_id
+  // scope the answer.
+  effectivePermissions: (params = {}) => {
+    const qs = new URLSearchParams(params).toString();
+    return request(`/policies/effective${qs ? '?' + qs : ''}`);
+  },
   // Explorer saved views — repo-scoped (canonical, via WS or REST)
   savedViews: (repoId) => request(`/repos/${repoId}/views`),
   createSavedView: (repoId, data) =>
@@ -634,6 +807,14 @@ export const api = {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${getAuthToken()}`,
       },
+      body: JSON.stringify(body),
+    }),
+  // Conversational exploration Q&A (system-explorer.md §8): grounded text
+  // answer with server-validated entity refs, optional view spec ("show me
+  // X") and structural prediction ("what would happen if…").
+  explorerAsk: (workspaceId, body) =>
+    request(`/workspaces/${workspaceId}/explorer-views/ask`, {
+      method: 'POST',
       body: JSON.stringify(body),
     }),
   // Specs View (S4.5)
@@ -670,10 +851,19 @@ export const api = {
       },
       body: JSON.stringify(body),
     }),
-  // Server does not have POST /specs/assist — only POST /repos/:id/specs/assist.
-  // Return a failed Response so callers fall through gracefully.
-  specsAssistGlobal: (_body) =>
-    Promise.resolve(new Response(null, { status: 404, statusText: 'Not available without repo context' })),
+  // Workspace-scoped meta-spec assist (ui-layout.md §9 State 1 chat): same
+  // SSE {diff, explanation} protocol as specsAssist, but no repo — the
+  // effective content is the in-editor draft (or the stored registry prompt
+  // when only meta_spec_id is given).
+  metaSpecsAssist: (workspaceId, body) =>
+    fetch(`${API_BASE}/workspaces/${workspaceId}/meta-specs/assist`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${getAuthToken()}`,
+      },
+      body: JSON.stringify(body),
+    }),
   // Spec save with optimistic-concurrency conflict handling (HSI §7).
   // On 409 (stale base_sha), resolves to { conflict: <body> } instead of
   // throwing, so callers can render the conflict resolution dialog.
@@ -704,6 +894,32 @@ export const api = {
     const qs = new URLSearchParams(params).toString();
     return request(`/analytics/events${qs ? '?' + qs : ''}`);
   },
+  // Analytics daily event counts (analytics.md §Analytics Dashboard bar chart)
+  analyticsDaily: (params = {}) => {
+    const qs = new URLSearchParams(params).toString();
+    return request(`/analytics/daily${qs ? '?' + qs : ''}`);
+  },
+  // Analytics event count, optionally property-filtered for funnel steps
+  // (analytics.md §Analytics Dashboard funnel view)
+  analyticsCount: (params = {}) => {
+    const qs = new URLSearchParams(params).toString();
+    return request(`/analytics/count${qs ? '?' + qs : ''}`);
+  },
+  // Decision API (analytics.md §Decision API) — interactive evaluator
+  analyticsDecide: (decision, context = {}) => {
+    const qs = new URLSearchParams({
+      decision,
+      context: JSON.stringify(context),
+    }).toString();
+    return request(`/analytics/decide?${qs}`);
+  },
+  // Retention policies (analytics.md §Data Retention) — adminRetention is
+  // defined alongside the other admin endpoints above.
+  setAnalyticsRetention: (retentionDays) =>
+    request('/admin/retention', {
+      method: 'PUT',
+      body: JSON.stringify({ retention_days: retentionDays }),
+    }),
   // Presence
   workspacePresence: (workspaceId) =>
     request(`/workspaces/${workspaceId}/presence`),
@@ -746,9 +962,29 @@ export const api = {
     const qs = new URLSearchParams(params).toString();
     return request(`/repos/${id}/graph/diff${qs ? '?' + qs : ''}`);
   },
+  // View-query diff scope (view-query-grammar.md §2 `diff`): resolve the
+  // SHA/ref-based commit-range change set server-side via the query-dryrun
+  // endpoint. The server computes the change set from real per-commit
+  // repository state (the shared two-commit graph-diff core — the same
+  // production path that serves GET /repos/{id}/graph/diff), so the client
+  // never guesses from the current snapshot's created_sha/last_modified_sha
+  // provenance (single-point stamps cannot express a commit range).
+  // Returns { matchedIds, warnings, matchedNodes }.
+  graphQueryDiffScope: async (repoId, query, selectedNodeId) => {
+    const result = await request(`/repos/${repoId}/graph/query-dryrun`, {
+      method: 'POST',
+      body: JSON.stringify({ query, selected_node_id: selectedNodeId ?? null }),
+    });
+    return {
+      matchedIds: Array.isArray(result?.matched_node_ids) ? result.matched_node_ids : [],
+      warnings: Array.isArray(result?.warnings) ? result.warnings : [],
+      matchedNodes: typeof result?.matched_nodes === 'number' ? result.matched_nodes : 0,
+    };
+  },
   // Workspace-scope concept search
   workspaceGraphConcept: (wsId, name) =>
     request(`/workspaces/${wsId}/graph/concept/${encodeURIComponent(name)}`),
+  workspaceGraphConcepts: (wsId) => request(`/workspaces/${wsId}/graph/concepts`),
   // API token management
   createApiToken: (data) =>
     request('/users/me/tokens', { method: 'POST', body: JSON.stringify(data) }),
@@ -792,3 +1028,22 @@ export const api = {
       body: JSON.stringify({ query, selected_node_id: selectedNodeId ?? null }),
     }),
 };
+
+// Reviewer identity binding (spec-registry.md §16 manifest gates): a human
+// caller may record an MR review only under their own verified identity —
+// the server rejects a request-body reviewer_agent_id naming anyone else for
+// non-admin principals. Resolves the caller's user id once per session and
+// caches it. Falls back to the legacy pseudo-id, which the server rejects
+// (fail closed, surfaced as an error toast) rather than silently
+// re-attributing the review; a failed lookup is not cached so a transient
+// error can recover on the next submission.
+let selfReviewerIdPromise = null;
+export async function selfReviewerId() {
+  if (!selfReviewerIdPromise) {
+    selfReviewerIdPromise = api.me().then(me => me?.id ?? null).catch(() => null);
+  }
+  const id = await selfReviewerIdPromise;
+  if (id) return id;
+  selfReviewerIdPromise = null;
+  return 'human-reviewer';
+}

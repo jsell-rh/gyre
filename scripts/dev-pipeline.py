@@ -17,7 +17,7 @@ from pipeline.catalog import discover, generation_for, metadata, sync_checkout
 from pipeline.execution import Execution, ROOT, Retry, Wait
 from pipeline.eligibility import eligible
 from pipeline.stages import HANDLERS
-from pipeline.store import STAGES, Store, StaleClaim
+from pipeline.store import STAGES, COMPUTE, Store, StaleClaim
 
 
 def source(store):
@@ -39,6 +39,14 @@ def source(store):
             apply(store, plan(store, path, recovery))
         from pipeline.fulfillment import reconcile
         reconcile(store, path, revision)
+        from pipeline.repair_budget import reconcile_generated
+        reconcile_generated(store)
+        from pipeline.integration import resolve_upstream_assessments
+        resolve_upstream_assessments(store,path,revision)
+        from pipeline.recovery_policy import reconcile as recover_holds
+        recover_holds(store)
+        from pipeline.spec_backlog import inventory
+        if store.setting('spec_reconciliation_enabled',False):inventory(store,path,revision)
         store.set_setting('observed_main', revision)
         return revision
 
@@ -78,7 +86,7 @@ def discover_stage(store, stage, base):
 
 def run_one(store, stage, task=None):
     limit = store.setting('limits', {}).get(stage, max(1, store.setting('slots', 8)))
-    if stage in ('implement', 'assess', 'review', 'triage', 'verify') and (store.setting('slots', 8) == 0 or store.setting('admission_paused', False)):
+    if stage in COMPUTE and (store.setting('slots', 8) == 0 or store.setting('admission_paused', False)):
         return False
     claim = store.claim(stage, f'{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}',
                         concurrency=limit, task=task, eligible=lambda work: eligible(store, work),
@@ -164,11 +172,13 @@ def run_claim(store, claim):
             category = getattr(exc, 'category', None) or ('observation' if isinstance(exc, Wait) else
                        stage if getattr(exc, 'fresh_model', False) else
                        'infrastructure' if isinstance(exc, (Retry, OSError, subprocess.TimeoutExpired)) else 'execution')
+            from pipeline.backend_capacity import classify as capacity_failure
+            reason=capacity_failure(execution,{'category':category,'message':str(exc)[-4000:],
+                'fresh_model':getattr(exc,'fresh_model',False),'diagnostic':getattr(exc,'diagnostic',None)})
             store.retry(claim['id'], claim['token'],
-                        {'category': category, 'message': str(exc)[-4000:], 'fresh_model': getattr(exc, 'fresh_model', False),
-                         'diagnostic': getattr(exc, 'diagnostic', None)},
+                        reason,
                         delay=getattr(exc, 'retry_delay', None), count_failure=not isinstance(exc, Wait), attention=getattr(exc,'attention',False))
-            execution.phase('NeedsAttention' if getattr(exc,'attention',False) else 'RetryScheduled', reason=str(exc)[-1000:], category=getattr(exc, 'category', None))
+            execution.phase('NeedsAttention' if getattr(exc,'attention',False) else 'RetryScheduled', reason=reason['message'][-1000:], category=reason['category'])
         except StaleClaim:
             pass
         except Exception as recovery_error:
@@ -225,6 +235,10 @@ def main():
     commands.add_parser('resume')
     commands.add_parser('slots').add_argument('count', type=int)
     commands.add_parser('reserve-verification').add_argument('count',type=int)
+    commands.add_parser('decisions')
+    command=commands.add_parser('decide')
+    command.add_argument('id');command.add_argument('option')
+    command.add_argument('--source',default='local CLI');command.add_argument('--instruction')
     commands.add_parser('priority-classes')
     command=commands.add_parser('priority-class')
     command.add_argument('name');command.add_argument('value',type=int)
@@ -245,6 +259,15 @@ def main():
         if args.command == 'status':
             from pipeline.cockpit import snapshot
             print(json.dumps(snapshot(store)))
+        elif args.command == 'decisions':
+            from pipeline.decisions import list_decisions
+            print(json.dumps(list_decisions(store)))
+        elif args.command == 'decide':
+            from pipeline.decisions import choose
+            try:
+                print(json.dumps(choose(store,args.id,args.option,source=args.source,instruction=args.instruction)))
+            except ValueError as exc:
+                raise SystemExit(str(exc)) from None
         elif args.command in ('retry', 'retry-all'):
             with store.transaction():
                 query = "UPDATE work SET state='ready',retry_at=0,ready_since=? WHERE state IN ('attention','retry')"
@@ -254,6 +277,8 @@ def main():
                     params += (args.task,)
                 for row in store.db.execute("SELECT task,stage,generation FROM work WHERE state IN ('attention','retry')" + (' AND task=?' if args.command=='retry' else ''), (args.task,) if args.command=='retry' else ()).fetchall():
                     store.db.execute('DELETE FROM settings WHERE key=?',(store.runtime_hold_key(row['task'],row['stage'],row['generation']),))
+                    from pipeline.repair_budget import reset
+                    reset(store,row['task'],row['stage'])
                 count = store.db.execute(query, params).rowcount
                 store.event('operator_retry', {'count': count}, getattr(args, 'task', None))
             print(f'retried {count} work items')

@@ -82,6 +82,15 @@ pub enum MessageKind {
     ReviewRequest,
     StatusUpdate,
     Escalation,
+    /// Forge → author agent: the outcome of a gate run on the author's MR
+    /// (agent-gates.md §Gate Failure Feedback — Agent Inbox Delivery).
+    /// server_only = true (the forge emits it; an agent must not forge a
+    /// gate outcome for another agent). Tier: Directed — persisted in the
+    /// author's inbox until acked, read by the next session on startup;
+    /// live sessions also get the WebSocket broadcast for immediate
+    /// reaction. Payload: `{mr_id, gate_name, gate_type, status, output,
+    /// spec_ref, attempt, gate_agent_id}`.
+    GateResult,
 
     // ── Tier 2: Events (signed + persisted with TTL) ────────────────────
     AgentCreated,
@@ -196,6 +205,7 @@ impl MessageKind {
             MessageKind::ReviewRequest => "review_request",
             MessageKind::StatusUpdate => "status_update",
             MessageKind::Escalation => "escalation",
+            MessageKind::GateResult => "gate_result",
             MessageKind::AgentCreated => "agent_created",
             MessageKind::AgentStatusChanged => "agent_status_changed",
             MessageKind::AgentContainerSpawned => "agent_container_spawned",
@@ -236,12 +246,15 @@ impl MessageKind {
         }
     }
 
-    /// Returns true for built-in Event-tier variants — these may only be sent by the server.
+    /// Returns true for kinds that may only be sent by the server: the
+    /// built-in Event-tier variants, plus the forge-emitted Directed
+    /// `GateResult` (a gate outcome is forge authority, not peer traffic).
     /// Custom(String) returns false even though it defaults to Event tier.
     pub fn server_only(&self) -> bool {
         matches!(
             self,
-            MessageKind::AgentCreated
+            MessageKind::GateResult
+                | MessageKind::AgentCreated
                 | MessageKind::AgentStatusChanged
                 | MessageKind::AgentContainerSpawned
                 | MessageKind::AgentCompleted
@@ -274,6 +287,37 @@ impl MessageKind {
         )
     }
 
+    /// Maps this kind to its AG-UI event type (message-bus.md §API Telemetry:
+    /// `ActivityEventData.event_type` = "`message.kind` mapped to `AgEventType`
+    /// string"). The seven telemetry kinds map to their AG-UI variants
+    /// (AgentError → ERROR per the §MCP Integration table); every other
+    /// kind maps to `AgEventType::Custom(kind.as_str())`, which serializes
+    /// as the kind's snake_case wire name.
+    pub fn ag_event_type(&self) -> crate::protocol::AgEventType {
+        match self {
+            MessageKind::ToolCallStart => crate::protocol::AgEventType::ToolCallStart,
+            MessageKind::ToolCallEnd => crate::protocol::AgEventType::ToolCallEnd,
+            MessageKind::TextMessageContent => crate::protocol::AgEventType::TextMessageContent,
+            MessageKind::RunStarted => crate::protocol::AgEventType::RunStarted,
+            MessageKind::RunFinished => crate::protocol::AgEventType::RunFinished,
+            MessageKind::StateChanged => crate::protocol::AgEventType::StateChanged,
+            MessageKind::AgentError => crate::protocol::AgEventType::Error,
+            other => crate::protocol::AgEventType::Custom(other.as_str().to_string()),
+        }
+    }
+
+    /// Broadcast-only kinds (message-bus.md §Broadcast-only kinds):
+    /// `DataSeeded` and `QueueUpdated` are server-only AND storage-exempt —
+    /// they flow through the in-memory broadcast channel only and never hit
+    /// `MessageRepository::store()`. Send paths must short-circuit storage
+    /// for these kinds regardless of destination: a row of these kinds must
+    /// never be persisted, even when addressed to a Workspace destination.
+    /// On the wire they use `Destination::Broadcast` with `workspace_id:
+    /// None` and carry no payload.
+    pub fn broadcast_only(&self) -> bool {
+        matches!(self, MessageKind::DataSeeded | MessageKind::QueueUpdated)
+    }
+
     /// Returns the tier for this kind.
     /// Custom defaults to Event tier.
     pub fn tier(&self) -> MessageTier {
@@ -281,7 +325,8 @@ impl MessageKind {
             MessageKind::TaskAssignment
             | MessageKind::ReviewRequest
             | MessageKind::StatusUpdate
-            | MessageKind::Escalation => MessageTier::Directed,
+            | MessageKind::Escalation
+            | MessageKind::GateResult => MessageTier::Directed,
 
             MessageKind::AgentCreated
             | MessageKind::AgentStatusChanged
@@ -346,6 +391,23 @@ impl MessageKind {
             MessageKind::Escalation => {
                 Some(&(const { [f("reason", Str, true), f("context", Str, false)] }))
             }
+            // Directed — agent-gates.md §Gate Failure Feedback: the exact
+            // field set of the spec's GateResult message ("attempt" is the
+            // 1-based number of this gate run for the MR).
+            MessageKind::GateResult => Some(
+                &(const {
+                    [
+                        f("mr_id", Str, true),
+                        f("gate_name", Str, true),
+                        f("gate_type", Str, false),
+                        f("status", Str, false),
+                        f("output", Str, false),
+                        f("spec_ref", Str, false),
+                        f("attempt", U32, true),
+                        f("gate_agent_id", Str, false),
+                    ]
+                }),
+            ),
             // Events
             MessageKind::AgentCreated => Some(&(const { [f("agent_id", Str, true)] })),
             MessageKind::AgentStatusChanged => {
@@ -688,6 +750,7 @@ impl MessageKind {
             "review_request" => MessageKind::ReviewRequest,
             "status_update" => MessageKind::StatusUpdate,
             "escalation" => MessageKind::Escalation,
+            "gate_result" => MessageKind::GateResult,
             "agent_created" => MessageKind::AgentCreated,
             "agent_status_changed" => MessageKind::AgentStatusChanged,
             "agent_container_spawned" => MessageKind::AgentContainerSpawned,
@@ -1272,6 +1335,25 @@ mod tests {
         assert!(!MessageKind::Custom("foo".to_string()).server_only());
     }
 
+    // ── Broadcast-only kinds (message-bus.md §Broadcast-only kinds) ─────
+
+    #[test]
+    fn broadcast_only_returns_true_for_dataseeded_queueupdated_only() {
+        // Exactly the two spec-named broadcast-only kinds — and no others:
+        // every Event-tier builtin is server_only, but only DataSeeded and
+        // QueueUpdated are storage-exempt, so a send path that keys its
+        // storage short-circuit on broadcast_only() must not skip storage
+        // for any other kind.
+        assert!(MessageKind::DataSeeded.broadcast_only());
+        assert!(MessageKind::QueueUpdated.broadcast_only());
+        assert!(!MessageKind::AgentCreated.broadcast_only());
+        assert!(!MessageKind::MrMerged.broadcast_only());
+        assert!(!MessageKind::MergeQueuePaused.broadcast_only());
+        assert!(!MessageKind::TaskAssignment.broadcast_only());
+        assert!(!MessageKind::ToolCallStart.broadcast_only());
+        assert!(!MessageKind::Custom("data_seeded".to_string()).broadcast_only());
+    }
+
     #[test]
     fn tier_directed() {
         assert_eq!(MessageKind::TaskAssignment.tier(), MessageTier::Directed);
@@ -1578,5 +1660,29 @@ mod tests {
         let msg = make_telemetry(Some(ws.clone()));
         buf.push(msg);
         assert_eq!(buf.list_since(&ws, 0, 100).len(), 1);
+    }
+
+    #[test]
+    fn kind_ag_event_type_mapping_matches_spec() {
+        // message-bus.md §API > Telemetry: event_type is the kind mapped to
+        // its AgEventType string. The seven telemetry kinds map to their
+        // AG-UI variants (AgentError → ERROR per the §MCP Integration
+        // table); other kinds fall back to the Custom(kind wire name)
+        // string.
+        let cases = [
+            (MessageKind::ToolCallStart, "TOOL_CALL_START"),
+            (MessageKind::ToolCallEnd, "TOOL_CALL_END"),
+            (MessageKind::TextMessageContent, "TEXT_MESSAGE_CONTENT"),
+            (MessageKind::RunStarted, "RUN_STARTED"),
+            (MessageKind::RunFinished, "RUN_FINISHED"),
+            (MessageKind::StateChanged, "STATE_CHANGED"),
+            (MessageKind::AgentError, "ERROR"),
+            (MessageKind::TaskCreated, "task_created"),
+            (MessageKind::MrMerged, "mr_merged"),
+            (MessageKind::Custom("my_event".to_string()), "my_event"),
+        ];
+        for (kind, expected) in cases {
+            assert_eq!(kind.ag_event_type().as_str(), expected, "kind {kind:?}");
+        }
     }
 }

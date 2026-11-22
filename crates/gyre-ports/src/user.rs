@@ -16,11 +16,51 @@ pub trait UserRepository: Send + Sync {
     async fn find_by_external_id(&self, external_id: &str) -> Result<Option<User>>;
     /// Find a user by their unique, immutable, URL-safe username.
     async fn find_by_username(&self, username: &str) -> Result<Option<User>>;
+    /// Find users by email address, case-insensitive.
+    ///
+    /// Email is NOT unique — the same person may hold accounts in
+    /// multiple tenants (user-management.md §Tenant-Level User
+    /// Onboarding cross-tenant model) — so every match is returned and
+    /// callers MUST scope the result by tenant before using it.
+    async fn find_by_email(&self, email: &str) -> Result<Vec<User>>;
     async fn list(&self) -> Result<Vec<User>>;
     /// Persist updated profile fields. `username` and `external_id` are
     /// immutable after creation; implementations MUST reject an update that
     /// changes either (user-management.md §Username vs Display Name).
     async fn update(&self, user: &User) -> Result<()>;
+    /// Re-point a user's `external_id` at an SSO subject — the single
+    /// sanctioned `external_id` transition.
+    ///
+    /// This claims a local-mode invitation account on the invitee's first
+    /// SSO login (user-management.md §Tenant-Level User Onboarding step 3:
+    /// "SSO mode: redirected to Keycloak login, then account linked"), so
+    /// the pre-assigned memberships and invited GlobalRole attach to the
+    /// SSO identity instead of a duplicate account. Fails if the user does
+    /// not exist or another user already owns `new_external_id`.
+    async fn claim_external_id(&self, user_id: &Id, new_external_id: &str) -> Result<()>;
+    /// Records the OIDC provider that just authenticated this user: the verified `iss` claim and
+    /// the authentication time (HSI §12 "Auth provider info"). Server-written — no handler ever
+    /// routes a client value here.
+    ///
+    /// The `last_login_at` write is skipped unless `min_interval_secs` has elapsed since the
+    /// stored `last_login_at` (or it is unset). OIDC tokens are validated on *every* request, so an
+    /// unconditional write would make `users` the hottest table in the server to record a
+    /// timestamp that is read a few times a day. Implementations MUST evaluate the interval and
+    /// apply the write in one statement — a read-modify-write would let concurrent requests for
+    /// the same user race.
+    ///
+    /// The debounce NEVER suppresses an issuer change: the write also fires when the stored
+    /// `oidc_issuer` is unset or differs from the verified one. The user-provisioning path
+    /// stamps `last_login_at` on every authentication (user-management.md §User Entity), which
+    /// keeps that column fresh — without this carve-out the issuer would never be recorded for
+    /// an already-provisioned user, and a migration to a different IdP would never be reflected.
+    async fn record_login(
+        &self,
+        user_id: &Id,
+        oidc_issuer: &str,
+        at: u64,
+        min_interval_secs: u64,
+    ) -> Result<()>;
     async fn delete(&self, id: &Id) -> Result<()>;
 }
 

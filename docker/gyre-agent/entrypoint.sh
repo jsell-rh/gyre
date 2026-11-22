@@ -72,11 +72,16 @@ fi
 
 cd /workspace/repo
 
-# Send heartbeat to signal the agent is alive
+# Send heartbeat to signal the agent is alive. The heartbeat carries the
+# session's X.509-SVID (identity-security.md Layer 1): the server verifies
+# the workload identity fail-closed before recording the heartbeat.
+# GYRE_SVID_PEM holds the PEM chain (multi-line), so the JSON body is built
+# with node (present in the reference image) rather than shell interpolation.
+SVID_PAYLOAD=$(node -e 'process.stdout.write(JSON.stringify({ svid: process.env.GYRE_SVID_PEM || "", stack_fingerprint: process.env.GYRE_STACK_HASH || "" }))' 2>/dev/null || printf '{"svid":""}')
 curl -s -X PUT "$GYRE_SERVER_URL/api/v1/agents/$GYRE_AGENT_ID/heartbeat" \
     -H "Authorization: Bearer ${GYRE_AUTH_TOKEN:-}" \
     -H "Content-Type: application/json" \
-    -d '{"pid": '"$$"'}' || true
+    -d "$SVID_PAYLOAD" || true
 
 echo "=== Agent ready. Workspace: /workspace/repo ==="
 

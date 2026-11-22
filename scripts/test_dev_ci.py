@@ -123,6 +123,60 @@ class GitHubChecksTest(unittest.TestCase):
         self.assertEqual(observed['status'],'candidate_failed')
         self.assertIn('broken feature',Path(observed['candidate_log']).read_text())
 
+    def job_log_observation(self, *, available=True, stale=False):
+        self.pr['statusCheckRollup']=[self.check('FAILURE'),self.check(None,'IN_PROGRESS')]
+        def run(*args,**kwargs):
+            if '--log-failed' in args:return subprocess.CompletedProcess(args,1,'','workflow still running')
+            if args[:2]==('gh','api'):
+                path=args[2]
+                if path.endswith('/runs/10'):
+                    value={'id':10,'head_sha':self.head,'run_attempt':1,'status':'in_progress'}
+                elif path.endswith('/jobs/100'):
+                    value={'id':100,'run_id':10,'head_sha':self.base if stale else self.head,'name':'e2e',
+                           'run_attempt':1,'status':'completed','conclusion':'failure'}
+                elif path.endswith('/jobs/100/logs'):
+                    return subprocess.CompletedProcess(args,0 if available else 1,
+                        'tests/e2e/app.spec.js:4:1 › actual failure\n' if available else '','')
+                else:return self.run_cli(*args,**kwargs)
+                return subprocess.CompletedProcess(args,0,json.dumps(value),'')
+            return self.run_cli(*args,**kwargs)
+        return ci.observe(run,'https://github.com/example/repo/pull/1',self.head,self.base,self.temp.name)
+
+    def test_completed_job_logs_work_before_sibling_jobs_finish(self):
+        observation=self.job_log_observation()
+        self.assertEqual(observation['status'],'candidate_failed')
+        self.assertIn('actual failure',Path(observation['candidate_log']).read_text())
+
+    def test_missing_job_logs_do_not_create_a_speculative_code_repair(self):
+        self.assertEqual(self.job_log_observation(available=False)['status'],'pending')
+
+    def test_job_log_evidence_must_match_exact_head_and_attempt(self):
+        with self.assertRaisesRegex(RuntimeError,'evidence changed'):
+            self.job_log_observation(stale=True)
+
+    def test_changed_upstream_gate_refreshes_without_approving_or_repairing_code(self):
+        failed=[self.check('FAILURE')]
+        logs={10:'ERROR: test_rebuild (test_dev_cargo_clean.CargoArtifactTest.test_rebuild)\n'}
+        main='c'*40
+        def run(*args,**kwargs):
+            path=args[2]
+            if '/git/ref/' in path:value={'object':{'sha':main}}
+            else:value={'type':'file','sha':('2' if path.endswith(main) else '1')*40}
+            return subprocess.CompletedProcess(args,0,json.dumps(value),'')
+        result=ci.changed_test_inputs(run,'example/repo',self.head,self.base,failed,logs)
+        self.assertEqual(result['status'],'environment_refresh')
+        self.assertEqual(result['target_base'],main)
+        self.assertNotIn('passed',result)
+        # Once verified against this main, the same failure cannot keep refreshing.
+        self.assertIsNone(ci.changed_test_inputs(run,'example/repo',self.head,main,failed,logs))
+        def candidate_edited(*args,**kwargs):
+            response=run(*args,**kwargs)
+            if args[2].endswith(self.head):return subprocess.CompletedProcess(args,0,json.dumps({'type':'file','sha':'3'*40}),'')
+            return response
+        self.assertIsNone(ci.changed_test_inputs(candidate_edited,'example/repo',self.head,self.base,failed,logs))
+        mixed=failed+[self.check('FAILURE')|{'detailsUrl':'https://github.com/example/repo/actions/runs/20/job/200'}]
+        self.assertIsNone(ci.changed_test_inputs(run,'example/repo',self.head,self.base,mixed,logs|{20:'product assertion failed'}))
+
     def test_missing_or_unknown_completed_conclusion_is_not_a_code_failure(self):
         for conclusion in (None,'UNKNOWN','ACTION_REQUIRED'):
             self.pr['statusCheckRollup']=[self.check(conclusion)]

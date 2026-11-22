@@ -46,6 +46,19 @@ pub struct Review {
     pub decision: ReviewDecision,
     pub body: Option<String>,
     pub created_at: u64,
+    /// Persona attribution for gate-agent reviews (agent-gates.md §Gate
+    /// Agent Lifecycle: "gate agent reviews are attributed — the review
+    /// shows which gate persona produced it"). Set by the server from the
+    /// scoped reviewer token's gate (the JWT `task_id` claim), never from
+    /// caller-supplied body fields. `None` for human/agent reviews that
+    /// were not produced by a gate.
+    #[serde(default)]
+    pub reviewer_persona: Option<String>,
+    /// Id of the gate whose agent produced this review, when the reviewer
+    /// authenticated with a gate-agent scoped token. Binds the review to
+    /// the gate chain entry that spawned the reviewer.
+    #[serde(default)]
+    pub gate_id: Option<Id>,
 }
 
 impl Review {
@@ -63,6 +76,8 @@ impl Review {
             decision,
             body: None,
             created_at,
+            reviewer_persona: None,
+            gate_id: None,
         }
     }
 }
@@ -91,6 +106,11 @@ mod tests {
         );
         assert_eq!(review.decision, ReviewDecision::Approved);
         assert!(review.body.is_none());
+        assert!(
+            review.reviewer_persona.is_none(),
+            "attribution starts unset; only the server sets it from a scoped gate token"
+        );
+        assert!(review.gate_id.is_none());
     }
 
     #[test]

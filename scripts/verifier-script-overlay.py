@@ -1,5 +1,16 @@
 #!/usr/bin/env python3
-"""Restore upstream checks without leaving files deleted by the candidate behind."""
+"""Restore upstream checks without leaving files deleted by the candidate behind.
+
+Upstream verifier LOGIC (the check scripts) is restored from the base so a
+candidate cannot weaken the gates that judge it, but the frozen repo-state
+data files (scripts/*-exemptions.txt) follow the merge instead: base data
+describes the base tree, and judging the merged tree with it fails whenever a
+candidate legitimately removes an exempted route or finding together with its
+exemption entry. This cannot weaken the upstream phase: dev-check.sh forbids
+adding any exemption entry relative to the base, so merged data is entrywise a
+subset of base data, and a removed entry only re-exposes the underlying
+finding to the upstream check that consumed it.
+"""
 import argparse
 import json
 import os
@@ -33,6 +44,13 @@ def begin(manifest):
             raise RuntimeError(f'refusing to overwrite an existing path: {name}')
     manifest.write_text(json.dumps({'candidate':candidate, 'introduced':introduced}))
     git('restore', '--source='+base, '--worktree', '--', 'scripts')
+    # Frozen repo-state data follows the merge (see module docstring): only
+    # files present in both trees, so candidate-deleted files stay restored
+    # from the base (conservative) and candidate-added files are untouched.
+    state = sorted(name for name in current
+                   if name.endswith('-exemptions.txt') and name in upstream)
+    if state:
+        git('restore', '--source='+candidate, '--worktree', '--', *state)
 
 
 def finish(manifest):

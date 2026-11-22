@@ -244,6 +244,24 @@ impl SpecApprovalRepository for SqliteStorage {
         .await?
     }
 
+    async fn list_by_approver(&self, approver_id: &str) -> Result<Vec<SpecApproval>> {
+        let pool = Arc::clone(&self.pool);
+        let approver = approver_id.to_string();
+        tokio::task::spawn_blocking(move || -> Result<Vec<SpecApproval>> {
+            let mut conn = pool.get().context("get db connection")?;
+            let rows = spec_approvals::table
+                .filter(spec_approvals::approver_id.eq(&approver))
+                .order(spec_approvals::id.desc())
+                .load::<SpecApprovalRow>(&mut *conn)
+                .context("list spec approvals by approver")?;
+            Ok(rows
+                .into_iter()
+                .map(SpecApprovalRow::into_approval)
+                .collect())
+        })
+        .await?
+    }
+
     async fn approve(&self, id: &Id, now: u64) -> Result<Option<()>, ApprovalTransitionError> {
         self.transition(id, move |a| a.approve(now)).await
     }
@@ -352,6 +370,47 @@ mod tests {
 
         let missing = storage.find_by_id(&Id::new("nope")).await.unwrap();
         assert!(missing.is_none());
+    }
+
+    #[tokio::test]
+    async fn list_by_approver_returns_only_that_approver() {
+        // Public-profile stats/activity attribution (user-management.md
+        // §User Profile Page).
+        let (_tmp, storage) = tmp_storage();
+        storage
+            .create(&SpecApproval::new(
+                Id::new("apr-1"),
+                "system/design.md",
+                sha('a'),
+                "user:alice",
+            ))
+            .await
+            .unwrap();
+        storage
+            .create(&SpecApproval::new(
+                Id::new("apr-2"),
+                "system/other.md",
+                sha('b'),
+                "user:alice",
+            ))
+            .await
+            .unwrap();
+        storage
+            .create(&SpecApproval::new(
+                Id::new("apr-3"),
+                "system/design.md",
+                sha('c'),
+                "user:bob",
+            ))
+            .await
+            .unwrap();
+
+        let mine = storage.list_by_approver("user:alice").await.unwrap();
+        assert_eq!(mine.len(), 2);
+        assert!(mine.iter().all(|a| a.approver_id == "user:alice"));
+
+        let none = storage.list_by_approver("user:nobody").await.unwrap();
+        assert!(none.is_empty());
     }
 
     #[tokio::test]
@@ -488,7 +547,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reject_only_from_pending_and_closes_lifecycle() {
+    async fn reject_from_pending_and_from_approved_records_decliner() {
         let (_tmp, storage) = tmp_storage();
         let id = Id::new("apr-1");
         storage
@@ -514,7 +573,9 @@ mod tests {
         assert_eq!(reloaded.rejected_by.as_deref(), Some("user:reviewer"));
         assert!(!reloaded.is_active());
 
-        // Approved entries cannot be rejected (only revoked).
+        // Decline after approval (agent-gates.md §Spec Approval Ledger):
+        // the port contract mirrors the domain — Approved → Rejected records
+        // the declining human in rejected_by (HSI §12 judgment attribution).
         let id2 = Id::new("apr-2");
         storage
             .create(&SpecApproval::new(
@@ -526,10 +587,26 @@ mod tests {
             .await
             .unwrap();
         storage.approve(&id2, 1700000100).await.unwrap().unwrap();
-        let res = storage
+        storage
             .reject(&id2, "user:reviewer", "no", 1700000200)
+            .await
+            .unwrap()
+            .unwrap();
+        let reloaded = storage.find_by_id(&id2).await.unwrap().unwrap();
+        assert_eq!(
+            reloaded.status(),
+            gyre_domain::spec_approval::ApprovalStatus::Rejected
+        );
+        assert_eq!(reloaded.rejected_by.as_deref(), Some("user:reviewer"));
+        assert_eq!(reloaded.approved_at, None, "mutual exclusivity");
+        assert_eq!(reloaded.rejected_at, Some(1700000200));
+        assert!(!reloaded.is_active());
+
+        // Terminal: a Rejected row cannot be rejected again.
+        let res = storage
+            .reject(&id2, "user:reviewer", "again", 1700000300)
             .await;
-        assert!(res.is_err(), "Approved → Rejected must be rejected");
+        assert!(res.is_err(), "Rejected → Rejected must be rejected");
     }
 
     #[tokio::test]

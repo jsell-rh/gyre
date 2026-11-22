@@ -15,6 +15,13 @@ pub enum AuditEventType {
     ContainerCrashed,
     ContainerOom,
     ContainerNetworkBlocked,
+    // Human judgment decisions (HSI §12 Judgment Ledger)
+    /// A workspace trust level transition (`PUT /workspaces/:id`).
+    TrustChange,
+    /// A human approved an MR whose gate results contained a failure.
+    GateOverride,
+    /// A meta-spec (persona/principle/standard) version was published.
+    MetaSpecPublish,
     // Source control events (observability.md §Audit Event Types)
     GitPushAccepted,
     GitPushRejected,
@@ -37,6 +44,11 @@ pub enum AuditEventType {
     AgentHeartbeat,
     AgentTokenRevoked,
     AgentReassigned,
+    // Supply-chain events (supply-chain.md §The Laptop Problem)
+    /// gyre-stack.lock drift detected at push time; the detail carries the
+    /// full `StackDriftEvent` (lockfile vs attested stack fingerprints,
+    /// enforcement mode, override reason, outcome).
+    StackDriftDetected,
     Custom(String),
 }
 
@@ -52,6 +64,9 @@ impl AuditEventType {
             Self::ContainerCrashed => "container_crashed".to_string(),
             Self::ContainerOom => "container_oom".to_string(),
             Self::ContainerNetworkBlocked => "container_network_blocked".to_string(),
+            Self::TrustChange => "trust_change".to_string(),
+            Self::GateOverride => "gate_override".to_string(),
+            Self::MetaSpecPublish => "meta_spec_publish".to_string(),
             Self::GitPushAccepted => "git_push_accepted".to_string(),
             Self::GitPushRejected => "git_push_rejected".to_string(),
             Self::GitClone => "git_clone".to_string(),
@@ -69,6 +84,7 @@ impl AuditEventType {
             Self::AgentHeartbeat => "agent_heartbeat".to_string(),
             Self::AgentTokenRevoked => "agent_token_revoked".to_string(),
             Self::AgentReassigned => "agent_reassigned".to_string(),
+            Self::StackDriftDetected => "stack_drift_detected".to_string(),
             Self::Custom(s) => s.clone(),
         }
     }
@@ -85,6 +101,9 @@ impl AuditEventType {
             "container_crashed" => Self::ContainerCrashed,
             "container_oom" => Self::ContainerOom,
             "container_network_blocked" => Self::ContainerNetworkBlocked,
+            "trust_change" => Self::TrustChange,
+            "gate_override" => Self::GateOverride,
+            "meta_spec_publish" => Self::MetaSpecPublish,
             "git_push_accepted" => Self::GitPushAccepted,
             "git_push_rejected" => Self::GitPushRejected,
             "git_clone" => Self::GitClone,
@@ -102,6 +121,7 @@ impl AuditEventType {
             "agent_heartbeat" => Self::AgentHeartbeat,
             "agent_token_revoked" => Self::AgentTokenRevoked,
             "agent_reassigned" => Self::AgentReassigned,
+            "stack_drift_detected" => Self::StackDriftDetected,
             other => Self::Custom(other.to_string()),
         }
     }
@@ -215,6 +235,9 @@ mod tests {
             AuditEventType::ContainerCrashed,
             AuditEventType::ContainerOom,
             AuditEventType::ContainerNetworkBlocked,
+            AuditEventType::TrustChange,
+            AuditEventType::GateOverride,
+            AuditEventType::MetaSpecPublish,
             AuditEventType::GitPushAccepted,
             AuditEventType::GitPushRejected,
             AuditEventType::GitClone,
@@ -232,10 +255,19 @@ mod tests {
             AuditEventType::AgentHeartbeat,
             AuditEventType::AgentTokenRevoked,
             AuditEventType::AgentReassigned,
+            AuditEventType::StackDriftDetected,
             AuditEventType::Custom("custom_event".to_string()),
         ];
         for t in &types {
             assert_eq!(AuditEventType::from_str(&t.as_str()), *t);
+        }
+        // The judgment-ledger event types are named variants: falling through to
+        // Custom would still round-trip, so assert the parse arm explicitly.
+        for s in ["trust_change", "gate_override", "meta_spec_publish"] {
+            assert!(
+                !matches!(AuditEventType::from_str(s), AuditEventType::Custom(_)),
+                "{s} must parse to its named variant, not Custom"
+            );
         }
     }
 

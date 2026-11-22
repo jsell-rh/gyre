@@ -351,7 +351,7 @@ mod tests {
             let resp = app
                 .oneshot(
                     Request::builder()
-                        .uri("/api/v1/meta-specs-registry")
+                        .uri("/api/v1/meta-specs")
                         .header("Authorization", format!("Bearer {developer_jwt}"))
                         .body(Body::empty())
                         .unwrap(),
@@ -359,10 +359,12 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(resp.status(), StatusCode::FORBIDDEN);
-            assert_one_rbac_denied(&state, "Admin", "GET /api/v1/meta-specs-registry").await;
+            assert_one_rbac_denied(&state, "Admin", "GET /api/v1/meta-specs").await;
         }
 
         // 2. ReadOnly caller running a meta-spec preview (Admin-or-Developer).
+        //    Global preview route (meta-spec-reconciliation.md §5); the
+        //    role guard in the handler is the audit surface.
         {
             let state = make_test_state_with_jwt();
             let app = crate::api::api_router().with_state(state.clone());
@@ -370,10 +372,24 @@ mod tests {
                 .oneshot(
                     Request::builder()
                         .method("POST")
-                        .uri("/api/v1/workspaces/ws-1/meta-specs/preview")
+                        .uri("/api/v1/meta-specs/preview")
                         .header("Authorization", format!("Bearer {}", readonly_jwt()))
                         .header("Content-Type", "application/json")
-                        .body(Body::from("{}"))
+                        .body(Body::from(
+                            serde_json::to_string(&serde_json::json!({
+                                "draft": {
+                                    "kind": "meta:persona",
+                                    "content": "draft persona text"
+                                },
+                                "targets": [
+                                    {
+                                        "repo_id": "00000000-0000-0000-0000-000000000000",
+                                        "spec_path": "specs/system/search.md"
+                                    }
+                                ]
+                            }))
+                            .unwrap(),
+                        ))
                         .unwrap(),
                 )
                 .await
@@ -382,7 +398,7 @@ mod tests {
             assert_one_rbac_denied(
                 &state,
                 "Admin or Developer",
-                "POST /api/v1/workspaces/:id/meta-specs/preview",
+                "POST /api/v1/meta-specs/preview",
             )
             .await;
         }
@@ -444,15 +460,30 @@ mod tests {
         //    the supervised trust gate; the guard is a live role check).
         {
             let state = make_test_state_with_jwt();
+            // create_mr resolves the MR's workspace scope from its
+            // repository and refuses unknown repositories (M34 hierarchy
+            // enforcement) — seed the repository the probe MR targets.
+            let repo = gyre_domain::Repository::new(
+                gyre_common::Id::new("repo-1"),
+                gyre_common::Id::new("ws1"),
+                "repo-1",
+                "/repos/repo-1",
+                1000,
+            );
+            state.repos.create(&repo).await.unwrap();
             let app = crate::api::api_router().with_state(state.clone());
-            // create_mr has no auth extractor, so seed the MR without a token.
+            // create_mr takes the auth extractor (task-263 MR-scope
+            // boundary); seed the MR with the global test token
+            // (system/Admin) so the seed itself is authorized.
             let resp = app
                 .clone()
                 .oneshot(
                     Request::builder()
                         .method("POST")
                         .uri("/api/v1/merge-requests")
+                        .header("Authorization", "Bearer test-token")
                         .header("Content-Type", "application/json")
+                        .header("authorization", "Bearer test-token")
                         .body(Body::from(
                             serde_json::to_string(&serde_json::json!({
                                 "repository_id": "repo-1",

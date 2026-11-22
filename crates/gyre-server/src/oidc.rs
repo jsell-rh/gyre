@@ -34,8 +34,27 @@ pub async fn openid_configuration(State(state): State<Arc<AppState>>) -> impl In
 ///
 /// Returns the public Ed25519 key in JWK Set format. Third-party verifiers
 /// can use this key to validate agent JWTs without contacting Gyre.
+///
+/// Signature-key rotation (message-bus.md §Edge Cases): the keys array
+/// also serves the retained historical keys, so messages signed before a
+/// rotation remain verifiable by their `key_id`. The active key's entry is
+/// always first; the active kid itself is never duplicated from history.
 pub async fn jwks(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let jwks: serde_json::Value = serde_json::from_str(&state.agent_signing_key.jwks_json)
+    let mut jwks: serde_json::Value = serde_json::from_str(&state.agent_signing_key.jwks_json)
         .unwrap_or_else(|_| json!({"keys": []}));
+    if let Some(keys) = jwks.get_mut("keys").and_then(|k| k.as_array_mut()) {
+        for historical in &state.signing_key_history {
+            if historical.kid == state.agent_signing_key.kid {
+                continue;
+            }
+            if keys
+                .iter()
+                .any(|k| k.get("kid").and_then(|v| v.as_str()) == Some(historical.kid.as_str()))
+            {
+                continue;
+            }
+            keys.push(historical.jwk());
+        }
+    }
     (StatusCode::OK, Json(jwks))
 }

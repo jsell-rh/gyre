@@ -47,6 +47,7 @@ impl From<gyre_domain::MergeRequestDependency> for DependencyDetailResponse {
             gyre_domain::DependencySource::Explicit => "explicit",
             gyre_domain::DependencySource::BranchLineage => "branch-lineage",
             gyre_domain::DependencySource::AgentDeclared => "agent-declared",
+            gyre_domain::DependencySource::DependencyGraph => "dependency-graph",
         };
         Self {
             mr_id: dep.target_mr_id.to_string(),
@@ -80,6 +81,16 @@ pub struct GraphDependencyEdge {
     pub source: String,
 }
 
+/// A recorded meta-spec drift warning for a queued MR
+/// (meta-spec-reconciliation.md §9).
+#[derive(Serialize)]
+pub struct MetaSpecDriftWarning {
+    /// Meta-spec set SHA under which the MR's code was produced.
+    pub produced_set_sha: String,
+    /// The workspace's current meta-spec set SHA when the drift was recorded.
+    pub current_set_sha: String,
+}
+
 #[derive(Serialize)]
 pub struct GraphNode {
     pub mr_id: String,
@@ -88,6 +99,9 @@ pub struct GraphNode {
     pub priority: u32,
     pub depends_on: Vec<GraphDependencyEdge>,
     pub atomic_group: Option<String>,
+    /// Meta-spec drift warning recorded on the MR's gate results, if any
+    /// (§9 merge gate behavior — warn, don't block).
+    pub meta_spec_drift: Option<MetaSpecDriftWarning>,
 }
 
 #[derive(Serialize)]
@@ -321,6 +335,22 @@ pub async fn get_queue_graph(
                 MrStatus::Closed => "closed",
                 MrStatus::Reverted => "reverted",
             };
+            // §9: surface a recorded meta-spec drift warning gate result on
+            // the node — same source the MR detail view reads gate results
+            // from, so the graph cannot disagree with the gate results.
+            let meta_spec_drift = state
+                .gate_results
+                .list_by_mr_id(mr.id.as_str())
+                .await
+                .unwrap_or_default()
+                .iter()
+                .find(|r| r.gate_id.as_str() == crate::reconciliation::META_SPEC_DRIFT_GATE_ID)
+                .and_then(|r| r.output.as_deref())
+                .and_then(crate::reconciliation::parse_meta_spec_drift_warning)
+                .map(|d| MetaSpecDriftWarning {
+                    produced_set_sha: d.produced_set_sha,
+                    current_set_sha: d.current_set_sha,
+                });
             nodes.push(GraphNode {
                 mr_id: mr.id.to_string(),
                 title: mr.title,
@@ -334,6 +364,7 @@ pub async fn get_queue_graph(
                             gyre_domain::DependencySource::Explicit => "explicit",
                             gyre_domain::DependencySource::BranchLineage => "branch-lineage",
                             gyre_domain::DependencySource::AgentDeclared => "agent-declared",
+                            gyre_domain::DependencySource::DependencyGraph => "dependency-graph",
                         };
                         GraphDependencyEdge {
                             mr_id: d.target_mr_id.to_string(),
@@ -342,6 +373,7 @@ pub async fn get_queue_graph(
                     })
                     .collect(),
                 atomic_group: mr.atomic_group,
+                meta_spec_drift,
             });
         }
     }
@@ -358,8 +390,24 @@ mod tests {
     use http::{Request, StatusCode};
     use tower::ServiceExt;
 
-    fn app() -> Router {
-        crate::api::api_router().with_state(test_state())
+    async fn app() -> Router {
+        let state = test_state();
+        seed_repo(&state).await;
+        crate::api::api_router().with_state(state)
+    }
+
+    /// create_mr resolves the MR's workspace scope from its repository (M34
+    /// hierarchy enforcement) and refuses unknown repositories — seed the
+    /// repository these tests open MRs against.
+    async fn seed_repo(state: &crate::AppState) {
+        let repo = gyre_domain::Repository::new(
+            gyre_common::Id::new("repo-1"),
+            gyre_common::Id::new("ws1"),
+            "repo-1",
+            "/repos/repo-1",
+            1000,
+        );
+        state.repos.create(&repo).await.unwrap();
     }
 
     async fn body_json(resp: axum::response::Response) -> serde_json::Value {
@@ -397,7 +445,7 @@ mod tests {
 
     #[tokio::test]
     async fn set_and_get_dependencies() {
-        let app = app();
+        let app = app().await;
         let (app, mr1_id) = create_mr(app, "MR1").await;
         let (app, mr2_id) = create_mr(app, "MR2").await;
 
@@ -440,7 +488,7 @@ mod tests {
 
     #[tokio::test]
     async fn self_dependency_rejected() {
-        let app = app();
+        let app = app().await;
         let (app, mr_id) = create_mr(app, "Self-dep").await;
         let body = serde_json::json!({ "depends_on": [mr_id] });
         let resp = app
@@ -460,7 +508,7 @@ mod tests {
 
     #[tokio::test]
     async fn cycle_detection() {
-        let app = app();
+        let app = app().await;
         let (app, mr1_id) = create_mr(app, "Cycle A").await;
         let (app, mr2_id) = create_mr(app, "Cycle B").await;
 
@@ -502,7 +550,7 @@ mod tests {
 
     #[tokio::test]
     async fn transitive_cycle_detection() {
-        let app = app();
+        let app = app().await;
         let (app, mr1_id) = create_mr(app, "Trans A").await;
         let (app, mr2_id) = create_mr(app, "Trans B").await;
         let (app, mr3_id) = create_mr(app, "Trans C").await;
@@ -554,7 +602,7 @@ mod tests {
 
     #[tokio::test]
     async fn remove_dependency() {
-        let app = app();
+        let app = app().await;
         let (app, mr1_id) = create_mr(app, "RM A").await;
         let (app, mr2_id) = create_mr(app, "RM B").await;
 
@@ -606,7 +654,7 @@ mod tests {
 
     #[tokio::test]
     async fn remove_nonexistent_dependency_returns_404() {
-        let app = app();
+        let app = app().await;
         let (app, mr_id) = create_mr(app, "NoRM").await;
         let resp = app
             .oneshot(
@@ -626,7 +674,7 @@ mod tests {
 
     #[tokio::test]
     async fn set_atomic_group() {
-        let app = app();
+        let app = app().await;
         let (app, mr_id) = create_mr(app, "Atomic").await;
         let body = serde_json::json!({ "group": "migration-bundle" });
         let resp = app
@@ -649,6 +697,7 @@ mod tests {
     #[tokio::test]
     async fn queue_graph_empty() {
         let resp = app()
+            .await
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/merge-queue/graph")
@@ -664,7 +713,7 @@ mod tests {
 
     #[tokio::test]
     async fn dependency_on_nonexistent_mr_rejected() {
-        let app = app();
+        let app = app().await;
         let (app, mr_id) = create_mr(app, "No dep target").await;
         let body = serde_json::json!({ "depends_on": ["does-not-exist"] });
         let resp = app
@@ -686,7 +735,7 @@ mod tests {
 
     #[tokio::test]
     async fn dependency_source_is_explicit_for_non_jwt_caller() {
-        let app = app();
+        let app = app().await;
         let (app, mr1_id) = create_mr(app, "Source MR").await;
         let (app, mr2_id) = create_mr(app, "Dep MR").await;
 
@@ -720,7 +769,7 @@ mod tests {
 
     #[tokio::test]
     async fn reason_persisted_and_retrievable() {
-        let app = app();
+        let app = app().await;
         let (app, mr1_id) = create_mr(app, "Reason A").await;
         let (app, mr2_id) = create_mr(app, "Reason B").await;
 
@@ -765,7 +814,7 @@ mod tests {
 
     #[tokio::test]
     async fn dependency_without_reason_has_null_reason() {
-        let app = app();
+        let app = app().await;
         let (app, mr1_id) = create_mr(app, "NoReason A").await;
         let (app, mr2_id) = create_mr(app, "NoReason B").await;
 
@@ -792,11 +841,22 @@ mod tests {
     #[tokio::test]
     async fn dependency_source_is_agent_declared_for_jwt_caller() {
         let state = test_state();
+        seed_repo(&state).await;
 
         // Mint an agent JWT and register it in the agent_tokens store.
         let agent_jwt = state
             .agent_signing_key
-            .mint("agent-42", "task-1", "system", &state.base_url, 3600)
+            .mint(
+                "agent-42",
+                "task-1",
+                "system",
+                &state.base_url,
+                3600,
+                "t1",
+                "ws-1",
+                "repo-42",
+                "merge-deps",
+            )
             .unwrap();
         state
             .kv_store

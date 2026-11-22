@@ -21,8 +21,12 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, waitFor, fireEvent } from '@testing-library/svelte';
 
 // ── Pure function tests (parseUrl + urlFor replicated from App.svelte) ──
+// The tab list is NOT replicated: it is derived from lib/repoTabs.js, the
+// same single source of truth App.svelte and RepoMode.svelte use, so the
+// replica cannot drift from the real parser's tab set.
+import { REPO_TAB_IDS } from '../lib/repoTabs.js';
 
-const REPO_TABS = ['specs', 'architecture', 'decisions', 'code', 'settings'];
+const REPO_TABS = REPO_TAB_IDS;
 
 function parseUrl(pathname) {
   const raw = pathname.split('/').filter(Boolean).map(p => {
@@ -33,6 +37,25 @@ function parseUrl(pathname) {
 
   if (raw.length === 1 && raw[0] === 'profile') {
     return { mode: 'profile', slug: null, repoName: null, tab: null };
+  }
+
+  // /@{username} — tenant-scoped public user profile
+  // (user-management.md §User Profile Page)
+  if (raw[0]?.startsWith('@') && raw[0].length > 1) {
+    return { mode: 'user_profile', slug: null, repoName: null, tab: null, username: raw[0].slice(1) };
+  }
+
+  // /invite/:workspaceId OR /invite/:token — pending invitation accept
+  // page (§UI Pages). A 64-char lowercase-hex segment is a task-110
+  // magic-link token; anything else is the authenticated flow's
+  // workspace id (a UUID).
+  if (raw[0] === 'invite' && raw.length === 2) {
+    const isToken = /^[0-9a-f]{64}$/.test(raw[1]);
+    return {
+      mode: 'invite_accept', slug: null, repoName: null, tab: null,
+      inviteId: isToken ? null : raw[1],
+      inviteToken: isToken ? raw[1] : null,
+    };
   }
 
   // /all  or  /all/settings  (cross-workspace view §10)
@@ -58,8 +81,13 @@ function parseUrl(pathname) {
 
 function urlFor(parsed) {
   if (!parsed) return '/';
-  const { mode: m, slug, repoName, tab } = parsed;
+  const { mode: m, slug, repoName, tab, username, inviteId, inviteToken } = parsed;
   if (m === 'profile') return '/profile';
+  if (m === 'user_profile') return `/@${encodeURIComponent(username ?? '')}`;
+  if (m === 'invite_accept') {
+    const seg = inviteToken ?? inviteId ?? '';
+    return `/invite/${encodeURIComponent(seg)}`;
+  }
   if (m === 'cross_workspace') {
     return tab ? `/all/${encodeURIComponent(tab)}` : '/all';
   }
@@ -86,6 +114,19 @@ describe('parseUrl', () => {
 
   it('parses profile route', () => {
     expect(parseUrl('/profile')).toEqual({ mode: 'profile', slug: null, repoName: null, tab: null });
+  });
+
+  it('parses /@username as the public profile route', () => {
+    expect(parseUrl('/@jsell')).toEqual({ mode: 'user_profile', slug: null, repoName: null, tab: null, username: 'jsell' });
+  });
+
+  it('decodes URL-encoded handles in /@username', () => {
+    expect(parseUrl('/@j%C3%B8rgen')).toEqual({ mode: 'user_profile', slug: null, repoName: null, tab: null, username: 'jørgen' });
+  });
+
+  it('does not treat a bare @ or non-@ path as a profile', () => {
+    expect(parseUrl('/@')).toBeNull();
+    expect(parseUrl('/dashboard')).toBeNull();
   });
 
   it('parses workspace home', () => {
@@ -142,6 +183,25 @@ describe('parseUrl', () => {
     });
   });
 
+  it('parses repo mode with dependencies tab (drift regression)', () => {
+    // The App.svelte route-parse list once drifted from the tab strip and
+    // lost 'dependencies', misparsing this deep link to the Specs tab. The
+    // tab set is now derived from lib/repoTabs.js, so every tab on the
+    // strip — including any added later — must parse.
+    expect(parseUrl('/workspaces/payments/r/payment-api/dependencies')).toEqual({
+      mode: 'repo', slug: 'payments', repoName: 'payment-api', tab: 'dependencies',
+    });
+  });
+
+  it('parses every tab on the repo tab strip', () => {
+    // Completeness guard: the parser accepts exactly the strip's tab set.
+    for (const id of REPO_TAB_IDS) {
+      expect(parseUrl(`/workspaces/payments/r/payment-api/${id}`)).toEqual({
+        mode: 'repo', slug: 'payments', repoName: 'payment-api', tab: id,
+      });
+    }
+  });
+
   it('falls back to specs for unknown repo tab', () => {
     expect(parseUrl('/workspaces/payments/r/payment-api/unknown')).toEqual({
       mode: 'repo', slug: 'payments', repoName: 'payment-api', tab: 'specs',
@@ -189,6 +249,59 @@ describe('urlFor', () => {
 
   it('returns /profile', () => {
     expect(urlFor({ mode: 'profile', slug: null, repoName: null, tab: null })).toBe('/profile');
+  });
+
+  it('parses /@username as user_profile', () => {
+    expect(parseUrl('/@asmith')).toEqual({
+      mode: 'user_profile', slug: null, repoName: null, tab: null, username: 'asmith',
+    });
+  });
+
+  it('parses /invite/:id as invite_accept', () => {
+    expect(parseUrl('/invite/ws-9')).toEqual({
+      mode: 'invite_accept', slug: null, repoName: null, tab: null, inviteId: 'ws-9', inviteToken: null,
+    });
+    // A UUID workspace id is never mistaken for a token.
+    expect(parseUrl('/invite/3f8a2b1e-9c4d-4e2a-8f1b-0d5c6e7a8b9c')).toEqual({
+      mode: 'invite_accept', slug: null, repoName: null, tab: null,
+      inviteId: '3f8a2b1e-9c4d-4e2a-8f1b-0d5c6e7a8b9c', inviteToken: null,
+    });
+  });
+
+  it('parses /invite/:token (64-hex magic link) as invite_accept with the token, not a workspace id', () => {
+    const token = 'a'.repeat(64);
+    expect(parseUrl(`/invite/${token}`)).toEqual({
+      mode: 'invite_accept', slug: null, repoName: null, tab: null, inviteId: null, inviteToken: token,
+    });
+    // Uppercase hex is not a minted token (tokens are lowercase hex);
+    // it falls through to the workspace-id shape.
+    expect(parseUrl('/invite/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA')).toEqual({
+      mode: 'invite_accept', slug: null, repoName: null, tab: null,
+      inviteId: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA', inviteToken: null,
+    });
+  });
+
+  it('generates /@username and /invite/:id URLs', () => {
+    expect(urlFor({ mode: 'user_profile', username: 'asmith' })).toBe('/@asmith');
+    expect(urlFor({ mode: 'invite_accept', inviteId: 'ws-9' })).toBe('/invite/ws-9');
+    // Token form takes precedence in the canonical URL.
+    const token = 'b'.repeat(64);
+    expect(urlFor({ mode: 'invite_accept', inviteId: null, inviteToken: token })).toBe(`/invite/${token}`);
+  });
+
+  it('round-trips a magic-link /invite/:token URL through parseUrl → urlFor byte-for-byte', () => {
+    const token = 'c0ffee'.padEnd(64, '0');
+    const parsed = parseUrl(`/invite/${token}`);
+    expect(urlFor(parsed)).toBe(`/invite/${token}`);
+  });
+
+  it('URL-encodes handles in /@username', () => {
+    expect(urlFor({ mode: 'user_profile', slug: null, repoName: null, tab: null, username: 'jørgen' })).toBe('/@j%C3%B8rgen');
+  });
+
+  it('round-trips /@username through parseUrl → urlFor', () => {
+    const parsed = parseUrl('/@jsell');
+    expect(urlFor(parsed)).toBe('/@jsell');
   });
 
   it('returns / when no slug', () => {
@@ -274,6 +387,8 @@ vi.mock('../lib/api.js', () => ({
     workspaceRepos: vi.fn().mockResolvedValue([]),
     workspaceBudget: vi.fn().mockResolvedValue(null),
     notificationCount: vi.fn().mockResolvedValue(0),
+    unreadNotificationCount: vi.fn().mockResolvedValue(0),
+    notifications: vi.fn().mockResolvedValue({ notifications: [] }),
     tokenInfo: vi.fn().mockResolvedValue({ kind: 'global' }),
     me: vi.fn().mockResolvedValue(null),
     version: vi.fn().mockResolvedValue({ version: '0.1.0', commit: 'abc1234', milestone: 'M35' }),
@@ -299,6 +414,8 @@ describe('App shell — topbar first, no sidebar (ui-navigation.md §1)', () => 
     api.workspaceRepos.mockResolvedValue([]);
     api.workspaceBudget.mockResolvedValue(null);
     api.notificationCount.mockResolvedValue(0);
+    api.unreadNotificationCount.mockResolvedValue(0);
+    api.notifications.mockResolvedValue({ notifications: [] });
   });
 
   it('renders topbar without a sidebar', async () => {
@@ -309,6 +426,105 @@ describe('App shell — topbar first, no sidebar (ui-navigation.md §1)', () => 
     }, { timeout: 3000 });
   });
 
+});
+
+// ── Notification bell (user-management.md §In-App Notification UI, ──────
+//    amended ui-navigation.md §1: the bell is the single top-bar
+//    notification surface — it shows the unread count and opens the
+//    notification drawer)
+
+describe('Notification bell (user-management.md §In-App Notification UI)', () => {
+  // The bell's unread count rides lib/notifications.svelte.js
+  // (refreshUnreadCount → raw fetch of GET /notifications/unread-count),
+  // not the api.js mock — mock the endpoint at the fetch level.
+  function mockUnreadCountFetch(counts) {
+    let call = 0;
+    global.fetch = vi.fn(() => {
+      const count = counts[Math.min(call, counts.length - 1)];
+      call += 1;
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ count }) });
+    });
+  }
+
+  beforeEach(() => {
+    window.history.pushState({}, '', '/');
+    localStorage.clear();
+    vi.clearAllMocks();
+    api.workspaces.mockResolvedValue([]);
+    api.workspaceRepos.mockResolvedValue([]);
+    api.workspaceBudget.mockResolvedValue(null);
+    api.notificationCount.mockResolvedValue(0);
+    api.unreadNotificationCount.mockResolvedValue(0);
+    api.notifications.mockResolvedValue({ notifications: [] });
+    api.version.mockResolvedValue({ version: '0.1.0' });
+  });
+
+  it('badge shows the unread count from GET /notifications/unread-count, not the decisions count', async () => {
+    // The bell badge is the unread notification count (spec: "Notification
+    // bell in top nav with unread count badge"). decisionsCount (legacy
+    // /users/me/notifications/count) must not drive the badge.
+    api.notificationCount.mockResolvedValue(7);
+    mockUnreadCountFetch([3]);
+    const { container } = render(App);
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="notification-bell"]')).toBeTruthy();
+    }, { timeout: 3000 });
+    await waitFor(() => {
+      const badge = container.querySelector('[data-testid="notification-bell"] [data-testid="notification-badge"]');
+      expect(badge).toBeTruthy();
+      expect(badge.textContent).toBe('3');
+    }, { timeout: 3000 });
+    // The count came from the unread-count endpoint (raw fetch), not from
+    // the decisions-count endpoint (api.notificationCount).
+    const fetchedUrls = global.fetch.mock.calls.map(c => String(c[0]));
+    expect(fetchedUrls.some(u => u.includes('/notifications/unread-count'))).toBe(true);
+  });
+
+  it('clicking the bell opens the notification drawer', async () => {
+    mockUnreadCountFetch([2]);
+    api.notifications.mockResolvedValue({
+      notifications: [
+        { id: 'n-1', title: 'Gate failure in payment-api', priority_level: 'High', read: false, created_at: 1700000000 },
+      ],
+    });
+    const { container } = render(App);
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="notification-bell"]')).toBeTruthy();
+    }, { timeout: 3000 });
+    await fireEvent.click(container.querySelector('[data-testid="notification-bell"]'));
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="notification-drawer"]')).toBeTruthy();
+    }, { timeout: 3000 });
+    // The drawer lists active-only notifications (?active=true).
+    expect(api.notifications).toHaveBeenCalledWith({ limit: 50, active: true });
+  });
+
+  it('refreshes the unread badge when the drawer closes', async () => {
+    // Read-state changes made inside the drawer (mark read / mark all read)
+    // must be reflected on the bell badge when it closes.
+    mockUnreadCountFetch([2, 0]);
+    api.notifications.mockResolvedValue({ notifications: [] });
+    const { container } = render(App);
+    await waitFor(() => {
+      const badge = container.querySelector('[data-testid="notification-bell"] [data-testid="notification-badge"]');
+      expect(badge).toBeTruthy();
+      expect(badge.textContent).toBe('2');
+    }, { timeout: 3000 });
+    await fireEvent.click(container.querySelector('[data-testid="notification-bell"]'));
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="notification-drawer"]')).toBeTruthy();
+    }, { timeout: 3000 });
+    // Close via the drawer's close button.
+    await fireEvent.click(container.querySelector('[data-testid="notification-drawer"] .close-btn'));
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="notification-bell"] [data-testid="notification-badge"]')).toBeNull();
+    }, { timeout: 3000 });
+    // The badge was re-read from the server after the close.
+    const unreadCalls = global.fetch.mock.calls
+      .map(c => String(c[0]))
+      .filter(u => u.includes('/notifications/unread-count'));
+    expect(unreadCalls.length).toBeGreaterThanOrEqual(2);
+  });
 });
 
 // ── Mobile drawer section navigation (ui-navigation.md §8) ──────────────
@@ -343,29 +559,47 @@ describe('Mobile drawer section navigation (ui-navigation.md §8)', () => {
     });
   }
 
-  it('clicking Briefing in repo mode opens the repo-scope Briefing sub-tab', async () => {
-    // ui-navigation.md §3 "Sub-tabs in the control bar": Briefing at repo
-    // scope is the Architecture tab's Briefing sub-tab (?repo_id= narrative).
-    // The drawer must stay in the repo's scope, not escape to workspace home.
+  it('repo-mode drawer mirrors the tab strip exactly and switches tabs (§1a narrow viewports)', async () => {
+    // ui-navigation.md §1a "Narrow viewports": the drawer offers the rail's
+    // per-mode item set; in repo mode that set mirrors the repo tab strip
+    // exactly (the tab strip is the source of truth - no 'briefing' item,
+    // it is a sub-tab of Architecture, not a tab). Selecting a drawer item
+    // activates the corresponding tab, same route as clicking the tab.
     window.history.pushState({}, '', '/workspaces/payments/r/core/specs');
     const { container } = render(App);
     // RepoMode is stubbed in jsdom; the document title proves repo mode.
     await waitFor(() => expect(document.title).toBe('core — Payments | Gyre'), { timeout: 3000 });
     await openDrawer(container);
-    await fireEvent.click(container.querySelector('[data-testid="drawer-item-briefing"]'));
-    // Stays in repo mode on the Architecture tab (the Briefing sub-tab's
-    // parent tab), with the subTab deep-link param for ExplorerView.
+    const drawer = container.querySelector('[data-testid="mobile-drawer"]');
+    const itemIds = Array.from(drawer.querySelectorAll('.drawer-link')).map(
+      (el) => el.getAttribute('data-testid').replace('drawer-item-', '')
+    );
+    // Canonical tab order — derived from the same shared list
+    // (lib/repoTabs.js) RepoMode's tab strip and App's rail render from.
+    expect(itemIds).toEqual(REPO_TAB_IDS);
+    // Briefing is an Architecture sub-tab, never a drawer/tab item.
+    expect(container.querySelector('[data-testid="drawer-item-briefing"]')).toBeNull();
+    // Selecting Architecture activates the Architecture tab (same route as
+    // clicking the tab).
+    await fireEvent.click(container.querySelector('[data-testid="drawer-item-architecture"]'));
     await waitFor(() => expect(window.location.pathname).toBe('/workspaces/payments/r/core/architecture'), { timeout: 3000 });
-    await waitFor(() => expect(window.location.search).toBe('?subTab=briefing'), { timeout: 3000 });
   });
 
 
-  it('clicking Agent Rules navigates to agent-rules page', async () => {
+  it('clicking Agent Rules at workspace scope scrolls to the dashboard section, not the sub-page (§1a)', async () => {
+    // ui-navigation.md §1a: section items scroll to their dashboard
+    // section on the workspace home; Settings is the only navigation
+    // exception. Agent Rules must not escape to the agent-rules sub-page
+    // (WorkspaceHome is stubbed here, so the observable is the URL: the
+    // workspace home is preserved; the scroll itself is covered by
+    // NavRail.test.js against the real WorkspaceHome).
     window.history.pushState({}, '', '/workspaces/payments');
     const { container } = render(App);
     await openDrawer(container);
     await fireEvent.click(container.querySelector('[data-testid="drawer-item-agent-rules"]'));
-    await waitFor(() => expect(window.location.pathname).toBe('/workspaces/payments/agent-rules'), { timeout: 3000 });
+    await new Promise(r => setTimeout(r, 100));
+    expect(window.location.pathname).toBe('/workspaces/payments');
+    expect(window.history.state?.mode).toBe('workspace_home');
   });
 
   it('repo mode drawer click on Specs switches to the Specs repo tab', async () => {

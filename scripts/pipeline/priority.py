@@ -5,8 +5,8 @@ import time
 
 DEFAULT_CLASSES = {'background':-100, 'normal':0, 'high':100, 'repair':200, 'urgent':300}
 CONTROL = {'cleanup':1_000_000_300, 'observe':1_000_000_200,
-           'publish':1_000_000_100, 'verify':1_000_000_000}
-COMPUTE = {'triage','assess','implement','review','verify'}
+           'backlog':1_000_000_150, 'publish':1_000_000_100, 'verify':1_000_000_000}
+from .store import COMPUTE
 REPAIRS = {'ci','verification','rebase','review','requirements_gap','requirements_changed'}
 
 
@@ -57,7 +57,7 @@ def task_priority(store, task):
         unresolved=store.db.execute("""SELECT 1 FROM findings WHERE task=? AND generation=?
             AND resolved_by IS NULL AND category IN ('ci','verification','rebase','review') LIMIT 1""",
             (task['name'],task['generation'])).fetchone()
-        name='repair' if finding.get('category') in REPAIRS or unresolved or data.get('assessment_pending') or data.get('ci_environment') else 'normal'
+        name='background' if data.get('spec_planner') else 'repair' if finding.get('category') in REPAIRS or unresolved or data.get('assessment_pending') or data.get('ci_environment') else 'normal'
         source='automatic'
     validate(store,name)
     return {'class':name,'value':classes(store)[name],'source':source,'preemptionPolicy':'Never'}
@@ -73,6 +73,10 @@ def info(store, work, now=None):
         return value | {'stage_class':'system/'+work['stage'], 'effective':CONTROL[work['stage']], 'age_seconds':0}
     since=work.get('ready_since') or now
     age=max(0,now-max(since,work.get('retry_at',0))) if work['state'] in ('ready','retry') else 0
+    if work['stage'] in ('spec_audit','decompose','plan_review') and value['class']=='background':
+        offset={'spec_audit':0,'decompose':30,'plan_review':60}[work['stage']]
+        return value | {'stage_class':'spec/'+work['stage'],'age_seconds':int(age),
+                        'effective':min(-1,value['value']+offset+min(20,int(age//60)))}
     return value | {'stage_class':value['class'], 'age_seconds':int(age),
                     'effective':min(999_999_999,value['value']+int(age//60))}
 

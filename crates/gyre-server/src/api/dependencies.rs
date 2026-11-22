@@ -83,6 +83,33 @@ pub struct GraphNode {
     pub name: String,
 }
 
+/// Breaking-change summary attached to a graph edge (dependency-graph.md §UI
+/// dependency detail panel: "breaking changes, acknowledgment status").
+#[derive(Serialize)]
+pub struct BreakingChangeSummary {
+    pub id: String,
+    pub commit_sha: String,
+    pub description: String,
+    pub detected_at: u64,
+    pub acknowledged: bool,
+    pub acknowledged_by: Option<String>,
+    pub acknowledged_at: Option<u64>,
+}
+
+impl From<gyre_domain::BreakingChange> for BreakingChangeSummary {
+    fn from(bc: gyre_domain::BreakingChange) -> Self {
+        Self {
+            id: bc.id.to_string(),
+            commit_sha: bc.commit_sha,
+            description: bc.description,
+            detected_at: bc.detected_at,
+            acknowledged: bc.acknowledged,
+            acknowledged_by: bc.acknowledged_by,
+            acknowledged_at: bc.acknowledged_at,
+        }
+    }
+}
+
 #[derive(Serialize)]
 pub struct GraphEdgeResponse {
     pub id: String,
@@ -91,12 +118,102 @@ pub struct GraphEdgeResponse {
     #[serde(rename = "type")]
     pub edge_type: DependencyType,
     pub status: DependencyStatus,
+    /// File or artifact in the source repo declaring the dependency.
+    pub source_artifact: String,
+    /// Artifact in the target repo being depended on (crate name, spec path…).
+    pub target_artifact: String,
+    /// Version the source pins, if any.
+    pub version_pinned: Option<String>,
+    /// Current version of the target, if known.
+    pub target_version_current: Option<String>,
+    /// How many versions the source is behind the target, if known.
+    pub version_drift: Option<u32>,
+    /// Breaking changes recorded against this edge (acknowledged and not).
+    pub breaking_changes: Vec<BreakingChangeSummary>,
 }
 
 #[derive(Serialize)]
 pub struct GraphResponse {
     pub nodes: Vec<GraphNode>,
     pub edges: Vec<GraphEdgeResponse>,
+}
+
+/// Builds the graph response shared by the tenant-wide and workspace-scoped
+/// graph endpoints: resolves node names, and enriches each edge with version
+/// drift and breaking-change detail so the UI dependency panel has real data.
+async fn build_graph_response(
+    state: &AppState,
+    edges: Vec<DependencyEdge>,
+) -> Result<GraphResponse, ApiError> {
+    let mut repo_ids: HashSet<String> = HashSet::new();
+    for edge in &edges {
+        repo_ids.insert(edge.source_repo_id.to_string());
+        repo_ids.insert(edge.target_repo_id.to_string());
+    }
+
+    let mut nodes = Vec::new();
+    for rid in repo_ids {
+        let name = state
+            .repos
+            .find_by_id(&Id::new(&rid))
+            .await
+            .ok()
+            .flatten()
+            .map(|r| r.name)
+            .unwrap_or_else(|| rid.clone());
+        nodes.push(GraphNode { repo_id: rid, name });
+    }
+    nodes.sort_by(|a, b| a.repo_id.cmp(&b.repo_id));
+
+    // Breaking changes grouped by dependency edge. Fetched per distinct
+    // target repo — BreakingChange.source_repo_id is the repo that
+    // introduced the change, i.e. the TARGET of the dependency edge (the
+    // repo being depended on) — and matched to edges via
+    // dependency_edge_id. Real queries, no fabrication.
+    let mut breaking_by_edge: std::collections::HashMap<String, Vec<BreakingChangeSummary>> =
+        std::collections::HashMap::new();
+    let mut target_repo_ids: Vec<Id> = Vec::new();
+    for edge in &edges {
+        if !target_repo_ids.contains(&edge.target_repo_id) {
+            target_repo_ids.push(edge.target_repo_id.clone());
+        }
+    }
+    for src in target_repo_ids {
+        let bcs = state
+            .breaking_changes
+            .list_by_source_repo(&src)
+            .await
+            .map_err(ApiError::Internal)?;
+        for bc in bcs {
+            breaking_by_edge
+                .entry(bc.dependency_edge_id.to_string())
+                .or_default()
+                .push(bc.into());
+        }
+    }
+
+    let edges = edges
+        .into_iter()
+        .map(|e| {
+            let id = e.id.to_string();
+            let breaking_changes = breaking_by_edge.remove(&id).unwrap_or_default();
+            GraphEdgeResponse {
+                id,
+                source: e.source_repo_id.to_string(),
+                target: e.target_repo_id.to_string(),
+                edge_type: e.dependency_type,
+                status: e.status,
+                source_artifact: e.source_artifact,
+                target_artifact: e.target_artifact,
+                version_pinned: e.version_pinned,
+                target_version_current: e.target_version_current,
+                version_drift: e.version_drift,
+                breaking_changes,
+            }
+        })
+        .collect();
+
+    Ok(GraphResponse { nodes, edges })
 }
 
 #[derive(Serialize)]
@@ -254,38 +371,8 @@ pub async fn get_graph(
         .await
         .map_err(ApiError::Internal)?;
 
-    let mut repo_ids: HashSet<String> = HashSet::new();
-    for edge in &all_edges {
-        repo_ids.insert(edge.source_repo_id.to_string());
-        repo_ids.insert(edge.target_repo_id.to_string());
-    }
-
-    let mut nodes = Vec::new();
-    for rid in repo_ids {
-        let name = state
-            .repos
-            .find_by_id(&Id::new(&rid))
-            .await
-            .ok()
-            .flatten()
-            .map(|r| r.name)
-            .unwrap_or_else(|| rid.clone());
-        nodes.push(GraphNode { repo_id: rid, name });
-    }
-    nodes.sort_by(|a, b| a.repo_id.cmp(&b.repo_id));
-
-    let edges = all_edges
-        .into_iter()
-        .map(|e| GraphEdgeResponse {
-            id: e.id.to_string(),
-            source: e.source_repo_id.to_string(),
-            target: e.target_repo_id.to_string(),
-            edge_type: e.dependency_type,
-            status: e.status,
-        })
-        .collect();
-
-    Ok(Json(GraphResponse { nodes, edges }))
+    let graph = build_graph_response(&state, all_edges).await?;
+    Ok(Json(graph))
 }
 
 /// GET /api/v1/workspaces/{id}/dependency-graph
@@ -327,39 +414,8 @@ pub async fn get_workspace_dependency_graph(
         })
         .collect();
 
-    // Collect all repo IDs referenced by filtered edges.
-    let mut repo_ids: HashSet<String> = HashSet::new();
-    for edge in &filtered_edges {
-        repo_ids.insert(edge.source_repo_id.to_string());
-        repo_ids.insert(edge.target_repo_id.to_string());
-    }
-
-    let mut nodes = Vec::new();
-    for rid in repo_ids {
-        let name = state
-            .repos
-            .find_by_id(&Id::new(&rid))
-            .await
-            .ok()
-            .flatten()
-            .map(|r| r.name)
-            .unwrap_or_else(|| rid.clone());
-        nodes.push(GraphNode { repo_id: rid, name });
-    }
-    nodes.sort_by(|a, b| a.repo_id.cmp(&b.repo_id));
-
-    let edges = filtered_edges
-        .into_iter()
-        .map(|e| GraphEdgeResponse {
-            id: e.id.to_string(),
-            source: e.source_repo_id.to_string(),
-            target: e.target_repo_id.to_string(),
-            edge_type: e.dependency_type,
-            status: e.status,
-        })
-        .collect();
-
-    Ok(Json(GraphResponse { nodes, edges }))
+    let graph = build_graph_response(&state, filtered_edges).await?;
+    Ok(Json(graph))
 }
 
 /// GET /api/v1/repos/{id}/blast-radius
@@ -701,6 +757,10 @@ mod tests {
 
     async fn create_repo_in_workspace(state: &Arc<AppState>, name: &str, workspace_id: &str) -> Id {
         use gyre_domain::Repository;
+        // The workspace must exist: domain events emitted for the repo resolve
+        // their tenant from the workspace record and are dropped when it is
+        // missing.
+        crate::mem::ensure_test_workspace(state, workspace_id).await;
         let repo = Repository::new(
             Id::new(uuid::Uuid::new_v4().to_string()),
             Id::new(workspace_id),
@@ -828,7 +888,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_cargo_toml_path_dep_detection() {
+    async fn test_cargo_toml_dep_detection_path_and_git_forms() {
         let toml_content = r#"
 [package]
 name = "my-crate"
@@ -837,11 +897,66 @@ version = "0.1.0"
 [dependencies]
 serde = "1.0"
 other-crate = { path = "../other-repo" }
+repo-b = { git = "https://gyre.example.com/ws/repo-b.git", tag = "v1.2.0" }
 gyre-client = { git = "https://github.com/example/gyre-client" }
 "#;
-        let path_deps = crate::git_http::detect_cargo_path_deps(toml_content);
-        assert_eq!(path_deps.len(), 1);
-        assert_eq!(path_deps[0], "../other-repo");
+        let deps = crate::git_http::detect_cargo_deps(toml_content);
+        assert_eq!(deps.len(), 3);
+        assert_eq!(deps[0].reference, "../other-repo");
+        assert_eq!(deps[0].version, None);
+        assert_eq!(deps[1].reference, "https://gyre.example.com/ws/repo-b.git");
+        assert_eq!(deps[1].version, Some("v1.2.0".to_string()));
+        // Extraction is form-based; matching against known tenant repos (so
+        // external hosts like github.com create no edge) happens at the
+        // detection call site, not in the parser.
+        assert_eq!(deps[2].reference, "https://github.com/example/gyre-client");
+    }
+
+    #[test]
+    fn test_cargo_deps_version_tag_rev_keys() {
+        let toml = r#"
+[dependencies]
+a = { git = "https://gyre.example.com/ws/a.git", version = "1.0.0" }
+b = { git = "https://gyre.example.com/ws/b.git", tag = "v2.0" }
+c = { git = "https://gyre.example.com/ws/c.git", rev = "abc123" }
+d = { path = "../d" }
+"#;
+        let deps = crate::git_http::detect_cargo_deps(toml);
+        assert_eq!(deps.len(), 4);
+        assert_eq!(deps[0].version, Some("1.0.0".to_string()));
+        assert_eq!(deps[1].version, Some("v2.0".to_string()));
+        assert_eq!(deps[2].version, Some("abc123".to_string()));
+        assert_eq!(deps[3].version, None);
+    }
+
+    #[test]
+    fn test_cargo_deps_key_must_be_word_boundary() {
+        // `path`/`git` must not match inside a dependency NAME — only as
+        // inline-table keys.
+        let toml = r#"
+[dependencies]
+some-path-crate = "1.0"
+legit = "2.0"
+"#;
+        let deps = crate::git_http::detect_cargo_deps(toml);
+        assert!(deps.is_empty());
+    }
+
+    #[test]
+    fn test_repo_name_from_reference() {
+        use crate::git_http::repo_name_from_reference;
+        assert_eq!(repo_name_from_reference("../repo-b"), "repo-b");
+        assert_eq!(repo_name_from_reference("./repo-b"), "repo-b");
+        assert_eq!(repo_name_from_reference("repo-b"), "repo-b");
+        assert_eq!(
+            repo_name_from_reference("https://gyre.example.com/ws/repo-b.git"),
+            "repo-b"
+        );
+        assert_eq!(
+            repo_name_from_reference("git+ssh://git@gyre.example.com/ws/repo-b.git#v1.2"),
+            "repo-b"
+        );
+        assert_eq!(repo_name_from_reference("git@host:ws/repo-b.git"), "repo-b");
     }
 
     // ── Breaking change detection tests ────────────────────────────────
@@ -1111,13 +1226,12 @@ gyre-client = { git = "https://github.com/example/gyre-client" }
         let mr = gyre_domain::MergeRequest::new(
             Id::new("mr-block-1"),
             repo_b.clone(),
+            Id::new("ws-block"),
             "Test MR",
             "feat/test",
             "main",
             0,
         );
-        let mut mr = mr;
-        mr.workspace_id = Id::new("ws-block");
         state.merge_requests.create(&mr).await.unwrap();
 
         // Enqueue the MR.
@@ -1201,15 +1315,15 @@ gyre-client = { git = "https://github.com/example/gyre-client" }
             .unwrap();
 
         // Create an MR and enqueue.
-        let mut mr = gyre_domain::MergeRequest::new(
+        let mr = gyre_domain::MergeRequest::new(
             Id::new("mr-ack-1"),
             repo_b.clone(),
+            Id::new("ws-ack"),
             "Test MR",
             "feat/test",
             "main",
             0,
         );
-        mr.workspace_id = Id::new("ws-ack");
         state.merge_requests.create(&mr).await.unwrap();
 
         let entry =
@@ -1278,15 +1392,15 @@ gyre-client = { git = "https://github.com/example/gyre-client" }
         state.workspaces.create(&ws).await.unwrap();
         // Default policy is Warn — no need to set explicitly.
 
-        let mut mr = gyre_domain::MergeRequest::new(
+        let mr = gyre_domain::MergeRequest::new(
             Id::new("mr-warn-1"),
             repo_b.clone(),
+            Id::new("ws-warn"),
             "Test MR",
             "feat/test",
             "main",
             0,
         );
-        mr.workspace_id = Id::new("ws-warn");
         state.merge_requests.create(&mr).await.unwrap();
 
         let entry =
@@ -1614,44 +1728,6 @@ serde = "1.0"
         assert_eq!(crate::git_http::extract_cargo_version(toml), None);
     }
 
-    #[test]
-    fn test_extract_dep_version_simple() {
-        let toml = r#"
-[dependencies]
-serde = "1.0.200"
-other-crate = "2.3.4"
-"#;
-        assert_eq!(
-            crate::git_http::extract_dep_version(toml, "serde"),
-            Some("1.0.200".to_string())
-        );
-        assert_eq!(
-            crate::git_http::extract_dep_version(toml, "other-crate"),
-            Some("2.3.4".to_string())
-        );
-    }
-
-    #[test]
-    fn test_extract_dep_version_inline_table() {
-        let toml = r#"
-[dependencies]
-serde = { version = "1.0.200", features = ["derive"] }
-"#;
-        assert_eq!(
-            crate::git_http::extract_dep_version(toml, "serde"),
-            Some("1.0.200".to_string())
-        );
-    }
-
-    #[test]
-    fn test_extract_dep_version_not_found() {
-        let toml = r#"
-[dependencies]
-serde = "1.0"
-"#;
-        assert_eq!(crate::git_http::extract_dep_version(toml, "tokio"), None);
-    }
-
     // ── TASK-048: Package manager parser tests ────────────────────────
 
     #[test]
@@ -1708,6 +1784,29 @@ serde = "1.0"
     fn test_detect_package_json_invalid_json() {
         let deps = crate::git_http::detect_package_json_deps("not valid json {{{");
         assert!(deps.is_empty());
+    }
+
+    #[test]
+    fn test_detect_package_json_git_ref() {
+        // dependency-graph.md §1: "dependencies pointing to Gyre-hosted
+        // packages" — git URL forms, matched by URL last segment.
+        let json = r#"{
+            "name": "my-app",
+            "dependencies": {
+                "repo-b": "git+https://gyre.example.com/ws/repo-b.git#v1.2",
+                "repo-c": "git+ssh://git@gyre.example.com/ws/repo-c.git",
+                "left-pad": "^1.3.0"
+            }
+        }"#;
+        let deps = crate::git_http::detect_package_json_deps(json);
+        assert_eq!(deps.len(), 2);
+        // Git URL references are stored verbatim (matching the pyproject
+        // convention); repo_name_from_reference strips the scheme/`.git`
+        // suffix when matching known repos.
+        assert_eq!(deps[0].0, "git+https://gyre.example.com/ws/repo-b.git");
+        assert_eq!(deps[0].1, Some("v1.2".to_string()));
+        assert_eq!(deps[1].0, "git+ssh://git@gyre.example.com/ws/repo-c.git");
+        assert_eq!(deps[1].1, None);
     }
 
     #[test]
@@ -1891,6 +1990,22 @@ flask = "^2.3"
         assert!(deps.is_empty());
     }
 
+    #[test]
+    fn test_detect_pyproject_pep508_git_ref() {
+        // PEP 508 direct git reference to a Gyre-hosted package.
+        let content = r#"
+[project]
+dependencies = [
+    "repo-b @ git+https://gyre.example.com/ws/repo-b.git",
+    "requests >= 2.28",
+]
+"#;
+        let deps = crate::git_http::detect_pyproject_deps(content);
+        assert_eq!(deps.len(), 1);
+        assert_eq!(deps[0].0, "git+https://gyre.example.com/ws/repo-b.git");
+        assert_eq!(deps[0].1, Some("repo-b".to_string()));
+    }
+
     // ── Spec manifest link tests ──────────────────────────────────────
 
     #[test]
@@ -1998,6 +2113,72 @@ info:
     }
 
     #[test]
+    fn test_detect_openapi_server_url_path_segment_match() {
+        // Gyre URL form: https://host/<workspace>/<repo> — the repo name is a
+        // whole path segment of servers[].url.
+        let content = r#"
+openapi: "3.0.0"
+servers:
+  - url: https://gyre.example.com/ws/repo-b/api/v1
+"#;
+        let repos = vec!["repo-b", "repo-c"];
+        let refs = crate::git_http::detect_openapi_refs(content, &repos);
+        assert_eq!(refs, vec!["repo-b".to_string()]);
+    }
+
+    #[test]
+    fn test_detect_openapi_description_mention_no_edge() {
+        // Over-match guard: a repo name appearing only in a description (not
+        // in servers[].url) must create NO edge — the pre-fix whole-document
+        // substring scan created one.
+        let content = r#"
+openapi: "3.0.0"
+info:
+  title: My API
+  description: Integrates with repo-b for billing
+servers:
+  - url: https://api.example.com/v1
+paths:
+  /orders:
+    get:
+      summary: Create order
+"#;
+        let repos = vec!["repo-b"];
+        let refs = crate::git_http::detect_openapi_refs(content, &repos);
+        assert!(refs.is_empty());
+    }
+
+    #[test]
+    fn test_detect_openapi_swagger2_host_base_path() {
+        let content = r#"
+swagger: "2.0"
+info:
+  title: Legacy API
+host: payment-service.internal
+basePath: /v1
+"#;
+        let repos = vec!["payment-service"];
+        let refs = crate::git_http::detect_openapi_refs(content, &repos);
+        assert_eq!(refs, vec!["payment-service".to_string()]);
+    }
+
+    #[test]
+    fn test_detect_openapi_json_document() {
+        // swagger.json is JSON — JSON is valid YAML, so the same structured
+        // extraction covers both serializations.
+        let content = r#"{"openapi": "3.0.0", "servers": [{"url": "https://gyre.example.com/ws/repo-b/api"}]}"#;
+        let repos = vec!["repo-b"];
+        let refs = crate::git_http::detect_openapi_refs(content, &repos);
+        assert_eq!(refs, vec!["repo-b".to_string()]);
+    }
+
+    #[test]
+    fn test_detect_openapi_invalid_document() {
+        let refs = crate::git_http::detect_openapi_refs("not: valid: yaml: ][", &["repo-b"]);
+        assert!(refs.is_empty());
+    }
+
+    #[test]
     fn test_detect_proto_imports() {
         let content = r#"
 syntax = "proto3";
@@ -2037,6 +2218,43 @@ import "google/protobuf/empty.proto";
         assert_eq!(refs.len(), 2);
         assert!(refs.contains(&"auth-service".to_string()));
         assert!(refs.contains(&"search-service".to_string()));
+    }
+
+    #[test]
+    fn test_detect_mcp_refs_mcp_servers_url() {
+        // Canonical MCP config shape: mcpServers.<name>.url.
+        let content = r#"{
+            "mcpServers": {
+                "billing": {"url": "https://gyre.example.com/ws/repo-b/mcp"},
+                "local": {"command": "npx", "args": ["-y", "some-server"]}
+            }
+        }"#;
+        let repos = vec!["repo-b", "repo-c"];
+        let refs = crate::git_http::detect_mcp_refs(content, &repos);
+        assert_eq!(refs, vec!["repo-b".to_string()]);
+    }
+
+    #[test]
+    fn test_detect_mcp_refs_unrelated_field_no_edge() {
+        // A repo name appearing only in an unrelated string field creates no
+        // edge — the pre-fix whole-document substring scan created one.
+        let content = r#"{
+            "mcpServers": {
+                "billing": {
+                    "url": "https://api.example.com/mcp",
+                    "description": "talks to repo-b"
+                }
+            }
+        }"#;
+        let repos = vec!["repo-b"];
+        let refs = crate::git_http::detect_mcp_refs(content, &repos);
+        assert!(refs.is_empty());
+    }
+
+    #[test]
+    fn test_detect_mcp_refs_invalid_json() {
+        let refs = crate::git_http::detect_mcp_refs("not valid json {{{", &["repo-b"]);
+        assert!(refs.is_empty());
     }
 
     // ── Reconciliation tests ──────────────────────────────────────────

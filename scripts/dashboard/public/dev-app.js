@@ -25,6 +25,8 @@ let streamExpansion = "default";
 let errorText = "";
 let retryAllPending = false;
 let slotsDraft = null;
+let decisionPending = null;
+let specPlanningExpanded = false;
 
 function e(tag, props = {}, ...children) {
   const node = document.createElement(tag);
@@ -123,12 +125,11 @@ function renderHealth() {
   const s = snapshot || {};
   const online = s.online;
   const value = s.slots ?? 0;
-  const gate = s.health || {};
   nodes.health.hidden = false;
   nodes.health.replaceChildren(
     e("span", {}, e("span", { class: `dot ${online ? "ok" : "down"}` }), online ? " controller online" : " controller offline"),
     e("span", { class: "sep", text: "|" }),
-    e("span", { text: `${s.running ?? 0} running / ${gate.effective_slots ?? value} admitted / ${value} desired` }),
+    e("span", { text: `${s.running ?? 0} running / ${value} desired` }),
     e("span", { class: "sep", text: "|" }),
     e("span", { text: `${s.eligible ?? 0} dependency-eligible · ${s.counts?.deferred ?? 0} queued · ${s.counts?.failed ?? 0} failed · ${s.counts?.merged ?? 0} current · ${s.counts?.assessing ?? 0} assessing · ${s.counts?.['needs-triage'] ?? 0} need triage · ${s.confirmed_merges ?? 0} shipped by controller` }),
     e("span", { class: "health-spacer" }),
@@ -227,17 +228,31 @@ function renderOverview() {
   const control = e("section", { class: "dev-panel" },
     e("h2", { text: "Independent reconcilers" }),
     e("p", { text: s.online ? `${s.supervisor_online ? "Supervisor online" : "Independent stage workers active"} · ${gate.condition || "Reconciling"}` : "Run: python3 scripts/dev-pipeline.py serve. Stages can also run independently with tick." }),
+    gate.capacity && !gate.capacity.allowed ? e("p", { class: "muted", text: gate.capacity.message }) : null,
+    gate.delivery ? e("p", { class: gate.delivery.condition === "Stalled" ? "dev-health-error" : "muted", text:
+      `Delivery ${gate.delivery.condition.toLowerCase()} · ${gate.delivery.unfinished} unfinished tasks` +
+      (gate.delivery.last_merge_at ? ` · last merge ${new Date(gate.delivery.last_merge_at * 1000).toLocaleString()}` : "") +
+      (Object.keys(gate.delivery.blockers || {}).length ? ` · blockers: ${Object.entries(gate.delivery.blockers).map(([name, count]) => `${name.replaceAll("_", " ")} (${count})`).join(", ")}` : "") }) : null,
+    s.spec_reconciliation ? e("p", { class: "muted", text:
+      `Spec reconciliation ${s.spec_reconciliation.enabled ? "enabled" : "disabled"} · ${s.spec_reconciliation.documents} canonical documents · ` +
+      Object.entries(s.spec_reconciliation.states || {}).map(([state, count]) => `${count} ${state}`).join(" · ") +
+      ". Observed means reviewed source evidence, not verified coverage." }) : null,
+    s.spec_reconciliation?.enabled ? e("details", { open: specPlanningExpanded, ontoggle: (event) => { specPlanningExpanded = event.currentTarget.open; } }, e("summary", { text: "Spec audits and planning · inspect work or failures" }),
+      ...(s.spec_reconciliation.items || []).map((item) => e("div", { class: "dev-control-line" },
+        taskButton(item, `${item.stage || item.progress} · ${item.gaps} observed gaps`),
+        item.condition ? e("span", { class: "dev-health-error", text: item.condition }) : null))) : null,
+    gate.stress_guard ? e("p", { class: "dev-health-error", text: `Stress guard paused new admissions: ${gate.stress_guard.reason}. Tasks: ${(gate.stress_guard.tasks || []).join(", ")}. Active work continues; inspect the fault before resuming.` }) : null,
     ...Object.entries(s.stages || {}).map(([stage, count]) => e("div", { class: "dev-control-line", text: `${stage}: ${count.claimed || 0} running · ${count.ready || 0} ready · ${count.retry || 0} ${stage === "observe" ? "waiting for CI" : "backing off"} · ${count.succeeded || 0} completed` })),
     e("p", { class: "muted", text: s.dispatch?.integration
-      ? `Final integration: ${s.dispatch.integration.task} owns verification, CI, and merge. Other candidates queue here; implementation and review remain parallel.`
-      : "Final integration admits one candidate at a time. Implementation and review remain parallel." }),
+      ? `Merge permit: ${s.dispatch.integration.task} is awaiting upstream confirmation. Verification and other PRs continue independently.`
+      : "Verification runs concurrently within the sandbox budget. Only actual merge requests share a global permit." }),
     e("p", { class: "muted", text: s.resources?.inventory_ready ? `Remote resource inventory current · ${s.resources.used} charged · ${s.resources.deletion_pending} awaiting deletion` : "Admission waits for a complete remote sandbox inventory." }),
-    (s.dispatch?.integration_waiting || []).length ? e("p", { class: "muted", text: `Integration lane yielded while waiting for external CI or policy: ${s.dispatch.integration_waiting.join(", ")}. Observation continues; merge checks remain required.` }) : null,
+    (s.dispatch?.integration_waiting || []).length ? e("p", { class: "muted", text: `External CI or policy waits: ${s.dispatch.integration_waiting.join(", ")}. Observation continues; merge checks remain required.` }) : null,
     gate.inference?.condition && gate.inference.condition !== "Ready" ? e("p", { class: "dev-health-error", text: `${gate.inference.condition} · ${gate.inference.expires > Date.now()/1000 ? `retry in ${until(gate.inference.expires)}` : "awaiting next probe"}` }) : null,
     gate.inventory_error ? e("p", { class: "muted", text: `Inventory: ${gate.inventory_error}` }) : null,
     gate.gateway_auth?.using_cached ? e("p", { class: "muted", text: `Gateway refresh is retrying with backoff; cached login is still working. Next refresh ${until(gate.gateway_auth.retry_at)}.` }) : null,
     s.dispatch?.only_task ? e("p", { text: `Dispatch restricted to ${s.dispatch.only_task}. Eligible counts include tasks excluded by this restriction.` }) : null,
-    e("p", { class: "muted", text: `Global sandbox budget: ${s.resources?.used || 0} charged / ${s.slots || 0} desired. Pending deletion continues to consume capacity.` }),
+    e("p", { class: "muted", text: `Global sandbox budget: ${s.resources?.used || 0} charged / ${s.slots || 0} desired. Pending deletion remains charged until physical absence is confirmed.` }),
     e("p", { class: "muted", text: `${s.dispatch?.verification_reserved || 0} slot reserved for verification. Priority classes age while queued; running workers are not preempted.` }),
     e("p", { class: "muted", text: "Set sandboxes to 0 to drain. Active attempts finish and keep their checkpoints." }),
     e("div", { class: "dev-control-line", text: `${(s.attempts || []).filter((a) => a.state === "running" && a.kind === "implement").length} implementing · ${(s.attempts || []).filter((a) => a.state === "running" && ["review", "verify"].includes(a.kind)).length} reviewing/verifying · ${s.slots ?? "—"} slots` }));
@@ -256,7 +271,29 @@ function renderOverview() {
   const waiting = e("section", { class: "dev-panel" }, e("h2", { text: `Stage retry queue · ${deferred.length}` }),
     deferred.length ? deferred.slice(0, 12).map((task) => taskButton(task, infrastructureQueueReason(task)))
       : e("p", { class: "muted", text: "No stage is waiting for a retry." }));
-  nodes.overview.replaceChildren(coverageBar, metrics, errorText || s.error ? e("div", { class: "dev-error", text: errorText || s.error }) : "",
+  const decisions = (s.decisions || []).filter((d) => d.current || d.selection);
+  const decisionPanel = e("section", { class: "dev-panel dev-decisions", id: "decisions" },
+    e("h2", { text: `Decisions · ${decisions.filter((d) => !d.selection).length} awaiting you` }),
+    ...decisions.map((d) => e("article", { class: "dev-decision" },
+      e("h3", { text: `${d.task} · ${d.question}` }),
+      e("p", { class: "muted", text: d.context }),
+      e("div", { class: "dev-decision-options" }, ...d.options.map((o, i) =>
+        e("section", { class: "dev-decision-option" },
+          e("strong", { text: `${i + 1}. ${o.title}${d.recommendation === o.id ? " · Recommended" : ""}` }),
+          e("p", { text: o.summary }), e("p", { class: "muted", text: `Tradeoffs: ${o.tradeoffs}` }),
+          e("p", { text: `Next: ${o.next_step}` }),
+          d.selection ? null : e("button", { class: "dev-action", text: "Choose this direction", disabled: decisionPending === d.id, onclick: async () => {
+            decisionPending = d.id; renderOverview();
+            try { await post("/api/decision", { id: d.id, option: o.id }); await poll(); }
+            catch (error) { errorText = error.message; render(); }
+            finally { decisionPending = null; renderOverview(); }
+          } })))),
+      d.selection ? e("p", { text: `Recorded: ${d.options.find((o) => o.id === d.selection.option)?.title} · ${d.selection.actor} via ${d.selection.source}. Amendment task: ${d.application_task}.` }) :
+        e("p", { class: "muted", text: "Nothing is selected automatically. Your choice is recorded and queues a reviewed spec amendment before implementation resumes." }),
+      ...(d.sources || []).map((source) => source.startsWith("https://")
+        ? e("a", { href: source, target: "_blank", rel: "noopener noreferrer", text: source })
+        : e("div", { class: "muted", text: source })))));
+  nodes.overview.replaceChildren(coverageBar, ...(decisions.length ? [decisionPanel] : []), metrics, errorText || s.error ? e("div", { class: "dev-error", text: errorText || s.error }) : "",
     published.length ? e("section", { class: "dev-panel" }, e("h2", { text: `Pull requests under reconciliation · ${published.length}` }),
       published.map((task) => e("div", {}, taskButton(task, task.condition || "Waiting for GitHub checks"), prLinks(task)))) : null,
     e("div", { class: "dev-overview-grid" }, e("div", {}, control, live, waiting), attention),
@@ -468,7 +505,7 @@ function showStream(id) {
   };
 }
 function renderDrawer() {
-  const task = (snapshot?.tasks || []).find((t) => t.name === selected);
+  const task = [...(snapshot?.tasks || []), ...(snapshot?.spec_reconciliation?.items || [])].find((t) => t.name === selected);
   if (!task) { if (snapshot?.tasks?.length) closeTask(); return; }
   $("drawer-id").textContent = task.name;
   $("drawer-title").textContent = title(task);

@@ -1,7 +1,7 @@
 <script>
   import { getContext } from 'svelte';
   import { t } from 'svelte-i18n';
-  import { api } from '../lib/api.js';
+  import { api, selfReviewerId } from '../lib/api.js';
   import { entityName } from '../lib/entityNames.svelte.js';
   import Badge from '../lib/Badge.svelte';
   import Button from '../lib/Button.svelte';
@@ -115,6 +115,16 @@
       // server returns the queue across all workspaces the user belongs to.
       const params = {};
       if (scope !== 'tenant' && workspaceId) params.workspace_id = workspaceId;
+      // HSI §2 "Inbox shows" / "Inbox priorities shown" rows: NO
+      // client-side priority cap is sent. The server applies the trust
+      // filter as a TYPE-SET exclusion (exclude_types derived from the
+      // workspace's trust_level) whenever max_priority is absent, which is
+      // the single enforcement point for every client (web, CLI, API) and
+      // keeps the list in lockstep with the badge count endpoint. A
+      // client-side max_priority=9 cap would additionally hide rank-10
+      // action-required types (InvitationReceived, MembershipChanged)
+      // that the type-set deliberately keeps visible at every trust
+      // level — the badge would count an invitation the inbox hides.
       let raw = await api.myNotifications(params);
       if (gen !== loadGen) return; // scope changed while loading
       let data = Array.isArray(raw) ? raw : (raw?.notifications ?? []);
@@ -175,6 +185,7 @@
         MergeQueueEscalation: 'merge_queue_escalation',
         // Legacy/defensive entries kept for older rows
         MrNeedsReview: 'mr_needs_review',
+        BudgetExhausted: 'budget_exhausted',
       };
       data = data.map(n => ({
         ...n,
@@ -304,7 +315,7 @@
   async function handleDismiss(n) {
     actionStates = { ...actionStates, [n.id]: { loading: true } };
     try {
-      await api.markNotificationRead(n.id);
+      await api.dismissNotification(n.id);
       notifications = notifications.map(item =>
         item.id === n.id ? { ...item, dismissed_at: new Date().toISOString() } : item
       );
@@ -492,7 +503,7 @@
     try {
       await api.submitReview(body.mr_id, {
         decision: 'approved',
-        reviewer_agent_id: 'human',
+        reviewer_agent_id: await selfReviewerId(),
         body: `Gate override from Inbox: ${body.gate_name ?? 'gate'} failure accepted by human`,
       });
       await api.mrStatus(body.mr_id, 'approved');

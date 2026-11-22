@@ -58,6 +58,35 @@ describe('validateViewQuery — valid queries', () => {
     expect(result.valid).toBe(true);
   });
 
+  it('accepts a concept scope with seed_match omitted (defaults to exact)', () => {
+    const result = validateViewQuery({
+      scope: { type: 'concept', seed_nodes: ['AuthService'] },
+    });
+    expect(result.valid).toBe(true);
+    expect(result.errors).toEqual([]);
+  });
+
+  it("accepts a concept scope with seed_match 'exact'", () => {
+    const result = validateViewQuery({
+      scope: { type: 'concept', seed_nodes: ['AuthService'], seed_match: 'exact' },
+    });
+    expect(result.valid).toBe(true);
+    expect(result.errors).toEqual([]);
+  });
+
+  it("accepts a concept scope with seed_match 'substring'", () => {
+    const result = validateViewQuery({
+      scope: {
+        type: 'concept',
+        seed_nodes: ['Service'],
+        expand_edges: ['calls'],
+        seed_match: 'substring',
+      },
+    });
+    expect(result.valid).toBe(true);
+    expect(result.errors).toEqual([]);
+  });
+
   it('accepts a full query with all optional sections', () => {
     const result = validateViewQuery({
       scope: { type: 'all' },
@@ -175,6 +204,23 @@ describe('validateViewQuery — scope-specific errors', () => {
     });
     expect(result.valid).toBe(false);
     expect(result.errors[0]).toContain('upward');
+  });
+
+  it("rejects concept scope with invalid seed_match", () => {
+    const result = validateViewQuery({
+      scope: { type: 'concept', seed_nodes: ['A'], seed_match: 'regex' },
+    });
+    expect(result.valid).toBe(false);
+    expect(result.errors[0]).toContain('regex');
+    expect(result.errors[0]).toContain('seed_match');
+  });
+
+  it("rejects concept scope with case-variant seed_match", () => {
+    const result = validateViewQuery({
+      scope: { type: 'concept', seed_nodes: ['A'], seed_match: 'Exact' },
+    });
+    expect(result.valid).toBe(false);
+    expect(result.errors[0]).toContain('seed_match');
   });
 
   it('rejects diff scope with empty from_commit', () => {

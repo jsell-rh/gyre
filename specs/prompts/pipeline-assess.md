@@ -20,3 +20,10 @@ empty and evidence must cover every changed requirement and the task acceptance
 criteria. Use the exact keys from required_evidence as evidence.requirement;
 include at least one evidence entry per key (including task and goal). Ambiguous requirements require needs_triage, never speculative coding.
 A host-controlled full verification follows any still_satisfied judgment.
+
+Copy candidate and requirements identifiers verbatim from /tmp/stage/job.json
+input (candidate falls back to input.base). Do not substitute a task generation,
+a previous report fingerprint, or the checkout's task metadata. Generate the
+report as JSON with a script. Verify each required_evidence key has at least one
+nonempty requirement/file/detail object before finishing; a malformed report
+cannot authorize implementation or mark requirements satisfied.

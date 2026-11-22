@@ -42,7 +42,7 @@ def restore(branch):
 
 
 def snapshot(task, state):
-    if not re.fullmatch(r'task-\d+', task):
+    if not re.fullmatch(r'(?:task-\d+|spec-[a-f0-9]{24})', task):
         raise ValueError('invalid task name')
     branch = git('branch', '--show-current').decode().strip()
     restore(branch)

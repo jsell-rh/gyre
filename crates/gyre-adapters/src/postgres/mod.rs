@@ -13,6 +13,7 @@ pub mod analytics;
 pub mod attestation;
 pub mod audit;
 pub mod authorization_provenance;
+pub mod breaking_change;
 pub mod budget;
 pub mod budget_call;
 pub mod commit_signature;
@@ -20,6 +21,8 @@ pub mod compute_target;
 pub mod container_audit;
 pub mod conversation;
 pub mod dependency;
+pub mod dependency_policy;
+pub mod invitation;
 pub mod kv_store;
 pub mod llm_config;
 pub mod merge_queue;
@@ -33,17 +36,22 @@ pub mod policy;
 pub mod prompt_template;
 pub mod push_gate;
 pub mod quality_gate;
+pub mod repair;
+pub mod repo_access;
 pub mod repository;
 pub mod review;
 pub mod rollout_policy;
+pub mod scim_group;
 pub mod search;
 pub mod secret;
+pub mod session;
 pub mod spawn_log;
 pub mod spec_approval;
 pub mod spec_approval_event;
 pub mod spec_assertion_results;
 pub mod spec_ledger;
 pub mod spec_lifecycle;
+pub mod spec_links;
 pub mod spec_policy;
 pub mod task;
 pub mod team;
@@ -88,6 +96,11 @@ impl PgStorage {
             let mut conn = pool.get()?;
             conn.run_pending_migrations(MIGRATIONS)
                 .map_err(|e| anyhow::anyhow!("Diesel PG migration failed: {e}"))?;
+            // Task-110 review: repair the six invitation timestamp columns
+            // (INTEGER -> BIGINT) on databases that ran the pre-repair
+            // variant of migration 000063 — see repair.rs for why this is
+            // a PG-only hook and not a shared migration.
+            repair::ensure_invitation_timestamps_bigint(&mut conn)?;
             // PostgreSQL-only tsvector search index (search.md §Search Index).
             // Dialect-specific DDL must not go in the shared diesel migrations
             // dir — that dir is embedded and runs on SQLite too.

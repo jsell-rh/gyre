@@ -33,12 +33,15 @@ struct UserRow {
     display_name: Option<String>,
     timezone: Option<String>,
     locale: Option<String>,
+    oidc_issuer: Option<String>,
     username: String,
     avatar_url: Option<String>,
     preferences: Option<String>,
     last_login_at: Option<i64>,
     tenant_id: Option<String>,
     global_role: String,
+    deactivated_at: Option<i64>,
+    manager_id: Option<String>,
 }
 
 impl From<UserRow> for User {
@@ -67,9 +70,12 @@ impl From<UserRow> for User {
         u.locale = r.locale.unwrap_or_else(|| "en".to_string());
         u.avatar_url = r.avatar_url;
         u.preferences = preferences;
-        u.last_login_at = r.last_login_at.map(|v| v as u64);
+        u.oidc_issuer = r.oidc_issuer;
+        u.last_login_at = r.last_login_at.map(|v| v.max(0) as u64);
         u.tenant_id = r.tenant_id.map(Id::new);
         u.global_role = global_role;
+        u.deactivated_at = r.deactivated_at.map(|v| v as u64);
+        u.manager_id = r.manager_id.map(Id::new);
         u
     }
 }
@@ -104,6 +110,8 @@ struct UserRecord<'a> {
     last_login_at: Option<i64>,
     tenant_id: Option<&'a str>,
     global_role: String,
+    deactivated_at: Option<i64>,
+    manager_id: Option<&'a str>,
 }
 
 #[derive(Insertable)]
@@ -162,6 +170,8 @@ impl UserRepository for SqliteStorage {
                 last_login_at: u.last_login_at.map(|v| v as i64),
                 tenant_id: u.tenant_id.as_ref().map(|t| t.as_str()),
                 global_role: global_role_to_str(&u.global_role).to_string(),
+                deactivated_at: u.deactivated_at.map(|v| v as i64),
+                manager_id: u.manager_id.as_ref().map(|m| m.as_str()),
             };
             diesel::insert_into(users::table)
                 .values(&record)
@@ -213,6 +223,30 @@ impl UserRepository for SqliteStorage {
                 .optional()
                 .context("find user by username")?;
             Ok(result.map(User::from))
+        })
+        .await?
+    }
+
+    async fn find_by_email(&self, email: &str) -> Result<Vec<User>> {
+        let pool = Arc::clone(&self.pool);
+        let email = email.to_lowercase();
+        tokio::task::spawn_blocking(move || -> Result<Vec<User>> {
+            let mut conn = pool.get().context("get db connection")?;
+            // Case-insensitive match via lower() (portable across SQLite
+            // and PostgreSQL): invitation emails are normalized to
+            // lowercase, but SSO-provisioned accounts store the IdP's raw
+            // casing. Email is not unique (same person, multiple
+            // tenants), so every match is returned; callers scope by
+            // tenant. Ordered by creation for a deterministic pick.
+            let rows = users::table
+                .filter(
+                    diesel::dsl::sql::<diesel::sql_types::Bool>("lower(users.email) = ")
+                        .bind::<diesel::sql_types::Text, _>(email),
+                )
+                .order(users::created_at.asc())
+                .load::<UserRow>(&mut *conn)
+                .context("find users by email")?;
+            Ok(rows.into_iter().map(User::from).collect())
         })
         .await?
     }
@@ -273,9 +307,44 @@ impl UserRepository for SqliteStorage {
                     users::last_login_at.eq(u.last_login_at.map(|v| v as i64)),
                     users::tenant_id.eq(u.tenant_id.as_ref().map(|t| t.as_str())),
                     users::global_role.eq(global_role_to_str(&u.global_role)),
+                    users::deactivated_at.eq(u.deactivated_at.map(|v| v as i64)),
+                    users::manager_id.eq(u.manager_id.as_ref().map(|m| m.as_str())),
                 ))
                 .execute(&mut *conn)
                 .context("update user")?;
+            Ok(())
+        })
+        .await?
+    }
+
+    async fn claim_external_id(&self, user_id: &Id, new_external_id: &str) -> Result<()> {
+        let pool = Arc::clone(&self.pool);
+        let user_id = user_id.clone();
+        let new_external_id = new_external_id.to_string();
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let mut conn = pool.get().context("get db connection")?;
+            // Port contract: fail if another user already owns the new
+            // external_id, or the target user does not exist.
+            let dup: Option<String> = users::table
+                .filter(
+                    users::external_id
+                        .eq(new_external_id.as_str())
+                        .and(users::id.ne(user_id.as_str())),
+                )
+                .select(users::id)
+                .first::<String>(&mut *conn)
+                .optional()
+                .context("check external_id owner")?;
+            if let Some(owner) = dup {
+                anyhow::bail!("external_id already owned by user {owner}");
+            }
+            let updated = diesel::update(users::table.find(user_id.as_str()))
+                .set(users::external_id.eq(new_external_id.as_str()))
+                .execute(&mut *conn)
+                .context("claim external_id")?;
+            if updated == 0 {
+                anyhow::bail!("cannot claim external_id for user {user_id}: not found");
+            }
             Ok(())
         })
         .await?
@@ -289,6 +358,44 @@ impl UserRepository for SqliteStorage {
             diesel::delete(users::table.find(id.as_str()))
                 .execute(&mut *conn)
                 .context("delete user")?;
+            Ok(())
+        })
+        .await?
+    }
+
+    async fn record_login(
+        &self,
+        user_id: &Id,
+        oidc_issuer: &str,
+        at: u64,
+        min_interval_secs: u64,
+    ) -> Result<()> {
+        let pool = Arc::clone(&self.pool);
+        let uid = user_id.clone();
+        let iss = oidc_issuer.to_string();
+        // Interval check and write in ONE statement (no read-modify-write race):
+        // the row is only touched when the verified issuer differs from the
+        // stored one, or last_login_at is NULL or at/older than the debounce
+        // threshold (the provisioning path re-stamps last_login_at on every
+        // auth, so the issuer carve-out is what keeps provenance correct).
+        let threshold = at.saturating_sub(min_interval_secs) as i64;
+        let at_i = at as i64;
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let mut conn = pool.get().context("get db connection")?;
+            diesel::update(users::table.find(uid.as_str()))
+                .set((
+                    users::oidc_issuer.eq(iss.as_str()),
+                    users::last_login_at.eq(at_i),
+                ))
+                .filter(
+                    users::oidc_issuer
+                        .is_null()
+                        .or(users::oidc_issuer.ne(iss.as_str()))
+                        .or(users::last_login_at.is_null())
+                        .or(users::last_login_at.le(threshold)),
+                )
+                .execute(&mut *conn)
+                .context("record_login")?;
             Ok(())
         })
         .await?
@@ -382,6 +489,125 @@ mod tests {
             .unwrap();
         assert_eq!(found.display_name, "alice");
         assert_eq!(found.external_id, "ext-1");
+    }
+
+    /// TASK-124: deactivation round-trips through the persisted column —
+    /// a fresh find_by_* after update() must see the deactivated account
+    /// (the auth extractor's rejection depends on it).
+    #[tokio::test]
+    async fn deactivation_persists_and_round_trips() {
+        let (_tmp, s) = setup();
+        let mut u = make_user("u1", "ext-1", "dana");
+        UserRepository::create(&s, &u).await.unwrap();
+        assert!(!u.is_deactivated());
+
+        u.deactivate(1234);
+        UserRepository::update(&s, &u).await.unwrap();
+
+        for found in [
+            UserRepository::find_by_id(&s, &u.id)
+                .await
+                .unwrap()
+                .unwrap(),
+            s.find_by_external_id("ext-1").await.unwrap().unwrap(),
+            s.find_by_username("dana").await.unwrap().unwrap(),
+        ] {
+            assert_eq!(found.deactivated_at, Some(1234));
+            assert!(found.is_deactivated());
+        }
+
+        // list() sees the deactivation too (GET /api/v1/users surface).
+        let listed = UserRepository::list(&s).await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert!(listed[0].is_deactivated());
+    }
+
+    #[tokio::test]
+    async fn enterprise_manager_id_round_trips() {
+        // TASK-265: the SCIM enterprise extension's manager.value
+        // (RFC 7643 §4.3) must survive create and update — the SCIM PUT/
+        // PATCH path persists it on the users.manager_id column.
+        let (_tmp, s) = setup();
+        let mut u = make_user("u-mgr", "ext-mgr", "dana");
+        u.manager_id = Some(Id::new("manager-user-9"));
+        UserRepository::create(&s, &u).await.unwrap();
+
+        let found = UserRepository::find_by_id(&s, &u.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.manager_id, Some(Id::new("manager-user-9")));
+
+        // Update path: change and clear.
+        let mut u2 = found.clone();
+        u2.manager_id = Some(Id::new("manager-user-10"));
+        UserRepository::update(&s, &u2).await.unwrap();
+        assert_eq!(
+            UserRepository::find_by_id(&s, &u.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .manager_id,
+            Some(Id::new("manager-user-10"))
+        );
+        u2.manager_id = None;
+        UserRepository::update(&s, &u2).await.unwrap();
+        assert_eq!(
+            UserRepository::find_by_id(&s, &u.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .manager_id,
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn tenant_scope_and_global_role_round_trip() {
+        // TASK-110 repair F1: tenant_id and global_role were silently
+        // dropped by the DB adapters (no columns). The workspace
+        // invitation flow keys tenant containment on user.tenant_id, so
+        // a DB-backed deployment rejected every invitee. This kills that
+        // regression: create → read back through real SQLite.
+        let (_tmp, s) = setup();
+        let mut u = make_user("u-tenant", "tenant:acme:email:a@x.com", "alice");
+        u.tenant_id = Some(Id::new("acme"));
+        u.global_role = gyre_domain::GlobalRole::TenantAdmin;
+        UserRepository::create(&s, &u).await.unwrap();
+        let found = s
+            .find_by_external_id("tenant:acme:email:a@x.com")
+            .await
+            .unwrap()
+            .expect("user persisted");
+        assert_eq!(found.tenant_id, Some(Id::new("acme")));
+        assert_eq!(found.global_role, gyre_domain::GlobalRole::TenantAdmin);
+
+        // Update path also persists both fields.
+        let mut reloaded = UserRepository::find_by_id(&s, &u.id)
+            .await
+            .unwrap()
+            .unwrap();
+        reloaded.tenant_id = Some(Id::new("acme2"));
+        reloaded.global_role = gyre_domain::GlobalRole::Member;
+        UserRepository::update(&s, &reloaded).await.unwrap();
+        let after = UserRepository::find_by_id(&s, &u.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(after.tenant_id, Some(Id::new("acme2")));
+        assert_eq!(after.global_role, gyre_domain::GlobalRole::Member);
+
+        // A legacy tenant-less user still reads back as Member with no
+        // tenant (pre-migration rows get the column defaults).
+        let legacy = make_user("u-legacy", "local:legacy", "legacy");
+        UserRepository::create(&s, &legacy).await.unwrap();
+        let found_legacy = s
+            .find_by_external_id("local:legacy")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(found_legacy.tenant_id, None);
+        assert_eq!(found_legacy.global_role, gyre_domain::GlobalRole::Member);
     }
 
     #[tokio::test]
@@ -498,6 +724,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn claim_external_id_is_the_sanctioned_repoint() {
+        // Port contract: update() rejects external_id changes, but the
+        // invitation account-link (user-management.md §Tenant-Level User
+        // Onboarding: "SSO mode: ... then account linked") must re-point a
+        // local-mode account's external_id at the SSO subject. The claim
+        // transition is the only sanctioned path — and it must refuse to
+        // steal an external_id another user already owns, or the claim
+        // would create the duplicate external_id the create() contract
+        // exists to prevent.
+        let (_tmp, s) = setup();
+        let invited = make_user("u-inv", "tenant:acme:email:a@x.com", "alice");
+        UserRepository::create(&s, &invited).await.unwrap();
+        let other = make_user("u-other", "keycloak-sub-other", "bob");
+        UserRepository::create(&s, &other).await.unwrap();
+
+        // Claim succeeds and is visible through the new external_id only.
+        UserRepository::claim_external_id(&s, &invited.id, "keycloak-sub-alice")
+            .await
+            .unwrap();
+        let claimed = s
+            .find_by_external_id("keycloak-sub-alice")
+            .await
+            .unwrap()
+            .expect("account re-pointed to SSO subject");
+        assert_eq!(claimed.id, invited.id);
+        assert!(
+            s.find_by_external_id("tenant:acme:email:a@x.com")
+                .await
+                .unwrap()
+                .is_none(),
+            "old namespaced external_id must no longer resolve"
+        );
+
+        // Claiming an external_id owned by another user is rejected, and
+        // the rejected claim must not have touched either account.
+        let err = UserRepository::claim_external_id(&s, &invited.id, "keycloak-sub-other").await;
+        assert!(err.is_err(), "claim must refuse a taken external_id");
+        assert_eq!(
+            s.find_by_external_id("keycloak-sub-alice")
+                .await
+                .unwrap()
+                .unwrap()
+                .id,
+            invited.id
+        );
+
+        // Unknown user is rejected (no silent no-op).
+        assert!(
+            UserRepository::claim_external_id(&s, &Id::new("u-missing"), "keycloak-sub-x")
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
     async fn update_persists_login_stamp_and_preferences() {
         // record_login + preferences updates must persist through update().
         let (_tmp, s) = setup();
@@ -546,5 +827,46 @@ mod tests {
             .unwrap();
         ApiKeyRepository::delete(&s, "gyre_key_abc").await.unwrap();
         assert!(s.find_user_id("gyre_key_abc").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn find_by_email_is_case_insensitive_and_returns_all_matches() {
+        // Task-110 review F1: invitation acceptance links an existing
+        // SSO-provisioned account by email. SSO accounts store the IdP's
+        // raw casing while invitation emails are normalized to lowercase,
+        // so the lookup must be case-insensitive; and email is NOT unique
+        // (the spec's cross-tenant model has the same person in two
+        // tenants), so every match is returned for the caller to scope by
+        // tenant. Exercises the real SQL (lower() comparison) through
+        // SQLite.
+        let (_tmp, s) = setup();
+        let mut sso = make_user("u-sso", "keycloak-subj-1", "sso-alice");
+        sso.email = Some("Sso-Alice@Example.com".to_string());
+        sso.tenant_id = Some(Id::new("acme"));
+        UserRepository::create(&s, &sso).await.unwrap();
+        let mut other_tenant = make_user(
+            "u-other",
+            "tenant:other:email:sso-alice@example.com",
+            "sso-alice-2",
+        );
+        other_tenant.email = Some("sso-alice@example.com".to_string());
+        other_tenant.tenant_id = Some(Id::new("other"));
+        UserRepository::create(&s, &other_tenant).await.unwrap();
+        let mut no_email = make_user("u-none", "ext-none", "none");
+        no_email.email = None;
+        UserRepository::create(&s, &no_email).await.unwrap();
+
+        let matches = s.find_by_email("sso-alice@example.com").await.unwrap();
+        let ids: Vec<&str> = matches.iter().map(|u| u.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["u-sso", "u-other"],
+            "both tenant accounts match (case-insensitive), ordered by creation"
+        );
+        assert!(s
+            .find_by_email("nobody@example.com")
+            .await
+            .unwrap()
+            .is_empty());
     }
 }

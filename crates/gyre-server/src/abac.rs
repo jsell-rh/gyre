@@ -325,10 +325,14 @@ mod tests {
     async fn no_policies_grants_access() {
         let state = test_state();
         let auth = AuthenticatedAgent {
+            auth_mechanism: crate::auth::AuthMechanism::AgentToken,
             agent_id: "agent-1".to_string(),
             user_id: None,
             roles: vec![],
             tenant_id: "default".to_string(),
+            workspace_id: None,
+            repo_id: None,
+            scope: Vec::new(),
             jwt_claims: Some(serde_json::json!({ "scope": "repo:X" })),
             bearer_token: None,
             deprecated_token_auth: false,
@@ -359,10 +363,14 @@ mod tests {
             .unwrap();
         // Global token / API key: jwt_claims is None → bypass.
         let auth = AuthenticatedAgent {
+            auth_mechanism: crate::auth::AuthMechanism::GlobalToken,
             agent_id: "system".to_string(),
             user_id: None,
             roles: vec![gyre_domain::UserRole::Admin],
             tenant_id: "default".to_string(),
+            workspace_id: None,
+            repo_id: None,
+            scope: Vec::new(),
             jwt_claims: None,
             bearer_token: None,
             deprecated_token_auth: false,
@@ -391,10 +399,14 @@ mod tests {
             .await
             .unwrap();
         let auth = AuthenticatedAgent {
+            auth_mechanism: crate::auth::AuthMechanism::AgentToken,
             agent_id: "agent-1".to_string(),
             user_id: None,
             roles: vec![],
             tenant_id: "default".to_string(),
+            workspace_id: None,
+            repo_id: None,
+            scope: Vec::new(),
             jwt_claims: Some(serde_json::json!({ "scope": "repo:A" })),
             bearer_token: None,
             deprecated_token_auth: false,
@@ -424,10 +436,14 @@ mod tests {
             .unwrap();
         // Agent only has scope for repo:A, not repo:B
         let auth = AuthenticatedAgent {
+            auth_mechanism: crate::auth::AuthMechanism::AgentToken,
             agent_id: "agent-1".to_string(),
             user_id: None,
             roles: vec![],
             tenant_id: "default".to_string(),
+            workspace_id: None,
+            repo_id: None,
+            scope: Vec::new(),
             jwt_claims: Some(serde_json::json!({ "scope": "repo:A" })),
             bearer_token: None,
             deprecated_token_auth: false,
@@ -475,10 +491,14 @@ mod tests {
                 .unwrap();
         }
         let auth = AuthenticatedAgent {
+            auth_mechanism: crate::auth::AuthMechanism::AgentToken,
             agent_id: "agent-1".to_string(),
             user_id: None,
             roles: vec![],
             tenant_id: "default".to_string(),
+            workspace_id: None,
+            repo_id: None,
+            scope: Vec::new(),
             jwt_claims: Some(serde_json::json!({ "scope": "repo:A" })),
             bearer_token: None,
             deprecated_token_auth: false,
@@ -506,10 +526,14 @@ mod tests {
 
         // Admin token (jwt_claims = None) — must succeed despite corrupt data.
         let admin_auth = AuthenticatedAgent {
+            auth_mechanism: crate::auth::AuthMechanism::GlobalToken,
             agent_id: "system".to_string(),
             user_id: None,
             roles: vec![gyre_domain::UserRole::Admin],
             tenant_id: "default".to_string(),
+            workspace_id: None,
+            repo_id: None,
+            scope: Vec::new(),
             jwt_claims: None,
             bearer_token: None,
             deprecated_token_auth: false,
@@ -524,10 +548,14 @@ mod tests {
 
         // Non-admin token (jwt_claims = Some(...)) — must fail-closed.
         let agent_auth = AuthenticatedAgent {
+            auth_mechanism: crate::auth::AuthMechanism::AgentToken,
             agent_id: "agent-1".to_string(),
             user_id: None,
             roles: vec![],
             tenant_id: "default".to_string(),
+            workspace_id: None,
+            repo_id: None,
+            scope: Vec::new(),
             jwt_claims: Some(serde_json::json!({ "scope": "repo:corrupt" })),
             bearer_token: None,
             deprecated_token_auth: false,

@@ -382,7 +382,7 @@ async fn store_and_emit(
         SpeculativeStatus::Clean => {
             state
                 .emit_event(
-                    Some(ws_id.clone()),
+                    ws_id.clone(),
                     gyre_common::message::Destination::Workspace(ws_id),
                     gyre_common::message::MessageKind::SpeculativeMergeClean,
                     Some(serde_json::json!({"repo_id": repo_id, "branch": branch})),
@@ -392,7 +392,7 @@ async fn store_and_emit(
         SpeculativeStatus::Conflict => {
             state
                 .emit_event(
-                    Some(ws_id.clone()),
+                    ws_id.clone(),
                     gyre_common::message::Destination::Workspace(ws_id),
                     gyre_common::message::MessageKind::SpeculativeConflict,
                     Some(serde_json::json!({
@@ -598,6 +598,7 @@ mod tests {
         let mr = MergeRequest::new(
             Id::new(mr_id),
             Id::new(repo_id),
+            Id::new("default"),
             &format!("MR for {branch}"),
             branch,
             "main",
@@ -714,6 +715,7 @@ mod tests {
         let mut mr_merged = gyre_domain::MergeRequest::new(
             Id::new("mr-merged"),
             Id::new("repo3"),
+            Id::new("default"),
             "Already merged",
             "feat/merged",
             "main",
@@ -975,6 +977,7 @@ mod tests {
         let mr = MergeRequest::new(
             Id::new(mr_id),
             Id::new(repo_id),
+            Id::new("default"),
             &format!("MR for {branch}"),
             branch,
             "main",

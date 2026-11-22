@@ -106,7 +106,7 @@ pub async fn evaluate_push_constraints(
                         event = "attestation.context_binding_mismatch",
                         binding = %child.label,
                         message = %child.message,
-                        "attestation.context_binding_mismatch (audit-only): {}",
+                        "attestation.context_binding_mismatch (audit-only): {}", // enforcement-mode:ok — audit-only mirror by design (Phase 2 observability); enforcement lives in enforce_push_constraints
                         child.message
                     );
                 }
@@ -329,7 +329,7 @@ pub async fn enforce_push_constraints(
         // Emit ConstraintViolation event for observability.
         state
             .emit_event(
-                Some(workspace_id.clone()),
+                workspace_id.clone(),
                 Destination::Workspace(workspace_id.clone()),
                 MessageKind::ConstraintViolation,
                 Some(serde_json::json!({
@@ -414,13 +414,12 @@ pub async fn enforce_push_constraints(
     );
 
     // Collect all constraints from the full chain (§4.3 additive accumulation).
-    let (_root, explicit_from_chain, gate_from_chain) =
-        crate::git_http::accumulate_chain_constraints(&attestations);
+    let chain_constraints = crate::git_http::accumulate_chain_constraints(&attestations);
 
     let all_constraints = constraint_evaluator::collect_all_constraints(
-        &explicit_from_chain,
+        &chain_constraints.explicit_constraints,
         &strategy_constraints,
-        &gate_from_chain,
+        &chain_constraints.gate_constraints,
     );
 
     if all_constraints.is_empty() {
@@ -671,13 +670,12 @@ pub async fn enforce_merge_constraints(
     );
 
     // Collect all constraints from the full chain (§4.3 additive accumulation).
-    let (_root, explicit_from_chain, gate_from_chain) =
-        crate::git_http::accumulate_chain_constraints(&attestations);
+    let chain_constraints = crate::git_http::accumulate_chain_constraints(&attestations);
 
     let all_constraints = constraint_evaluator::collect_all_constraints(
-        &explicit_from_chain,
+        &chain_constraints.explicit_constraints,
         &strategy_constraints,
-        &gate_from_chain,
+        &chain_constraints.gate_constraints,
     );
 
     if all_constraints.is_empty() {
@@ -878,7 +876,7 @@ pub async fn evaluate_merge_constraints(
                         event = "attestation.context_binding_mismatch",
                         binding = %child.label,
                         message = %child.message,
-                        "attestation.context_binding_mismatch (audit-only): {}",
+                        "attestation.context_binding_mismatch (audit-only): {}", // enforcement-mode:ok — audit-only mirror by design (Phase 2 observability); enforcement lives in enforce_push_constraints
                         child.message
                     );
                 }
@@ -1587,7 +1585,7 @@ async fn emit_constraint_violations(
         // Broadcast to workspace.
         state
             .emit_event(
-                Some(workspace_id.clone()),
+                workspace_id.clone(),
                 Destination::Workspace(workspace_id.clone()),
                 MessageKind::ConstraintViolation,
                 Some(payload.clone()),
@@ -1598,7 +1596,7 @@ async fn emit_constraint_violations(
         if !agent_id.is_empty() {
             state
                 .emit_event(
-                    Some(workspace_id.clone()),
+                    workspace_id.clone(),
                     Destination::Agent(Id::new(agent_id)),
                     MessageKind::ConstraintViolation,
                     Some(payload),
@@ -1683,12 +1681,15 @@ async fn create_violation_notifications(
             notif.source.repo_id = Some(Id::new(repo_id.to_string()));
             notif.source.entity_id = format!("task:{task_id}");
 
-            if let Err(e) = state.notifications.create(&notif).await {
+            if let Err(e) = state.create_notification(&notif).await {
                 warn!(
                     constraint = %violation.constraint_name,
                     error = %e,
                     "failed to create constraint violation notification"
                 );
+            } else {
+                // Channel fan-out per user-management.md §Delivery Channels.
+                crate::notification_dispatcher::dispatch_to_channels(state, &notif).await;
             }
         }
     }
@@ -2023,9 +2024,9 @@ mod tests {
         let repo_path = tmp.path().to_str().unwrap();
 
         let state = crate::mem::test_state();
-        // Emissions resolve the tenant scope from the workspace record and
-        // skip when it does not exist (task-099 F1) — seed ws-1.
-        seed_ws(&state, "ws-1").await;
+        // The workspace must exist: violation events resolve their tenant
+        // from the workspace record and are dropped when it is missing.
+        crate::mem::ensure_test_workspace(&state, "ws-1").await;
 
         // Seed workspace meta-spec set and agent persona so build_agent_context
         // produces valid values matching the InputContent.
@@ -2109,6 +2110,9 @@ mod tests {
         // skip when it does not exist (task-099 F1) — seed ws-1.
         seed_ws(&state, "ws-1").await;
         let ws_id = Id::new("ws-1");
+        // The workspace must exist: violation events resolve their tenant
+        // from the workspace record and are dropped when it is missing.
+        crate::mem::ensure_test_workspace(&state, "ws-1").await;
 
         // Subscribe to broadcast before emitting.
         let mut rx = state.message_broadcast_tx.subscribe();
@@ -2203,7 +2207,9 @@ mod tests {
                 Some(&ws_id),
                 None,
                 None,
-                Some("ConstraintViolation"),
+                Some(&["ConstraintViolation"]),
+                None,
+                &[],
                 100,
                 0,
             )
@@ -2290,9 +2296,10 @@ mod tests {
         let repo_path = tmp.path().to_str().unwrap();
 
         let state = crate::mem::test_state();
-        // Emissions resolve the tenant scope from the workspace record and
-        // skip when it does not exist (task-099 F1) — seed ws-1.
-        seed_ws(&state, "ws-1").await;
+        // The workspace must exist: violation events resolve their tenant
+        // from the workspace record and are dropped when it is missing.
+        crate::mem::ensure_test_workspace(&state, "ws-1").await;
+
         // Seed workspace meta-spec set and agent persona.
         let meta_sha = seed_agent_context(&state, "ws-1", "agent-merge-2").await;
 
@@ -2454,6 +2461,9 @@ mod tests {
             last_verified_at: 1_700_000_000,
             container_id: Some("container-xyz".to_string()),
             image_hash: Some("sha256:img-def".to_string()),
+            spiffe_id: None,
+            svid_serial: None,
+            svid_verified_at: None,
         };
         let json = serde_json::to_string(&att).unwrap();
         state
@@ -2491,6 +2501,9 @@ mod tests {
             last_verified_at: 1_700_000_000,
             container_id: None,
             image_hash: None,
+            spiffe_id: None,
+            svid_serial: None,
+            svid_verified_at: None,
         };
         assert_eq!(derive_attestation_level(Some(&att)), 1);
     }
@@ -2509,6 +2522,9 @@ mod tests {
             last_verified_at: 1_700_000_000,
             container_id: None,
             image_hash: None,
+            spiffe_id: None,
+            svid_serial: None,
+            svid_verified_at: None,
         };
         assert_eq!(derive_attestation_level(Some(&att)), 2);
     }
@@ -2527,6 +2543,9 @@ mod tests {
             last_verified_at: 1_700_000_000,
             container_id: Some("ctr-123".to_string()),
             image_hash: Some("sha256:img-456".to_string()),
+            spiffe_id: None,
+            svid_serial: None,
+            svid_verified_at: None,
         };
         assert_eq!(derive_attestation_level(Some(&att)), 3);
     }
@@ -2546,6 +2565,9 @@ mod tests {
             last_verified_at: 1_700_000_000,
             container_id: Some(String::new()),
             image_hash: Some(String::new()),
+            spiffe_id: None,
+            svid_serial: None,
+            svid_verified_at: None,
         };
         assert_eq!(derive_attestation_level(Some(&att)), 2);
     }
@@ -2639,6 +2661,9 @@ mod tests {
             last_verified_at: 1_700_000_000,
             container_id: None,
             image_hash: None,
+            spiffe_id: None,
+            svid_serial: None,
+            svid_verified_at: None,
         };
         state
             .kv_store
@@ -2664,6 +2689,9 @@ mod tests {
             last_verified_at: 1_700_000_000,
             container_id: Some("ctr-abc".to_string()),
             image_hash: Some("sha256:img-xyz".to_string()),
+            spiffe_id: None,
+            svid_serial: None,
+            svid_verified_at: None,
         };
         state
             .kv_store
@@ -3610,6 +3638,7 @@ mod tests {
                 http::Request::builder()
                     .method("PUT")
                     .uri("/api/v1/tasks/task-api-gen")
+                    .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),

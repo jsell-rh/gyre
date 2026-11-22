@@ -1,5 +1,6 @@
 use crate::budget::BudgetConfig;
 use gyre_common::Id;
+use gyre_common::NotificationType;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -54,7 +55,148 @@ impl TrustLevel {
     pub fn from_db_str(s: &str) -> Self {
         Self::parse(s).unwrap_or_default()
     }
+
+    /// HSI §2 "What Each Level Controls" > Notifications row: whether a
+    /// notification of this type is delivered to the inbox at this trust
+    /// level.
+    ///
+    /// - **Supervised / Custom** deliver every state change (Custom's
+    ///   differentiation is in the ABAC policies, not the inbox filter —
+    ///   HSI §2 "Custom trust Inbox").
+    /// - **Guided** delivers "failures and approvals": failures the agent
+    ///   owns, every approval-flow request, and the exception set below.
+    /// - **Autonomous** delivers "exceptions only": events that require
+    ///   human action, record a security/consent event, or gate an
+    ///   approval flow — plus the explicit budget carve-out (HSI §2
+    ///   Mechanical Implementation: "Budget warnings … remain visible at
+    ///   Autonomous trust because `platform-model.md` §5 defines budget
+    ///   exhaustion as requiring human action").
+    ///
+    /// Failures are suppressed at Autonomous because the agent owns
+    /// remediation there; an unresolvable failure escalates
+    /// (`AgentEscalation` / `AgentNeedsClarification`), which IS delivered.
+    pub fn delivers_notification(&self, notification_type: &NotificationType) -> bool {
+        match self {
+            TrustLevel::Supervised | TrustLevel::Custom => true,
+            TrustLevel::Guided => !GUIDED_SUPPRESSED.contains(notification_type),
+            TrustLevel::Autonomous => !AUTONOMOUS_SUPPRESSED.contains(notification_type),
+        }
+    }
+
+    /// Canonical type strings this trust level suppresses (empty at
+    /// Supervised/Custom). Used to build the inbox `exclude_types` filter —
+    /// exact-match strings on the persisted `notification_type` column.
+    pub fn suppressed_notification_types(&self) -> Vec<&'static str> {
+        let suppressed: &[NotificationType] = match self {
+            TrustLevel::Supervised | TrustLevel::Custom => &[],
+            TrustLevel::Guided => GUIDED_SUPPRESSED,
+            TrustLevel::Autonomous => AUTONOMOUS_SUPPRESSED,
+        };
+        suppressed.iter().map(|t| t.as_str()).collect()
+    }
+
+    /// HSI §2 "Inbox priorities shown" row: canonical type strings the
+    /// inbox RANGE excludes at this trust level (empty at Supervised/Custom
+    /// — 1-10, everything).
+    ///
+    /// The HSI §8 priority table lists exactly one rank-10 type
+    /// (`SuggestedSpecLink` — "excludes suggested links"). The unified
+    /// notification taxonomy (user-management.md §Notification Entity)
+    /// later placed `InvitationReceived`/`MembershipChanged` at rank 10
+    /// too; a blanket `max_priority=9` rank cap would therefore also hide
+    /// invitations — action-required events the volume row deliberately
+    /// delivers at every level. The range is consequently enforced as a
+    /// TYPE-SET exclusion: rank>10-cap types that are not always-delivered
+    /// (i.e. not delivered at Autonomous, the most restrictive level). With
+    /// the current taxonomy this is exactly `SuggestedSpecLink`, matching
+    /// the HSI table's parenthetical.
+    pub fn inbox_range_excluded_types(&self) -> Vec<&'static str> {
+        match self {
+            TrustLevel::Supervised | TrustLevel::Custom => Vec::new(),
+            TrustLevel::Guided | TrustLevel::Autonomous => NotificationType::all()
+                .iter()
+                .filter(|t| t.default_priority_rank() > 9)
+                .filter(|t| !TrustLevel::Autonomous.delivers_notification(t))
+                .map(|t| t.as_str())
+                .collect(),
+        }
+    }
+
+    /// Combined inbox exclusion set at this trust level: the volume row's
+    /// suppressed types plus the range row's excluded types, de-duplicated.
+    /// This is what the inbox listing AND the badge counts pass as
+    /// `exclude_types`, so the two can never disagree.
+    pub fn inbox_excluded_types(&self) -> Vec<&'static str> {
+        let mut excluded = self.suppressed_notification_types();
+        for t in self.inbox_range_excluded_types() {
+            if !excluded.contains(&t) {
+                excluded.push(t);
+            }
+        }
+        excluded
+    }
 }
+
+/// State-change chatter suppressed at Guided ("alert me on failures") —
+/// neither a failure, an approval, nor an exception.
+///
+/// - `MrMerged` / `GatePassed` / `AgentCompleted`: successful state changes.
+/// - `SuggestedSpecLink` (rank 10): knowledge-graph suggestions.
+/// - `TrustSuggestion`: the trust system's own suggestions (the operator
+///   already chose this level).
+/// - `CrossWorkspaceSpecChange` / `MetaSpecDrift` / `AbandonedBranch` /
+///   `CascadeTestTriggered` / `DependencyChainTooDeep`: informational
+///   activity, not failures.
+const GUIDED_SUPPRESSED: &[NotificationType] = &[
+    NotificationType::MrMerged,
+    NotificationType::GatePassed,
+    NotificationType::AgentCompleted,
+    NotificationType::SuggestedSpecLink,
+    NotificationType::TrustSuggestion,
+    NotificationType::CrossWorkspaceSpecChange,
+    NotificationType::MetaSpecDrift,
+    NotificationType::AbandonedBranch,
+    NotificationType::CascadeTestTriggered,
+    NotificationType::DependencyChainTooDeep,
+];
+
+/// Everything Autonomous suppresses: the Guided set PLUS the failures the
+/// agent owns remediation for ("only interrupt me for exceptions"). An
+/// unresolvable failure escalates via `AgentEscalation`, which stays
+/// delivered. Delivered at Autonomous: `AgentNeedsClarification`,
+/// `AgentEscalation`, `AgentBudgetWarning` (explicit HSI §2 carve-out),
+/// `AgentBudgetExhausted`, `SecurityFinding`, `MergeQueueEscalation`,
+/// `MergeQueuePaused` (broken main), `ComputeTargetUnavailable`, all
+/// approval-flow requests (`SpecApprovalRequested`,
+/// `PersonaApprovalRequested`, `PersonaChangePendingApproval`),
+/// `SpecConflict`, `ImpersonationRequest`/`ImpersonationAlert` (consent),
+/// `WorkspaceOwnerless`, `SecretExpiring`, `InvitationReceived`,
+/// `MembershipChanged`, `SystemAlert`.
+const AUTONOMOUS_SUPPRESSED: &[NotificationType] = &[
+    // Guided-suppressed state-change chatter
+    NotificationType::MrMerged,
+    NotificationType::GatePassed,
+    NotificationType::AgentCompleted,
+    NotificationType::SuggestedSpecLink,
+    NotificationType::TrustSuggestion,
+    NotificationType::CrossWorkspaceSpecChange,
+    NotificationType::MetaSpecDrift,
+    NotificationType::AbandonedBranch,
+    NotificationType::CascadeTestTriggered,
+    NotificationType::DependencyChainTooDeep,
+    // Failures the agent owns at Autonomous
+    NotificationType::GateFailure,
+    NotificationType::AgentFailed,
+    NotificationType::CascadeTestFailed,
+    NotificationType::SpecAssertionFailure,
+    NotificationType::ConstraintViolation,
+    NotificationType::AtomicGroupFailure,
+    NotificationType::MrReverted,
+    NotificationType::BreakingChangeDetected,
+    NotificationType::SpecRejected,
+    NotificationType::SpecDriftDetected,
+    NotificationType::DependencyStale,
+];
 
 /// Governance and coordination boundary. Groups related repos with shared budgets and policies.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -449,5 +591,184 @@ mod tests {
         assert_eq!(TrustLevel::parse("Autonomus"), None);
         assert_eq!(TrustLevel::parse("autonomous"), None);
         assert_eq!(TrustLevel::parse(""), None);
+    }
+
+    // ── HSI §2 "Notifications" / "Inbox priorities shown" rows ──
+
+    #[test]
+    fn supervised_and_custom_deliver_every_notification_type() {
+        // "Every state change" at Supervised; Custom's differentiation is
+        // in the ABAC policies, not the inbox filter (HSI §2).
+        for t in NotificationType::all() {
+            assert!(
+                TrustLevel::Supervised.delivers_notification(&t),
+                "Supervised must deliver {}",
+                t.as_str()
+            );
+            assert!(
+                TrustLevel::Custom.delivers_notification(&t),
+                "Custom must deliver {}",
+                t.as_str()
+            );
+        }
+        assert!(TrustLevel::Supervised
+            .suppressed_notification_types()
+            .is_empty());
+        assert!(TrustLevel::Custom
+            .suppressed_notification_types()
+            .is_empty());
+        assert!(TrustLevel::Supervised.inbox_excluded_types().is_empty());
+        assert!(TrustLevel::Custom.inbox_excluded_types().is_empty());
+    }
+
+    #[test]
+    fn guided_suppresses_state_change_chatter_but_delivers_failures_and_approvals() {
+        use NotificationType::*;
+        let guided = TrustLevel::Guided;
+        // "Failures and approvals": failures deliver.
+        for failure in [
+            GateFailure,
+            AgentFailed,
+            CascadeTestFailed,
+            SpecAssertionFailure,
+            ConstraintViolation,
+            AtomicGroupFailure,
+        ] {
+            assert!(
+                guided.delivers_notification(&failure),
+                "{}",
+                failure.as_str()
+            );
+        }
+        // Approvals deliver (spec approval is always human).
+        assert!(guided.delivers_notification(&SpecApprovalRequested));
+        assert!(guided.delivers_notification(&PersonaApprovalRequested));
+        // Exceptions deliver.
+        assert!(guided.delivers_notification(&AgentEscalation));
+        assert!(guided.delivers_notification(&AgentNeedsClarification));
+        assert!(guided.delivers_notification(&SecurityFinding));
+        // Successful state changes are suppressed.
+        for chatter in [
+            MrMerged,
+            GatePassed,
+            AgentCompleted,
+            SuggestedSpecLink,
+            TrustSuggestion,
+        ] {
+            assert!(
+                !guided.delivers_notification(&chatter),
+                "Guided must suppress {}",
+                chatter.as_str()
+            );
+        }
+        // "Inbox priorities shown: 1-9 (excludes suggested links)" — the
+        // suggested link is excluded from the Guided inbox.
+        assert!(guided.inbox_excluded_types().contains(&"SuggestedSpecLink"));
+    }
+
+    #[test]
+    fn autonomous_delivers_exceptions_only() {
+        use NotificationType::*;
+        let autonomous = TrustLevel::Autonomous;
+        // Exceptions: human action required now.
+        for exception in [
+            AgentNeedsClarification,
+            AgentEscalation,
+            AgentBudgetExhausted,
+            SecurityFinding,
+            MergeQueueEscalation,
+            MergeQueuePaused,
+            ComputeTargetUnavailable,
+            WorkspaceOwnerless,
+            SecretExpiring,
+            ImpersonationRequest,
+            ImpersonationAlert,
+        ] {
+            assert!(
+                autonomous.delivers_notification(&exception),
+                "{}",
+                exception.as_str()
+            );
+        }
+        // Explicit HSI §2 carve-out: budget warnings remain visible at
+        // Autonomous (platform-model.md §5 — budget exhaustion requires
+        // human action).
+        assert!(autonomous.delivers_notification(&AgentBudgetWarning));
+        // Spec approval is always human — the approval REQUEST must
+        // reach a human at every trust level, else approval stalls.
+        assert!(autonomous.delivers_notification(&SpecApprovalRequested));
+        assert!(autonomous.delivers_notification(&PersonaApprovalRequested));
+        assert!(autonomous.delivers_notification(&PersonaChangePendingApproval));
+        // Failures the agent owns are suppressed — escalation covers the
+        // human-needed cases.
+        for failure in [
+            GateFailure,
+            AgentFailed,
+            CascadeTestFailed,
+            SpecAssertionFailure,
+            ConstraintViolation,
+            MrMerged,
+            GatePassed,
+            AgentCompleted,
+            SuggestedSpecLink,
+        ] {
+            assert!(
+                !autonomous.delivers_notification(&failure),
+                "Autonomous must suppress {}",
+                failure.as_str()
+            );
+        }
+        // "Inbox priorities shown: 1-9 (excludes suggested links)".
+        assert!(autonomous
+            .inbox_excluded_types()
+            .contains(&"SuggestedSpecLink"));
+    }
+
+    #[test]
+    fn suppressed_type_strings_round_trip_through_parse() {
+        // The suppressed sets feed the inbox exclude_types filter as
+        // exact-match strings on the persisted notification_type column —
+        // every string must parse back to the variant it names.
+        for level in [TrustLevel::Guided, TrustLevel::Autonomous] {
+            for s in level.suppressed_notification_types() {
+                assert_eq!(
+                    NotificationType::parse(s)
+                        .as_ref()
+                        .map(NotificationType::as_str),
+                    Some(s),
+                    "suppressed type string {s} must round-trip"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn inbox_range_excludes_rank_ten_chatter_but_not_action_required_types() {
+        // The unified taxonomy ranks InvitationReceived/MembershipChanged
+        // at 10 alongside SuggestedSpecLink. The range row's stated intent
+        // ("excludes suggested links") must NOT hide action-required
+        // invitations: only rank>9 types that are not always-delivered are
+        // range-excluded.
+        for level in [TrustLevel::Guided, TrustLevel::Autonomous] {
+            let excluded = level.inbox_range_excluded_types();
+            assert!(
+                excluded.contains(&"SuggestedSpecLink"),
+                "suggested links must be range-excluded at {level:?}"
+            );
+            assert!(
+                !excluded.contains(&"InvitationReceived"),
+                "invitations are action-required and must stay visible at {level:?}"
+            );
+            assert!(
+                !excluded.contains(&"MembershipChanged"),
+                "membership changes concern the user's own access and must stay visible at {level:?}"
+            );
+            // Every range-excluded type is also in the combined inbox
+            // exclusion set (list and badge share it).
+            let combined = level.inbox_excluded_types();
+            for t in excluded {
+                assert!(combined.contains(&t));
+            }
+        }
     }
 }

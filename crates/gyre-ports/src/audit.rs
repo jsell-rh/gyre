@@ -12,6 +12,9 @@ pub struct AuditQueryFilter {
     pub workspace_id: Option<String>,
     pub user_id: Option<String>,
     pub resource_type: Option<String>,
+    /// Scope to events targeting a specific repo. `None` = no constraint.
+    /// Honored by `query` and `count_filtered` in every adapter.
+    pub repo_id: Option<String>,
     pub outcome: Option<AuditOutcome>,
     pub since: Option<u64>,
     pub until: Option<u64>,
@@ -36,10 +39,20 @@ pub struct CompressionStats {
 pub trait AuditRepository: Send + Sync {
     async fn record(&self, event: &AuditEvent) -> Result<()>;
 
+    /// Query events matching the filter, ordered newest-first (descending
+    /// timestamp). All adapters (mem, SQLite, Postgres) must keep this
+    /// contract; callers that need a stable position across equal
+    /// second-granularity timestamps must identify events by content.
     async fn query(&self, filter: &AuditQueryFilter) -> Result<Vec<AuditEvent>>;
 
     /// Total count of all audit events.
     async fn count(&self) -> Result<u64>;
+
+    /// Count events matching the filter — the storage-level counterpart of
+    /// [`AuditRepository::query`]. `filter.limit` is IGNORED: the count
+    /// covers the full filtered set, so a caller reporting a total is never
+    /// bounded by the page size it used to fetch the list.
+    async fn count_filtered(&self, filter: &AuditQueryFilter) -> Result<u64>;
 
     /// Returns (event_type, count) pairs across all events.
     async fn stats_by_type(&self) -> Result<Vec<(String, u64)>>;

@@ -225,6 +225,9 @@ pub async fn open_tunnel(
     if let Some(port) = config.config["port"].as_u64() {
         ssh_target = ssh_target.with_port(port as u16);
     }
+    if let Some(bin) = config.config["ssh_path"].as_str() {
+        ssh_target = ssh_target.with_ssh_path(bin);
+    }
 
     let local_host = req
         .local_host

@@ -7,6 +7,9 @@ pub mod agent;
 pub mod agent_tracking;
 pub mod analytics;
 pub mod attestation_repo;
+pub mod attestation_signer;
+pub mod attestation_storage;
+pub mod attestation_verifier;
 pub mod audit;
 pub mod breaking_change;
 pub mod budget;
@@ -23,6 +26,7 @@ pub mod dependency;
 pub mod dependency_policy;
 pub mod git_ops;
 pub mod graph;
+pub mod invitation;
 pub mod jj_ops;
 pub mod key_binding_repo;
 pub mod kv_store;
@@ -40,10 +44,13 @@ pub mod pre_accept;
 pub mod prompt_template;
 pub mod push_gate;
 pub mod quality_gate;
+pub mod rekor;
+pub mod repo_access;
 pub mod repository;
 pub mod review;
 pub mod rollout_policy;
 pub mod saved_view;
+pub mod scim_group;
 pub mod search;
 pub mod secret;
 pub mod spawn_log;
@@ -52,6 +59,7 @@ pub mod spec_approval_event_repo;
 pub mod spec_assertion_result_repo;
 pub mod spec_ledger_repo;
 pub mod spec_lifecycle_repo;
+pub mod spec_link_repo;
 pub mod spec_policy_repo;
 pub mod storage;
 pub mod task;
@@ -66,9 +74,12 @@ pub mod workspace;
 pub mod workspace_membership;
 
 pub use agent::AgentRepository;
-pub use agent_tracking::{AgentCommitRepository, WorktreeRepository};
-pub use analytics::{AnalyticsRepository, CostRepository};
+pub use agent_tracking::{AgentCommitRepository, AgentSessionRepository, WorktreeRepository};
+pub use analytics::{AnalyticsGroupBy, AnalyticsQueryFilter, AnalyticsRepository, CostRepository};
 pub use attestation_repo::AttestationRepository;
+pub use attestation_signer::AttestationSigner;
+pub use attestation_storage::{AttestationScope, AttestationStorage};
+pub use attestation_verifier::AttestationVerifier;
 pub use audit::{AuditQueryFilter, AuditRepository, CompressionStats};
 pub use breaking_change::BreakingChangeRepository;
 pub use budget::BudgetRepository;
@@ -85,7 +96,8 @@ pub use dependency::DependencyRepository;
 pub use dependency_policy::DependencyPolicyRepository;
 pub use git_ops::GitOpsPort;
 pub use graph::GraphPort;
-pub use jj_ops::{JjChange, JjOpsPort, JjRebaseOutcome};
+pub use invitation::{TenantInvitationRepository, WorkspaceInvitationRepository};
+pub use jj_ops::{JjChange, JjNewChange, JjOpsPort, JjRebaseOutcome};
 pub use key_binding_repo::KeyBindingRepository;
 pub use kv_store::KvJsonStore;
 pub use llm::{
@@ -105,12 +117,16 @@ pub use pre_accept::{GateOutcome, PreAcceptGate, PushContext};
 pub use prompt_template::PromptRepository;
 pub use push_gate::PushGateRepository;
 pub use quality_gate::{GateResultRepository, QualityGateRepository};
+pub use rekor::RekorClient;
+pub use repo_access::RepoAccessOverrideRepository;
 pub use repository::RepoRepository;
 pub use review::ReviewRepository;
 pub use rollout_policy::RolloutPolicyRepository;
 pub use saved_view::{SavedView, SavedViewRepository};
+pub use scim_group::{ScimGroupRepository, ScimMappingRepository};
 pub use search::{
-    FacetCounts, SearchDocument, SearchPort, SearchQuery, SearchResult, SearchSuggestion,
+    parse_query, FacetCounts, FacetFilter, ParsedQuery, SearchDocument, SearchPort, SearchQuery,
+    SearchResult, SearchSuggestion, TimeBounds, UPDATED_AT_KEY,
 };
 pub use secret::SecretRepository;
 pub use spawn_log::{SpawnLogEntry, SpawnLogRepository};
@@ -119,6 +135,7 @@ pub use spec_approval_event_repo::SpecApprovalEventRepository;
 pub use spec_assertion_result_repo::SpecAssertionResultRepository;
 pub use spec_ledger_repo::SpecLedgerRepository;
 pub use spec_lifecycle_repo::SpecLifecycleRepository;
+pub use spec_link_repo::SpecLinkRepository;
 pub use spec_policy_repo::SpecPolicyRepository;
 pub use storage::StoragePort;
 pub use task::TaskRepository;
@@ -128,7 +145,8 @@ pub use trace::{SpanPayload, TraceRepository};
 pub use trust_anchor::TrustAnchorRepository;
 pub use user::{ApiKeyRepository, UserRepository};
 pub use user_profile::{
-    JudgmentLedgerRepository, UserNotificationPreferenceRepository, UserTokenRepository,
+    JudgmentLedgerRepository, SessionRepository, UserChannelPreferenceRepository,
+    UserNotificationPreferenceRepository, UserTokenRepository,
 };
 pub use user_workspace_state::UserWorkspaceStateRepository;
 pub use workspace::{PersonaRepository, WorkspaceRepository};

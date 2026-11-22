@@ -1,12 +1,13 @@
 //! Knowledge graph API endpoints (realized-model.md §7).
 //!
 //! Endpoints:
-//!   GET  /api/v1/repos/{id}/graph              — full knowledge graph (nodes + edges)
+//!   GET  /api/v1/repos/{id}/graph              — full knowledge graph (nodes + edges, ?at= point-in-time)
 //!   GET  /api/v1/repos/{id}/graph/types        — nodes by NodeType::Type with edges
 //!   GET  /api/v1/repos/{id}/graph/modules      — nodes by NodeType::Module + containment
 //!   GET  /api/v1/repos/{id}/graph/node/{nid}   — single node + all connected edges
 //!   GET  /api/v1/repos/{id}/graph/spec/{path}  — nodes governed by a spec path
 //!   GET  /api/v1/repos/{id}/graph/concept/{n}  — concept view projection (manifest-defined)
+//!   GET  /api/v1/repos/{id}/graph/concepts     — concept browser listing (manifest-defined)
 //!   GET  /api/v1/repos/{id}/graph/timeline     — architectural deltas (?since=&until=)
 //!   GET  /api/v1/repos/{id}/graph/risks        — risk metrics per module
 //!   GET  /api/v1/repos/{id}/graph/diff         — graph diff between commits (?from=&to=)
@@ -22,13 +23,13 @@ use axum::{
     response::sse::{Event, Sse},
     Json,
 };
-use futures_util::{stream, StreamExt as _};
+use futures_util::stream;
 use gyre_common::GateStatus;
 use gyre_common::{
     graph::{ArchitecturalDelta, EdgeType, GraphEdge, GraphNode, NodeType, SpecConfidence},
     Id,
 };
-use gyre_domain::{MrStatus, TaskStatus};
+use gyre_domain::{MrStatus, TaskStatus, TrustLevel};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
@@ -166,6 +167,63 @@ pub struct NodeWithEdgesResponse {
 pub struct RepoGraphQuery {
     /// Optional case-insensitive substring filter on node name / qualified_name.
     pub concept: Option<String>,
+    /// Optional point-in-time filter (system-explorer.md §6 Architectural
+    /// Timeline): return the graph as it existed at this instant. Accepts
+    /// either a unix-epoch-second integer or an RFC 3339 / ISO 8601
+    /// timestamp ("2024-06-01T12:00:00Z"). Invalid values yield 400.
+    pub at: Option<String>,
+}
+
+impl RepoGraphQuery {
+    /// Resolve the `at` parameter to unix epoch seconds.
+    ///
+    /// Accepts epoch seconds (`1712000000`) or RFC 3339 timestamps
+    /// (`2024-04-01T16:00:00Z`, `2024-04-01T16:00:00+02:00`). Returns
+    /// `Err(message)` on unparseable input — the caller maps that to a 400.
+    fn resolve_at(&self) -> Result<Option<u64>, String> {
+        let Some(raw) = self.at.as_deref() else {
+            return Ok(None);
+        };
+        let raw = raw.trim();
+        if raw.is_empty() {
+            return Ok(None);
+        }
+        if let Ok(secs) = raw.parse::<u64>() {
+            return Ok(Some(secs));
+        }
+        let parsed =
+            time::OffsetDateTime::parse(raw, &time::format_description::well_known::Rfc3339)
+                .map_err(|e| format!("invalid 'at' timestamp {raw:?}: {e}"))?;
+        let secs = parsed.unix_timestamp();
+        if secs < 0 {
+            return Err(format!("'at' timestamp {raw:?} is before the unix epoch"));
+        }
+        Ok(Some(secs as u64))
+    }
+}
+
+/// One predefined concept from a repo's spec manifest (realized-model.md §4)
+/// — the concept-browser listing entry (system-explorer.md §4).
+#[derive(Serialize)]
+pub struct ConceptSummary {
+    pub name: String,
+    pub description: String,
+}
+
+/// GET /api/v1/repos/{id}/graph/concepts response.
+#[derive(Serialize)]
+pub struct RepoConceptListResponse {
+    pub repo_id: String,
+    pub concepts: Vec<ConceptSummary>,
+}
+
+/// GET /api/v1/workspaces/{id}/graph/concepts response: manifest concepts
+/// unioned across the workspace's repos (case-insensitive name dedupe —
+/// the first repo defining a name supplies the description).
+#[derive(Serialize)]
+pub struct WorkspaceConceptListResponse {
+    pub workspace_id: String,
+    pub concepts: Vec<ConceptSummary>,
 }
 
 #[derive(Deserialize)]
@@ -236,7 +294,21 @@ pub struct GraphDiffResponse {
     pub from: String,
     pub to: String,
     pub message: String,
+    /// Node-level change set between the two boundary commits, computed from
+    /// real per-commit repository state via the shared two-commit graph-diff
+    /// core (qualified-name identity). `None` when a boundary ref could not
+    /// be resolved (see `message`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nodes: Option<GraphDiffNodeChangeSet>,
     pub deltas: Vec<DeltaResponse>,
+}
+
+/// Node-level change set (qualified names) between two boundary commits.
+#[derive(Serialize)]
+pub struct GraphDiffNodeChangeSet {
+    pub added: Vec<String>,
+    pub removed: Vec<String>,
+    pub modified: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -347,6 +419,21 @@ pub struct LinkNodeResponse {
 pub struct PredictResponse {
     pub repo_id: String,
     pub predictions: Vec<serde_json::Value>,
+    /// Specs linked to the predicted spec (§3 fast tier, spec-edit calls
+    /// only): the other side of every spec link touching `spec_path`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub affected_specs: Option<Vec<String>>,
+    /// Repos whose knowledge graphs contain nodes governed by the predicted
+    /// spec (§3 fast tier, spec-edit calls only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub affected_repos: Option<Vec<String>>,
+    /// Deterministic pre-execution cost estimate for implementing the
+    /// predicted changes (§3 fast tier, spec-edit calls only): a fixed
+    /// per-change rate over the prediction count. An estimate by
+    /// definition — actual cost is recorded per agent at completion
+    /// (record_agent_usage).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub estimated_agent_cost: Option<String>,
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -386,6 +473,9 @@ fn parse_confidence(s: &str) -> SpecConfidence {
 /// Returns the full knowledge graph (all nodes + all edges) for a repository.
 /// Optional `?concept=<substring>` filters nodes by case-insensitive substring
 /// match on `name` or `qualified_name`.
+/// Optional `?at=<epoch-seconds|RFC3339>` returns the point-in-time graph
+/// (system-explorer.md §6 Architectural Timeline): nodes/edges that existed
+/// at that instant, including ones that have since been soft-deleted.
 pub async fn get_repo_graph(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -394,11 +484,20 @@ pub async fn get_repo_graph(
     require_repo(&state, &id).await?;
     let repo_id = Id::new(&id);
 
-    let all_nodes = state
-        .graph_store
-        .list_nodes(&repo_id, None)
-        .await
-        .map_err(ApiError::Internal)?;
+    let at = q.resolve_at().map_err(ApiError::BadRequest)?;
+
+    let (all_nodes, all_edges) = match at {
+        Some(at) => (
+            state.graph_store.list_nodes_at(&repo_id, at).await,
+            state.graph_store.list_edges_at(&repo_id, at).await,
+        ),
+        None => (
+            state.graph_store.list_nodes(&repo_id, None).await,
+            state.graph_store.list_edges(&repo_id, None).await,
+        ),
+    };
+    let all_nodes = all_nodes.map_err(ApiError::Internal)?;
+    let all_edges = all_edges.map_err(ApiError::Internal)?;
 
     let nodes: Vec<GraphNode> = if let Some(pattern) = &q.concept {
         let pat = pattern.to_lowercase();
@@ -412,12 +511,6 @@ pub async fn get_repo_graph(
     } else {
         all_nodes
     };
-
-    let all_edges = state
-        .graph_store
-        .list_edges(&repo_id, None)
-        .await
-        .map_err(ApiError::Internal)?;
 
     // When concept filtering is active, restrict edges to those where both
     // endpoints are in the matched node set (consistent with /graph/concept/:name).
@@ -699,6 +792,29 @@ pub async fn assemble_workspace_concept_projection(
     })
 }
 
+/// Read the `concepts:` block of the repo's `specs/manifest.yaml` at its
+/// default branch. Returns an empty vector when the repo has no manifest
+/// or the manifest is unparseable — a repo without a manifest simply
+/// defines no predefined concepts.
+async fn manifest_concepts(
+    repo: &gyre_domain::Repository,
+) -> Vec<crate::spec_registry::ConceptDef> {
+    let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
+    let yaml = crate::spec_registry::read_git_file(
+        &git_bin,
+        &repo.path,
+        &repo.default_branch,
+        "specs/manifest.yaml",
+    )
+    .await;
+    let Some(yaml) = yaml else {
+        return Vec::new();
+    };
+    crate::spec_registry::parse_manifest(&yaml)
+        .map(|m| m.concepts)
+        .unwrap_or_default()
+}
+
 /// Resolve the `ConceptView` named `concept_name` (case-insensitive exact
 /// match on the concept name) from the `concepts:` block of the repo's
 /// `specs/manifest.yaml` at its default branch. Returns `None` when the repo
@@ -708,17 +824,8 @@ async fn resolve_concept_view(
     repo: &gyre_domain::Repository,
     concept_name: &str,
 ) -> Option<gyre_common::graph::ConceptView> {
-    let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
-    let yaml = crate::spec_registry::read_git_file(
-        &git_bin,
-        &repo.path,
-        &repo.default_branch,
-        "specs/manifest.yaml",
-    )
-    .await?;
-    let manifest = crate::spec_registry::parse_manifest(&yaml).ok()?;
-    manifest
-        .concepts
+    manifest_concepts(repo)
+        .await
         .iter()
         .find(|c| c.name.eq_ignore_ascii_case(concept_name))
         .map(gyre_common::graph::ConceptView::from)
@@ -746,6 +853,38 @@ pub async fn get_graph_concept(
     Ok(Json(
         assemble_concept_projection(&state, &repo, &concept_name).await?,
     ))
+}
+
+/// GET /api/v1/repos/{id}/graph/concepts
+/// Concept browser listing (system-explorer.md §4): the repo's predefined
+/// concepts from its spec manifest. A repo without a manifest (or with an
+/// unparseable one) defines no predefined concepts — an empty list is the
+/// valid answer, distinct from the single-concept projection endpoint's
+/// 404 on an undefined concept name.
+pub async fn list_graph_concepts(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<RepoConceptListResponse>, ApiError> {
+    let repo = state
+        .repos
+        .find_by_id(&Id::new(&id))
+        .await
+        .map_err(ApiError::Internal)?
+        .ok_or_else(|| ApiError::NotFound(format!("repo {id} not found")))?;
+
+    let concepts = manifest_concepts(&repo)
+        .await
+        .into_iter()
+        .map(|c| ConceptSummary {
+            name: c.name,
+            description: c.description,
+        })
+        .collect();
+
+    Ok(Json(RepoConceptListResponse {
+        repo_id: id,
+        concepts,
+    }))
 }
 
 // ── Narrative generation (realized-model.md §6) ─────────────────────────────
@@ -1034,9 +1173,16 @@ pub async fn get_graph_timeline(
 }
 
 /// GET /api/v1/repos/{id}/graph/diff
-/// Returns the graph diff between two git commit SHAs (?from=&to=).
+/// Returns the graph diff between two commits (?from=&to=).
 ///
-/// Returns deltas as an approximation; full diff requires the extraction pipeline.
+/// The node-level change set (`nodes`) is computed from real per-commit
+/// repository state via the shared two-commit graph-diff core
+/// (crates/gyre-server/src/graph_diff_core.rs — the same production path the
+/// view-query `Scope::Diff` consumes): each boundary ref is resolved against
+/// the repo's real git, each boundary commit's tree is snapshotted and
+/// extracted, and nodes are compared by qualified-name identity.
+/// `deltas` remains the recorded per-extraction delta history (realized-model
+/// §3 timeline records).
 pub async fn get_graph_diff(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -1047,6 +1193,50 @@ pub async fn get_graph_diff(
 
     let from = q.from.unwrap_or_else(|| "HEAD~1".to_string());
     let to = q.to.unwrap_or_else(|| "HEAD".to_string());
+
+    // Shared two-commit graph-diff core (identical production path to the
+    // view-query diff scope).
+    let repo = state
+        .repos
+        .find_by_id(&repo_id)
+        .await
+        .map_err(ApiError::Internal)?
+        .ok_or_else(|| ApiError::NotFound(format!("repo {id} not found")))?;
+    let outcome = if repo.path.is_empty() {
+        crate::graph_diff_core::CommitRangeDiffOutcome {
+            diff: None,
+            warnings: vec![format!(
+                "Diff could not be computed: repo '{id}' has no git storage path."
+            )],
+        }
+    } else {
+        crate::graph_diff_core::compute_commit_range_diff(&repo.path, &repo_id, &from, &to).await
+    };
+
+    let (message, nodes) = match &outcome.diff {
+        Some(d) => {
+            let cs = &d.change_set;
+            let short = |sha: &str| sha.chars().take(12).collect::<String>();
+            (
+                format!(
+                    "node-level change set computed from per-commit extraction between \
+                     {} (from) and {} (to): {} added, {} removed, {} modified; \
+                     deltas below are the recorded extraction history",
+                    short(&d.from_sha),
+                    short(&d.to_sha),
+                    cs.added.len(),
+                    cs.removed.len(),
+                    cs.modified.len()
+                ),
+                Some(GraphDiffNodeChangeSet {
+                    added: cs.added.clone(),
+                    removed: cs.removed.clone(),
+                    modified: cs.modified.clone(),
+                }),
+            )
+        }
+        None => (outcome.warnings.join(" "), None),
+    };
 
     let deltas = state
         .graph_store
@@ -1070,7 +1260,8 @@ pub async fn get_graph_diff(
     Ok(Json(GraphDiffResponse {
         from,
         to,
-        message: "full diff requires extraction pipeline; returning all deltas".to_string(),
+        message,
+        nodes,
         deltas: delta_responses,
     }))
 }
@@ -1153,43 +1344,154 @@ pub async fn assemble_briefing(
         .filter(|t| repo_match(&t.repo_id, repo_filter))
         .collect();
 
-    // Section: completed — MRs with status Merged updated since `since`.
-    let completed: Vec<BriefingItem> = mrs
-        .iter()
-        .filter(|mr| mr.status == MrStatus::Merged && mr.updated_at >= since)
-        .map(|mr| BriefingItem {
-            title: mr.title.clone(),
-            description: format!("{} → {}", mr.source_branch, mr.target_branch),
-            entity_type: "mr".to_string(),
-            entity_id: Some(mr.id.to_string()),
-            spec_path: mr
-                .spec_ref
-                .as_ref()
-                .map(|s| s.split('@').next().unwrap_or(s).to_string()),
-            timestamp: mr.updated_at,
-            actions: Vec::new(),
-            source_workspace_slug: None,
-        })
-        .collect();
+    // HSI §2 "Briefing detail" row: the briefing's granularity follows the
+    // workspace's trust level — Supervised shows per-agent activity and
+    // per-MR status; Guided shows per-spec progress plus exceptions;
+    // Autonomous shows spec-level summaries and exceptions only. Unknown
+    // workspace (should not happen — the route validated it) falls back to
+    // the Supervised default, the most detailed (fail-open on detail).
+    let trust_level = state
+        .workspaces
+        .find_by_id(&ws_id)
+        .await
+        .ok()
+        .flatten()
+        .map(|ws| ws.trust_level)
+        .unwrap_or_default();
+    let spec_level_briefing = matches!(trust_level, TrustLevel::Guided | TrustLevel::Autonomous);
 
-    // Section: in_progress — tasks with status InProgress or Review updated since `since`.
-    let in_progress: Vec<BriefingItem> = tasks
-        .iter()
-        .filter(|t| {
-            (t.status == TaskStatus::InProgress || t.status == TaskStatus::Review)
-                && t.updated_at >= since
-        })
-        .map(|t| BriefingItem {
-            title: t.title.clone(),
-            description: t.description.clone().unwrap_or_default(),
-            entity_type: "task".to_string(),
-            entity_id: Some(t.id.to_string()),
-            spec_path: t.spec_path.clone(),
-            timestamp: t.updated_at,
-            actions: Vec::new(),
-            source_workspace_slug: None,
-        })
-        .collect();
+    // Section: completed — MRs with status Merged updated since `since`.
+    // At Guided/Autonomous the section is rolled up per spec (HSI §2
+    // "Briefing detail": "Per-spec progress" / "Spec-level summaries").
+    let completed: Vec<BriefingItem> = {
+        let per_mr: Vec<BriefingItem> = mrs
+            .iter()
+            .filter(|mr| mr.status == MrStatus::Merged && mr.updated_at >= since)
+            .map(|mr| BriefingItem {
+                title: mr.title.clone(),
+                description: format!("{} → {}", mr.source_branch, mr.target_branch),
+                entity_type: "mr".to_string(),
+                entity_id: Some(mr.id.to_string()),
+                spec_path: mr
+                    .spec_ref
+                    .as_ref()
+                    .map(|s| s.split('@').next().unwrap_or(s).to_string()),
+                timestamp: mr.updated_at,
+                actions: Vec::new(),
+                source_workspace_slug: None,
+            })
+            .collect();
+        if !spec_level_briefing {
+            per_mr
+        } else {
+            // Roll up per spec: one item per spec path with the merged-MR
+            // count. MRs without a spec_ref group under their own title
+            // (a spec-less MR stays visible rather than vanishing).
+            let mut groups: std::collections::BTreeMap<String, Vec<&BriefingItem>> =
+                std::collections::BTreeMap::new();
+            for item in &per_mr {
+                let key = item.spec_path.clone().unwrap_or_else(|| item.title.clone());
+                groups.entry(key).or_default().push(item);
+            }
+            groups
+                .into_iter()
+                .map(|(spec, items)| {
+                    let count = items.len();
+                    let mr_word = if count == 1 { "MR" } else { "MRs" };
+                    let (latest, spec_path) = items
+                        .iter()
+                        .max_by_key(|i| i.timestamp)
+                        .map(|i| (i.timestamp, i.spec_path.clone()))
+                        .unwrap_or((since, None));
+                    BriefingItem {
+                        title: spec.clone(),
+                        description: format!("{count} {mr_word} merged"),
+                        entity_type: "spec".to_string(),
+                        entity_id: None,
+                        spec_path: spec_path.or(Some(spec)),
+                        timestamp: latest,
+                        actions: Vec::new(),
+                        source_workspace_slug: None,
+                    }
+                })
+                .collect()
+        }
+    };
+
+    // Section: in_progress — tasks with status InProgress or Review updated
+    // since `since`. At Guided this rolls up per spec with progress
+    // ("x of y tasks done, z active"); at Autonomous it is a terse
+    // spec-level summary (HSI §2 "Briefing detail").
+    let in_progress: Vec<BriefingItem> = {
+        let per_task: Vec<BriefingItem> = tasks
+            .iter()
+            .filter(|t| {
+                (t.status == TaskStatus::InProgress || t.status == TaskStatus::Review)
+                    && t.updated_at >= since
+            })
+            .map(|t| BriefingItem {
+                title: t.title.clone(),
+                description: t.description.clone().unwrap_or_default(),
+                entity_type: "task".to_string(),
+                entity_id: Some(t.id.to_string()),
+                spec_path: t.spec_path.clone(),
+                timestamp: t.updated_at,
+                actions: Vec::new(),
+                source_workspace_slug: None,
+            })
+            .collect();
+        if !spec_level_briefing {
+            per_task
+        } else {
+            let autonomous = matches!(trust_level, TrustLevel::Autonomous);
+            let spec_of =
+                |t: &gyre_domain::Task| t.spec_path.clone().unwrap_or_else(|| t.title.clone());
+            let mut groups: std::collections::BTreeMap<String, Vec<&gyre_domain::Task>> =
+                std::collections::BTreeMap::new();
+            for t in tasks.iter().filter(|t| {
+                (t.status == TaskStatus::InProgress || t.status == TaskStatus::Review)
+                    && t.updated_at >= since
+            }) {
+                groups.entry(spec_of(t)).or_default().push(t);
+            }
+            groups
+                .into_iter()
+                .map(|(spec, in_flight)| {
+                    let done = tasks
+                        .iter()
+                        .filter(|t| {
+                            t.spec_path.as_deref() == Some(spec.as_str())
+                                && t.status == TaskStatus::Done
+                        })
+                        .count();
+                    let active = in_flight.len();
+                    let description = if autonomous {
+                        format!("{active} task(s) in progress")
+                    } else {
+                        format!(
+                            "{done} of {} tasks complete, {active} active",
+                            done + active
+                        )
+                    };
+                    let latest = in_flight
+                        .iter()
+                        .map(|t| t.updated_at)
+                        .max()
+                        .unwrap_or(since);
+                    BriefingItem {
+                        title: spec.clone(),
+                        description,
+                        entity_type: "spec".to_string(),
+                        entity_id: None,
+                        spec_path: Some(spec),
+                        timestamp: latest,
+                        actions: Vec::new(),
+                        source_workspace_slug: None,
+                    }
+                })
+                .collect()
+        }
+    };
 
     // Section: cross_workspace — inbound spec links from other workspaces.
     let cross_workspace: Vec<BriefingItem> = {
@@ -1250,7 +1552,11 @@ pub async fn assemble_briefing(
         let mut items = Vec::new();
 
         // 1. Gate failures: failed gate results for workspace MRs since `since`.
-        for mr in mrs.iter().filter(|mr| mr.updated_at >= since) {
+        //    The gate result's finished_at is the time gate — gates run
+        //    asynchronously after MR enqueue and the failure path never
+        //    touches mr.updated_at, so requiring mr.updated_at >= since
+        //    would silently drop fresh failures on stale-MR records.
+        for mr in mrs.iter() {
             let results = state
                 .gate_results
                 .list_by_mr_id(&mr.id.to_string())
@@ -1284,19 +1590,35 @@ pub async fn assemble_briefing(
             }
         }
 
-        // 2. Spec assertion failures: recent notifications of type SpecAssertionFailure.
-        let recent_notifications = state
+        // 2. Spec assertion failures: SpecAssertionFailure notifications in this
+        //    workspace since `since`. Sourced via the workspace+type+since-scoped
+        //    query (NOT list_recent's globally-truncated recency window, which
+        //    silently drops the failure once 200 newer notifications exist
+        //    anywhere). The notification fan-out creates one copy per notified
+        //    member with an identical source event, so dedup by
+        //    (entity_id, title, created_at) — one failure event must yield one
+        //    exception item regardless of how many members were notified.
+        let assertion_failures = state
             .notifications
-            .list_recent(200)
+            .list_by_workspace_type_since(
+                &ws_id,
+                gyre_common::NotificationType::SpecAssertionFailure.as_str(),
+                since as i64,
+            )
             .await
             .unwrap_or_default();
-        for n in recent_notifications.iter().filter(|n| {
-            n.notification_type == gyre_common::NotificationType::SpecAssertionFailure
-                && n.workspace_id == ws_id
-                && n.created_at >= since as i64
-                && repo_filter
-                    .is_none_or(|f| n.source.repo_id.as_ref().map(|r| r.as_str()) == Some(f))
+        let mut seen_assertion_events: std::collections::HashSet<(String, String, i64)> =
+            std::collections::HashSet::new();
+        for n in assertion_failures.iter().filter(|n| {
+            repo_filter.is_none_or(|f| n.source.repo_id.as_ref().map(|r| r.as_str()) == Some(f))
         }) {
+            if !seen_assertion_events.insert((
+                n.source.entity_id.clone(),
+                n.title.clone(),
+                n.created_at,
+            )) {
+                continue; // per-member fan-out copy of an already-emitted failure event
+            }
             items.push(BriefingItem {
                 title: n.title.clone(),
                 description: n.body.clone().unwrap_or_default(),
@@ -1417,11 +1739,19 @@ pub async fn assemble_briefing(
                 .get("spec_ref")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
-            let decisions = payload
+            let mut decisions = payload
                 .get("decisions")
                 .and_then(|v| v.as_array())
                 .cloned()
                 .unwrap_or_default();
+            // HSI §2 "Agent completion summaries" row: at Autonomous only
+            // low-confidence decisions are surfaced — the full decision log
+            // is Supervised's view, Guided keeps the log and highlights
+            // uncertainties (rendering). The stored message is untouched;
+            // this is payload shaping for the trust level, not data loss.
+            if matches!(trust_level, TrustLevel::Autonomous) {
+                decisions.retain(|d| d.get("confidence").and_then(|c| c.as_str()) == Some("low"));
+            }
             let uncertainties = payload
                 .get("uncertainties")
                 .and_then(|v| v.as_array())
@@ -1628,12 +1958,13 @@ pub async fn briefing_ask(
         ));
     }
 
-    // Per-user/workspace sliding-window rate limit (HSI §6): 10 req/60 s.
+    // Per-user/workspace sliding-window rate limit (ui-layout.md §2 /
+    // HSI §6): 10 req/60 s, keyed on the auth-context user_id.
     {
         let mut limiter = state.llm_rate_limiter.lock().await;
         if let Err(retry_after) = check_rate_limit(
             &mut limiter,
-            &caller.agent_id,
+            &crate::llm_rate_limit::rate_limit_principal(&caller),
             &id,
             LLM_RATE_LIMIT,
             LLM_WINDOW_SECS,
@@ -1710,18 +2041,10 @@ pub async fn briefing_ask(
 
     let workspace_id_obj = Id::new(&id);
 
-    // Load effective prompt; fall back to hardcoded default.
-    let template_content = state
-        .prompt_templates
-        .get_effective(&workspace_id_obj, "briefing-ask")
-        .await
-        .map_err(ApiError::Internal)?
-        .map(|t| t.content)
-        .unwrap_or_else(|| crate::llm_defaults::PROMPT_BRIEFING_ASK.to_string());
-
-    // Grounding context: JSON-serialized briefing + conversation history.
-    // The server is stateless (HSI §1325); the client owns the conversation
-    // state, so we replay exactly what was sent as prompt context.
+    // Grounding context: JSON-serialized briefing + conversation history
+    // (HSI §1327). The server is stateless (HSI §1325); the client owns
+    // the conversation state, so we replay exactly what was sent as prompt
+    // context.
     let briefing_json =
         serde_json::to_string(&briefing).map_err(|e| ApiError::Internal(anyhow::anyhow!(e)))?;
     let mut context = format!("Briefing data:\n{briefing_json}");
@@ -1743,24 +2066,89 @@ pub async fn briefing_ask(
         ));
     }
 
-    let system_prompt = template_content
-        .replace("{{workspace_id}}", &id)
-        .replace("{{context}}", &context)
-        .replace("{{question}}", &req.question);
+    let template = crate::llm_helpers::resolve_prompt_template(
+        &state,
+        &workspace_id_obj,
+        None,
+        "briefing-ask",
+        crate::llm_defaults::PROMPT_BRIEFING_ASK,
+    )
+    .await;
+
+    // Prompt template (ui-layout.md §2): DB override → git tree
+    // (specs/prompts/briefing-ask.md) → hardcoded fallback. `sha` carries
+    // git provenance for the cost entry. Variables match the committed
+    // template (`{{briefing_json}}`, `{{graph_summary}}`, `{{history}}`);
+    // the hardcoded default uses `{{context}}` (briefing JSON + history
+    // transcript) — each variable gets its own faithful value.
+    // The user's question travels as the user prompt only (injection
+    // containment), so the template's `{{question}}` placeholder is
+    // explicitly blanked — the same rule the other two LLM endpoints
+    // apply — rather than leaking literal placeholder text.
+    let graph_summary =
+        crate::llm_helpers::workspace_graph_summary(&state, &workspace_id_obj, None).await;
+    let history_transcript: String = req
+        .history
+        .as_deref()
+        .map(|h| {
+            h.iter()
+                .map(|e| format!("{}: {}", e.role, e.content))
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .unwrap_or_default();
+    let system_prompt = crate::llm_helpers::substitute_template(
+        &template.content,
+        &[
+            ("workspace_id", id.as_str()),
+            ("context", context.as_str()),
+            ("briefing_json", briefing_json.as_str()),
+            ("graph_summary", graph_summary.as_str()),
+            ("history", history_transcript.as_str()),
+            ("question", ""),
+        ],
+    );
     let user_prompt = req.question.clone();
 
-    // Resolve model and call streaming LLM.
-    let (model, _) =
-        crate::llm_helpers::resolve_llm_model(&state, &Id::new(&id), "briefing-ask").await;
-    let stream = factory
+    // Model + per-endpoint max output tokens (ui-layout.md §2).
+    let (model, max_tokens) =
+        crate::llm_helpers::resolve_llm_model(&state, &workspace_id_obj, "briefing-ask").await;
+    // LLM connection failure is an `event: error` SSE event, not an HTTP
+    // 500 (ui-layout.md §2). Mid-stream chunk failures must surface as
+    // `event: error` too — a truncated response must not masquerade as a
+    // `complete` event (the old `filter_map(|r| r.ok())` silently dropped
+    // them).
+    let stream = match factory
         .for_model(&model)
-        .stream_complete(&system_prompt, &user_prompt, None)
+        .stream_complete(&system_prompt, &user_prompt, max_tokens)
         .await
-        .map_err(ApiError::Internal)?;
+    {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!(model = %model, workspace_id = %id, error = ?e, "LLM stream_complete failed in briefing_ask");
+            return Ok(sse_error_stream(format!("LLM request failed: {e}")));
+        }
+    };
 
-    let chunks: Vec<String> = stream.filter_map(|r| async { r.ok() }).collect().await;
+    let mut chunks: Vec<String> = Vec::new();
+    let mut stream_error: Option<String> = None;
+    {
+        use futures_util::StreamExt as _;
+        let mut stream = std::pin::pin!(stream);
+        while let Some(item) = stream.next().await {
+            match item {
+                Ok(chunk) => chunks.push(chunk),
+                Err(e) => {
+                    stream_error = Some(format!("LLM stream failed mid-generation: {e}"));
+                    break;
+                }
+            }
+        }
+    }
     let full_text = chunks.join("");
-
+    if let Some(err) = stream_error {
+        return Ok(sse_error_stream(err));
+    }
     // Budget tracking (ui-layout.md §3, platform-model.md §Budget Tracking):
     // the LlmPort does not return actual usage, so estimate — ~4 chars per
     // token for prompts (input) and the produced text (output).
@@ -1781,8 +2169,10 @@ pub async fn briefing_ask(
     }
 
     // Per-call budget record + workspace/tenant counter increment
-    // (platform-model.md §Budget Tracking). User-initiated query:
-    // agent_id/task_id/repo_id are None.
+    // (platform-model.md §Budget Tracking), with the prompt-template git
+    // SHA for audit (ui-layout.md §2). User-initiated query:
+    // agent_id/task_id/repo_id are None. Skip and log if the workspace
+    // cannot be resolved rather than fabricating a tenant scope.
     let ws_for_budget = state
         .workspaces
         .find_by_id(&workspace_id_obj)
@@ -1803,6 +2193,7 @@ pub async fn briefing_ask(
                 output_tokens: estimated_output as u64,
                 cost_usd: 0.0,
                 model: model.clone(),
+                prompt_template_sha: template.sha.clone(),
             },
         )
         .await;
@@ -1826,7 +2217,8 @@ pub async fn briefing_ask(
     .unwrap_or_default();
     events.push(Ok(Event::default().event("complete").data(complete_data)));
 
-    Ok(Sse::new(stream::iter(events)).keep_alive(
+    let s = stream::iter(events);
+    Ok(Sse::new(s).keep_alive(
         axum::response::sse::KeepAlive::new()
             .interval(Duration::from_secs(15))
             .text("ping"),
@@ -1884,6 +2276,22 @@ pub async fn link_node_to_spec(
     ))
 }
 
+/// Build a single-event SSE stream carrying `event: error` (ui-layout.md §2:
+/// "If the LLM connection fails entirely, `event: error` fires instead").
+fn sse_error_stream(
+    message: String,
+) -> Sse<futures_util::stream::Iter<std::vec::IntoIter<Result<Event, std::convert::Infallible>>>> {
+    let error_data =
+        serde_json::to_string(&serde_json::json!({"error": message})).unwrap_or_default();
+    let events: Vec<Result<Event, std::convert::Infallible>> =
+        vec![Ok(Event::default().event("error").data(error_data))];
+    Sse::new(stream::iter(events)).keep_alive(
+        axum::response::sse::KeepAlive::new()
+            .interval(Duration::from_secs(15))
+            .text("ping"),
+    )
+}
+
 /// GET /workspaces/{id}/graph/concept/{name}
 /// Workspace-scoped concept view projection (realized-model.md §4): each
 /// repo in the workspace resolves the named concept from its own spec
@@ -1898,6 +2306,68 @@ pub async fn get_workspace_graph_concept(
     Ok(Json(
         assemble_workspace_concept_projection(&state, &Id::new(&id), &concept_name).await?,
     ))
+}
+
+/// GET /api/v1/workspaces/{id}/graph/concepts
+/// Workspace-scoped concept browser listing (system-explorer.md §4): the
+/// union of predefined concepts across the workspace's repos' spec
+/// manifests, deduped by case-insensitive name with a deterministic
+/// winner (the lexicographically smallest spelling/description pair, so
+/// the result is independent of repo iteration order). Repos without
+/// manifests contribute nothing — an empty union is a valid workspace-wide
+/// answer.
+pub async fn list_workspace_graph_concepts(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<WorkspaceConceptListResponse>, ApiError> {
+    require_workspace(&state, &id).await?;
+
+    let repos = state
+        .repos
+        .list_by_workspace(&Id::new(&id))
+        .await
+        .map_err(ApiError::Internal)?;
+
+    // Order-independent dedupe: the port does not guarantee repo iteration
+    // order (the mem adapter returns HashMap order), so first-wins would
+    // make the surviving spelling of a case-variant name depend on adapter
+    // internals. Instead each case-insensitive name keeps one deterministic
+    // winner — the lexicographically smallest (name, description) pair —
+    // and the listing is sorted by name so every adapter returns the same
+    // response for the same manifest set.
+    let mut by_key: std::collections::BTreeMap<String, ConceptSummary> =
+        std::collections::BTreeMap::new();
+    for repo in &repos {
+        for def in manifest_concepts(repo).await {
+            let candidate = ConceptSummary {
+                name: def.name,
+                description: def.description,
+            };
+            match by_key.entry(candidate.name.to_lowercase()) {
+                std::collections::btree_map::Entry::Vacant(v) => {
+                    v.insert(candidate);
+                }
+                std::collections::btree_map::Entry::Occupied(mut o) => {
+                    if (candidate.name.as_str(), candidate.description.as_str())
+                        < (o.get().name.as_str(), o.get().description.as_str())
+                    {
+                        o.insert(candidate);
+                    }
+                }
+            }
+        }
+    }
+    let mut concepts: Vec<ConceptSummary> = by_key.into_values().collect();
+    concepts.sort_by(|a, b| {
+        a.name
+            .cmp(&b.name)
+            .then_with(|| a.description.cmp(&b.description))
+    });
+
+    Ok(Json(WorkspaceConceptListResponse {
+        workspace_id: id,
+        concepts,
+    }))
 }
 
 /// Request body for structural prediction.
@@ -1929,12 +2399,13 @@ pub async fn predict_graph(
         .map_err(ApiError::Internal)?
         .ok_or_else(|| ApiError::NotFound(format!("repo {id} not found")))?;
 
-    // Per-user/repo sliding-window rate limit: 10 req/60 s.
+    // Per-user/repo sliding-window rate limit: 10 req/60 s, keyed on the
+    // auth-context user_id (same principal rule as the LLM endpoints).
     {
         let mut limiter = state.llm_rate_limiter.lock().await;
         if let Err(retry_after) = check_rate_limit(
             &mut limiter,
-            &caller.agent_id,
+            &crate::llm_rate_limit::rate_limit_principal(&caller),
             &id,
             LLM_RATE_LIMIT,
             LLM_WINDOW_SECS,
@@ -1943,30 +2414,353 @@ pub async fn predict_graph(
         }
     }
 
+    let workspace_id = repo.workspace_id.clone();
+    let repo_id = Id::new(&id);
+
+    // Build user prompt based on whether spec context is provided. The
+    // spec-edit framing note rides the system prompt (same slot it used
+    // before the core was extracted) so the model sees it as instruction,
+    // not as part of the user's question.
+    let (user_prompt, system_note, output_contract) = if let (Some(spec_path), Some(draft)) =
+        (&req.spec_path, &req.draft_content)
+    {
+        (
+                format!(
+                    "Predict what would change in the codebase if this spec is implemented:\n\nSpec: {spec_path}\n\nContent:\n{draft}"
+                ),
+                Some(
+                    "\n\nThe user is editing a spec and wants to understand the structural impact.",
+                ),
+                // §3 prediction contract: ghost overlays render action,
+                // confidence and reason, so the spec-edit caller must get
+                // those fields back — not the free-form improvement
+                // categories the default prompt requests.
+                Some(
+                    "\n\nFor this spec-edit prediction, respond with a JSON array of prediction objects, each with exactly these fields: \n\
+                     \"action\" (\"add\"|\"modify\"|\"remove\"), \n\
+                     \"node_type\" (e.g. \"Type\", \"Trait\", \"TraitMethod\", \"Module\"), \n\
+                     \"name\" (the new or existing element name), \n\
+                     \"node_id\" (the existing node's id from the context, when the prediction targets an existing node), \n\
+                     \"confidence\" (a number between 0.0 and 1.0), \n\
+                     \"reason\" (a one-sentence justification), \n\
+                     \"changes\" (array of strings describing the modification, for \"modify\"), \n\
+                     \"parent_trait\" (the existing trait or type a new element belongs to, for \"add\").",
+                ),
+            )
+    } else if let Some(spec_path) = &req.spec_path {
+        (
+            format!("Predict structural improvements related to spec: {spec_path}"),
+            None,
+            None,
+        )
+    } else {
+        (
+            format!("Predict structural improvements for repo {id}."),
+            None,
+            None,
+        )
+    };
+
+    let predictions = run_structural_prediction(
+        &state,
+        &workspace_id,
+        &repo_id,
+        &user_prompt,
+        system_note,
+        output_contract,
+    )
+    .await?;
+
+    // §3 fast-tier context (spec-edit calls only): real link-graph and
+    // knowledge-graph queries, never fabricated.
+    let (affected_specs, affected_repos, estimated_agent_cost) = if req.spec_path.is_some() {
+        (
+            Some(affected_specs_for(&state, req.spec_path.as_deref().unwrap_or("")).await),
+            Some(
+                affected_repos_for(
+                    &state,
+                    &workspace_id,
+                    req.spec_path.as_deref().unwrap_or(""),
+                )
+                .await,
+            ),
+            // Deterministic estimate over the prediction count (documented
+            // rate; the field is an estimate by spec — actual spend is
+            // recorded per agent at completion).
+            Some(format!("${:.2}", 0.05 + 0.10 * predictions.len() as f64)),
+        )
+    } else {
+        (None, None, None)
+    };
+
+    Ok(Json(PredictResponse {
+        repo_id: id,
+        predictions,
+        affected_specs,
+        affected_repos,
+        estimated_agent_cost,
+    }))
+}
+
+/// §3 fast tier: specs connected to `spec_path` — the other side of every
+/// spec link (either direction) recorded in the spec-links store.
+async fn affected_specs_for(state: &AppState, spec_path: &str) -> Vec<String> {
+    let links = state.spec_links_store.lock().await;
+    let mut specs: Vec<String> = links
+        .iter()
+        .filter_map(|l| {
+            if l.source_path == spec_path && l.target_path != spec_path {
+                Some(l.target_path.clone())
+            } else if l.target_path == spec_path && l.source_path != spec_path {
+                Some(l.source_path.clone())
+            } else {
+                None
+            }
+        })
+        .collect();
+    specs.sort();
+    specs.dedup();
+    specs
+}
+
+/// §3 fast tier: repos implementing `spec_path` — the workspace's repos
+/// whose knowledge graphs contain live (non-deleted) nodes governed by the
+/// spec. Repo names, the form the spec's example response uses.
+async fn affected_repos_for(state: &AppState, workspace_id: &Id, spec_path: &str) -> Vec<String> {
+    let repo_ids: Vec<Id> = state
+        .repos
+        .list_by_workspace(workspace_id)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|r| r.id)
+        .collect();
+    let mut names = Vec::new();
+    for repo_id in repo_ids {
+        let Ok(nodes) = state.graph_store.list_nodes(&repo_id, None).await else {
+            continue;
+        };
+        if nodes
+            .iter()
+            .any(|n| n.deleted_at.is_none() && n.spec_path.as_deref() == Some(spec_path))
+        {
+            if let Ok(Some(repo)) = state.repos.find_by_id(&repo_id).await {
+                names.push(repo.name);
+            }
+        }
+    }
+    names.sort();
+    names.dedup();
+    names
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/v1/repos/{id}/graph/thorough-preview — §3 thorough tier
+// ---------------------------------------------------------------------------
+
+/// Request body for the thorough preview (system-explorer.md §3 "Thorough
+/// (minutes, on-demand) — Full preview").
+#[derive(Deserialize)]
+pub struct ThoroughPreviewRequest {
+    /// Spec file path the draft edits.
+    pub spec_path: String,
+    /// Full draft spec content to implement on the throwaway branch.
+    pub draft_content: String,
+}
+
+/// Response for the thorough preview: the preview task and the agent
+/// spawned to implement the draft on a throwaway branch.
+#[derive(Serialize)]
+pub struct ThoroughPreviewResponse {
+    pub repo_id: String,
+    pub task_id: String,
+    pub agent_id: String,
+    /// Throwaway branch the preview agent implements on. Never merged
+    /// unless a human chooses to — the completion MR is the preview
+    /// artifact the client diffs against.
+    pub branch: String,
+    /// Whether the agent process launched on a compute target
+    /// (agent-runtime.md §1 Phase 7). False means the task and agent
+    /// records exist but nothing is executing — the client's poll surfaces
+    /// the stall, never a fabricated completion.
+    pub process_launched: bool,
+}
+
+/// POST /api/v1/repos/{id}/graph/thorough-preview
+///
+/// §3 thorough tier: create a preview task carrying the spec draft, then
+/// spawn an implementation agent on a throwaway `preview/...` branch via
+/// the shared spawn core (same worktree/JWT/compute-target/budget path as
+/// POST /agents/spawn). The client polls the task; when the agent
+/// completes, the completion MR (source = the throwaway branch) carries
+/// the real code diff.
+///
+/// Compensating rollback: if the spawn fails, the just-created preview
+/// task is deleted so a failed preview leaves no orphaned Backlog task
+/// behind (same invariant as the spawn core's agent/worktree rollback).
+pub async fn thorough_preview(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    caller: AuthenticatedAgent,
+    Json(req): Json<ThoroughPreviewRequest>,
+) -> Result<(StatusCode, Json<ThoroughPreviewResponse>), ApiError> {
+    if req.spec_path.trim().is_empty() {
+        return Err(ApiError::InvalidInput(
+            "spec_path is required for a thorough preview".to_string(),
+        ));
+    }
+    if req.draft_content.trim().is_empty() {
+        return Err(ApiError::InvalidInput(
+            "draft_content is required for a thorough preview".to_string(),
+        ));
+    }
+
+    // Repo + workspace scope (the spawn core re-checks repo ABAC and
+    // budget against the caller — defense in depth, not duplication).
+    let repo = state
+        .repos
+        .find_by_id(&Id::new(&id))
+        .await
+        .map_err(ApiError::Internal)?
+        .ok_or_else(|| ApiError::NotFound(format!("repo {id} not found")))?;
+
+    let now = now_secs();
+    let task_id = new_id();
+    // Char-boundary-safe unique prefixes (ids are server-generated, but
+    // the repo invariant forbids fixed byte-index slicing on principle).
+    let id_prefix: String = task_id.as_str().chars().take(8).collect();
+    let spec_stem: String = req
+        .spec_path
+        .rsplit('/')
+        .next()
+        .unwrap_or("spec")
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let branch = format!("preview/{spec_stem}-{id_prefix}");
+
+    // Preview task: the draft rides the description — the spawned agent
+    // reads its task and implements exactly this content on its branch.
+    let mut task = gyre_domain::Task::new(
+        task_id.clone(),
+        format!("Spec preview: {}", req.spec_path),
+        now,
+    );
+    task.description = Some(format!(
+        "Thorough preview (system-explorer.md §3): implement the following \
+         spec draft on the throwaway branch '{branch}'. This is a preview, \
+         not a production change — produce real code matching the draft.\n\
+         Spec: {}\n\n--- draft content ---\n{}",
+        req.spec_path, req.draft_content
+    ));
+    task.task_type = Some(gyre_domain::TaskType::Implementation);
+    task.labels = vec!["spec-preview".to_string()];
+    task.spec_path = Some(req.spec_path.clone());
+    task.workspace_id = repo.workspace_id.clone();
+    task.repo_id = repo.id.clone();
+    task.branch = Some(branch.clone());
+    state
+        .tasks
+        .create(&task)
+        .await
+        .map_err(ApiError::Internal)?;
+
+    let spawn_req = crate::api::spawn::SpawnAgentRequest {
+        name: format!("preview-{id_prefix}"),
+        repo_id: repo.id.to_string(),
+        task_id: task_id.to_string(),
+        branch: branch.clone(),
+        parent_id: None,
+        compute_target_id: None,
+        disconnected_behavior: None,
+        loop_config: None,
+        agent_type: None,
+        conversation_sha: None,
+        persona: None,
+        persona_slug: None,
+    };
+    match crate::api::spawn::spawn_agent_core(
+        &state,
+        spawn_req,
+        &caller,
+        "POST /api/v1/repos/:id/graph/thorough-preview",
+    )
+    .await
+    {
+        Ok(resp) => Ok((
+            StatusCode::CREATED,
+            Json(ThoroughPreviewResponse {
+                repo_id: id,
+                task_id: task_id.to_string(),
+                agent_id: resp.agent.id.to_string(),
+                branch,
+                process_launched: resp.process_launched,
+            }),
+        )),
+        Err(e) => {
+            // Compensating rollback: the spawn failed (budget, ABAC,
+            // compute target, …) — remove the orphaned preview task so it
+            // is never picked up by the scheduler as real work.
+            if let Err(del_err) = state.tasks.delete(&task_id).await {
+                tracing::warn!(
+                    task_id = %task_id,
+                    error = %del_err,
+                    "thorough-preview: failed to roll back preview task after spawn failure"
+                );
+            }
+            Err(e)
+        }
+    }
+}
+
+/// Shared structural-prediction core (system-explorer.md §3 fast tier and
+/// §8 Conversational Exploration): runs one LLM prediction over a repo's
+/// live knowledge graph. Used by `POST /repos/:id/graph/predict` (spec
+/// draft impact → ghost overlays) and by the workspace explorer ask
+/// endpoint ("what would happen if…" follow-up questions) so both surfaces
+/// run the same prediction machinery against the same grounding — never
+/// two divergent copies.
+///
+/// `instruction` is the user-side prompt describing the change to predict.
+/// `system_note` is appended to the substituted system prompt for
+/// caller-specific framing (the spec-edit caller marks the edit context).
+/// `output_contract` (spec-edit caller only) appends the §3 prediction
+/// JSON shape so ghost overlays get action/confidence/reason fields.
+pub(crate) async fn run_structural_prediction(
+    state: &AppState,
+    workspace_id: &Id,
+    repo_id: &Id,
+    instruction: &str,
+    system_note: Option<&str>,
+    output_contract: Option<&str>,
+) -> Result<Vec<serde_json::Value>, ApiError> {
     // Require LLM to be configured.
     let factory = state.llm.as_ref().ok_or(ApiError::LlmUnavailable)?;
 
-    let workspace_id = repo.workspace_id.clone();
-
     // Load effective prompt; fall back to hardcoded default.
-    let template_content = state
+    let mut system_prompt = state
         .prompt_templates
-        .get_effective(&workspace_id, "graph-predict")
+        .get_effective(workspace_id, "graph-predict")
         .await
         .map_err(ApiError::Internal)?
         .map(|t| t.content)
         .unwrap_or_else(|| crate::llm_defaults::PROMPT_GRAPH_PREDICT.to_string());
 
     // Load graph nodes and edges for context.
-    let repo_id = Id::new(&id);
     let nodes = state
         .graph_store
-        .list_nodes(&repo_id, None)
+        .list_nodes(repo_id, None)
         .await
         .map_err(ApiError::Internal)?;
     let edges = state
         .graph_store
-        .list_edges(&repo_id, None)
+        .list_edges(repo_id, None)
         .await
         .map_err(ApiError::Internal)?;
 
@@ -2003,43 +2797,30 @@ pub async fn predict_graph(
     let nodes_json = serde_json::to_string(&nodes_summary).unwrap_or_else(|_| "[]".to_string());
     let edges_json = serde_json::to_string(&edge_summary).unwrap_or_else(|_| "[]".to_string());
 
-    let mut system_prompt = template_content
+    system_prompt = system_prompt
         .replace("{{nodes}}", &nodes_json)
         .replace("{{edges}}", &edges_json);
-
-    // Build user prompt based on whether spec context is provided
-    let user_prompt = if let (Some(spec_path), Some(draft)) = (&req.spec_path, &req.draft_content) {
-        system_prompt.push_str(
-            "\n\nThe user is editing a spec and wants to understand the structural impact.",
-        );
-        format!(
-            "Predict what would change in the codebase if this spec is implemented:\n\nSpec: {spec_path}\n\nContent:\n{draft}"
-        )
-    } else if let Some(spec_path) = &req.spec_path {
-        format!("Predict structural improvements related to spec: {spec_path}")
-    } else {
-        format!("Predict structural improvements for repo {id}.")
-    };
+    if let Some(note) = system_note {
+        system_prompt.push_str(note);
+    }
+    if let Some(contract) = output_contract {
+        system_prompt.push_str(contract);
+    }
 
     // Resolve model and call LLM for structured JSON output.
     let (model, _) =
-        crate::llm_helpers::resolve_llm_model(&state, &workspace_id, "graph-predict").await;
+        crate::llm_helpers::resolve_llm_model(state, workspace_id, "graph-predict").await;
     let result = factory
         .for_model(&model)
-        .predict_json(&system_prompt, &user_prompt)
+        .predict_json(&system_prompt, instruction, None)
         .await
         .map_err(ApiError::Internal)?;
 
-    let predictions = if let Some(arr) = result.as_array() {
+    Ok(if let Some(arr) = result.as_array() {
         arr.clone()
     } else {
         vec![result]
-    };
-
-    Ok(Json(PredictResponse {
-        repo_id: id,
-        predictions,
-    }))
+    })
 }
 
 // ── View query dry-run ───────────────────────────────────────────────────────
@@ -2069,7 +2850,21 @@ pub async fn view_query_dryrun(
         .map_err(ApiError::Internal)?;
 
     let selected = req.selected_node_id.as_deref();
-    let result = gyre_domain::view_query_resolver::dry_run(&req.query, &nodes, &edges, selected);
+    // SHA/ref-based Diff scopes resolve their change set from the repo's
+    // real git via the shared two-commit graph-diff core (the same path that
+    // serves GET /repos/{id}/graph/diff) and inject it into the pure domain
+    // resolver — no git knowledge enters gyre-domain.
+    let diff_changes =
+        crate::graph_diff_core::resolve_view_query_diff_changes_for_state(&state, &id, &req.query)
+            .await;
+    let result = gyre_domain::view_query_resolver::dry_run_with_diff_change_set(
+        &req.query,
+        &nodes,
+        &edges,
+        selected,
+        None,
+        diff_changes.as_ref(),
+    );
 
     Ok(Json(result))
 }
@@ -2334,6 +3129,181 @@ mod tests {
         assert_eq!(nodes[0].id.as_str(), nid.as_str());
     }
 
+    #[tokio::test]
+    async fn repo_graph_at_returns_point_in_time_graph() {
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // Create a repo so require_repo passes.
+        let create_body = serde_json::json!({
+            "name": "timeline-at-repo",
+            "workspace_id": "ws-timeline",
+            "tenant_id": "tenant-1",
+        });
+        let repo_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/repos")
+                    .header("Authorization", auth())
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&create_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(repo_resp.status(), StatusCode::CREATED);
+        let repo_json = body_json(repo_resp).await;
+        let repo_id = repo_json["id"].as_str().unwrap().to_string();
+
+        // Seed the graph store: `early` (first seen 100, active), `late`
+        // (first seen 900), `gone` (first seen 100, soft-deleted at 300).
+        let mut early = _new_node(&repo_id, "EarlyNode", NodeType::Type);
+        early.first_seen_at = 100;
+        early.last_seen_at = 2000;
+        let mut late = _new_node(&repo_id, "LateNode", NodeType::Type);
+        late.first_seen_at = 900;
+        late.last_seen_at = 2000;
+        let mut gone = _new_node(&repo_id, "GoneNode", NodeType::Type);
+        gone.first_seen_at = 100;
+        gone.last_seen_at = 300;
+        gone.deleted_at = Some(300);
+        for node in [early, late, gone] {
+            state.graph_store.create_node(node).await.unwrap();
+        }
+
+        let get = |query: String| {
+            let app = app.clone();
+            let repo = repo_id.clone();
+            async move {
+                app.oneshot(
+                    Request::builder()
+                        .method("GET")
+                        .uri(format!("/api/v1/repos/{repo}/graph{query}"))
+                        .header("Authorization", auth())
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+            }
+        };
+        // No `at`: the current graph excludes the soft-deleted node.
+        let resp = get("".to_string()).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp).await;
+        let names: Vec<&str> = body["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, vec!["EarlyNode", "LateNode"]);
+
+        // Epoch-seconds `at=200`: late did not exist yet; gone existed
+        // (deleted later) and MUST be reconstructed.
+        let resp = get("?at=200".to_string()).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp).await;
+        let names: Vec<&str> = body["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, vec!["EarlyNode", "GoneNode"]);
+
+        // `at=500`: gone was deleted at 300 — absent again.
+        let resp = get("?at=500".to_string()).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp).await;
+        let names: Vec<&str> = body["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, vec!["EarlyNode"]);
+
+        // RFC 3339 `at`: 1970-01-01T00:03:20Z == epoch 200.
+        let resp = get("?at=1970-01-01T00%3A03%3A20Z".to_string()).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp).await;
+        let names: Vec<&str> = body["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, vec!["EarlyNode", "GoneNode"]);
+
+        // Unparseable `at` → 400, not silently ignored.
+        let resp = get("?at=not-a-timestamp".to_string()).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_mem_list_nodes_at_and_edges_at_contract() {
+        // test_state wires MemGraphStore — this pins the in-code guard to the
+        // same existed-at contract the SQLite adapter enforces in SQL
+        // (check-mem-port-contracts: one adapter's test suite cannot cover
+        // the other's implementation).
+        let state = test_state();
+        let repo = "repo-mem-at";
+
+        let mut n1 = _new_node(repo, "N1", NodeType::Type);
+        n1.first_seen_at = 100;
+        n1.last_seen_at = 900;
+        let mut n2 = _new_node(repo, "N2", NodeType::Type);
+        n2.first_seen_at = 100;
+        n2.last_seen_at = 250;
+        n2.deleted_at = Some(250);
+        state.graph_store.create_node(n1.clone()).await.unwrap();
+        state.graph_store.create_node(n2.clone()).await.unwrap();
+
+        let edge = GraphEdge {
+            id: Id::new("e1"),
+            repo_id: Id::new(repo),
+            source_id: n1.id.clone(),
+            target_id: n2.id.clone(),
+            edge_type: EdgeType::DependsOn,
+            metadata: None,
+            first_seen_at: 100,
+            last_seen_at: 250,
+            deleted_at: Some(250),
+        };
+        state.graph_store.create_edge(edge.clone()).await.unwrap();
+
+        let at_150 = state
+            .graph_store
+            .list_nodes_at(&Id::new(repo), 150)
+            .await
+            .unwrap();
+        assert_eq!(at_150.len(), 2, "n2 existed at 150 (deleted at 250)");
+
+        let at_500 = state
+            .graph_store
+            .list_nodes_at(&Id::new(repo), 500)
+            .await
+            .unwrap();
+        assert_eq!(at_500.len(), 1);
+        assert_eq!(at_500[0].name, "N1");
+
+        let edges_150 = state
+            .graph_store
+            .list_edges_at(&Id::new(repo), 150)
+            .await
+            .unwrap();
+        assert_eq!(edges_150.len(), 1, "edge existed at 150");
+        let edges_500 = state
+            .graph_store
+            .list_edges_at(&Id::new(repo), 500)
+            .await
+            .unwrap();
+        assert!(edges_500.is_empty(), "edge was deleted at 250");
+    }
+
     // ── LLM endpoint tests ───────────────────────────────────────────────────
 
     fn app_no_llm() -> Router {
@@ -2425,6 +3395,461 @@ mod tests {
         assert!(
             !predictions.is_empty(),
             "mock LLM should return at least one prediction"
+        );
+    }
+
+    /// §3 fast tier: a spec-edit predict call (spec_path + draft_content)
+    /// must return the ghost-overlay prediction contract — action,
+    /// confidence, reason — plus the real link-graph context
+    /// (affected_specs, affected_repos, estimated_agent_cost), and the
+    /// system prompt sent to the LLM must carry the §3 output contract.
+    #[tokio::test]
+    async fn predict_graph_spec_edit_returns_ghost_contract_and_link_context() {
+        use gyre_domain::spec_links::{SpecLinkEntry, SpecLinkType};
+
+        let mut s = (*test_state()).clone();
+        let adapter = std::sync::Arc::new(gyre_adapters::MockLlmAdapter::json_response(
+            serde_json::json!([
+                {
+                    "action": "add",
+                    "node_type": "Type",
+                    "name": "VectorIndex",
+                    "confidence": 0.85,
+                    "reason": "Spec mentions vector similarity search"
+                },
+                {
+                    "action": "modify",
+                    "node_id": "node-search",
+                    "confidence": 0.9,
+                    "reason": "Search needs modes",
+                    "changes": ["New field: mode"]
+                }
+            ]),
+        ));
+        s.llm = Some(std::sync::Arc::new(gyre_adapters::MockLlmPortFactory {
+            inner: adapter.clone(),
+        }) as _);
+        let state = std::sync::Arc::new(s);
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // Workspace + repo (real workspace row so the affected-repos query
+        // resolves the repo name).
+        let ws_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces")
+                    .header("Authorization", auth())
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({"name": "ws-predict-shape"}))
+                            .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ws_resp.status(), StatusCode::CREATED);
+        let ws_id = body_json(ws_resp).await["id"].as_str().unwrap().to_string();
+
+        let repo_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/repos")
+                    .header("Authorization", auth())
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "name": "predict-shape-repo",
+                            "workspace_id": ws_id,
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(repo_resp.status(), StatusCode::CREATED);
+        let repo_id = body_json(repo_resp).await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // A live graph node governed by the spec → the repo implements it.
+        let mut node = _new_node(&repo_id, "SearchQuery", NodeType::Type);
+        node.spec_path = Some("specs/system/search.md".to_string());
+        state.graph_store.create_node(node).await.unwrap();
+
+        // A spec link touching the spec → a connected spec.
+        state.spec_links_store.lock().await.push(SpecLinkEntry {
+            id: "link-1".to_string(),
+            source_path: "specs/system/search.md".to_string(),
+            source_repo_id: Some(repo_id.clone()),
+            source_sha: "sha-1".to_string(),
+            link_type: SpecLinkType::References,
+            target_path: "specs/system/dependency-graph.md".to_string(),
+            target_repo_id: None,
+            target_display: None,
+            target_sha: None,
+            reason: None,
+            status: "active".to_string(),
+            created_at: 1000,
+            stale_since: None,
+        });
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/repos/{repo_id}/graph/predict"))
+                    .header("Authorization", auth())
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "spec_path": "specs/system/search.md",
+                            "draft_content": "# Search\n\nNeeds semantic mode."
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+
+        // §3 prediction contract round-trips: ghost overlays need action,
+        // confidence and reason.
+        let predictions = json["predictions"].as_array().unwrap();
+        assert_eq!(predictions.len(), 2);
+        assert_eq!(predictions[0]["action"].as_str().unwrap(), "add");
+        assert_eq!(predictions[0]["name"].as_str().unwrap(), "VectorIndex");
+        assert!((predictions[0]["confidence"].as_f64().unwrap() - 0.85).abs() < 1e-9);
+        assert!(predictions[0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("vector"));
+
+        // Real link-graph context, never fabricated.
+        let affected: Vec<&str> = json["affected_specs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert_eq!(affected, vec!["specs/system/dependency-graph.md"]);
+        let repos: Vec<&str> = json["affected_repos"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert_eq!(repos, vec!["predict-shape-repo"]);
+        // Deterministic estimate over the prediction count.
+        assert_eq!(json["estimated_agent_cost"].as_str().unwrap(), "$0.25");
+
+        // The LLM actually received the §3 output contract (ghost fields).
+        let prompts = adapter.captured_system_prompts.lock().unwrap().clone();
+        assert!(
+            prompts.iter().any(|p| p.contains("\"action\"")),
+            "spec-edit predict must instruct the LLM to return the §3 prediction shape"
+        );
+    }
+
+    /// §3 thorough tier: POST /repos/:id/graph/thorough-preview creates a
+    /// preview task carrying the draft, spawns an implementation agent on
+    /// a throwaway preview/ branch, and reports both ids.
+    #[tokio::test]
+    async fn thorough_preview_creates_task_and_spawns_agent_on_throwaway_branch() {
+        let app = app();
+
+        // Workspace + repo.
+        let ws_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces")
+                    .header("Authorization", auth())
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({"name": "ws-thorough"})).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ws_resp.status(), StatusCode::CREATED);
+        let ws_id = body_json(ws_resp).await["id"].as_str().unwrap().to_string();
+
+        let repo_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/repos")
+                    .header("Authorization", auth())
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "name": "thorough-repo",
+                            "workspace_id": ws_id,
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(repo_resp.status(), StatusCode::CREATED);
+        let repo_id = body_json(repo_resp).await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/repos/{repo_id}/graph/thorough-preview"))
+                    .header("Authorization", auth())
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "spec_path": "specs/system/search.md",
+                            "draft_content": "# Search\n\nAdd semantic mode."
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let json = body_json(resp).await;
+        let task_id = json["task_id"].as_str().unwrap().to_string();
+        let agent_id = json["agent_id"].as_str().unwrap().to_string();
+        let branch = json["branch"].as_str().unwrap().to_string();
+        assert!(
+            branch.starts_with("preview/search-md-"),
+            "throwaway preview branch, got {branch}"
+        );
+        assert_eq!(json["repo_id"].as_str().unwrap(), repo_id);
+
+        // The preview task exists, is assigned to the spawned agent, and
+        // carries the spec + branch + preview label.
+        let task_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/api/v1/tasks/{task_id}"))
+                    .header("Authorization", auth())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(task_resp.status(), StatusCode::OK);
+        let task = body_json(task_resp).await;
+        assert_eq!(task["status"].as_str().unwrap(), "in_progress");
+        assert_eq!(
+            task["spec_path"].as_str().unwrap(),
+            "specs/system/search.md"
+        );
+        assert_eq!(task["branch"].as_str().unwrap(), branch);
+        assert_eq!(task["assigned_to"].as_str().unwrap(), agent_id);
+        assert!(task["labels"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|l| l == "spec-preview"));
+        // The draft rides the task the agent reads.
+        assert!(task["description"]
+            .as_str()
+            .unwrap()
+            .contains("Add semantic mode."));
+
+        // The agent exists and is bound to the task.
+        let agent_resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/api/v1/agents/{agent_id}"))
+                    .header("Authorization", auth())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(agent_resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn thorough_preview_rejects_missing_fields_and_unknown_repo() {
+        let app = app();
+
+        // Unknown repo → 404.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/repos/repo-nope/graph/thorough-preview")
+                    .header("Authorization", auth())
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "spec_path": "specs/a.md",
+                            "draft_content": "draft"
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        // Create a real repo for the field-validation cases.
+        let repo_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/repos")
+                    .header("Authorization", auth())
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "name": "thorough-validate-repo",
+                            "workspace_id": "ws-any",
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(repo_resp.status(), StatusCode::CREATED);
+        let repo_id = body_json(repo_resp).await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // Empty draft → 400.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/repos/{repo_id}/graph/thorough-preview"))
+                    .header("Authorization", auth())
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "spec_path": "specs/a.md",
+                            "draft_content": "   "
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // Missing spec_path → 422: axum's Json<T> extractor rejects a
+        // body missing a required field before the handler runs (same
+        // contract as the release.rs missing-field case).
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/repos/{repo_id}/graph/thorough-preview"))
+                    .header("Authorization", auth())
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({"draft_content": "d"})).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    /// Compensating rollback: when the spawn fails (here: the repo's
+    /// workspace row is missing, so the spawn fails closed), the
+    /// just-created preview task is deleted — a failed preview leaves no
+    /// orphaned Backlog task for the scheduler to pick up as real work.
+    #[tokio::test]
+    async fn thorough_preview_rolls_back_preview_task_when_spawn_fails() {
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // Repo with a dangling workspace reference (POST /repos accepts
+        // any workspace_id): the spawn core fails closed on it.
+        let repo_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/repos")
+                    .header("Authorization", auth())
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "name": "thorough-rollback-repo",
+                            "workspace_id": "ws-does-not-exist",
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(repo_resp.status(), StatusCode::CREATED);
+        let repo_id = body_json(repo_resp).await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/repos/{repo_id}/graph/thorough-preview"))
+                    .header("Authorization", auth())
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "spec_path": "specs/system/rollback.md",
+                            "draft_content": "draft"
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_ne!(resp.status(), StatusCode::CREATED);
+
+        // No preview task survived the failed spawn.
+        let tasks = state
+            .tasks
+            .list_by_spec_path("specs/system/rollback.md")
+            .await
+            .unwrap();
+        assert!(
+            tasks.is_empty(),
+            "failed thorough preview must roll back its task, found {}",
+            tasks.len()
         );
     }
 
@@ -2628,6 +4053,172 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn briefing_ask_llm_connection_failure_sends_error_event() {
+        // ui-layout.md §2: an LLM connection failure is an SSE `error` event,
+        // not an HTTP 500 — and never a `complete` event.
+        let mut s = (*test_state()).clone();
+        s.llm = Some(Arc::new(gyre_adapters::MockLlmPortFactory {
+            inner: Arc::new(gyre_adapters::MockLlmAdapter::failing(
+                "connection refused by mock",
+            )),
+        }) as Arc<dyn gyre_ports::LlmPortFactory>);
+        let app = crate::api::api_router().with_state(Arc::new(s));
+
+        let ws_body = serde_json::json!({"name": "llm-connfail-ws", "tenant_id": "tenant-1"});
+        let ws_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces")
+                    .header("Authorization", auth())
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&ws_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ws_resp.status(), StatusCode::CREATED);
+        let ws_json = body_json(ws_resp).await;
+        let ws_id = ws_json["id"].as_str().unwrap().to_string();
+
+        let ask_body = serde_json::json!({"question": "Tell me more"});
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/workspaces/{ws_id}/briefing/ask"))
+                    .header("Authorization", auth())
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&ask_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let ct = resp.headers().get("content-type").unwrap();
+        assert!(ct.to_str().unwrap().contains("text/event-stream"));
+
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&bytes).to_string();
+        let mut error_msgs: Vec<String> = Vec::new();
+        let mut complete_count = 0usize;
+        let mut current_event: Option<String> = None;
+        for line in text.lines() {
+            if let Some(kind) = line.strip_prefix("event: ") {
+                current_event = Some(kind.trim().to_string());
+            } else if let Some(data) = line.strip_prefix("data: ") {
+                let kind = match current_event.take() {
+                    Some(k) => k,
+                    None => continue,
+                };
+                if kind == "error" {
+                    let v: serde_json::Value = serde_json::from_str(data).unwrap();
+                    error_msgs.push(v["error"].as_str().unwrap_or("").to_string());
+                } else if kind == "complete" {
+                    complete_count += 1;
+                }
+            }
+        }
+        assert_eq!(error_msgs.len(), 1, "expected exactly one error event");
+        assert_eq!(
+            complete_count, 0,
+            "a connection failure must never masquerade as a complete event"
+        );
+        assert!(
+            error_msgs[0].contains("connection refused by mock"),
+            "error event must carry the failure cause, got: {}",
+            error_msgs[0]
+        );
+    }
+
+    #[tokio::test]
+    async fn briefing_ask_llm_mid_stream_failure_sends_error_event() {
+        // A connection that drops mid-generation: partial chunks arrive, then
+        // the stream errors. The truncated response must surface as
+        // `event: error` — never a `complete` event built from the partial
+        // text. Regression for the old `filter_map(|r| r.ok())` that silently
+        // dropped the stream error and completed on the truncated text.
+        let mut s = (*test_state()).clone();
+        s.llm = Some(Arc::new(gyre_adapters::MockLlmPortFactory {
+            inner: Arc::new(gyre_adapters::MockLlmAdapter::stream_error_after(
+                vec!["The workspace ".into(), "has three ".into()],
+                "dropped mid-generation by mock",
+            )),
+        }) as Arc<dyn gyre_ports::LlmPortFactory>);
+        let app = crate::api::api_router().with_state(Arc::new(s));
+
+        let ws_body = serde_json::json!({"name": "llm-midfail-ws", "tenant_id": "tenant-1"});
+        let ws_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces")
+                    .header("Authorization", auth())
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&ws_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ws_resp.status(), StatusCode::CREATED);
+        let ws_json = body_json(ws_resp).await;
+        let ws_id = ws_json["id"].as_str().unwrap().to_string();
+
+        let ask_body = serde_json::json!({"question": "Tell me more"});
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/workspaces/{ws_id}/briefing/ask"))
+                    .header("Authorization", auth())
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&ask_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&bytes).to_string();
+        let mut error_msgs: Vec<String> = Vec::new();
+        let mut complete_count = 0usize;
+        let mut current_event: Option<String> = None;
+        for line in text.lines() {
+            if let Some(kind) = line.strip_prefix("event: ") {
+                current_event = Some(kind.trim().to_string());
+            } else if let Some(data) = line.strip_prefix("data: ") {
+                let kind = match current_event.take() {
+                    Some(k) => k,
+                    None => continue,
+                };
+                if kind == "error" {
+                    let v: serde_json::Value = serde_json::from_str(data).unwrap();
+                    error_msgs.push(v["error"].as_str().unwrap_or("").to_string());
+                } else if kind == "complete" {
+                    complete_count += 1;
+                }
+            }
+        }
+        assert_eq!(error_msgs.len(), 1, "expected exactly one error event");
+        assert_eq!(
+            complete_count, 0,
+            "a truncated (mid-stream failed) response must never be completed"
+        );
+        assert!(
+            error_msgs[0].contains("dropped mid-generation by mock"),
+            "error event must carry the mid-stream failure cause, got: {}",
+            error_msgs[0]
+        );
+    }
+
     /// Prompt-capturing LLM factory for the grounding test: records the
     /// system prompt of each stream_complete call and streams it back so the
     /// caller can assert on the exact prompt text the production code built.
@@ -2654,6 +4245,7 @@ mod tests {
             &self,
             _system_prompt: &str,
             _user_prompt: &str,
+            _max_tokens: Option<u32>,
         ) -> anyhow::Result<serde_json::Value> {
             Ok(serde_json::json!([]))
         }
@@ -2723,12 +4315,12 @@ mod tests {
         let mut mr = gyre_domain::MergeRequest::new(
             Id::new(uuid::Uuid::new_v4().to_string()),
             Id::new("repo-grounding"),
+            ws.id.clone(),
             mr_title,
             "feature/grounding",
             "main",
             1000,
         );
-        mr.workspace_id = ws.id.clone();
         mr.spec_ref = Some(spec_ref.to_string());
         mr.status = gyre_domain::MrStatus::Merged;
         mr.updated_at = now_secs();
@@ -2956,6 +4548,7 @@ mod tests {
             updated_at: 1000,
             max_agents: None,
             max_agent_iterations: None,
+            budget: None,
         };
         state.repos.create(&foreign_repo).await.unwrap();
 
@@ -2963,12 +4556,12 @@ mod tests {
         let mut mr1 = gyre_domain::MergeRequest::new(
             Id::new("mr-http-r1"),
             Id::new("repo-1"),
+            Id::new("ws-briefing"),
             "repo-1 merged work",
             "feat/one",
             "main",
             2000,
         );
-        mr1.workspace_id = Id::new("ws-briefing");
         mr1.updated_at = 2000;
         mr1.status = gyre_domain::MrStatus::Merged;
         state.merge_requests.create(&mr1).await.unwrap();
@@ -2985,12 +4578,12 @@ mod tests {
         let mut mr_foreign = gyre_domain::MergeRequest::new(
             Id::new("mr-http-foreign"),
             Id::new("repo-foreign"),
+            Id::new("ws-briefing"),
             "foreign repo work",
             "feat/foreign",
             "main",
             2000,
         );
-        mr_foreign.workspace_id = Id::new("ws-briefing");
         mr_foreign.updated_at = 2000;
         mr_foreign.status = gyre_domain::MrStatus::Merged;
         state.merge_requests.create(&mr_foreign).await.unwrap();
@@ -3092,6 +4685,7 @@ mod tests {
             updated_at: 1000,
             max_agents: None,
             max_agent_iterations: None,
+            budget: None,
         };
         state.repos.create(&repo).await.unwrap();
         ("ws-briefing".to_string(), "repo-1".to_string())
@@ -3110,6 +4704,7 @@ mod tests {
                 id: "link-1".to_string(),
                 source_path: "system/payment-retry.md".to_string(),
                 source_repo_id: Some("repo-1".to_string()),
+                source_sha: "src-sha".to_string(),
                 link_type: crate::spec_registry::SpecLinkType::DependsOn,
                 target_path: "system/idempotent-api.md".to_string(),
                 target_repo_id: Some("external-repo".to_string()),
@@ -3156,6 +4751,7 @@ mod tests {
                 id: "link-same".to_string(),
                 source_path: "system/auth.md".to_string(),
                 source_repo_id: Some("repo-1".to_string()),
+                source_sha: "src-sha".to_string(),
                 link_type: crate::spec_registry::SpecLinkType::DependsOn,
                 target_path: "system/users.md".to_string(),
                 target_repo_id: Some("repo-1".to_string()),
@@ -3191,6 +4787,7 @@ mod tests {
                 id: "link-stale".to_string(),
                 source_path: "system/payment-retry.md".to_string(),
                 source_repo_id: Some("repo-1".to_string()),
+                source_sha: "src-sha".to_string(),
                 link_type: crate::spec_registry::SpecLinkType::DependsOn,
                 target_path: "system/idempotent-api.md".to_string(),
                 target_repo_id: Some("external-repo".to_string()),
@@ -3232,6 +4829,7 @@ mod tests {
                 id: "link-old-stale".to_string(),
                 source_path: "system/billing.md".to_string(),
                 source_repo_id: Some("repo-1".to_string()),
+                source_sha: "src-sha".to_string(),
                 link_type: crate::spec_registry::SpecLinkType::DependsOn,
                 target_path: "system/old-api.md".to_string(),
                 target_repo_id: Some("external-repo".to_string()),
@@ -3263,12 +4861,12 @@ mod tests {
         let mut mr = gyre_domain::MergeRequest::new(
             Id::new("mr-47"),
             Id::new("repo-1"),
+            Id::new("ws-briefing"),
             "Add billing retry",
             "feat/billing-retry",
             "main",
             2000,
         );
-        mr.workspace_id = Id::new("ws-briefing");
         mr.updated_at = 2000;
         state.merge_requests.create(&mr).await.unwrap();
 
@@ -3311,12 +4909,12 @@ mod tests {
         let mut mr = gyre_domain::MergeRequest::new(
             Id::new("mr-old-gate"),
             Id::new("repo-1"),
+            Id::new("ws-briefing"),
             "Old gate failure MR",
             "feat/old-gate",
             "main",
             400,
         );
-        mr.workspace_id = Id::new("ws-briefing");
         mr.updated_at = 2000; // after since=1500
         state.merge_requests.create(&mr).await.unwrap();
 
@@ -3348,6 +4946,114 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn briefing_exceptions_gate_failure_on_stale_mr_record() {
+        // F2 regression: gates run asynchronously after MR enqueue and the
+        // failure path never touches mr.updated_at. A gate failure that
+        // finished after `since` on an MR whose updated_at precedes `since`
+        // MUST still appear — the gate result's finished_at is the time gate.
+        let state = test_state();
+        let (ws_id, _repo_id) = setup_workspace_and_repo(&state).await;
+
+        // MR approved days ago (updated_at before since); never touched since.
+        let mut mr = gyre_domain::MergeRequest::new(
+            Id::new("mr-stale"),
+            Id::new("repo-1"),
+            Id::new("ws-briefing"),
+            "Approved long ago, enqueued today",
+            "feat/stale-mr",
+            "main",
+            1000,
+        );
+        mr.updated_at = 1000; // BEFORE since=1500
+        state.merge_requests.create(&mr).await.unwrap();
+
+        // Gate failed AFTER since (enqueued today, failed today).
+        let gr = gyre_domain::GateResult {
+            id: Id::new("gr-fresh-fail"),
+            gate_id: Id::new("gate-tests"),
+            mr_id: Id::new("mr-stale"),
+            status: GateStatus::Failed,
+            output: Some("cargo test failed (3 tests)".to_string()),
+            started_at: Some(1900),
+            finished_at: Some(2000), // AFTER since=1500
+        };
+        state.gate_results.save(&gr).await.unwrap();
+
+        let briefing = assemble_briefing(&state, &ws_id, 1500, None)
+            .await
+            .map_err(|_| "assemble_briefing failed")
+            .unwrap();
+        let gate_failures: Vec<_> = briefing
+            .exceptions
+            .iter()
+            .filter(|e| e.entity_type == "gate_failure")
+            .collect();
+        assert_eq!(
+            gate_failures.len(),
+            1,
+            "fresh gate failure on a stale MR record must appear in exceptions"
+        );
+        assert_eq!(gate_failures[0].timestamp, 2000);
+    }
+
+    #[tokio::test]
+    async fn briefing_exceptions_assertion_failure_beyond_recency_window() {
+        // F3 regression: the exceptions section must not be subject to a
+        // globally-truncated recency window. Seed a SpecAssertionFailure,
+        // then 201 newer notifications of other types (across users and
+        // workspaces) — the failure must still be reported.
+        let state = test_state();
+        let (ws_id, _repo_id) = setup_workspace_and_repo(&state).await;
+
+        let notif = gyre_common::Notification::new(
+            Id::new("notif-buried"),
+            Id::new("ws-briefing"),
+            Id::new("user-1"),
+            gyre_common::NotificationType::SpecAssertionFailure,
+            "Spec assertion failed: payment.md §2",
+            "tenant-1",
+            2000,
+        );
+        state.notifications.create(&notif).await.unwrap();
+
+        // 201 newer notifications: mix of other workspaces and this workspace,
+        // other types, other users — all created after the assertion failure.
+        for i in 0..201 {
+            let (ws, tenant) = if i % 2 == 0 {
+                (Id::new("ws-other"), "tenant-2")
+            } else {
+                (Id::new("ws-briefing"), "tenant-1")
+            };
+            let n = gyre_common::Notification::new(
+                Id::new(format!("notif-noise-{i}")),
+                ws,
+                Id::new(format!("user-noise-{i}")),
+                gyre_common::NotificationType::MrMerged,
+                "MR merged noise",
+                tenant,
+                2100 + i as i64,
+            );
+            state.notifications.create(&n).await.unwrap();
+        }
+
+        let briefing = assemble_briefing(&state, &ws_id, 1500, None)
+            .await
+            .map_err(|_| "assemble_briefing failed")
+            .unwrap();
+        let assertions: Vec<_> = briefing
+            .exceptions
+            .iter()
+            .filter(|e| e.entity_type == "spec_assertion_failure")
+            .collect();
+        assert_eq!(
+            assertions.len(),
+            1,
+            "assertion failure older than 200 newer notifications must still be reported"
+        );
+        assert!(assertions[0].title.contains("payment.md"));
+    }
+
+    #[tokio::test]
     async fn briefing_exceptions_spec_assertion_failures() {
         let state = test_state();
         let (ws_id, _repo_id) = setup_workspace_and_repo(&state).await;
@@ -3364,6 +5070,34 @@ mod tests {
         );
         state.notifications.create(&notif).await.unwrap();
 
+        // The notification fan-out (graph_extraction.rs) delivers one copy per
+        // notified Admin/Developer/Owner member: identical source event
+        // (entity_id, title, created_at), distinct notification/user ids.
+        // One failure event must yield ONE exception item, not one per member.
+        let member_copy = gyre_common::Notification::new(
+            Id::new("notif-1-member-2"),
+            Id::new("ws-briefing"),
+            Id::new("user-2"),
+            gyre_common::NotificationType::SpecAssertionFailure,
+            "Spec assertion failed: auth.md §3",
+            "tenant-1",
+            2000,
+        );
+        state.notifications.create(&member_copy).await.unwrap();
+
+        // A distinct failure event (different created_at) must still get its
+        // own exception item — dedup is per source event, not per entity.
+        let second_event = gyre_common::Notification::new(
+            Id::new("notif-2"),
+            Id::new("ws-briefing"),
+            Id::new("user-1"),
+            gyre_common::NotificationType::SpecAssertionFailure,
+            "Spec assertion failed: auth.md §3",
+            "tenant-1",
+            2200,
+        );
+        state.notifications.create(&second_event).await.unwrap();
+
         let briefing = assemble_briefing(&state, &ws_id, 1500, None)
             .await
             .map_err(|_| "assemble_briefing failed")
@@ -3373,7 +5107,11 @@ mod tests {
             .iter()
             .filter(|e| e.entity_type == "spec_assertion_failure")
             .collect();
-        assert_eq!(assertions.len(), 1);
+        assert_eq!(
+            assertions.len(),
+            2,
+            "per-member fan-out copies must be deduplicated; distinct events kept"
+        );
         assert!(assertions[0].title.contains("Spec assertion failed"));
         assert_eq!(
             assertions[0].actions,
@@ -3390,12 +5128,12 @@ mod tests {
         let mut mr = gyre_domain::MergeRequest::new(
             Id::new("mr-99"),
             Id::new("repo-1"),
+            Id::new("ws-briefing"),
             "Broken migration",
             "feat/migration",
             "main",
             1800,
         );
-        mr.workspace_id = Id::new("ws-briefing");
         mr.transition_status(MrStatus::Approved).unwrap();
         mr.transition_status(MrStatus::Merged).unwrap();
         mr.revert("f".repeat(40).to_string(), 2100).unwrap();
@@ -3446,6 +5184,7 @@ mod tests {
                 id: "link-old".to_string(),
                 source_path: "system/old-dep.md".to_string(),
                 source_repo_id: Some("repo-1".to_string()),
+                source_sha: "src-sha".to_string(),
                 link_type: crate::spec_registry::SpecLinkType::DependsOn,
                 target_path: "old-spec.md".to_string(),
                 target_repo_id: Some("external-repo".to_string()),
@@ -3462,12 +5201,12 @@ mod tests {
         let mut mr = gyre_domain::MergeRequest::new(
             Id::new("mr-old"),
             Id::new("repo-1"),
+            Id::new("ws-briefing"),
             "Old revert",
             "feat/old",
             "main",
             400,
         );
-        mr.workspace_id = Id::new("ws-briefing");
         mr.transition_status(MrStatus::Approved).unwrap();
         mr.transition_status(MrStatus::Merged).unwrap();
         mr.revert("0".repeat(40).to_string(), 500).unwrap();
@@ -3779,6 +5518,183 @@ specs:
         drop(tmp2);
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn list_graph_concepts_returns_manifest_concepts() {
+        let state = test_state();
+        let (_ws_id, repo_id) = setup_workspace_and_repo(&state).await;
+        let (_tmp, repo_path) = init_manifest_repo(AUTH_CONCEPT_MANIFEST);
+
+        let repo = state
+            .repos
+            .find_by_id(&Id::new(&repo_id))
+            .await
+            .unwrap()
+            .unwrap();
+        let mut repo = repo;
+        repo.path = repo_path;
+        state.repos.update(&repo).await.unwrap();
+
+        let app = crate::api::api_router().with_state(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/api/v1/repos/{repo_id}/graph/concepts"))
+                    .header("Authorization", auth())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+
+        // The manifest defines exactly one concept — the browser listing
+        // must surface its name and description verbatim.
+        let concepts = json["concepts"].as_array().unwrap();
+        assert_eq!(
+            concepts.len(),
+            1,
+            "exactly the manifest concept: {concepts:?}"
+        );
+        assert_eq!(concepts[0]["name"].as_str().unwrap(), "Authentication");
+        assert_eq!(
+            concepts[0]["description"].as_str().unwrap(),
+            "Token validation, RBAC, ABAC, JWT handling"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn list_graph_concepts_repo_without_manifest_returns_empty_list() {
+        let state = test_state();
+        let (_ws_id, repo_id) = setup_workspace_and_repo(&state).await;
+        // Repo path /repos/billing-service has no git repo — no manifest.
+
+        let app = crate::api::api_router().with_state(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/api/v1/repos/{repo_id}/graph/concepts"))
+                    .header("Authorization", auth())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // A repo without a manifest defines no predefined concepts — an
+        // empty listing is the valid answer (contrast the single-concept
+        // projection endpoint, which 404s on the missing manifest).
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(
+            json["concepts"].as_array().unwrap().len(),
+            0,
+            "no manifest → no predefined concepts"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn list_workspace_graph_concepts_unions_and_dedupes() {
+        let state = test_state();
+        let (ws_id, _repo_id) = setup_workspace_and_repo(&state).await;
+
+        // repo-1 defines Authentication.
+        let (tmp, repo_path) = init_manifest_repo(AUTH_CONCEPT_MANIFEST);
+        let repo = state
+            .repos
+            .find_by_id(&Id::new("repo-1"))
+            .await
+            .unwrap()
+            .unwrap();
+        let mut repo = repo;
+        repo.path = repo_path;
+        state.repos.update(&repo).await.unwrap();
+
+        // repo-2 (same workspace) defines Authentication again (duplicate,
+        // case-different name — must dedupe to one entry) plus a distinct
+        // concept.
+        let two_concept_manifest = r#"
+version: 1
+specs:
+  - path: system/other.md
+    title: Other
+    owner: user:test
+concepts:
+  - name: authentication
+    description: "Token validation, RBAC, ABAC, JWT handling"
+    include:
+      - types: ["*Auth*"]
+  - name: Billing
+    description: "Invoicing and payments"
+    include:
+      - types: ["*Invoice*"]
+"#;
+        let (tmp2, repo2_path) = init_manifest_repo(two_concept_manifest);
+        let repo2 = gyre_domain::Repository::new(
+            Id::new("repo-2"),
+            Id::new("ws-briefing"),
+            "other-service",
+            repo2_path,
+            1000,
+        );
+        state.repos.create(&repo2).await.unwrap();
+
+        // repo-3 has no manifest — contributes nothing.
+        let repo3 = gyre_domain::Repository::new(
+            Id::new("repo-3"),
+            Id::new("ws-briefing"),
+            "manifest-less",
+            "/repos/manifest-less",
+            1000,
+        );
+        state.repos.create(&repo3).await.unwrap();
+
+        let app = crate::api::api_router().with_state(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/api/v1/workspaces/{ws_id}/graph/concepts"))
+                    .header("Authorization", auth())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+
+        let mut names: Vec<&str> = json["concepts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["name"].as_str().unwrap())
+            .collect();
+        names.sort_unstable();
+        // Case-insensitive dedupe: Authentication appears once (both
+        // repos define it with the same description — repo iteration order
+        // in the mem adapter is arbitrary, so the winner must not matter),
+        // Billing once, nothing from repo-3.
+        assert_eq!(
+            names,
+            vec!["Authentication", "Billing"],
+            "union with case-insensitive dedupe: {names:?}"
+        );
+        let auth = json["concepts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"].as_str().unwrap() == "Authentication")
+            .unwrap();
+        assert_eq!(
+            auth["description"].as_str().unwrap(),
+            "Token validation, RBAC, ABAC, JWT handling"
+        );
+        drop(tmp);
+        drop(tmp2);
+    }
+
     // ── Graph narrative generation (realized-model.md §6) ───────────────
 
     /// Seed repo-1 graph: `billing::search` module containing `VectorIndex`
@@ -3967,6 +5883,7 @@ specs:
             updated_at: 1000,
             max_agents: None,
             max_agent_iterations: None,
+            budget: None,
         };
         state.repos.create(&repo2).await.unwrap();
 
@@ -3974,12 +5891,12 @@ specs:
         let mut mr1 = gyre_domain::MergeRequest::new(
             Id::new("mr-r1"),
             Id::new("repo-1"),
+            Id::new("ws-briefing"),
             "repo-1 merged work",
             "feat/one",
             "main",
             2000,
         );
-        mr1.workspace_id = Id::new("ws-briefing");
         mr1.updated_at = 2000;
         mr1.status = gyre_domain::MrStatus::Merged;
         state.merge_requests.create(&mr1).await.unwrap();
@@ -3988,12 +5905,12 @@ specs:
         let mut mr2 = gyre_domain::MergeRequest::new(
             Id::new("mr-r2"),
             Id::new("repo-2"),
+            Id::new("ws-briefing"),
             "repo-2 merged work",
             "feat/two",
             "main",
             2000,
         );
-        mr2.workspace_id = Id::new("ws-briefing");
         mr2.updated_at = 2000;
         mr2.status = gyre_domain::MrStatus::Merged;
         state.merge_requests.create(&mr2).await.unwrap();
@@ -4021,6 +5938,7 @@ specs:
                 id: "link-r1".to_string(),
                 source_path: "system/payment-retry.md".to_string(),
                 source_repo_id: Some("repo-1".to_string()),
+                source_sha: "sha-link-r1".to_string(),
                 link_type: crate::spec_registry::SpecLinkType::DependsOn,
                 target_path: "system/idempotent-api.md".to_string(),
                 target_repo_id: Some("external-repo".to_string()),
@@ -4035,6 +5953,7 @@ specs:
                 id: "link-r2".to_string(),
                 source_path: "system/auth.md".to_string(),
                 source_repo_id: Some("repo-2".to_string()),
+                source_sha: "sha-link-r2".to_string(),
                 link_type: crate::spec_registry::SpecLinkType::DependsOn,
                 target_path: "system/sso.md".to_string(),
                 target_repo_id: Some("external-repo".to_string()),
@@ -4111,6 +6030,7 @@ specs:
             updated_at: 1000,
             max_agents: None,
             max_agent_iterations: None,
+            budget: None,
         };
         state.repos.create(&repo2).await.unwrap();
         let mut a2 = gyre_domain::Agent::new(Id::new("agent-r2"), "worker-2", 2000);
@@ -4160,5 +6080,140 @@ specs:
             .map_err(|_| "assemble_briefing failed")
             .unwrap();
         assert_eq!(ball.completed_agents.len(), 3);
+    }
+
+    /// HSI §2 "Briefing detail" + "Agent completion summaries" rows: the
+    /// briefing payload VARIES with the workspace's trust level —
+    /// Supervised shows per-MR status and the full decision log; Guided
+    /// rolls up per spec (progress) keeping the full log; Autonomous shows
+    /// spec-level summaries and surfaces only low-confidence decisions.
+    #[tokio::test]
+    async fn briefing_detail_and_completion_summaries_vary_by_trust_level() {
+        let state = test_state();
+        let (ws_id, _repo1) = setup_workspace_and_repo(&state).await;
+
+        // Two merged MRs implementing the SAME spec.
+        for (mr_id, branch) in [("mr-trust-a", "feat/a"), ("mr-trust-b", "feat/b")] {
+            let mut mr = gyre_domain::MergeRequest::new(
+                Id::new(mr_id),
+                Id::new("repo-1"),
+                Id::new("ws-briefing"),
+                "Implement payment retry",
+                branch,
+                "main",
+                2000,
+            );
+            mr.spec_ref = Some("specs/system/payment-retry.md@sha-1".to_string());
+            mr.updated_at = 2000;
+            mr.status = gyre_domain::MrStatus::Merged;
+            state.merge_requests.create(&mr).await.unwrap();
+        }
+
+        // In-progress task on the same spec.
+        let mut t1 = gyre_domain::Task::new(Id::new("task-trust-1"), "Retry logic", 2000);
+        t1.workspace_id = Id::new("ws-briefing");
+        t1.repo_id = Id::new("repo-1");
+        t1.spec_path = Some("specs/system/payment-retry.md".to_string());
+        t1.status = gyre_domain::TaskStatus::InProgress;
+        t1.updated_at = 2000;
+        state.tasks.create(&t1).await.unwrap();
+
+        // Completed agent with a mixed-confidence decision log.
+        let msg = gyre_common::Message {
+            id: Id::new("msg-trust-agent"),
+            tenant_id: Id::new("tenant-1"),
+            from: gyre_common::MessageOrigin::Agent(Id::new("agent-trust")),
+            workspace_id: Some(Id::new("ws-briefing")),
+            to: gyre_common::Destination::Broadcast,
+            kind: gyre_common::MessageKind::AgentCompleted,
+            payload: Some(serde_json::json!({
+                "agent_id": "agent-trust",
+                "spec_ref": "specs/system/payment-retry.md",
+                "decisions": [
+                    { "what": "used exponential backoff", "why": "idempotency", "confidence": "high" },
+                    { "what": "capped retries at 3", "why": "spec silent", "confidence": "low" }
+                ],
+                "uncertainties": ["timeout behavior undefined"]
+            })),
+            created_at: 2_000_000,
+            signature: None,
+            key_id: None,
+            acknowledged: false,
+        };
+        state.messages.store(&msg).await.unwrap();
+
+        let set_trust = |level: gyre_domain::TrustLevel| {
+            let state = state.clone();
+            let ws_id = ws_id.clone();
+            async move {
+                let mut ws = state
+                    .workspaces
+                    .find_by_id(&Id::new(&ws_id))
+                    .await
+                    .unwrap()
+                    .unwrap();
+                ws.trust_level = level;
+                state.workspaces.update(&ws).await.unwrap();
+            }
+        };
+
+        // Supervised (default): per-MR completed items, full decision log.
+        let b = assemble_briefing(&state, &ws_id, 1500, None)
+            .await
+            .map_err(|_| "assemble_briefing failed")
+            .unwrap();
+        assert_eq!(b.completed.len(), 2, "Supervised: per-MR status");
+        assert_eq!(b.in_progress.len(), 1, "Supervised: per-task activity");
+        assert_eq!(
+            b.completed_agents[0].decisions.len(),
+            2,
+            "Supervised: full decision log visible"
+        );
+
+        // Guided: per-spec rollup with progress, full log kept.
+        set_trust(gyre_domain::TrustLevel::Guided).await;
+        let b = assemble_briefing(&state, &ws_id, 1500, None)
+            .await
+            .map_err(|_| "assemble_briefing failed")
+            .unwrap();
+        assert_eq!(
+            b.completed.len(),
+            1,
+            "Guided: per-spec progress, not per-MR"
+        );
+        assert!(b.completed[0].description.contains("2 MRs merged"));
+        assert_eq!(b.in_progress.len(), 1, "Guided: per-spec in-progress");
+        assert!(b.in_progress[0].description.contains("active"));
+        assert_eq!(
+            b.completed_agents[0].decisions.len(),
+            2,
+            "Guided: decision log kept (uncertainties highlighted in the UI)"
+        );
+        assert_eq!(b.completed_agents[0].uncertainties.len(), 1);
+
+        // Autonomous: terse spec-level summaries, only low-confidence
+        // decisions surfaced.
+        set_trust(gyre_domain::TrustLevel::Autonomous).await;
+        let b = assemble_briefing(&state, &ws_id, 1500, None)
+            .await
+            .map_err(|_| "assemble_briefing failed")
+            .unwrap();
+        assert_eq!(b.completed.len(), 1, "Autonomous: spec-level summaries");
+        assert_eq!(
+            b.in_progress.len(),
+            1,
+            "Autonomous: in-progress stays spec-level"
+        );
+        assert_eq!(
+            b.completed_agents[0].decisions.len(),
+            1,
+            "Autonomous: only low-confidence decisions surfaced"
+        );
+        assert_eq!(
+            b.completed_agents[0].decisions[0]["confidence"], "low",
+            "the surfaced decision must be the low-confidence one"
+        );
+        // Uncertainties are exception-tier: still surfaced at Autonomous.
+        assert_eq!(b.completed_agents[0].uncertainties.len(), 1);
     }
 }

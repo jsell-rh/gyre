@@ -1,15 +1,28 @@
 //! User management, workspace membership, teams, and notification endpoints (HSI §2 + §12).
 //!
 //! POST /api/v1/users                 (bootstrap admin user creation - Admin-only)
+//! GET  /api/v1/users                 (list users - TenantAdmin only, paginated)
 //! GET  /api/v1/users/me
 //! PUT  /api/v1/users/me
+//! GET  /api/v1/users/:username       (tenant-public profile)
+//! PUT  /api/v1/users/:id/deactivate  (TenantAdmin only, cascades to auth + ownership)
 //! GET  /api/v1/users/me/notifications?workspace_id=&min_priority=&max_priority=&limit=&offset=
+//! GET  /api/v1/notifications?workspace_id=&repo_id=&type=&priority=&limit=&offset=
+//! GET  /api/v1/notifications/unread-count?workspace_id=
+//! PUT  /api/v1/notifications/:id/read (POST kept for pre-existing callers)
+//! POST /api/v1/notifications/mark-all-read?workspace_id=
+//! GET  /api/v1/notifications/preferences
+//! PUT  /api/v1/notifications/preferences
+//! GET  /api/v1/notifications/stream?workspace_id= (SSE)
 //! POST /api/v1/notifications/:id/dismiss
 //! POST /api/v1/notifications/:id/resolve
 //! POST /api/v1/workspaces/:id/members   (invite)
 //! GET  /api/v1/workspaces/:id/members
 //! PUT  /api/v1/workspaces/:id/members/:user_id
 //! DELETE /api/v1/workspaces/:id/members/:user_id
+//! (Workspace invitation lifecycle endpoints — POST /invite,
+//! GET /invitations, POST /invite/accept, DELETE /invitations/:id —
+//! live in api/invitations.rs, task-110's WorkspaceInvitation model.)
 //! POST /api/v1/workspaces/:id/teams
 //! GET  /api/v1/workspaces/:id/teams
 //! PUT  /api/v1/workspaces/:id/teams/:team_id
@@ -23,27 +36,44 @@
 //! PUT    /api/v1/users/me/notification-preferences
 //! GET    /api/v1/users/me/judgments?workspace_id=&type=&since=&limit=&offset=
 //!
+//! Session Management (user-management.md §Session Management):
+//! GET    /api/v1/users/me/sessions
+//! DELETE /api/v1/users/me/sessions/:id
+//! POST   /api/v1/users/me/sessions/revoke-all
+//! TenantAdmin variants (same spec section — "TenantAdmins can view and
+//! revoke any user's sessions"):
+//! GET    /api/v1/users/:user_id/sessions
+//! DELETE /api/v1/users/:user_id/sessions/:id
+//! POST   /api/v1/users/:user_id/sessions/revoke-all
+
 //! All notification endpoints use per-handler auth (not ABAC):
 //! the handler verifies notification.user_id == caller AND notification.tenant_id == caller.tenant_id.
 
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
+    response::sse::{Event, Sse},
     Json,
 };
-use gyre_common::{Id, Notification, NotificationType};
+use futures_util::stream;
+use gyre_common::{Id, Notification, NotificationPriority, NotificationType};
 use gyre_domain::{
-    JudgmentType, Team, User, UserNotificationPreference, UserRole, UserToken, WorkspaceMembership,
-    WorkspaceRole,
+    JudgmentType, Team, TeamMembership, TrustLevel, User, UserNotificationPreference, UserRole,
+    UserToken, WorkspaceMembership, WorkspaceRole,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::{auth::AuthenticatedAgent, AppState};
 
 use super::error::ApiError;
 use super::{new_id, now_secs};
+
+/// How long the SSE notification stream waits on the broadcast channel
+/// before emitting a heartbeat comment.
+const STREAM_HEARTBEAT_SECS: Duration = Duration::from_secs(30);
 
 // ─── User profile ────────────────────────────────────────────────────────────
 
@@ -59,9 +89,16 @@ pub struct UserProfileResponse {
     pub global_role: String,
     pub roles: Vec<String>,
     pub preferences: serde_json::Value,
-    pub last_login_at: Option<u64>,
     pub created_at: u64,
     pub updated_at: u64,
+    /// OIDC issuer that authenticated this user (HSI §12 auth-provider info).
+    /// Null for API-key/legacy provisioned users.
+    pub oidc_issuer: Option<String>,
+    /// Last authenticated-at (Unix secs) of the user (HSI §12).
+    pub last_login_at: Option<u64>,
+    /// Unix seconds of the account's deactivation, if a TenantAdmin
+    /// deactivated it (user-management.md §API > User Management).
+    pub deactivated_at: Option<u64>,
     /// Tenant binding (platform-model.md §1: every user belongs to exactly
     /// one tenant). None for legacy users provisioned before the binding
     /// existed (F1); those fail closed at the auth extractor.
@@ -82,9 +119,11 @@ impl From<User> for UserProfileResponse {
             global_role: format!("{:?}", u.global_role),
             roles: u.roles.iter().map(|r| r.as_str().to_string()).collect(),
             preferences: prefs,
-            last_login_at: u.last_login_at,
             created_at: u.created_at,
             updated_at: u.updated_at,
+            oidc_issuer: u.oidc_issuer.clone(),
+            last_login_at: u.last_login_at,
+            deactivated_at: u.deactivated_at,
             tenant_id: u.tenant_id.map(|t| t.to_string()),
         }
     }
@@ -117,9 +156,11 @@ pub async fn get_me(
         roles: auth.roles.iter().map(|r| r.as_str().to_string()).collect(),
         preferences: serde_json::to_value(gyre_domain::UserPreferences::default())
             .unwrap_or_default(),
-        last_login_at: None,
         created_at: 0,
         updated_at: 0,
+        oidc_issuer: None,
+        last_login_at: None,
+        deactivated_at: None,
         tenant_id: None,
     };
     Ok(Json(profile))
@@ -162,6 +203,17 @@ pub async fn update_me(
                 "display_name must not be empty".to_string(),
             ));
         }
+        // The reserved system ABAC identity (task-129 review round 3):
+        // API-key/JWT auth resolves the caller's ABAC subject.id from
+        // display_name, and `system-full-access` (priority 1000) matches
+        // that identity — accepting it here would let any user grant
+        // themselves full access by renaming.
+        if dn == gyre_domain::SYSTEM_ABAC_IDENTITY {
+            return Err(ApiError::InvalidInput(format!(
+                "display_name '{}' is reserved for the system principal",
+                gyre_domain::SYSTEM_ABAC_IDENTITY
+            )));
+        }
         user.display_name = dn;
     }
     if let Some(tz) = req.timezone {
@@ -183,16 +235,682 @@ pub async fn update_me(
     if let Some(avatar) = req.avatar_url {
         user.avatar_url = Some(avatar);
     }
+    let mut patched_channels: Option<gyre_domain::NotificationChannels> = None;
     if let Some(prefs_json) = req.preferences {
         // Partial-update semantics: omitted preference fields keep their
         // current value (matching the Option-based top-level fields). An
         // invalid value for a present field still fails the whole request.
         let patch: gyre_domain::UserPreferencesPatch = serde_json::from_value(prefs_json)
             .map_err(|e| ApiError::InvalidInput(format!("invalid preferences: {e}")))?;
+        // A `notification_channels` value carried by this endpoint is the
+        // SAME configuration the dedicated PUT /notifications/preferences
+        // accepts — validate it identically and remember it so the delivery
+        // store can be converged below (single effective config, review
+        // bf1e11be F1: previously this field persisted to users.preferences
+        // only, and delivery read user_channel_prefs only, so the config
+        // silently never fired).
+        if let Some(channels) = &patch.notification_channels {
+            validate_channel_config(channels)?;
+            patched_channels = Some(channels.clone());
+        }
         user.preferences.apply_patch(patch);
     }
     user.updated_at = now_secs();
     state.users.update(&user).await?;
+    if let Some(channels) = patched_channels {
+        // Converge the delivery store to the same value the profile store
+        // just persisted — a config set via PUT /users/me must reach the
+        // dispatcher (which reads user_channel_prefs).
+        state.user_channel_prefs.upsert(user_id, &channels).await?;
+    }
+    Ok(Json(UserProfileResponse::from(user)))
+}
+
+// ─── User lookup & management (user-management.md §API > User Management) ────
+
+#[derive(Serialize)]
+pub struct PublicUserProfileResponse {
+    pub id: String,
+    pub username: String,
+    pub display_name: String,
+    pub avatar_url: Option<String>,
+    pub timezone: String,
+    pub created_at: u64,
+    /// Workspace memberships and roles (user-management.md §User Profile
+    /// Page: "Workspace memberships and roles" is part of the tenant-public
+    /// profile surface).
+    pub memberships: Vec<MembershipResponse>,
+    /// Team memberships across the user's workspaces (user-management.md
+    /// §User Profile Page: "Team memberships"). Only accepted workspace
+    /// memberships contribute — a pending invitation is not yet a
+    /// membership, so it must not reveal team rosters.
+    pub teams: Vec<ProfileTeamResponse>,
+}
+
+/// A team the profile subject belongs to (tenant-public subset of
+/// `TeamResponse`: no member roster — that surface is workspace-scoped).
+#[derive(Serialize)]
+pub struct ProfileTeamResponse {
+    pub id: String,
+    pub workspace_id: String,
+    pub name: String,
+    pub slug: String,
+}
+
+/// Resolve the tenant-public-profile subject shared by the profile,
+/// activity, and stats handlers: look the user up by username and enforce
+/// tenant containment. Tenants are hard isolation boundaries
+/// (§Workspace Membership): a user of another tenant is indistinguishable
+/// from a nonexistent one (404), so the endpoints cannot be used to probe
+/// foreign tenants' handles.
+async fn resolve_public_user(
+    state: &AppState,
+    auth: &AuthenticatedAgent,
+    username: &str,
+) -> Result<User, ApiError> {
+    let user = state
+        .users
+        .find_by_username(username)
+        .await?
+        .ok_or(ApiError::NotFound("User not found".to_string()))?;
+    // Tenant containment: the profile is tenant-public, not global-public.
+    // The system principal (bootstrap token) is exempt — it is the
+    // principal that provisioned the tenant hierarchy.
+    if !auth.is_system_principal() {
+        match (&user.tenant_id, &auth.tenant_id) {
+            (Some(user_tenant), caller_tenant) if user_tenant.as_str() == caller_tenant => {}
+            _ => return Err(ApiError::NotFound("User not found".to_string())),
+        }
+    }
+    Ok(user)
+}
+
+/// GET /api/v1/users/:username — user profile, public within the tenant
+/// (user-management.md §API > User Management; §User Profile Page).
+pub async fn get_user_by_username(
+    auth: AuthenticatedAgent,
+    Path(username): Path<String>,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<PublicUserProfileResponse>, ApiError> {
+    let user = resolve_public_user(&state, &auth, &username).await?;
+    let memberships = state.workspace_memberships.list_by_user(&user.id).await?;
+    let mut teams = Vec::new();
+    for m in &memberships {
+        if !m.accepted {
+            continue;
+        }
+        for team in state.teams.list_for_user(&m.workspace_id, &user.id).await? {
+            teams.push(ProfileTeamResponse {
+                id: team.id.to_string(),
+                workspace_id: team.workspace_id.to_string(),
+                name: team.name,
+                slug: team.slug,
+            });
+        }
+    }
+    Ok(Json(PublicUserProfileResponse {
+        id: user.id.to_string(),
+        username: user.username,
+        display_name: user.display_name,
+        avatar_url: user.avatar_url,
+        timezone: user.timezone,
+        created_at: user.created_at,
+        memberships: memberships.into_iter().map(Into::into).collect(),
+        teams,
+    }))
+}
+
+#[derive(Deserialize)]
+pub struct ListUsersParams {
+    pub limit: Option<u32>,
+    pub offset: Option<u32>,
+}
+
+// ─── Public profile activity & stats (user-management.md §User Profile
+//     Page — /@{username} surface) ───────────────────────────────────────
+
+/// The `approver_id` strings a user's spec-approval ledger rows can carry.
+/// The production writer (specs.rs `approve_spec`) records the canonical
+/// user Id for human principals — pinned by the specs.rs regression "ledger
+/// approver_id must be the canonical user Id" — so that form is primary.
+/// The `user:{display_name}` / `user:{username}` forms are legacy rows from
+/// the pre-canonical-Id writer (the default display name at provisioning is
+/// the username, so both name spellings occur after a display-name change);
+/// they are matched so historical approvals still attribute. Rows matched
+/// under several forms are deduped by ledger id at the call sites.
+fn approval_identity_forms(user: &User) -> Vec<String> {
+    let mut forms = vec![user.id.to_string()];
+    for name in [&user.display_name, &user.username] {
+        let form = format!("user:{}", name);
+        if !forms.contains(&form) {
+            forms.push(form);
+        }
+    }
+    forms
+}
+
+/// The `spawned_by` strings a user's agent spawns can carry: the spawn
+/// path records the raw principal id (`auth.agent_id`), which is the
+/// display name for user principals.
+fn spawner_identity_forms(user: &User) -> Vec<String> {
+    let mut forms = vec![user.display_name.clone()];
+    if user.username != user.display_name {
+        forms.push(user.username.clone());
+    }
+    forms
+}
+
+#[derive(Deserialize)]
+pub struct PublicActivityParams {
+    pub limit: Option<u32>,
+    pub offset: Option<u32>,
+}
+
+/// GET /api/v1/users/:username/activity — tenant-public activity feed
+/// (user-management.md §User Profile Page: "Recent activity feed (public
+/// actions only)"). Public actions are the user's recorded judgments and
+/// spawns: MR reviews (reviewer identity is the user id, enforced at
+/// submission), spec approvals/rejections/revocations, and agent spawns.
+/// Private state (notifications, sessions, tokens) is never part of the
+/// feed. Same tenant containment as the profile itself (404 across
+/// tenants).
+pub async fn get_user_activity(
+    auth: AuthenticatedAgent,
+    Path(username): Path<String>,
+    Query(params): Query<PublicActivityParams>,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let user = resolve_public_user(&state, &auth, &username).await?;
+    let limit = params.limit.unwrap_or(30).min(100) as usize;
+    let offset = params.offset.unwrap_or(0) as usize;
+
+    // (timestamp, event) pairs so the merge sorts on the raw integer.
+    let mut events: Vec<(u64, serde_json::Value)> = Vec::new();
+
+    // MR reviews — reviewer_agent_id is the user id (merge_requests.rs
+    // rejects a human review recorded under any other identity).
+    for review in state.reviews.list_by_reviewer(user.id.as_str()).await? {
+        let (mr_title, repo_id, workspace_id) = match state
+            .merge_requests
+            .find_by_id(&review.merge_request_id)
+            .await
+        {
+            Ok(Some(mr)) => (
+                Some(mr.title),
+                Some(mr.repository_id.to_string()),
+                Some(mr.workspace_id.to_string()),
+            ),
+            _ => (None, None, None),
+        };
+        events.push((
+            review.created_at,
+            serde_json::json!({
+                "event_type": "mr_review",
+                "timestamp": review.created_at,
+                "mr_id": review.merge_request_id.to_string(),
+                "mr_title": mr_title,
+                "repo_id": repo_id,
+                "workspace_id": workspace_id,
+                "decision": match review.decision {
+                    gyre_domain::ReviewDecision::Approved => "approved",
+                    gyre_domain::ReviewDecision::ChangesRequested => "changes_requested",
+                },
+            }),
+        ));
+    }
+
+    // Spec approvals / rejections / revocations from the durable ledger.
+    let mut seen_approvals = std::collections::HashSet::new();
+    for form in approval_identity_forms(&user) {
+        for approval in state.spec_approvals.list_by_approver(&form).await? {
+            if !seen_approvals.insert(approval.id.to_string()) {
+                continue; // same ledger row matched under both name forms
+            }
+            if let Some(ts) = approval
+                .approved_at
+                .filter(|_| approval.revoked_at.is_none() && approval.rejected_at.is_none())
+            {
+                events.push((
+                    ts,
+                    serde_json::json!({
+                        "event_type": "spec_approved",
+                        "timestamp": ts,
+                        "spec_path": approval.spec_path,
+                        "spec_sha": approval.spec_sha,
+                    }),
+                ));
+            }
+            if let Some(ts) = approval.rejected_at {
+                events.push((
+                    ts,
+                    serde_json::json!({
+                        "event_type": "spec_rejected",
+                        "timestamp": ts,
+                        "spec_path": approval.spec_path,
+                        "spec_sha": approval.spec_sha,
+                        "reason": approval.rejected_reason,
+                    }),
+                ));
+            }
+            if let Some(ts) = approval.revoked_at {
+                events.push((
+                    ts,
+                    serde_json::json!({
+                        "event_type": "spec_revoked",
+                        "timestamp": ts,
+                        "spec_path": approval.spec_path,
+                        "spec_sha": approval.spec_sha,
+                        "reason": approval.revocation_reason,
+                    }),
+                ));
+            }
+        }
+    }
+
+    // Agent spawns.
+    let mut seen_agents = std::collections::HashSet::new();
+    for form in spawner_identity_forms(&user) {
+        for agent in state.agents.list_by_spawner(&form).await? {
+            if !seen_agents.insert(agent.id.to_string()) {
+                continue;
+            }
+            events.push((
+                agent.spawned_at,
+                serde_json::json!({
+                    "event_type": "agent_spawned",
+                    "timestamp": agent.spawned_at,
+                    "agent_id": agent.id.to_string(),
+                    "agent_name": agent.name,
+                    "workspace_id": agent.workspace_id.to_string(),
+                }),
+            ));
+        }
+    }
+
+    // Newest first, then paginate.
+    events.sort_by_key(|&(ts, _)| std::cmp::Reverse(ts));
+    let total = events.len();
+    let page: Vec<serde_json::Value> = events
+        .into_iter()
+        .skip(offset)
+        .take(limit)
+        .map(|(_, ev)| ev)
+        .collect();
+
+    Ok(Json(serde_json::json!({
+        "activity": page,
+        "limit": limit,
+        "offset": offset,
+        "total": total,
+    })))
+}
+
+/// GET /api/v1/users/:username/stats — aggregate public-action counts
+/// (user-management.md §User Profile Page: "Stats: MRs reviewed, specs
+/// approved, agents spawned"). Computed from the same stores the activity
+/// feed reads; same tenant containment (404 across tenants).
+pub async fn get_user_stats(
+    auth: AuthenticatedAgent,
+    Path(username): Path<String>,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let user = resolve_public_user(&state, &auth, &username).await?;
+
+    // MRs reviewed: human reviews are recorded under the user id, so this
+    // is an exact (globally unique id) attribution.
+    let mrs_reviewed = state
+        .reviews
+        .list_by_reviewer(user.id.as_str())
+        .await?
+        .len() as u64;
+
+    // Specs approved: ledger rows with approved_at set that were neither
+    // revoked nor rejected. Deduped across the caller's identity forms.
+    let mut approved = std::collections::HashSet::new();
+    for form in approval_identity_forms(&user) {
+        for approval in state.spec_approvals.list_by_approver(&form).await? {
+            if approval.approved_at.is_some()
+                && approval.revoked_at.is_none()
+                && approval.rejected_at.is_none()
+            {
+                approved.insert(approval.id.to_string());
+            }
+        }
+    }
+
+    // Agents spawned: deduped across the caller's identity forms.
+    let mut spawned = std::collections::HashSet::new();
+    for form in spawner_identity_forms(&user) {
+        for agent in state.agents.list_by_spawner(&form).await? {
+            spawned.insert(agent.id.to_string());
+        }
+    }
+
+    Ok(Json(serde_json::json!({
+        "mrs_reviewed": mrs_reviewed,
+        "specs_approved": approved.len(),
+        "agents_spawned": spawned.len(),
+    })))
+}
+
+/// Whether the caller may perform TenantAdmin user-management operations
+/// (list users, deactivate): the system principal, a caller holding the
+/// Admin role, or a user whose stored global role is TenantAdmin. The
+/// stored record is authoritative when resolvable — a JWT role claim can
+/// lag a demotion (same rationale as `can_manage_membership`).
+async fn is_tenant_admin(state: &AppState, auth: &AuthenticatedAgent) -> Result<bool, ApiError> {
+    if auth.is_system_principal() || auth.roles.contains(&UserRole::Admin) {
+        return Ok(true);
+    }
+    if let Some(uid) = &auth.user_id {
+        if let Ok(Some(user)) = state.users.find_by_id(uid).await {
+            if user.global_role == gyre_domain::GlobalRole::TenantAdmin {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+/// GET /api/v1/users — list users, TenantAdmin only, paginated
+/// (user-management.md §API > User Management).
+///
+/// The result is scoped to the caller's tenant: the TenantAdmin role is a
+/// tenant-scoped role, never a cross-tenant one (platform-model.md §1).
+/// ABAC maps the route to the "user" resource; the TenantAdmin restriction
+/// itself is enforced per-handler (the POST /users bootstrap route uses the
+/// same split).
+pub async fn list_users(
+    auth: AuthenticatedAgent,
+    Query(params): Query<ListUsersParams>,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    if !is_tenant_admin(&state, &auth).await? {
+        crate::rbac::record_rbac_denied(&state, &auth, "TenantAdmin", "GET /api/v1/users").await;
+        return Err(ApiError::Forbidden(
+            "listing users requires the TenantAdmin role".to_string(),
+        ));
+    }
+    let limit = params.limit.unwrap_or(50).min(200);
+    let offset = params.offset.unwrap_or(0);
+    let mut users = state.users.list().await?;
+    // Tenant containment: a TenantAdmin sees their tenant's users only.
+    // Legacy unbound users (tenant_id None) predate the binding (F1) and
+    // are visible only to the system principal.
+    if !auth.is_system_principal() {
+        users.retain(|u| u.tenant_id.as_ref().map(|t| t.as_str()) == Some(auth.tenant_id.as_str()));
+    }
+    let total = users.len();
+    let items: Vec<UserProfileResponse> = users
+        .into_iter()
+        .skip(offset as usize)
+        .take(limit as usize)
+        .map(Into::into)
+        .collect();
+    Ok(Json(serde_json::json!({
+        "users": items,
+        "limit": limit,
+        "offset": offset,
+        "total": total,
+    })))
+}
+
+#[derive(Deserialize, Default)]
+pub struct DeactivateUserRequest {
+    /// Optional reason recorded in the audit trail.
+    pub reason: Option<String>,
+}
+
+/// PUT /api/v1/users/:id/deactivate — deactivate a user, TenantAdmin only
+/// (user-management.md §API > User Management).
+///
+/// Cascade (the deactivation is effective immediately, not cosmetic):
+/// - the account fails authentication on every path (API-key extractor,
+///   WebSocket auth, SSO login) — see auth.rs;
+/// - active impersonation sessions the user participates in (as
+///   impersonator or target) are ended immediately, revoking the
+///   unexpired impersonation JWTs — see impersonation.rs (the resolver
+///   also re-checks account deactivation on every call);
+/// - workspaces the user owned stop having an active Owner: the ownerless
+///   flow records the transition and notifies the tenant's TenantAdmins
+///   inline (workspace_ownership), so ownership can be reassigned via
+///   `PUT /api/v1/workspaces/{id}/members/{new_owner_id}/role`;
+/// - lingering memberships survive for audit (deactivation is soft — the
+///   row remains so the departed Owner is still attributable).
+///
+/// ABAC maps the route to the "user" resource (PUT → write), and the
+/// handler enforces the TenantAdmin + same-tenant requirement (the same
+/// split as the POST /users bootstrap route).
+pub async fn deactivate_user(
+    auth: AuthenticatedAgent,
+    Path(user_id): Path<String>,
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<DeactivateUserRequest>,
+) -> Result<Json<UserProfileResponse>, ApiError> {
+    if !is_tenant_admin(&state, &auth).await? {
+        crate::rbac::record_rbac_denied(
+            &state,
+            &auth,
+            "TenantAdmin",
+            "PUT /api/v1/users/:id/deactivate",
+        )
+        .await;
+        return Err(ApiError::Forbidden(
+            "deactivating users requires the TenantAdmin role".to_string(),
+        ));
+    }
+    let uid = Id::new(user_id);
+    let mut user = state
+        .users
+        .find_by_id(&uid)
+        .await?
+        .ok_or(ApiError::NotFound("User not found".to_string()))?;
+    // Tenant containment: a TenantAdmin may only deactivate users of their
+    // own tenant (the system principal is exempt — bootstrap path).
+    if !auth.is_system_principal() {
+        let same_tenant = user
+            .tenant_id
+            .as_ref()
+            .map(|t| t.as_str() == auth.tenant_id)
+            .unwrap_or(false);
+        if !same_tenant {
+            return Err(ApiError::Forbidden(
+                "cannot deactivate a user of another tenant".to_string(),
+            ));
+        }
+    }
+    // Self-deactivation guard: the actor would lock themselves out of the
+    // very role needed to undo it (and could orphan the tenant's admin
+    // capability entirely).
+    if auth.user_id.as_ref() == Some(&uid) {
+        return Err(ApiError::Conflict(
+            "cannot deactivate your own account".to_string(),
+        ));
+    }
+
+    let already = user.is_deactivated();
+    let now = now_secs();
+    user.deactivate(now);
+    state.users.update(&user).await?;
+
+    // Audit trail (ownership transfers and membership changes are audited
+    // with actor + reason; deactivation is the same class of event).
+    use gyre_domain::audit::{AuditEvent, AuditEventType, AuditOutcome};
+    let event = AuditEvent::new(
+        Id::new(uuid::Uuid::new_v4().to_string()),
+        AuditEventType::Custom("user_deactivated".to_string()),
+        Some(Id::new(auth.agent_id.clone())),
+        auth.user_id.clone(),
+        None,
+        None,
+        None,
+        "user".to_string(),
+        Some(user.id.to_string()),
+        AuditOutcome::Success,
+        serde_json::json!({
+            "user_id": user.id.to_string(),
+            "username": user.username,
+            "tenant_id": user.tenant_id.as_ref().map(|t| t.to_string()),
+            "reason": req.reason,
+            "actor": auth.agent_id,
+            "already_deactivated": already,
+        }),
+        None,
+        None,
+        now,
+    );
+    if let Err(e) = state.audit.record(&event).await {
+        tracing::warn!(user_id = %user.id, "user_deactivated audit event recording failed: {e}");
+    }
+
+    // Impersonation cascade: end every active impersonation session the
+    // deactivated user participates in (as impersonator or target). The
+    // resolver rejects deactivated accounts on its own, but ending the
+    // sessions here also closes the audit trail (ImpersonationEnded with
+    // a reason) and frees the impersonator's active-session slot.
+    crate::impersonation::end_active_sessions_for_user(
+        &state,
+        user.id.as_str(),
+        "user_deactivated",
+    )
+    .await;
+
+    // Ownerless cascade: re-track every workspace the user belongs to. With
+    // the account now deactivated, `has_active_owner` no longer counts the
+    // user, so a workspace whose last active Owner just departed is
+    // recorded ownerless and its TenantAdmins notified inline (the daily
+    // job would otherwise lag up to a day).
+    crate::workspace_ownership::on_user_removed(&state, &user.id).await;
+
+    Ok(Json(UserProfileResponse::from(user)))
+}
+
+#[derive(Deserialize)]
+pub struct UpdateUserRoleRequest {
+    /// Target GlobalRole: "Member" or "TenantAdmin" (the invitation
+    /// API's role vocabulary — the tenant-level role, not a workspace
+    /// membership role).
+    pub role: String,
+    /// Optional reason, recorded in the audit trail.
+    pub reason: Option<String>,
+}
+
+/// PUT /api/v1/users/:id/role — change an existing user's GlobalRole,
+/// TenantAdmin only (user-management.md §UI Pages > Tenant User
+/// Management: "role management (TenantAdmin only)").
+///
+/// The stored record is authoritative for authorization decisions
+/// (`is_tenant_admin` re-reads it on every call), so the change is
+/// effective immediately for API-key callers; a lagging JWT role claim
+/// cannot keep a demoted admin elevated.
+pub async fn update_user_role(
+    auth: AuthenticatedAgent,
+    Path(user_id): Path<String>,
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<UpdateUserRoleRequest>,
+) -> Result<Json<UserProfileResponse>, ApiError> {
+    if !is_tenant_admin(&state, &auth).await? {
+        crate::rbac::record_rbac_denied(&state, &auth, "TenantAdmin", "PUT /api/v1/users/:id/role")
+            .await;
+        return Err(ApiError::Forbidden(
+            "changing user roles requires the TenantAdmin role".to_string(),
+        ));
+    }
+    let new_role = match req.role.as_str() {
+        "Member" => gyre_domain::GlobalRole::Member,
+        "TenantAdmin" => gyre_domain::GlobalRole::TenantAdmin,
+        other => {
+            return Err(ApiError::InvalidInput(format!(
+                "unknown role: {other} (expected TenantAdmin or Member)"
+            )))
+        }
+    };
+    let uid = Id::new(user_id);
+    let mut user = state
+        .users
+        .find_by_id(&uid)
+        .await?
+        .ok_or(ApiError::NotFound("User not found".to_string()))?;
+    // Tenant containment: a TenantAdmin may only manage users of their
+    // own tenant (the system principal is exempt — bootstrap path).
+    if !auth.is_system_principal() {
+        let same_tenant = user
+            .tenant_id
+            .as_ref()
+            .map(|t| t.as_str() == auth.tenant_id)
+            .unwrap_or(false);
+        if !same_tenant {
+            return Err(ApiError::Forbidden(
+                "cannot change the role of a user of another tenant".to_string(),
+            ));
+        }
+    }
+    // Self-change guard: an admin demoting themselves would orphan the
+    // tenant's admin capability exactly like self-deactivation (no
+    // self-service undo), and a self-promotion is a no-op for a caller
+    // who already passed the TenantAdmin gate.
+    if auth.user_id.as_ref() == Some(&uid) {
+        return Err(ApiError::Conflict(
+            "cannot change your own global role".to_string(),
+        ));
+    }
+    // A deactivated account is terminal (no reactivation path exists);
+    // a role change on it can never take effect, so reject instead of
+    // letting the UI imply otherwise.
+    if user.is_deactivated() {
+        return Err(ApiError::Conflict(
+            "user account is deactivated; its role can no longer be changed".to_string(),
+        ));
+    }
+    if user.global_role == new_role {
+        // Idempotent no-op: nothing changes, nothing to audit.
+        return Ok(Json(UserProfileResponse::from(user)));
+    }
+
+    let previous_role = user.global_role;
+    let now = now_secs();
+    // GlobalRole ↔ UserRole stay in lockstep, same mapping as the
+    // invitation-acceptance and provisioning paths (an invited
+    // TenantAdmin is Admin + TenantAdmin; a Member is Developer).
+    user.global_role = new_role.clone();
+    user.roles = match new_role {
+        gyre_domain::GlobalRole::TenantAdmin => vec![UserRole::Admin],
+        gyre_domain::GlobalRole::Member => vec![UserRole::Developer],
+    };
+    user.updated_at = now;
+    state.users.update(&user).await?;
+
+    // Audit trail (role changes are privilege changes — actor + previous
+    // + new role + reason, same class as the deactivation event).
+    use gyre_domain::audit::{AuditEvent, AuditEventType, AuditOutcome};
+    let event = AuditEvent::new(
+        Id::new(uuid::Uuid::new_v4().to_string()),
+        AuditEventType::Custom("user_global_role_changed".to_string()),
+        Some(Id::new(auth.agent_id.clone())),
+        auth.user_id.clone(),
+        None,
+        None,
+        None,
+        "user".to_string(),
+        Some(user.id.to_string()),
+        AuditOutcome::Success,
+        serde_json::json!({
+            "user_id": user.id.to_string(),
+            "username": user.username,
+            "tenant_id": user.tenant_id.as_ref().map(|t| t.to_string()),
+            "previous_role": previous_role.as_str(),
+            "new_role": new_role.as_str(),
+            "reason": req.reason,
+            "actor": auth.agent_id,
+        }),
+        None,
+        None,
+        now,
+    );
+    if let Err(e) = state.audit.record(&event).await {
+        tracing::warn!(user_id = %user.id, "user_global_role_changed audit event recording failed: {e}");
+    }
+
     Ok(Json(UserProfileResponse::from(user)))
 }
 
@@ -203,7 +921,24 @@ pub struct NotificationParams {
     pub workspace_id: Option<String>,
     pub min_priority: Option<u8>,
     pub max_priority: Option<u8>,
+    /// Filter by taxonomy type. Query key `type` per the spec's filter
+    /// surface (`?type=`); `notification_type` kept as an alias for the
+    /// pre-existing `/users/me/notifications` clients.
+    #[serde(rename = "type", alias = "notification_type")]
     pub notification_type: Option<String>,
+    /// Repo filter (user-management.md §In-App Notification UI: filter by
+    /// type, priority, workspace, repo). Matches the notification's source
+    /// repo.
+    pub repo_id: Option<String>,
+    /// Four-level priority name (Low/Medium/High/Urgent), case-insensitive —
+    /// filters by the type-derived band (same derivation as the response's
+    /// `priority_level` field).
+    pub priority: Option<String>,
+    /// Active-only listing (user-management.md §In-App Notification UI:
+    /// the notification drawer shows recent notifications; rows the user
+    /// has resolved or dismissed elsewhere are excluded by the query).
+    /// `?active=true`.
+    pub active: Option<bool>,
     pub limit: Option<u32>,
     pub offset: Option<u32>,
 }
@@ -272,21 +1007,129 @@ pub async fn get_my_notifications(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let user_id = resolve_user_id(&auth);
+    list_my_notifications_impl(user_id, params, state).await
+}
+
+/// GET /api/v1/notifications?workspace_id=&repo_id=&type=&priority=&limit=&offset=
+///
+/// Spec path (user-management.md §API > Notifications: "My notifications
+/// (paginated, filterable)"). Same per-handler scoping as the legacy
+/// `/users/me/notifications` route — the listing is keyed to the caller's
+/// user identity, so no ABAC resource type applies.
+pub async fn list_my_notifications(
+    auth: AuthenticatedAgent,
+    Query(params): Query<NotificationParams>,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let user_id = resolve_user_id(&auth);
+    list_my_notifications_impl(user_id, params, state).await
+}
+
+/// Shared listing implementation behind the spec path
+/// (`GET /api/v1/notifications`) and the legacy `/users/me/notifications`.
+/// Both routes resolve the caller's user identity in-handler and pass it
+/// here — the listing is scoped to that identity.
+async fn list_my_notifications_impl(
+    user_id: Id,
+    params: NotificationParams,
+    state: Arc<AppState>,
+) -> Result<Json<serde_json::Value>, ApiError> {
     let workspace_id = params.workspace_id.as_deref().map(Id::new);
+    let repo_id = params.repo_id.as_deref().map(Id::new);
+    // `?type=` is an exact-match filter on the persisted type string.
+    // `?priority=` filters by the entity's four-level band, which derives
+    // from the notification TYPE (amended §Notification Entity membership
+    // table) — never from the HSI §8 numeric rank, so it cannot be served
+    // by the stored rank column's min/max bounds (SpecApprovalRequested is
+    // rank 2 yet High; CascadeTestTriggered rank 4 yet Low; SecretExpiring
+    // rank 7 yet High). Expand the level to the set of persisted type
+    // strings whose band is that level — legacy DB names of renamed
+    // variants included, so pre-unification rows filter by their band too —
+    // and intersect with `?type=` when both are given. The filter and the
+    // response's `priority_level` field therefore share one derivation and
+    // can never disagree.
+    let mut notification_types: Option<Vec<String>> = params
+        .notification_type
+        .as_deref()
+        .map(|t| vec![t.to_string()]);
+    if let Some(level) = params.priority.as_deref() {
+        let normalized = level.trim().to_ascii_lowercase();
+        let parsed = NotificationPriority::from_level_str(&normalized).ok_or_else(|| {
+            ApiError::InvalidInput(format!(
+                "invalid priority filter '{level}': expected one of Low, Medium, High, Urgent"
+            ))
+        })?;
+        let band_types = parsed.notification_type_strings();
+        notification_types = Some(match notification_types {
+            Some(requested) => requested
+                .into_iter()
+                .filter(|t| band_types.contains(&t.as_str()))
+                .collect(),
+            None => band_types.into_iter().map(str::to_string).collect(),
+        });
+    }
+    let type_filter: Option<Vec<&str>> = notification_types
+        .as_ref()
+        .map(|ts| ts.iter().map(String::as_str).collect());
     let limit = params.limit.unwrap_or(50).min(200);
     let offset = params.offset.unwrap_or(0);
-    let notifications = state
-        .notifications
-        .list_for_user(
-            &user_id,
-            workspace_id.as_ref(),
-            params.min_priority,
-            params.max_priority,
-            params.notification_type.as_deref(),
-            limit,
-            offset,
-        )
-        .await?;
+    let disabled = disabled_notification_types(&state, &user_id).await?;
+    // HSI §12: types the user disabled via notification preferences are
+    // excluded from the inbox (before limit/offset), so a page never
+    // comes back short. HSI §2 "Inbox shows" / "Notifications" /
+    // "Inbox priorities shown" rows add the trust-derived exclusion set,
+    // server-side so the contract holds for every client (web, CLI,
+    // API). Explicit `?min_priority=`/`?max_priority=` rank filters from
+    // the caller are still honored verbatim — the trust set only supplies
+    // the DEFAULT view.
+    let trust_excluded = trust_inbox_excluded_types(&state, &user_id, workspace_id.as_ref()).await;
+    let mut excluded: Vec<&str> = disabled.iter().map(String::as_str).collect();
+    for t in &trust_excluded {
+        if !excluded.contains(&t.as_str()) {
+            excluded.push(t.as_str());
+        }
+    }
+    // `?active=true` routes to the active-only listing (drawer surface);
+    // the default keeps the full listing the Inbox depends on (its
+    // show-dismissed toggle needs resolved/dismissed rows client-side).
+    // Both branches share the same `type_filter` derivation above, so the
+    // drawer and the Inbox can never disagree on a priority band. The
+    // drawer branch deliberately applies no exclusion set: it is paired
+    // with the unread-count bell badge (`count_unread`), which counts
+    // every active notification regardless of toggles; the drawer and
+    // the badge that opens it must agree on what they count/show, while
+    // the Inbox (and its own badge via count_unresolved) hides disabled
+    // and trust-suppressed types.
+    let notifications = if params.active.unwrap_or(false) {
+        state
+            .notifications
+            .list_active_for_user(
+                &user_id,
+                workspace_id.as_ref(),
+                params.min_priority,
+                params.max_priority,
+                type_filter.as_deref(),
+                repo_id.as_ref(),
+                limit,
+                offset,
+            )
+            .await?
+    } else {
+        state
+            .notifications
+            .list_for_user(
+                &user_id,
+                workspace_id.as_ref(),
+                params.min_priority,
+                params.max_priority,
+                type_filter.as_deref(),
+                repo_id.as_ref(),
+                &excluded,
+                limit,
+                offset,
+            )
+            .await?
+    };
     let items: Vec<NotificationResponse> = notifications.into_iter().map(Into::into).collect();
     Ok(Json(serde_json::json!({
         "notifications": items,
@@ -306,11 +1149,62 @@ pub async fn get_notification_count(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let user_id = resolve_user_id(&auth);
     let workspace_id = params.workspace_id.as_deref().map(Id::new);
+    // Same preference + trust exclusion as the inbox list, so the badge
+    // matches it (port contract: the badge MUST NOT count a notification
+    // the inbox itself would hide — same rule for the trust-derived set).
+    let disabled = disabled_notification_types(&state, &user_id).await?;
+    let trust_excluded = trust_inbox_excluded_types(&state, &user_id, workspace_id.as_ref()).await;
+    let mut excluded: Vec<&str> = disabled.iter().map(String::as_str).collect();
+    for t in &trust_excluded {
+        if !excluded.contains(&t.as_str()) {
+            excluded.push(t.as_str());
+        }
+    }
     let count = state
         .notifications
-        .count_unresolved(&user_id, workspace_id.as_ref())
+        .count_unresolved(&user_id, workspace_id.as_ref(), &excluded)
         .await?;
     Ok(Json(serde_json::json!({ "count": count })))
+}
+
+/// GET /api/v1/notifications/unread-count?workspace_id=
+///
+/// Spec path (user-management.md §API > Notifications: "Unread count (for
+/// bell badge)"). Counts active (unresolved, undismissed) notifications the
+/// caller has not read. Scoped to the caller's user identity — no ABAC
+/// resource type applies.
+pub async fn get_unread_count(
+    auth: AuthenticatedAgent,
+    Query(params): Query<NotificationParams>,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let user_id = resolve_user_id(&auth);
+    let workspace_id = params.workspace_id.as_deref().map(Id::new);
+    let count = state
+        .notifications
+        .count_unread(&user_id, workspace_id.as_ref())
+        .await?;
+    Ok(Json(serde_json::json!({ "count": count })))
+}
+
+/// POST /api/v1/notifications/mark-all-read?workspace_id=
+///
+/// Spec path (user-management.md §API > Notifications: "Mark all read").
+/// Marks every unread notification owned by the caller read (stamping
+/// `read_at`); an optional `workspace_id` narrows the sweep. Scoped to the
+/// caller's user identity — no ABAC resource type applies.
+pub async fn mark_all_read_notifications(
+    auth: AuthenticatedAgent,
+    Query(params): Query<NotificationParams>,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let user_id = resolve_user_id(&auth);
+    let workspace_id = params.workspace_id.as_deref().map(Id::new);
+    let marked = state
+        .notifications
+        .mark_all_read(&user_id, workspace_id.as_ref())
+        .await?;
+    Ok(Json(serde_json::json!({ "marked": marked })))
 }
 
 /// POST /api/v1/notifications/:id/dismiss
@@ -371,11 +1265,13 @@ pub async fn resolve_notification(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// POST /api/v1/notifications/:id/read
+/// PUT/POST /api/v1/notifications/:id/read
 ///
 /// Marks the notification read (stamps `read_at`). Per-handler auth: verifies
 /// notification belongs to caller AND caller.tenant_id matches
-/// (user-management.md §Notification Entity read state).
+/// (user-management.md §Notification Entity read state; §API > Notifications
+/// specifies PUT — POST is kept for pre-existing callers of the same
+/// handler).
 pub async fn mark_notification_read(
     auth: AuthenticatedAgent,
     Path(id): Path<String>,
@@ -428,6 +1324,87 @@ pub async fn mark_notification_unread(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// GET /api/v1/notifications/stream?workspace_id=
+///
+/// Real-time notification stream (user-management.md §API > Notifications:
+/// "GET (SSE)"). Subscribes to the notification broadcast channel fed by
+/// `AppState::create_notification` — every notification is emitted the
+/// moment it is persisted. Per-handler auth (ABAC-exempt, like every other
+/// notification route): each event is filtered against the caller — the
+/// notification must belong to the caller's user identity AND its tenant
+/// must match `auth.tenant_id`, otherwise it is dropped before it reaches
+/// the wire. An optional `workspace_id` narrows delivery to one workspace.
+pub async fn notification_stream(
+    auth: AuthenticatedAgent,
+    Query(params): Query<NotificationParams>,
+    State(state): State<Arc<AppState>>,
+) -> Sse<impl futures_util::Stream<Item = Result<Event, std::convert::Infallible>>> {
+    let user_id = resolve_user_id(&auth);
+    let tenant_id = auth.tenant_id.clone();
+    let workspace_filter = params.workspace_id.map(Id::new);
+    let rx = state.notification_broadcast_tx.subscribe();
+    let s = stream::unfold(
+        (rx, user_id, tenant_id, workspace_filter),
+        |(mut rx, user_id, tenant_id, workspace_filter)| async move {
+            loop {
+                // Poll with a heartbeat timeout so the connection stays alive
+                // even when nothing is being created.
+                let result = tokio::time::timeout(STREAM_HEARTBEAT_SECS, rx.recv()).await;
+                let msg = match result {
+                    Ok(Ok(msg)) => msg,
+                    // Lagged: this subscriber fell behind the channel buffer;
+                    // the channel is still live and the missed messages are
+                    // simply gone — keep streaming rather than terminating
+                    // the client's stream.
+                    Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {
+                        continue;
+                    }
+                    // Closed: every sender (AppState) is gone — end the stream.
+                    Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => return None,
+                    Err(_) => {
+                        // Timeout - send a heartbeat comment.
+                        return Some((
+                            Ok(Event::default().comment("heartbeat")),
+                            (rx, user_id, tenant_id, workspace_filter),
+                        ));
+                    }
+                };
+                // Per-handler scoping: parse the broadcast notification and
+                // deliver only if it belongs to the caller (user + tenant),
+                // and — when requested — the workspace. Unparseable payloads
+                // and other users' notifications are silently skipped; the
+                // stream itself never terminates on them.
+                let Ok(notif) = serde_json::from_str::<Notification>(&msg) else {
+                    continue;
+                };
+                if notif.user_id != user_id || notif.tenant_id != tenant_id {
+                    continue;
+                }
+                if workspace_filter
+                    .as_ref()
+                    .is_some_and(|ws| notif.workspace_id != *ws)
+                {
+                    continue;
+                }
+                let data =
+                    serde_json::to_string(&NotificationResponse::from(notif)).unwrap_or_default();
+                if data.is_empty() {
+                    continue;
+                }
+                return Some((
+                    Ok(Event::default().event("notification").data(data)),
+                    (rx, user_id, tenant_id, workspace_filter),
+                ));
+            }
+        },
+    );
+    Sse::new(s).keep_alive(
+        axum::response::sse::KeepAlive::new()
+            .interval(Duration::from_secs(15))
+            .text("ping"),
+    )
+}
+
 // ─── Workspace Members ───────────────────────────────────────────────────────
 
 #[derive(Serialize)]
@@ -437,6 +1414,7 @@ pub struct MembershipResponse {
     pub workspace_id: String,
     pub role: String,
     pub accepted: bool,
+    pub accepted_at: Option<u64>,
     pub created_at: u64,
 }
 
@@ -448,6 +1426,7 @@ impl From<WorkspaceMembership> for MembershipResponse {
             workspace_id: m.workspace_id.to_string(),
             role: m.role.as_str().to_string(),
             accepted: m.accepted,
+            accepted_at: m.accepted_at,
             created_at: m.created_at,
         }
     }
@@ -459,6 +1438,95 @@ pub struct InviteMemberRequest {
     pub role: String,
 }
 
+/// Load a workspace and enforce the caller's tenant scope on it
+/// (user-management.md §Workspace Membership: tenants are hard isolation
+/// boundaries — cross-tenant sharing is not supported).
+///
+/// The system principal (bootstrap token) bypasses the tenant match, mirroring
+/// `resolve_repo_by_slug` in git_http.rs: it is the principal that created the
+/// tenant/workspace hierarchy in the first place.
+async fn load_workspace_scoped(
+    state: &AppState,
+    auth: &AuthenticatedAgent,
+    workspace_id: &str,
+) -> Result<gyre_domain::Workspace, ApiError> {
+    let ws = state
+        .workspaces
+        .find_by_id(&Id::new(workspace_id))
+        .await?
+        .ok_or_else(|| ApiError::NotFound(format!("workspace {workspace_id} not found")))?;
+    if !auth.is_system_principal() && ws.tenant_id.to_string() != auth.tenant_id {
+        return Err(ApiError::Forbidden(
+            "cross-tenant workspace access denied".to_string(),
+        ));
+    }
+    Ok(ws)
+}
+
+/// Whether the caller may manage membership of this workspace: the system
+/// principal, a global TenantAdmin, or a workspace Owner/Admin member
+/// (user-management.md §Workspace Membership — "Manage members" is an
+/// Owner/Admin capability; §Ownership Transfer & Reclamation lets the
+/// TenantAdmin reassign ownership).
+async fn can_manage_membership(
+    state: &AppState,
+    auth: &AuthenticatedAgent,
+    ws: &gyre_domain::Workspace,
+) -> Result<bool, ApiError> {
+    if auth.is_system_principal() || auth.roles.contains(&UserRole::Admin) {
+        return Ok(true);
+    }
+    // A TenantAdmin's authority comes from their stored global role; JWT
+    // role claims can lag a demotion, so the stored record is authoritative
+    // when resolvable.
+    if let Some(uid) = &auth.user_id {
+        if let Ok(Some(user)) = state.users.find_by_id(uid).await {
+            if user.global_role == gyre_domain::GlobalRole::TenantAdmin {
+                return Ok(true);
+            }
+        }
+    }
+    let Some(uid) = &auth.user_id else {
+        return Ok(false);
+    };
+    Ok(state
+        .workspace_memberships
+        .find_by_user_and_workspace(uid, &ws.id)
+        .await?
+        .map(|m| m.role.can_manage_members())
+        .unwrap_or(false))
+}
+
+/// Count active Owner memberships of a workspace, optionally excluding one
+/// user (the member being removed/downgraded). An Owner membership is
+/// active when its user record still exists and is not deactivated — a
+/// deactivated/removed user's lingering membership is not an active Owner.
+async fn count_active_owners_excluding(
+    state: &AppState,
+    workspace_id: &Id,
+    exclude_user: Option<&Id>,
+) -> Result<usize, ApiError> {
+    let members = state
+        .workspace_memberships
+        .list_by_workspace(workspace_id)
+        .await?;
+    let mut owners = 0usize;
+    for m in &members {
+        if m.role != WorkspaceRole::Owner {
+            continue;
+        }
+        if Some(&m.user_id) == exclude_user {
+            continue;
+        }
+        if let Ok(Some(u)) = state.users.find_by_id(&m.user_id).await {
+            if !u.is_deactivated() {
+                owners += 1;
+            }
+        }
+    }
+    Ok(owners)
+}
+
 pub async fn invite_member(
     auth: AuthenticatedAgent,
     Path(workspace_id): Path<String>,
@@ -468,10 +1536,43 @@ pub async fn invite_member(
     let role = WorkspaceRole::parse_role(&req.role)
         .ok_or_else(|| ApiError::InvalidInput(format!("Unknown role: {}", req.role)))?;
 
+    let ws = load_workspace_scoped(&state, &auth, &workspace_id).await?;
+    if !can_manage_membership(&state, &auth, &ws).await? {
+        return Err(ApiError::Forbidden(
+            "workspace membership can only be granted by an Owner, Admin, or TenantAdmin"
+                .to_string(),
+        ));
+    }
+
     let caller_id = Id::new(auth.agent_id.clone());
-    let ws_id = Id::new(workspace_id);
+    let ws_id = ws.id.clone();
     let user_id = Id::new(req.user_id);
     let now = now_secs();
+
+    // Cross-tenant sharing is not supported (user-management.md §Workspace
+    // Membership): the invitee must already exist in the workspace's tenant.
+    let invitee = state.users.find_by_id(&user_id).await?.ok_or_else(|| {
+        ApiError::InvalidInput(format!(
+            "user {user_id} does not exist in this tenant; users must exist before being \
+                 invited to a workspace"
+        ))
+    })?;
+    if invitee.tenant_id.as_ref() != Some(&ws.tenant_id) {
+        return Err(ApiError::Forbidden(
+            "cross-tenant workspace sharing is not supported".to_string(),
+        ));
+    }
+
+    if state
+        .workspace_memberships
+        .find_by_user_and_workspace(&user_id, &ws_id)
+        .await?
+        .is_some()
+    {
+        return Err(ApiError::Conflict(format!(
+            "user {user_id} is already a member of workspace {workspace_id}"
+        )));
+    }
 
     let membership = WorkspaceMembership::new(new_id(), user_id, ws_id, role, caller_id, now);
     state.workspace_memberships.create(&membership).await?;
@@ -482,7 +1583,7 @@ pub async fn invite_member(
     // side-effect, not a dependent record of the membership — its failure
     // must not fail the invite, and notify_rich logs-and-continues internally.
     crate::notifications::notify_rich(
-        &state,
+        state.as_ref(),
         membership.workspace_id.clone(),
         membership.user_id.clone(),
         NotificationType::InvitationReceived,
@@ -506,13 +1607,14 @@ pub async fn invite_member(
 }
 
 pub async fn list_members(
+    auth: AuthenticatedAgent,
     Path(workspace_id): Path<String>,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let ws_id = Id::new(workspace_id);
+    let ws = load_workspace_scoped(&state, &auth, &workspace_id).await?;
     let members = state
         .workspace_memberships
-        .list_by_workspace(&ws_id)
+        .list_by_workspace(&ws.id)
         .await?;
     let items: Vec<MembershipResponse> = members.into_iter().map(Into::into).collect();
     Ok(Json(serde_json::json!({"members": items})))
@@ -521,69 +1623,198 @@ pub async fn list_members(
 #[derive(Deserialize)]
 pub struct UpdateMemberRoleRequest {
     pub role: String,
+    /// Optional reason recorded in the audit trail. Required semantics per
+    /// user-management.md §Ownership Transfer & Reclamation: the transfer is
+    /// audit-logged with the previous owner and reason.
+    pub reason: Option<String>,
 }
 
+/// Record a workspace membership audit event (observability.md §Audit Event
+/// Schema; event-specific data in `detail`).
+async fn emit_membership_audit(
+    state: &AppState,
+    auth: &AuthenticatedAgent,
+    ws: &gyre_domain::Workspace,
+    event_type: &str,
+    detail: serde_json::Value,
+) {
+    use gyre_domain::audit::{AuditEvent, AuditEventType, AuditOutcome};
+    let event = AuditEvent::new(
+        Id::new(uuid::Uuid::new_v4().to_string()),
+        AuditEventType::Custom(event_type.to_string()),
+        Some(Id::new(auth.agent_id.clone())),
+        auth.user_id.clone(),
+        None,
+        Some(ws.id.clone()),
+        None,
+        "workspace_member".to_string(),
+        Some(ws.id.to_string()),
+        AuditOutcome::Success,
+        detail,
+        None,
+        None,
+        now_secs(),
+    );
+    if let Err(e) = state.audit.record(&event).await {
+        tracing::warn!(
+            workspace_id = %ws.id,
+            event_type,
+            "membership audit event recording failed: {e}"
+        );
+    }
+}
+
+/// PUT /api/v1/workspaces/:id/members/:user_id — change a member's role,
+/// including ownership transfer and TenantAdmin reassignment
+/// (user-management.md §Ownership Transfer & Reclamation).
 pub async fn update_member_role(
+    auth: AuthenticatedAgent,
     Path((workspace_id, user_id)): Path<(String, String)>,
     State(state): State<Arc<AppState>>,
     Json(req): Json<UpdateMemberRoleRequest>,
 ) -> Result<StatusCode, ApiError> {
-    let role = WorkspaceRole::parse_role(&req.role)
+    let new_role = WorkspaceRole::parse_role(&req.role)
         .ok_or_else(|| ApiError::InvalidInput(format!("Unknown role: {}", req.role)))?;
-    let ws_id = Id::new(workspace_id);
+    let ws = load_workspace_scoped(&state, &auth, &workspace_id).await?;
+    if !can_manage_membership(&state, &auth, &ws).await? {
+        return Err(ApiError::Forbidden(
+            "member roles can only be changed by a workspace Owner, Admin, or TenantAdmin"
+                .to_string(),
+        ));
+    }
     let uid = Id::new(user_id);
     let membership = state
         .workspace_memberships
-        .find_by_user_and_workspace(&uid, &ws_id)
+        .find_by_user_and_workspace(&uid, &ws.id)
         .await?
-        .ok_or(ApiError::NotFound("Membership not found".to_string()))?;
+        .ok_or_else(|| ApiError::NotFound("Membership not found".to_string()))?;
+
+    // Last-Owner protection (user-management.md §Ownership Transfer &
+    // Reclamation: "Cannot remove last Owner"; a voluntary transfer must
+    // designate a new Owner before downgrading).
+    if membership.role == WorkspaceRole::Owner && new_role != WorkspaceRole::Owner {
+        let others = count_active_owners_excluding(&state, &ws.id, Some(&uid)).await?;
+        if others == 0 {
+            return Err(ApiError::Conflict(
+                "cannot downgrade the last Owner of a workspace; designate a new Owner first \
+                 (PUT /api/v1/workspaces/{id}/members/{new_owner_id}/role with {\"role\": \"Owner\"})"
+                    .to_string(),
+            ));
+        }
+    }
+
+    let previous_role = membership.role;
     state
         .workspace_memberships
-        .update_role(&membership.id, role)
+        .update_role(&membership.id, new_role)
         .await?;
+
+    // Audit trail. An ownership transfer (either direction involving the
+    // Owner role) is logged with the previous owner and the reason
+    // (user-management.md §Ownership Transfer & Reclamation).
+    let involves_owner = previous_role == WorkspaceRole::Owner || new_role == WorkspaceRole::Owner;
+    let event_type = if involves_owner {
+        "workspace_ownership_transferred"
+    } else {
+        "workspace_member_role_changed"
+    };
+    let detail = serde_json::json!({
+        "workspace_id": ws.id.to_string(),
+        "target_user_id": uid.to_string(),
+        "previous_role": previous_role.as_str(),
+        "new_role": new_role.as_str(),
+        "previous_owner": if previous_role == WorkspaceRole::Owner {
+            serde_json::json!(uid.to_string())
+        } else {
+            serde_json::Value::Null
+        },
+        "reason": req.reason,
+        "actor": auth.agent_id,
+    });
+    emit_membership_audit(&state, &auth, &ws, event_type, detail).await;
+
+    // Ownership (re)assignment reclaims an ownerless/orphaned workspace:
+    // clear the tracking record so it stops being flagged immediately.
+    if new_role == WorkspaceRole::Owner {
+        crate::workspace_ownership::clear_ownerless(&state, &ws.id).await;
+    }
+
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// DELETE /api/v1/workspaces/:id/members/:user_id — remove a member.
 pub async fn remove_member(
+    auth: AuthenticatedAgent,
     Path((workspace_id, user_id)): Path<(String, String)>,
     State(state): State<Arc<AppState>>,
 ) -> Result<StatusCode, ApiError> {
-    let ws_id = Id::new(workspace_id);
+    let ws = load_workspace_scoped(&state, &auth, &workspace_id).await?;
+    if !can_manage_membership(&state, &auth, &ws).await? {
+        return Err(ApiError::Forbidden(
+            "members can only be removed by a workspace Owner, Admin, or TenantAdmin".to_string(),
+        ));
+    }
     let uid = Id::new(user_id);
     let membership = state
         .workspace_memberships
-        .find_by_user_and_workspace(&uid, &ws_id)
+        .find_by_user_and_workspace(&uid, &ws.id)
         .await?
-        .ok_or(ApiError::NotFound("Membership not found".to_string()))?;
+        .ok_or_else(|| ApiError::NotFound("Membership not found".to_string()))?;
+
+    // Last-Owner protection: "Cannot remove themselves as Owner if they're
+    // the last Owner" (user-management.md §Ownership Transfer & Reclamation).
+    if membership.role == WorkspaceRole::Owner {
+        let others = count_active_owners_excluding(&state, &ws.id, Some(&uid)).await?;
+        if others == 0 {
+            return Err(ApiError::Conflict(
+                "cannot remove the last Owner of a workspace; designate a new Owner first \
+                 (PUT /api/v1/workspaces/{id}/members/{new_owner_id}/role with {\"role\": \"Owner\"})"
+                    .to_string(),
+            ));
+        }
+    }
+
     state.workspace_memberships.delete(&membership.id).await?;
+
+    emit_membership_audit(
+        &state,
+        &auth,
+        &ws,
+        "workspace_member_removed",
+        serde_json::json!({
+            "workspace_id": ws.id.to_string(),
+            "removed_user_id": uid.to_string(),
+            "removed_role": membership.role.as_str(),
+            "actor": auth.agent_id,
+        }),
+    )
+    .await;
 
     // Notify the removed user (user-management.md §Notification Entity:
     // MembershipChanged — Low, informational). Best-effort: the membership is
     // already deleted; notification failure must not fail the removal. The
-    // tenant scope comes from the workspace lookup — skip rather than
-    // fabricate one when it cannot be resolved.
-    if let Ok(Some(ws)) = state.workspaces.find_by_id(&ws_id).await {
-        crate::notifications::notify_rich(
-            state.as_ref(),
-            ws_id.clone(),
-            uid.clone(),
-            NotificationType::MembershipChanged,
-            format!("Your membership in workspace '{}' was removed", ws.name),
-            ws.tenant_id.to_string(),
-            Some(
-                serde_json::json!({
-                    "workspace_id": ws_id.as_str(),
-                    "user_id": uid.as_str(),
-                })
-                .to_string(),
-            ),
-            Some(ws_id.to_string()),
-            None,
-            "workspace",
-            None,
-        )
-        .await;
-    }
+    // tenant scope comes from the workspace already loaded and authorized
+    // above — no re-fetch and no fabricated scope needed.
+    crate::notifications::notify_rich(
+        state.as_ref(),
+        ws.id.clone(),
+        uid.clone(),
+        NotificationType::MembershipChanged,
+        format!("Your membership in workspace '{}' was removed", ws.name),
+        ws.tenant_id.to_string(),
+        Some(
+            serde_json::json!({
+                "workspace_id": ws.id.as_str(),
+                "user_id": uid.as_str(),
+            })
+            .to_string(),
+        ),
+        Some(ws.id.to_string()),
+        None,
+        "workspace",
+        None,
+    )
+    .await;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -595,87 +1826,337 @@ pub struct TeamResponse {
     pub id: String,
     pub workspace_id: String,
     pub name: String,
+    pub slug: String,
     pub description: Option<String>,
+    pub lead: String,
     pub member_ids: Vec<String>,
     pub created_at: u64,
 }
 
-impl From<Team> for TeamResponse {
-    fn from(t: Team) -> Self {
-        Self {
+impl TeamResponse {
+    /// Build the response for a team, joining its memberships so
+    /// `member_ids` reflects the real `team_memberships` table.
+    async fn from_team(state: &AppState, t: Team) -> Result<Self, ApiError> {
+        let member_ids = state
+            .teams
+            .list_members(&t.id)
+            .await?
+            .into_iter()
+            .map(|m| m.user_id.to_string())
+            .collect();
+        Ok(Self {
             id: t.id.to_string(),
             workspace_id: t.workspace_id.to_string(),
             name: t.name,
+            slug: t.slug,
             description: t.description,
-            member_ids: t.member_ids.iter().map(|id| id.to_string()).collect(),
+            lead: t.lead.to_string(),
+            member_ids,
             created_at: t.created_at,
-        }
+        })
     }
 }
 
 #[derive(Deserialize)]
 pub struct CreateTeamRequest {
     pub name: String,
+    /// Optional explicit slug; derived from the name when omitted.
+    #[serde(default)]
+    pub slug: Option<String>,
     pub description: Option<String>,
+    /// User responsible for the team (a workspace member).
+    pub lead: String,
+}
+
+/// Resolve the slug for a create/update: an explicit slug must be URL-safe
+/// (rejected otherwise — never silently rewritten); an omitted slug is
+/// derived from the team name.
+fn resolve_team_slug(explicit: Option<&str>, name: &str) -> Result<String, ApiError> {
+    let slug = match explicit {
+        Some(s) => {
+            let s = s.trim();
+            Team::validate_slug(s)
+                .map_err(|e| ApiError::InvalidInput(format!("invalid team slug: {e}")))?;
+            s.to_string()
+        }
+        None => Team::sanitize_slug(name).ok_or_else(|| {
+            ApiError::InvalidInput(
+                "team name yields no URL-safe slug; provide an explicit 'slug' field".to_string(),
+            )
+        })?,
+    };
+    Ok(slug)
+}
+
+/// Validate that `lead` is a member of the workspace (user-management.md §
+/// Team Management: the lead is "User responsible for the team"; teams never
+/// grant permissions beyond workspace membership, so the lead must already
+/// be a workspace member).
+async fn validate_team_lead(
+    state: &AppState,
+    ws: &gyre_domain::Workspace,
+    lead: &str,
+) -> Result<Id, ApiError> {
+    let lead_id = Id::new(lead.to_string());
+    let membership = state
+        .workspace_memberships
+        .find_by_user_and_workspace(&lead_id, &ws.id)
+        .await?;
+    if membership.is_none() {
+        return Err(ApiError::InvalidInput(format!(
+            "team lead {lead} is not a member of workspace {}",
+            ws.id.as_str()
+        )));
+    }
+    Ok(lead_id)
+}
+
+/// Reject a slug that another team in the workspace already owns (the
+/// repository unique index is the race-safe backstop; this produces the
+/// clean 409).
+async fn reject_duplicate_slug(
+    state: &AppState,
+    ws_id: &Id,
+    slug: &str,
+    exclude_team: Option<&Id>,
+) -> Result<(), ApiError> {
+    if let Some(existing) = state.teams.find_by_slug(ws_id, slug).await? {
+        if Some(&existing.id) != exclude_team {
+            return Err(ApiError::Conflict(format!(
+                "team slug '{slug}' already exists in this workspace"
+            )));
+        }
+    }
+    Ok(())
 }
 
 pub async fn create_team(
+    auth: AuthenticatedAgent,
     Path(workspace_id): Path<String>,
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateTeamRequest>,
 ) -> Result<(StatusCode, Json<TeamResponse>), ApiError> {
-    let ws_id = Id::new(workspace_id);
-    let mut team = Team::new(new_id(), ws_id, req.name, now_secs());
+    let ws = load_workspace_scoped(&state, &auth, &workspace_id).await?;
+    if !can_manage_membership(&state, &auth, &ws).await? {
+        return Err(ApiError::Forbidden(
+            "teams can only be managed by an Owner, Admin, or TenantAdmin".to_string(),
+        ));
+    }
+
+    let name = req.name.trim().to_string();
+    if name.is_empty() {
+        return Err(ApiError::InvalidInput(
+            "team name must not be empty".to_string(),
+        ));
+    }
+    let slug = resolve_team_slug(req.slug.as_deref(), &name)?;
+    reject_duplicate_slug(&state, &ws.id, &slug, None).await?;
+    let lead = validate_team_lead(&state, &ws, req.lead.trim()).await?;
+
+    let mut team = Team::new(new_id(), ws.id.clone(), name, slug, lead, now_secs());
     team.description = req.description;
     state.teams.create(&team).await?;
-    Ok((StatusCode::CREATED, Json(TeamResponse::from(team))))
+    Ok((
+        StatusCode::CREATED,
+        Json(TeamResponse::from_team(&state, team).await?),
+    ))
 }
 
 pub async fn list_teams(
+    auth: AuthenticatedAgent,
     Path(workspace_id): Path<String>,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let ws_id = Id::new(workspace_id);
-    let teams = state.teams.list_by_workspace(&ws_id).await?;
-    let items: Vec<TeamResponse> = teams.into_iter().map(Into::into).collect();
+    let ws = load_workspace_scoped(&state, &auth, &workspace_id).await?;
+    let teams = state.teams.list_by_workspace(&ws.id).await?;
+    let mut items = Vec::with_capacity(teams.len());
+    for team in teams {
+        items.push(TeamResponse::from_team(&state, team).await?);
+    }
     Ok(Json(serde_json::json!({"teams": items})))
 }
 
 #[derive(Deserialize)]
 pub struct UpdateTeamRequest {
     pub name: Option<String>,
+    pub slug: Option<String>,
     pub description: Option<String>,
+    pub lead: Option<String>,
 }
 
 pub async fn update_team(
+    auth: AuthenticatedAgent,
     Path((workspace_id, team_id)): Path<(String, String)>,
     State(state): State<Arc<AppState>>,
     Json(req): Json<UpdateTeamRequest>,
 ) -> Result<Json<TeamResponse>, ApiError> {
-    let _ws_id = Id::new(workspace_id);
+    let ws = load_workspace_scoped(&state, &auth, &workspace_id).await?;
+    if !can_manage_membership(&state, &auth, &ws).await? {
+        return Err(ApiError::Forbidden(
+            "teams can only be managed by an Owner, Admin, or TenantAdmin".to_string(),
+        ));
+    }
     let tid = Id::new(team_id);
     let mut team = state
         .teams
         .find_by_id(&tid)
         .await?
         .ok_or(ApiError::NotFound("Team not found".to_string()))?;
+    // Per-handler scope check: the team must belong to the path's workspace
+    // (the path workspace is caller-scoped; a team from another workspace
+    // is a 404, not a cross-workspace write).
+    if team.workspace_id != ws.id {
+        return Err(ApiError::NotFound("Team not found".to_string()));
+    }
+
     if let Some(name) = req.name {
+        let name = name.trim().to_string();
+        if name.is_empty() {
+            return Err(ApiError::InvalidInput(
+                "team name must not be empty".to_string(),
+            ));
+        }
         team.name = name;
+    }
+    if let Some(slug) = req.slug {
+        let slug = resolve_team_slug(Some(slug.trim()), &team.name)?;
+        reject_duplicate_slug(&state, &ws.id, &slug, Some(&team.id)).await?;
+        team.slug = slug;
     }
     if let Some(desc) = req.description {
         team.description = Some(desc);
     }
+    if let Some(lead) = req.lead {
+        team.lead = validate_team_lead(&state, &ws, lead.trim()).await?;
+    }
+
     state.teams.update(&team).await?;
-    Ok(Json(TeamResponse::from(team)))
+    Ok(Json(TeamResponse::from_team(&state, team).await?))
 }
 
 pub async fn delete_team(
+    auth: AuthenticatedAgent,
     Path((workspace_id, team_id)): Path<(String, String)>,
     State(state): State<Arc<AppState>>,
 ) -> Result<StatusCode, ApiError> {
-    let _ws_id = Id::new(workspace_id);
+    let ws = load_workspace_scoped(&state, &auth, &workspace_id).await?;
+    if !can_manage_membership(&state, &auth, &ws).await? {
+        return Err(ApiError::Forbidden(
+            "teams can only be managed by an Owner, Admin, or TenantAdmin".to_string(),
+        ));
+    }
     let tid = Id::new(team_id);
+    let team = state
+        .teams
+        .find_by_id(&tid)
+        .await?
+        .ok_or(ApiError::NotFound("Team not found".to_string()))?;
+    if team.workspace_id != ws.id {
+        return Err(ApiError::NotFound("Team not found".to_string()));
+    }
     state.teams.delete(&tid).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+pub struct AddTeamMemberRequest {
+    pub user_id: String,
+}
+
+#[derive(Serialize)]
+pub struct TeamMembershipResponse {
+    pub team_id: String,
+    pub user_id: String,
+    pub added_at: u64,
+}
+
+/// POST /api/v1/workspaces/:id/teams/:team_id/members — add a member to a
+/// team (user-management.md §API > Teams). The user must already be a
+/// workspace member — teams are organizational and never expand access
+/// beyond workspace membership.
+pub async fn add_team_member(
+    auth: AuthenticatedAgent,
+    Path((workspace_id, team_id)): Path<(String, String)>,
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<AddTeamMemberRequest>,
+) -> Result<(StatusCode, Json<TeamMembershipResponse>), ApiError> {
+    let ws = load_workspace_scoped(&state, &auth, &workspace_id).await?;
+    if !can_manage_membership(&state, &auth, &ws).await? {
+        return Err(ApiError::Forbidden(
+            "team membership can only be managed by an Owner, Admin, or TenantAdmin".to_string(),
+        ));
+    }
+    let tid = Id::new(team_id);
+    let team = state
+        .teams
+        .find_by_id(&tid)
+        .await?
+        .ok_or(ApiError::NotFound("Team not found".to_string()))?;
+    if team.workspace_id != ws.id {
+        return Err(ApiError::NotFound("Team not found".to_string()));
+    }
+
+    let user_id = Id::new(req.user_id);
+    if state
+        .workspace_memberships
+        .find_by_user_and_workspace(&user_id, &ws.id)
+        .await?
+        .is_none()
+    {
+        return Err(ApiError::InvalidInput(format!(
+            "user {} is not a member of workspace {}; teams cannot expand access beyond \
+             workspace membership",
+            user_id.as_str(),
+            ws.id.as_str()
+        )));
+    }
+
+    let membership = TeamMembership::new(team.id.clone(), user_id.clone(), now_secs());
+    // Port contract: duplicate membership fails. Surface it as 409 here
+    // (mirroring `reject_duplicate_slug`) so the adapter's guard never
+    // bubbles up as an undifferentiated 500.
+    let existing_members = state.teams.list_members(&tid).await?;
+    if existing_members.iter().any(|m| m.user_id == user_id) {
+        return Err(ApiError::Conflict(format!(
+            "user {} is already a member of team {}",
+            user_id.as_str(),
+            tid.as_str()
+        )));
+    }
+    state.teams.add_member(&membership).await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(TeamMembershipResponse {
+            team_id: membership.team_id.to_string(),
+            user_id: membership.user_id.to_string(),
+            added_at: membership.added_at,
+        }),
+    ))
+}
+
+/// DELETE /api/v1/workspaces/:id/teams/:team_id/members/:user_id — remove a
+/// member from a team (user-management.md §API > Teams). Idempotent.
+pub async fn remove_team_member(
+    auth: AuthenticatedAgent,
+    Path((workspace_id, team_id, user_id)): Path<(String, String, String)>,
+    State(state): State<Arc<AppState>>,
+) -> Result<StatusCode, ApiError> {
+    let ws = load_workspace_scoped(&state, &auth, &workspace_id).await?;
+    if !can_manage_membership(&state, &auth, &ws).await? {
+        return Err(ApiError::Forbidden(
+            "team membership can only be managed by an Owner, Admin, or TenantAdmin".to_string(),
+        ));
+    }
+    let tid = Id::new(team_id);
+    let team = state
+        .teams
+        .find_by_id(&tid)
+        .await?
+        .ok_or(ApiError::NotFound("Team not found".to_string()))?;
+    if team.workspace_id != ws.id {
+        return Err(ApiError::NotFound("Team not found".to_string()));
+    }
+    state.teams.remove_member(&tid, &Id::new(user_id)).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -780,7 +2261,226 @@ pub async fn create_token(
     ))
 }
 
+// ─── Session Management (user-management.md §Session Management) ────────────
+
+#[derive(Serialize)]
+pub struct UserSessionResponse {
+    pub id: String,
+    /// Device the session presents from: User-Agent header captured at
+    /// session creation (empty for WebSocket-minted sessions, which carry
+    /// no request headers).
+    pub user_agent: String,
+    pub ip_address: String,
+    pub created_at: u64,
+    pub last_active_at: u64,
+    pub expires_at: u64,
+}
+
+impl From<gyre_domain::UserSession> for UserSessionResponse {
+    fn from(s: gyre_domain::UserSession) -> Self {
+        Self {
+            id: s.id.to_string(),
+            user_agent: s.user_agent,
+            ip_address: s.ip_address,
+            created_at: s.created_at,
+            last_active_at: s.last_active_at,
+            expires_at: s.expires_at,
+        }
+    }
+}
+
+/// GET /api/v1/users/me/sessions
+///
+/// Lists the current user's active sessions (non-revoked, non-expired).
+/// The session token hash is never exposed — only device, IP, and activity
+/// timestamps.
+pub async fn list_my_sessions(
+    auth: AuthenticatedAgent,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let user_id = resolve_user_id(&auth);
+    let now = now_secs();
+    let sessions = state.sessions.list_for_user(&user_id).await?;
+    let items: Vec<UserSessionResponse> = sessions
+        .into_iter()
+        .filter(|s| s.is_active(now))
+        .map(Into::into)
+        .collect();
+    Ok(Json(serde_json::json!({ "sessions": items })))
+}
+
+/// DELETE /api/v1/users/me/sessions/:id
+///
+/// Revokes one of the current user's sessions. Scoped: revoking another
+/// user's session id is a 404, not a silent success.
+pub async fn revoke_my_session(
+    auth: AuthenticatedAgent,
+    Path(session_id): Path<String>,
+    State(state): State<Arc<AppState>>,
+) -> Result<StatusCode, ApiError> {
+    let user_id = resolve_user_id(&auth);
+    let sid = Id::new(session_id);
+    // Confirm the session exists AND belongs to the caller before revoking.
+    let session = state
+        .sessions
+        .find_by_id(&sid)
+        .await?
+        .ok_or(ApiError::NotFound("Session not found".to_string()))?;
+    if session.user_id != user_id {
+        return Err(ApiError::NotFound("Session not found".to_string()));
+    }
+    state.sessions.revoke(&sid, &user_id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// POST /api/v1/users/me/sessions/revoke-all
+///
+/// "Sign out everywhere": revokes every session for the current user.
+/// The auth middleware rejects API keys whose every session is revoked, so
+/// this signs the credential out too.
+pub async fn revoke_all_my_sessions(
+    auth: AuthenticatedAgent,
+    State(state): State<Arc<AppState>>,
+) -> Result<StatusCode, ApiError> {
+    let user_id = resolve_user_id(&auth);
+    state.sessions.revoke_all_for_user(&user_id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// GET /api/v1/users/:user_id/sessions — TenantAdmin views any user's
+/// active sessions (user-management.md §Session Management: "TenantAdmins
+/// can view and revoke any user's sessions").
+///
+/// Per-handler authorization (ABAC-exempt route): the caller must hold the
+/// Admin role (TenantAdmin) AND be scoped to the target user's tenant (see
+/// [`ensure_same_tenant_session_target`]). The target user must exist — an
+/// unknown user id is a 404, not an empty list, so the endpoint cannot be
+/// used to probe which user ids exist.
+pub async fn list_user_sessions(
+    auth: AuthenticatedAgent,
+    Path(user_id): Path<String>,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    if !auth.roles.contains(&UserRole::Admin) {
+        return Err(ApiError::Forbidden(
+            "only Admin role may view another user's sessions".to_string(),
+        ));
+    }
+    let target_id = Id::new(user_id);
+    let target = state
+        .users
+        .find_by_id(&target_id)
+        .await?
+        .ok_or(ApiError::NotFound("User not found".to_string()))?;
+    ensure_same_tenant_session_target(&auth, &target)?;
+    let now = now_secs();
+    let sessions = state.sessions.list_for_user(&target_id).await?;
+    let items: Vec<UserSessionResponse> = sessions
+        .into_iter()
+        .filter(|s| s.is_active(now))
+        .map(Into::into)
+        .collect();
+    Ok(Json(serde_json::json!({ "sessions": items })))
+}
+
+/// DELETE /api/v1/users/:user_id/sessions/:id — TenantAdmin revokes one of
+/// any user's sessions (user-management.md §Session Management).
+///
+/// Per-handler authorization (ABAC-exempt route): Admin role required; the
+/// caller must be scoped to the target user's tenant (see
+/// [`ensure_same_tenant_session_target`]); the session must exist and
+/// belong to the path's user (404 otherwise).
+pub async fn revoke_user_session(
+    auth: AuthenticatedAgent,
+    Path((user_id, session_id)): Path<(String, String)>,
+    State(state): State<Arc<AppState>>,
+) -> Result<StatusCode, ApiError> {
+    if !auth.roles.contains(&UserRole::Admin) {
+        return Err(ApiError::Forbidden(
+            "only Admin role may revoke another user's sessions".to_string(),
+        ));
+    }
+    let target_id = Id::new(user_id);
+    let target = state
+        .users
+        .find_by_id(&target_id)
+        .await?
+        .ok_or(ApiError::NotFound("User not found".to_string()))?;
+    ensure_same_tenant_session_target(&auth, &target)?;
+    let sid = Id::new(session_id);
+    // Confirm the session exists AND belongs to the target user before
+    // revoking (a mismatched id is a 404, same as the /me variant).
+    let session = state
+        .sessions
+        .find_by_id(&sid)
+        .await?
+        .ok_or(ApiError::NotFound("Session not found".to_string()))?;
+    if session.user_id != target_id {
+        return Err(ApiError::NotFound("Session not found".to_string()));
+    }
+    state.sessions.revoke(&sid, &target_id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// POST /api/v1/users/:user_id/sessions/revoke-all — TenantAdmin signs any
+/// user out everywhere (user-management.md §Session Management).
+///
+/// Per-handler authorization (ABAC-exempt route): Admin role required; the
+/// caller must be scoped to the target user's tenant (see
+/// [`ensure_same_tenant_session_target`]); the target user must exist.
+pub async fn revoke_all_user_sessions(
+    auth: AuthenticatedAgent,
+    Path(user_id): Path<String>,
+    State(state): State<Arc<AppState>>,
+) -> Result<StatusCode, ApiError> {
+    if !auth.roles.contains(&UserRole::Admin) {
+        return Err(ApiError::Forbidden(
+            "only Admin role may revoke another user's sessions".to_string(),
+        ));
+    }
+    let target_id = Id::new(user_id);
+    let target = state
+        .users
+        .find_by_id(&target_id)
+        .await?
+        .ok_or(ApiError::NotFound("User not found".to_string()))?;
+    ensure_same_tenant_session_target(&auth, &target)?;
+    state.sessions.revoke_all_for_user(&target_id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 // ─── Bootstrap: admin user creation ──────────────────────────────────────────
+
+/// Tenant containment for the TenantAdmin session endpoints (per-handler
+/// authorization on ABAC-exempt routes, repo invariant: load the scoped
+/// entity, compare tenant against the caller, reject on mismatch).
+/// `GlobalRole::TenantAdmin` is tenant-scoped (user-management.md §Roles),
+/// so an Admin of one tenant must not view or revoke another tenant's
+/// user's sessions: the listing hands back ip_address/user_agent/
+/// last_active_at and the revokes sign the victim out. Fail-closed when
+/// the target user has no tenant binding (there is no tenant to compare,
+/// so the operation is skipped, not guessed). The system principal (the
+/// global dev token, the first-run bootstrap path before any admin
+/// exists) is exempt — same exemption as `create_user` below.
+fn ensure_same_tenant_session_target(
+    auth: &AuthenticatedAgent,
+    target: &User,
+) -> Result<(), ApiError> {
+    if auth.is_system_principal() {
+        return Ok(());
+    }
+    let same_tenant = target
+        .tenant_id
+        .as_ref()
+        .is_some_and(|t| t.to_string() == auth.tenant_id);
+    if !same_tenant {
+        return Err(ApiError::Forbidden(format!(
+            "cannot access sessions of user {} (caller is scoped to tenant {})",
+            target.id, auth.tenant_id
+        )));
+    }
+    Ok(())
+}
 
 #[derive(Deserialize)]
 pub struct CreateUserRequest {
@@ -851,6 +2551,19 @@ pub async fn create_user(
     // separators; 1-64 chars. Rejects rather than silently rewriting the
     // admin's chosen handle.
     User::validate_username(&username).map_err(ApiError::InvalidInput)?;
+
+    // The reserved system ABAC identity (task-129 review round 3):
+    // `User::new` derives display_name from the username, and API-key/JWT
+    // auth resolves the user's ABAC subject.id from display_name — a user
+    // provisioned under this handle would match `system-full-access`
+    // (priority 1000) and gain full access.
+    if username == gyre_domain::SYSTEM_ABAC_IDENTITY {
+        return Err(ApiError::InvalidInput(format!(
+            "username '{}' is reserved: it would become the user's display_name \
+             and reserved system ABAC identity",
+            gyre_domain::SYSTEM_ABAC_IDENTITY
+        )));
+    }
 
     // Parse roles; default to Admin (this is the bootstrap admin-user path).
     let mut roles: Vec<UserRole> = Vec::new();
@@ -968,7 +2681,12 @@ impl From<UserNotificationPreference> for NotifPrefResponse {
     }
 }
 
-/// GET /api/v1/users/me/notification-preferences
+/// GET /api/v1/notifications/preferences (spec path; also served at
+/// /api/v1/users/me/notification-preferences): the caller's per-type
+/// notification preferences AND delivery channel configuration
+/// (user-management.md §Delivery Channels). Per-handler auth
+/// (self-scope only): the handler reads exclusively the authenticated
+/// user's own rows, so no cross-scope decision is possible.
 pub async fn get_notification_preferences(
     auth: AuthenticatedAgent,
     State(state): State<Arc<AppState>>,
@@ -979,7 +2697,10 @@ pub async fn get_notification_preferences(
         .list_for_user(&user_id)
         .await?;
     let items: Vec<NotifPrefResponse> = prefs.into_iter().map(Into::into).collect();
-    Ok(Json(serde_json::json!({ "preferences": items })))
+    let channels = crate::notification_dispatcher::resolve_channels(&state, &user_id).await;
+    Ok(Json(
+        serde_json::json!({ "preferences": items, "channels": channels }),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -990,26 +2711,235 @@ pub struct NotifPrefItem {
 
 #[derive(Deserialize)]
 pub struct UpdateNotifPrefsRequest {
-    pub preferences: Vec<NotifPrefItem>,
+    /// Per-type enable/disable preferences (HSI §12). Optional: a request
+    /// may update only `channels`.
+    pub preferences: Option<Vec<NotifPrefItem>>,
+    /// Delivery channel configuration (user-management.md §Delivery
+    /// Channels). Optional: a request may update only `preferences`.
+    pub channels: Option<gyre_domain::NotificationChannels>,
 }
 
-/// PUT /api/v1/users/me/notification-preferences
+/// Canonical type names the user has explicitly disabled (HSI §12).
+/// Used as the inbox/count exclusion set; an empty result filters nothing.
+async fn disabled_notification_types(
+    state: &AppState,
+    user_id: &Id,
+) -> Result<Vec<String>, ApiError> {
+    let prefs = state.user_notification_prefs.list_for_user(user_id).await?;
+    Ok(prefs
+        .into_iter()
+        .filter(|p| !p.enabled)
+        .map(|p| p.notification_type)
+        .collect())
+}
+
+/// Resolve the trust-derived inbox exclusion set (HSI §2 "What Each Level
+/// Controls": the "Inbox shows" range row plus the "Notifications" volume
+/// row). Returns canonical `NotificationType` strings to pass as
+/// `exclude_types` — the same mechanism as the preference exclusions, so
+/// the exclusion is applied by the query, before limit/offset, and the
+/// badge counts share it.
+///
+/// Scope resolution:
+/// - **Workspace-scoped** (`workspace_id` given): that workspace's
+///   `trust_level` — the exact per-workspace behavior the spec table
+///   defines.
+/// - **Tenant-scoped** (no filter — the aggregate inbox spans every
+///   workspace the user belongs to): a type is excluded only when EVERY
+///   member workspace excludes it (the aggregate shows anything any of the
+///   user's workspaces would deliver). Per-row filtering would require a
+///   per-workspace condition inside the port query; the intersection rule
+///   keeps the aggregate read expressible on the existing filter surface.
+///
+/// Fail-open on lookup errors (a read surface must not 500 because a
+/// workspace row could not be read — the caller sees the unfiltered set,
+/// never a silent 403-equivalent empty inbox).
+async fn trust_inbox_excluded_types(
+    state: &AppState,
+    user_id: &Id,
+    workspace_id: Option<&Id>,
+) -> Vec<String> {
+    /// Intersect accumulated exclusions with one workspace's set.
+    fn intersect(acc: Option<Vec<String>>, ws_excluded: Vec<String>) -> Option<Vec<String>> {
+        match acc {
+            None => Some(ws_excluded),
+            Some(current) => Some(
+                current
+                    .into_iter()
+                    .filter(|t| ws_excluded.iter().any(|w| w == t))
+                    .collect(),
+            ),
+        }
+    }
+
+    let levels: Vec<TrustLevel> = match workspace_id {
+        Some(wid) => match state.workspaces.find_by_id(wid).await {
+            Ok(Some(ws)) => vec![ws.trust_level],
+            Ok(None) => {
+                tracing::warn!(workspace_id = %wid, "inbox trust filter: workspace not found");
+                return Vec::new();
+            }
+            Err(e) => {
+                tracing::warn!(workspace_id = %wid, error = %e, "inbox trust filter: lookup failed");
+                return Vec::new();
+            }
+        },
+        None => {
+            // Tenant scope: the user's member workspaces drive the filter.
+            let memberships = match state.workspace_memberships.list_by_user(user_id).await {
+                Ok(m) => m,
+                Err(e) => {
+                    tracing::warn!(error = %e, "inbox trust filter: membership lookup failed");
+                    return Vec::new();
+                }
+            };
+            let mut levels = Vec::new();
+            for m in &memberships {
+                match state.workspaces.find_by_id(&m.workspace_id).await {
+                    Ok(Some(ws)) => levels.push(ws.trust_level),
+                    Ok(None) => {
+                        // Membership whose workspace no longer resolves:
+                        // it can contribute no notifications, so it does not
+                        // widen the filter — skip it.
+                        continue;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            workspace_id = %m.workspace_id,
+                            error = %e,
+                            "inbox trust filter: workspace lookup failed"
+                        );
+                        return Vec::new();
+                    }
+                }
+            }
+            // No memberships (agent principals, fresh users): nothing to
+            // filter — no workspace trusts apply.
+            levels
+        }
+    };
+
+    if levels.is_empty() {
+        return Vec::new();
+    }
+    let mut acc: Option<Vec<String>> = None;
+    for level in &levels {
+        let excluded: Vec<String> = level
+            .inbox_excluded_types()
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        acc = intersect(acc, excluded);
+    }
+    acc.unwrap_or_default()
+}
+
+/// Shared validation for a `NotificationChannels` update, whichever endpoint
+/// carries it (PUT /notifications/preferences or the `notification_channels`
+/// field of PUT /users/me): `in_app` is forced true ("Always true (can't
+/// disable)"), configured endpoints must be absolute URLs, and per-type
+/// email unsubscribe keys must name a real notification type.
+fn validate_channel_config(channels: &gyre_domain::NotificationChannels) -> Result<(), ApiError> {
+    if !channels.in_app {
+        return Err(ApiError::InvalidInput(
+            "in_app cannot be disabled (user-management.md §Delivery Channels)".to_string(),
+        ));
+    }
+    if let Some(hook) = &channels.webhook {
+        if reqwest::Url::parse(&hook.url).is_err() {
+            return Err(ApiError::InvalidInput(format!(
+                "webhook.url is not a valid absolute URL: {}",
+                hook.url
+            )));
+        }
+    }
+    if let Some(slack) = &channels.slack {
+        if reqwest::Url::parse(&slack.webhook_url).is_err() {
+            return Err(ApiError::InvalidInput(format!(
+                "slack.webhook_url is not a valid absolute URL: {}",
+                slack.webhook_url
+            )));
+        }
+    }
+    for ty in channels.email.type_overrides.keys() {
+        if gyre_common::NotificationType::parse(ty).is_none() {
+            return Err(ApiError::InvalidInput(format!(
+                "channels.email.type_overrides key is not a known notification type: {ty}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// PUT /api/v1/notifications/preferences (spec path; also served at
+/// /api/v1/users/me/notification-preferences): update the caller's per-type
+/// notification preferences and/or delivery channel configuration. The body
+/// may carry `preferences`, `channels`, or both; at least one is required.
+/// Per-handler auth (self-scope only).
+///
+/// A channel update is persisted to BOTH the dedicated `user_channel_prefs`
+/// store (what delivery reads) and the user's
+/// `users.preferences.notification_channels` (what GET /users/me echoes) —
+/// one effective configuration, no split-brain (review bf1e11be F1).
 pub async fn update_notification_preferences(
     auth: AuthenticatedAgent,
     State(state): State<Arc<AppState>>,
     Json(req): Json<UpdateNotifPrefsRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let user_id = resolve_user_id(&auth);
-    let prefs: Vec<UserNotificationPreference> = req
-        .preferences
-        .into_iter()
-        .map(|item| {
-            UserNotificationPreference::new(user_id.clone(), item.notification_type, item.enabled)
-        })
-        .collect();
-    state.user_notification_prefs.upsert_batch(&prefs).await?;
-    let items: Vec<NotifPrefResponse> = prefs.into_iter().map(Into::into).collect();
-    Ok(Json(serde_json::json!({ "preferences": items })))
+    if req.preferences.is_none() && req.channels.is_none() {
+        return Err(ApiError::InvalidInput(
+            "body must set `preferences` and/or `channels`".to_string(),
+        ));
+    }
+
+    // Normalize to the canonical `NotificationType::as_str()` name before
+    // storing: `parse` accepts legacy aliases (`SpecPendingApproval`,
+    // `BudgetWarning`), but notification rows are persisted with canonical
+    // names and the inbox filter is a raw string comparison — storing an
+    // alias would silently create a preference that never matches any
+    // notification (a dead toggle).
+    let mut items: Vec<NotifPrefResponse> = Vec::new();
+    if let Some(prefs) = req.preferences {
+        let mut normalized: Vec<UserNotificationPreference> = Vec::with_capacity(prefs.len());
+        for item in prefs {
+            let nt = NotificationType::parse(&item.notification_type).ok_or_else(|| {
+                ApiError::BadRequest(format!(
+                    "unknown notification type '{}' (expected canonical name, e.g. \"GateFailure\")",
+                    item.notification_type
+                ))
+            })?;
+            normalized.push(UserNotificationPreference::new(
+                user_id.clone(),
+                nt.as_str().to_string(),
+                item.enabled,
+            ));
+        }
+        state
+            .user_notification_prefs
+            .upsert_batch(&normalized)
+            .await?;
+        items = normalized.into_iter().map(Into::into).collect();
+    }
+
+    let mut channels: Option<gyre_domain::NotificationChannels> = None;
+    if let Some(ch) = req.channels {
+        validate_channel_config(&ch)?;
+        state.user_channel_prefs.upsert(&user_id, &ch).await?;
+        // Mirror the same value into the user profile store so the
+        // preferences round-trip (GET /users/me → PUT /users/me) cannot
+        // silently revert delivery to a stale configuration.
+        if let Some(mut user) = state.users.find_by_id(&user_id).await? {
+            user.preferences.notification_channels = ch.clone();
+            user.updated_at = now_secs();
+            state.users.update(&user).await?;
+        }
+        channels = Some(ch);
+    }
+
+    Ok(Json(
+        serde_json::json!({ "preferences": items, "channels": channels }),
+    ))
 }
 
 // ─── HSI §12: Judgment Ledger ─────────────────────────────────────────────────
@@ -1041,10 +2971,18 @@ pub async fn get_judgments(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let user_id = resolve_user_id(&auth);
     let workspace_id = params.workspace_id.as_deref().map(Id::new);
-    let judgment_type = params
-        .judgment_type
-        .as_deref()
-        .and_then(JudgmentType::from_db_str);
+    // An unparseable ?type= must 400 (same contract as the sibling
+    // notification-preferences PUT / notifications priority param):
+    // silently treating it as "no filter" returns unfiltered results the
+    // caller did not ask for.
+    let judgment_type = match params.judgment_type.as_deref() {
+        Some(t) => Some(JudgmentType::from_db_str(t).ok_or_else(|| {
+            ApiError::InvalidInput(format!(
+                "unknown judgment type '{t}' (expected one of approval|rejection|gate|trust|meta-spec)"
+            ))
+        })?),
+        None => None,
+    };
     let limit = params.limit.unwrap_or(50).min(200);
     let offset = params.offset.unwrap_or(0);
 
@@ -1084,6 +3022,7 @@ pub async fn get_judgments(
 mod tests {
     use crate::mem::test_state;
     use axum::{body::Body, Router};
+    use futures_util::StreamExt;
     use gyre_common::{Id, Notification, NotificationType};
     use http::{Request, StatusCode};
     use tower::ServiceExt;
@@ -1116,6 +3055,261 @@ mod tests {
             now,
         );
         state.notifications.create(&notif).await.unwrap();
+    }
+
+    /// Helper: create a workspace at the given trust level via the API
+    /// (system token) and return its id.
+    async fn create_workspace_at_trust(app: &Router, slug: &str, trust_level: &str) -> String {
+        let body = serde_json::json!({
+            "tenant_id": "t1",
+            "name": format!("Ws-{slug}"),
+            "slug": slug,
+            "trust_level": trust_level,
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces")
+                    .header("content-type", "application/json")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        body_json(resp).await["id"].as_str().unwrap().to_string()
+    }
+
+    /// Helper: seed one notification for user "system" in a REAL workspace
+    /// (so the trust filter can resolve the workspace's trust level).
+    async fn seed_notification_in_workspace(
+        state: &std::sync::Arc<crate::AppState>,
+        workspace_id: &str,
+        notification_type: NotificationType,
+        title: &str,
+    ) {
+        let now = 1_700_000_000i64;
+        let notif = Notification::new(
+            Id::new(uuid::Uuid::new_v4().to_string()),
+            Id::new(workspace_id),
+            Id::new("system"),
+            notification_type,
+            title,
+            "default",
+            now,
+        );
+        state.notifications.create(&notif).await.unwrap();
+    }
+
+    /// HSI §2 "Inbox shows" + "Notifications" rows: at Autonomous trust the
+    /// inbox hides state-change chatter and failures (the agent owns them)
+    /// while exceptions and approval requests stay visible; the suggested
+    /// link (rank 10) is excluded by the "Inbox priorities shown" row.
+    /// Supervised shows everything.
+    #[tokio::test]
+    async fn inbox_trust_filter_autonomous_vs_supervised() {
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let ws_id = create_workspace_at_trust(&app, "trust-inbox-auto", "Autonomous").await;
+
+        seed_notification_in_workspace(&state, &ws_id, NotificationType::MrMerged, "MR merged")
+            .await;
+        seed_notification_in_workspace(
+            &state,
+            &ws_id,
+            NotificationType::GateFailure,
+            "Gate failed",
+        )
+        .await;
+        seed_notification_in_workspace(
+            &state,
+            &ws_id,
+            NotificationType::AgentEscalation,
+            "Agent escalated",
+        )
+        .await;
+        seed_notification_in_workspace(
+            &state,
+            &ws_id,
+            NotificationType::SpecApprovalRequested,
+            "Spec needs approval",
+        )
+        .await;
+        seed_notification_in_workspace(
+            &state,
+            &ws_id,
+            NotificationType::SuggestedSpecLink,
+            "Suggested link",
+        )
+        .await;
+
+        let list = |app: &Router, ws: &str| {
+            let uri = format!("/api/v1/notifications?workspace_id={ws}");
+            app.clone().oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+        };
+
+        // Autonomous: only the escalation and the approval request.
+        let resp = list(&app, &ws_id).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let types: Vec<&str> = json["notifications"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n["notification_type"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            types,
+            vec!["AgentEscalation", "SpecApprovalRequested"],
+            "Autonomous inbox must show exceptions and approvals only"
+        );
+
+        // Badge count matches the filtered inbox (port contract).
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/api/v1/users/me/notifications/count?workspace_id={ws_id}"
+                    ))
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(
+            json["count"], 2,
+            "badge must not count trust-suppressed notifications"
+        );
+
+        // Transition to Supervised: everything becomes visible.
+        let update = serde_json::json!({ "trust_level": "Supervised" });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/workspaces/{ws_id}"))
+                    .header("content-type", "application/json")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&update).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let resp = list(&app, &ws_id).await.unwrap();
+        let json = body_json(resp).await;
+        assert_eq!(
+            json["notifications"].as_array().unwrap().len(),
+            5,
+            "Supervised inbox shows every state change"
+        );
+    }
+
+    /// HSI §2 at Guided: failures and approvals deliver; suggested links
+    /// (rank 10) are excluded; invitations stay visible despite rank 10 —
+    /// they are action-required, and the HSI §8 table lists only
+    /// SuggestedSpecLink at priority 10.
+    #[tokio::test]
+    async fn inbox_trust_filter_guided_keeps_failures_and_invitations() {
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let ws_id = create_workspace_at_trust(&app, "trust-inbox-guided", "Guided").await;
+
+        seed_notification_in_workspace(
+            &state,
+            &ws_id,
+            NotificationType::GateFailure,
+            "Gate failed",
+        )
+        .await;
+        seed_notification_in_workspace(
+            &state,
+            &ws_id,
+            NotificationType::SuggestedSpecLink,
+            "Suggested link",
+        )
+        .await;
+        seed_notification_in_workspace(
+            &state,
+            &ws_id,
+            NotificationType::InvitationReceived,
+            "You were invited",
+        )
+        .await;
+        seed_notification_in_workspace(&state, &ws_id, NotificationType::MrMerged, "MR merged")
+            .await;
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/notifications?workspace_id={ws_id}"))
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let types: Vec<&str> = json["notifications"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n["notification_type"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            types,
+            vec!["GateFailure", "InvitationReceived"],
+            "Guided inbox: failures and approvals; no state changes, no suggested links"
+        );
+    }
+
+    /// A caller's EXPLICIT `?max_priority=` filter is honored verbatim — the
+    /// trust set supplies the default view, never overrides an explicit one.
+    #[tokio::test]
+    async fn inbox_trust_filter_respects_explicit_rank_filter() {
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let ws_id = create_workspace_at_trust(&app, "trust-inbox-expl", "Autonomous").await;
+        seed_notification_in_workspace(
+            &state,
+            &ws_id,
+            NotificationType::AgentEscalation,
+            "Agent escalated",
+        )
+        .await;
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/api/v1/notifications?workspace_id={ws_id}&max_priority=2"
+                    ))
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        // AgentEscalation is rank 2 — inside the caller's explicit 1-2 range.
+        assert_eq!(json["notifications"].as_array().unwrap().len(), 1);
     }
 
     #[tokio::test]
@@ -1247,7 +3441,11 @@ mod tests {
         // list response: four-level priority, structured source, deep link,
         // and read state.
         assert_eq!(notifs[0]["priority"], 2);
-        assert_eq!(notifs[0]["priority_level"], "Urgent");
+        // Four-level band is High per the amended §Notification Entity
+        // membership table — SpecApprovalRequested is a pending-approval
+        // decision (rank 2 would threshold-map to Urgent; the amendment
+        // forbids deriving the band from the number).
+        assert_eq!(notifs[0]["priority_level"], "High");
         assert_eq!(notifs[0]["entity_type"], "workspace");
         assert_eq!(notifs[0]["read"], false);
         assert!(notifs[0]["read_at"].is_null());
@@ -1353,6 +3551,516 @@ mod tests {
         assert!(!n.read, "cross-user mark_read must not mutate");
     }
 
+    /// Spec path (user-management.md §API > Notifications): GET
+    /// /api/v1/notifications lists the caller's notifications with pagination
+    /// and the specced filter surface (type, priority level, workspace, repo).
+    #[tokio::test]
+    async fn spec_path_notifications_list_with_filters() {
+        let state = test_state();
+        let mut with_repo = Notification::new(
+            Id::new("notif-spec-1"),
+            Id::new("ws-default"),
+            Id::new("system"),
+            NotificationType::GateFailure, // rank 3 → High band
+            "Gate failed on repo-a MR",
+            "default",
+            1_700_000_000,
+        );
+        with_repo.source.entity_type = "mr".to_string();
+        with_repo.source.entity_id = "mr-1".to_string();
+        with_repo.source.repo_id = Some(Id::new("repo-a"));
+        state.create_notification(&with_repo).await.unwrap();
+        let no_repo = Notification::new(
+            Id::new("notif-spec-2"),
+            Id::new("ws-default"),
+            Id::new("system"),
+            NotificationType::AgentCompleted, // rank 9 → Low band
+            "Agent worker-1 completed",
+            "default",
+            1_700_000_001,
+        );
+        state.create_notification(&no_repo).await.unwrap();
+        // Rank/band divergence (amended §Notification Entity membership
+        // table): SpecApprovalRequested is numeric rank 2 — inside the Urgent
+        // rank band (1–2) — yet its band is High. Seeded specifically so the
+        // `?priority=` filter cannot pass by rank-band widening: the old
+        // rank-derived filter returned it under ?priority=urgent (labeled
+        // priority_level "High") and dropped it under ?priority=high.
+        let diverging = Notification::new(
+            Id::new("notif-spec-3"),
+            Id::new("ws-default"),
+            Id::new("system"),
+            NotificationType::SpecApprovalRequested, // rank 2 → High band
+            "Spec spec-1 awaiting approval",
+            "default",
+            1_700_000_002,
+        );
+        state.create_notification(&diverging).await.unwrap();
+
+        let app = crate::api::api_router().with_state(state);
+
+        async fn list(app: &Router, uri: &str) -> serde_json::Value {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(uri)
+                        .header("Authorization", "Bearer test-token")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK, "GET {uri}");
+            body_json(resp).await
+        }
+
+        // Unfiltered: all three seeded notifications.
+        let json = list(&app, "/api/v1/notifications").await;
+        assert_eq!(json["notifications"].as_array().unwrap().len(), 3);
+
+        // ?type= filter (spec filter surface).
+        let json = list(&app, "/api/v1/notifications?type=AgentCompleted").await;
+        let notifs = json["notifications"].as_array().unwrap();
+        assert_eq!(notifs.len(), 1, "type filter must narrow to the match");
+        assert_eq!(notifs[0]["id"], "notif-spec-2");
+
+        // ?repo_id= filter — matches the notification's source repo.
+        let json = list(&app, "/api/v1/notifications?repo_id=repo-a").await;
+        let notifs = json["notifications"].as_array().unwrap();
+        assert_eq!(notifs.len(), 1, "repo filter must narrow to the match");
+        assert_eq!(notifs[0]["id"], "notif-spec-1");
+
+        // ?priority= filters by the TYPE-derived band (the same derivation
+        // as the response's priority_level field), never by the HSI rank
+        // band: GateFailure (rank 3, High) and SpecApprovalRequested
+        // (rank 2 — inside the Urgent rank band — yet High) are High;
+        // AgentCompleted (rank 9) is Low.
+        let json = list(&app, "/api/v1/notifications?priority=high").await;
+        let notifs = json["notifications"].as_array().unwrap();
+        assert_eq!(
+            notifs.len(),
+            2,
+            "priority=high must match both High items, including the rank-2 divergence"
+        );
+        let ids: Vec<&str> = notifs.iter().map(|n| n["id"].as_str().unwrap()).collect();
+        assert!(ids.contains(&"notif-spec-1"));
+        assert!(ids.contains(&"notif-spec-3"));
+        assert_eq!(
+            notifs.iter().find(|n| n["id"] == "notif-spec-3").unwrap()["priority_level"],
+            "High",
+            "the filter and the priority_level field must agree on the diverging type"
+        );
+        // The old rank-band widening returned the rank-2 type under
+        // ?priority=urgent while labeling it High — the divergence this
+        // filter must not reproduce.
+        let json = list(&app, "/api/v1/notifications?priority=urgent").await;
+        let notifs = json["notifications"].as_array().unwrap();
+        assert_eq!(
+            notifs.len(),
+            0,
+            "priority=urgent must not match the rank-2 High-band type"
+        );
+        let json = list(&app, "/api/v1/notifications?priority=low").await;
+        let notifs = json["notifications"].as_array().unwrap();
+        assert_eq!(notifs.len(), 1, "priority=low must match only the Low item");
+        assert_eq!(notifs[0]["id"], "notif-spec-2");
+
+        // ?type= and ?priority= intersect: SpecApprovalRequested is not in
+        // the Low band, so the combination matches nothing.
+        let json = list(
+            &app,
+            "/api/v1/notifications?type=SpecApprovalRequested&priority=low",
+        )
+        .await;
+        assert_eq!(
+            json["notifications"].as_array().unwrap().len(),
+            0,
+            "type and priority filters must intersect"
+        );
+
+        // An unknown priority level is a 400, not a silently ignored filter.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/notifications?priority=critical")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // Pagination: limit=1 returns one item and echoes the window.
+        let json = list(&app, "/api/v1/notifications?limit=1&offset=1").await;
+        let notifs = json["notifications"].as_array().unwrap();
+        assert_eq!(notifs.len(), 1);
+        assert_eq!(json["limit"], 1);
+        assert_eq!(json["offset"], 1);
+    }
+
+    /// `?active=true` (user-management.md §In-App Notification UI): the
+    /// notification drawer's listing excludes rows the user has already
+    /// resolved or dismissed, while the default listing still returns them
+    /// (the Inbox's show-dismissed toggle depends on the full listing).
+    #[tokio::test]
+    async fn spec_path_notifications_active_filter_excludes_resolved_and_dismissed() {
+        let state = test_state();
+        let seed = |id: &str| {
+            Notification::new(
+                Id::new(id),
+                Id::new("ws-default"),
+                Id::new("system"),
+                NotificationType::GatePassed,
+                id,
+                "default",
+                1_700_000_000,
+            )
+        };
+        state
+            .create_notification(&seed("notif-active"))
+            .await
+            .unwrap();
+        let resolved = seed("notif-resolved");
+        state.create_notification(&resolved).await.unwrap();
+        state
+            .notifications
+            .resolve(&Id::new("notif-resolved"), &Id::new("system"), None)
+            .await
+            .unwrap();
+        let dismissed = seed("notif-dismissed");
+        state.create_notification(&dismissed).await.unwrap();
+        state
+            .notifications
+            .dismiss(&Id::new("notif-dismissed"), &Id::new("system"))
+            .await
+            .unwrap();
+
+        let app = crate::api::api_router().with_state(state);
+
+        // Default listing: all three (Inbox surface contract unchanged).
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/notifications")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(
+            json["notifications"].as_array().unwrap().len(),
+            3,
+            "default listing still returns resolved and dismissed rows"
+        );
+
+        // Active-only listing: just the untouched row.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/notifications?active=true")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let notifs = json["notifications"].as_array().unwrap();
+        assert_eq!(notifs.len(), 1, "resolved and dismissed rows are excluded");
+        assert_eq!(notifs[0]["id"], "notif-active");
+    }
+
+    /// Spec path (user-management.md §API > Notifications): unread-count
+    /// counts active-but-unread notifications for the bell badge, and
+    /// mark-all-read drives it to zero (only the caller's rows are touched).
+    #[tokio::test]
+    async fn spec_path_unread_count_and_mark_all_read() {
+        let state = test_state();
+        let seed = |id: &str, user: &str, ty: NotificationType| {
+            Notification::new(
+                Id::new(id),
+                Id::new("ws-default"),
+                Id::new(user),
+                ty,
+                id,
+                "default",
+                1_700_000_000,
+            )
+        };
+        // Caller ("system"): one unread, one already read, one dismissed-but-unread.
+        let unread = seed("notif-unread", "system", NotificationType::GatePassed);
+        state.create_notification(&unread).await.unwrap();
+        let read = seed("notif-read", "system", NotificationType::GatePassed);
+        state.create_notification(&read).await.unwrap();
+        state
+            .notifications
+            .mark_read(&Id::new("notif-read"), &Id::new("system"), true)
+            .await
+            .unwrap();
+        let dismissed = seed("notif-dismissed", "system", NotificationType::GatePassed);
+        state.create_notification(&dismissed).await.unwrap();
+        state
+            .notifications
+            .dismiss(&Id::new("notif-dismissed"), &Id::new("system"))
+            .await
+            .unwrap();
+        // Another user's unread notification must not count for the caller.
+        let other = seed("notif-other", "someone-else", NotificationType::GatePassed);
+        state.create_notification(&other).await.unwrap();
+
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/notifications/unread-count")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(
+            json["count"], 1,
+            "only the caller's active unread item counts (read and dismissed excluded)"
+        );
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/notifications/mark-all-read")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(
+            json["marked"], 2,
+            "the unread and dismissed-unread rows flip; the already-read row does not"
+        );
+
+        // Badge reaches zero and the other user's row stays unread.
+        let count = state
+            .notifications
+            .count_unread(&Id::new("system"), None)
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
+        let other_row = state
+            .notifications
+            .get(&Id::new("notif-other"), &Id::new("someone-else"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            !other_row.read,
+            "mark-all-read must stay scoped to the caller"
+        );
+    }
+
+    /// Spec path/method (user-management.md §API > Notifications): PUT
+    /// /api/v1/notifications/{id}/read marks read.
+    #[tokio::test]
+    async fn put_read_is_the_spec_method() {
+        let state = test_state();
+        let notif = Notification::new(
+            Id::new("notif-put-read"),
+            Id::new("ws-default"),
+            Id::new("system"),
+            NotificationType::MrMerged,
+            "MR merged",
+            "default",
+            1_700_000_000,
+        );
+        state.create_notification(&notif).await.unwrap();
+
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/notifications/notif-put-read/read")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let n = state
+            .notifications
+            .get(&Id::new("notif-put-read"), &Id::new("system"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(n.read);
+        assert!(n.read_at.is_some());
+    }
+
+    /// Spec path (user-management.md §API > Notifications): preferences
+    /// get/put at /api/v1/notifications/preferences (same handlers as the
+    /// HSI §12 /users/me/notification-preferences route).
+    #[tokio::test]
+    async fn spec_path_preferences_roundtrip() {
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/notifications/preferences")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["preferences"].as_array().unwrap().len(), 0);
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/notifications/preferences")
+                    .header("Authorization", "Bearer test-token")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"preferences": [
+                            {"notification_type": "AgentBudgetWarning", "enabled": false}
+                        ]})
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/notifications/preferences")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let prefs = json["preferences"].as_array().unwrap();
+        assert_eq!(prefs.len(), 1);
+        assert_eq!(prefs[0]["notification_type"], "AgentBudgetWarning");
+        assert_eq!(prefs[0]["enabled"], false);
+    }
+
+    /// Spec path (user-management.md §API > Notifications): the SSE stream
+    /// delivers the caller's notifications as they are persisted and drops
+    /// other users' (and other tenants') notifications before the wire.
+    #[tokio::test]
+    async fn notification_stream_delivers_own_notifications_only() {
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // Connect: the handler subscribes to the broadcast channel before
+        // the response (Sse) is returned, so once oneshot resolves the
+        // subscription is live.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/notifications/stream")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let ct = resp.headers().get("content-type").unwrap();
+        assert!(ct.to_str().unwrap().contains("text/event-stream"));
+
+        // Create one notification for the caller and one for another user
+        // (plus a cross-tenant one addressed to the caller's user id).
+        let own = Notification::new(
+            Id::new("notif-stream-own"),
+            Id::new("ws-default"),
+            Id::new("system"),
+            NotificationType::SpecApprovalRequested,
+            "Streamed to caller",
+            "default",
+            1_700_000_000,
+        );
+        state.create_notification(&own).await.unwrap();
+        let other_user = Notification::new(
+            Id::new("notif-stream-other-user"),
+            Id::new("ws-default"),
+            Id::new("someone-else"),
+            NotificationType::SpecApprovalRequested,
+            "Not the caller",
+            "default",
+            1_700_000_001,
+        );
+        state.create_notification(&other_user).await.unwrap();
+        let other_tenant = Notification::new(
+            Id::new("notif-stream-other-tenant"),
+            Id::new("ws-default"),
+            Id::new("system"),
+            NotificationType::SpecApprovalRequested,
+            "Wrong tenant",
+            "another-tenant",
+            1_700_000_002,
+        );
+        state.create_notification(&other_tenant).await.unwrap();
+
+        // Read SSE chunks until the heartbeat timeout: the caller's event
+        // must arrive; the other two must never reach the wire.
+        let mut body = resp.into_body().into_data_stream();
+        let mut received = Vec::<u8>::new();
+        loop {
+            let next = tokio::time::timeout(std::time::Duration::from_secs(1), body.next()).await;
+            match next {
+                Err(_) => break, // 1s with no chunk: nothing more is coming
+                Ok(Some(Ok(chunk))) => received.extend_from_slice(&chunk),
+                Ok(Some(Err(_))) | Ok(None) => break,
+            }
+        }
+        let text = String::from_utf8_lossy(&received).to_string();
+        assert!(
+            text.contains("event: notification"),
+            "stream must emit notification events; got: {text}"
+        );
+        assert!(
+            text.contains("notif-stream-own"),
+            "the caller's notification must be delivered; got: {text}"
+        );
+        assert!(
+            !text.contains("notif-stream-other-user"),
+            "another user's notification must be filtered out; got: {text}"
+        );
+        assert!(
+            !text.contains("notif-stream-other-tenant"),
+            "a cross-tenant notification must be filtered out; got: {text}"
+        );
+    }
+
     #[tokio::test]
     async fn agent_completed_notification_type_round_trips() {
         // Verify AgentCompleted and AgentEscalation types serialize/deserialize correctly.
@@ -1428,6 +4136,256 @@ mod tests {
             "should return only ConflictingInterpretations: got {notifs:?}"
         );
         assert_eq!(notifs[0]["notification_type"], "ConflictingInterpretations");
+    }
+
+    /// HSI §12: disabling a notification type via
+    /// PUT /users/me/notification-preferences must exclude it from the inbox
+    /// list AND the badge count — the handler wiring, not just the query.
+    #[tokio::test]
+    async fn disabled_preference_excludes_type_from_inbox_and_count() {
+        let state = test_state();
+        seed_notification(&state, NotificationType::GateFailure, "Gate failed").await;
+        seed_notification(
+            &state,
+            NotificationType::SpecApprovalRequested,
+            "Approve spec",
+        )
+        .await;
+
+        let app = crate::api::api_router().with_state(state);
+        // Baseline: both visible.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me/notifications")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(
+            json["notifications"].as_array().unwrap().len(),
+            2,
+            "baseline: both types visible: {json:?}"
+        );
+
+        // Disable GateFailure.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/users/me/notification-preferences")
+                    .header("Authorization", "Bearer test-token")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        r#"{"preferences":[{"notification_type":"GateFailure","enabled":false}]}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Inbox excludes the disabled type.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me/notifications")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let notifs = json["notifications"].as_array().unwrap();
+        assert_eq!(notifs.len(), 1, "disabled type must be excluded: {json:?}");
+        assert_eq!(notifs[0]["notification_type"], "SpecApprovalRequested");
+
+        // Badge count matches the inbox.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me/notifications/count")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["count"], 1, "badge must not count the disabled type");
+    }
+
+    /// Legacy parse aliases must normalize to the canonical
+    /// `NotificationType::as_str()` name before storing: notification rows
+    /// are persisted with canonical names and the inbox exclusion is a raw
+    /// string comparison, so storing 'SpecPendingApproval' (alias for
+    /// 'SpecApprovalRequested') would be a silently inert toggle.
+    #[tokio::test]
+    async fn preference_alias_normalizes_to_canonical_before_storing() {
+        let state = test_state();
+        seed_notification(
+            &state,
+            NotificationType::SpecApprovalRequested,
+            "Approve spec",
+        )
+        .await;
+
+        let app = crate::api::api_router().with_state(state.clone());
+        // Disable via the legacy alias spelling.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/users/me/notification-preferences")
+                    .header("Authorization", "Bearer test-token")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        r#"{"preferences":[{"notification_type":"SpecPendingApproval","enabled":false}]}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        // The stored (and echoed) preference carries the canonical name.
+        assert_eq!(
+            json["preferences"][0]["notification_type"], "SpecApprovalRequested",
+            "alias must be normalized before storing: {json:?}"
+        );
+
+        // The canonical-typed notification is excluded from the inbox...
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me/notifications")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(
+            json["notifications"].as_array().unwrap().len(),
+            0,
+            "alias-named disable must filter the canonical-typed notification: {json:?}"
+        );
+
+        // ...and from the badge count.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me/notifications/count")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["count"], 0);
+    }
+
+    /// HSI §12 auth provider info: a successful OIDC/JWT authentication must
+    /// record the verified issuer + login time, and GET /users/me must return
+    /// both read-only. PUT /users/me has no field for either, so they cannot
+    /// be client-set.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn get_me_returns_recorded_auth_provider_info() {
+        use crate::auth::test_helpers::{make_test_state_with_jwt, sign_test_jwt};
+
+        let state = make_test_state_with_jwt();
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // Authenticate via a real OIDC JWT — this drives validate_jwt's
+        // record_login path against the user store.
+        let jwt = sign_test_jwt(
+            &serde_json::json!({
+                "sub": "me-issuer-sub",
+                "preferred_username": "issuer-user",
+                "realm_access": { "roles": ["developer"] }
+            }),
+            3600,
+        );
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let me = body_json(resp).await;
+        // The issuer is the test JwtConfig's verified issuer.
+        assert_eq!(me["oidc_issuer"], "http://localhost:8080/realms/gyre");
+        let login = me["last_login_at"]
+            .as_u64()
+            .expect("last_login_at recorded");
+        assert!(login > 0);
+
+        // Editable profile fields round-trip without touching auth-provider
+        // info. The body also spoofs the auth-provider fields — serde ignores
+        // them because UpdateProfileRequest has no such field, so a client
+        // cannot set either.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/users/me")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"display_name":"Renamed","timezone":"Europe/Berlin",
+                            "oidc_issuer":"https://attacker.example/realms/spoof",
+                            "last_login_at":12345}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let me2 = body_json(resp).await;
+        assert_eq!(me2["display_name"], "Renamed");
+        assert_eq!(me2["timezone"], "Europe/Berlin");
+        assert_eq!(me2["oidc_issuer"], "http://localhost:8080/realms/gyre");
+        // The PUT re-authenticates through validate_jwt, whose provisioning
+        // path re-stamps last_login_at on each auth (user-management spec:
+        // "last_login_at is set on each authentication"), so the stored value
+        // may legitimately advance by the wall-clock time elapsed between the
+        // two requests. It must stay inside that wall-clock window — never
+        // regress, never clear, and never take the spoofed 12345 (which is
+        // far below the real auth timestamps). Strict equality here flaked
+        // across a second boundary on a loaded CI runner.
+        let t_after_put = crate::api::now_secs();
+        let login_after_put = me2["last_login_at"]
+            .as_u64()
+            .expect("last_login_at still recorded after profile update");
+        assert!(
+            login <= login_after_put && login_after_put <= t_after_put,
+            "last_login_at must stay in the real auth window \
+             [{login}, {t_after_put}], got {login_after_put} \
+             (spoofed value must be ignored)"
+        );
     }
 
     /// Seed a tenant so create_user's tenant validation can resolve it
@@ -1549,6 +4507,48 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
+    /// Task-129 review round 3 (privilege escalation): admin-created users
+    /// derive display_name from the username, and display_name becomes the
+    /// user's ABAC subject.id under API-key/JWT auth — a user provisioned
+    /// under the reserved system identity would match `system-full-access`
+    /// (priority 1000) and gain full access.
+    #[tokio::test]
+    async fn create_user_rejects_reserved_system_username() {
+        let state = test_state();
+        seed_tenant(&state).await;
+        let resp = crate::api::api_router()
+            .with_state(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/users")
+                    .header("Authorization", "Bearer test-token")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        r#"{"username":"gyre-system-token","tenant_id":"t-1"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "the reserved system ABAC identity must not be provisionable as a username"
+        );
+
+        // And no user row was created under the reserved handle.
+        assert!(
+            state
+                .users
+                .find_by_username("gyre-system-token")
+                .await
+                .unwrap()
+                .is_none(),
+            "rejected reserved-identity provisioning must not create a user"
+        );
+    }
+
     #[tokio::test]
     async fn create_user_rejects_duplicate_external_id() {
         let state = test_state();
@@ -1654,6 +4654,294 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
+    #[tokio::test]
+    async fn get_channel_preferences_returns_defaults() {
+        let resp = app()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/notifications/preferences")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let channels = &json["channels"];
+        assert_eq!(channels["in_app"], true, "in_app defaults on");
+        assert_eq!(channels["email"]["enabled"], false, "email defaults off");
+        assert!(
+            channels["webhook"].is_null(),
+            "webhook defaults unconfigured"
+        );
+        assert!(channels["slack"].is_null(), "slack defaults unconfigured");
+    }
+
+    #[tokio::test]
+    async fn put_channel_preferences_round_trips() {
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let payload = serde_json::json!({
+            "channels": {
+                "in_app": true,
+                "email": {
+                    "enabled": true,
+                    "digest": "Daily",
+                    "min_priority": "Medium"
+                },
+                "webhook": {
+                    "url": "https://hooks.example.test/gyre",
+                    "secret": "s3cret",
+                    "min_priority": "High"
+                },
+                "slack": {
+                    "webhook_url": "https://hooks.slack.test/T/B/X",
+                    "channel": "#ops",
+                    "min_priority": "Low"
+                }
+            }
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/notifications/preferences")
+                    .header("Authorization", "Bearer test-token")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(payload.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "valid config must be accepted"
+        );
+
+        // A fresh router over the same state must read the persisted config
+        // (durable store, not in-handler memory).
+        let resp = crate::api::api_router()
+            .with_state(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/notifications/preferences")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let channels = &json["channels"];
+        assert_eq!(channels["email"]["enabled"], true);
+        assert_eq!(channels["email"]["digest"], "Daily");
+        assert_eq!(
+            channels["webhook"]["url"],
+            "https://hooks.example.test/gyre"
+        );
+        assert_eq!(channels["webhook"]["min_priority"], "High");
+        assert_eq!(channels["slack"]["channel"], "#ops");
+    }
+
+    #[tokio::test]
+    async fn put_channel_preferences_rejects_disabled_in_app() {
+        let resp = app()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/notifications/preferences")
+                    .header("Authorization", "Bearer test-token")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        r#"{"channels":{"in_app":false,"email":{"enabled":false,"digest":"Off","min_priority":"Low"},"webhook":null,"slack":null}}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "in_app=false must be rejected — spec marks it can't-disable"
+        );
+    }
+
+    #[tokio::test]
+    async fn put_channel_preferences_rejects_relative_webhook_url() {
+        let resp = app()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/notifications/preferences")
+                    .header("Authorization", "Bearer test-token")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        r#"{"channels":{"in_app":true,"email":{"enabled":false,"digest":"Off","min_priority":"Low"},"webhook":{"url":"./local-hook","secret":"s","min_priority":"Low"},"slack":null}}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "non-absolute webhook URL must be rejected"
+        );
+    }
+
+    /// Guard against the split-brain config defect (review bf1e11be F1):
+    /// a channel configuration set via `PUT /users/me`'s
+    /// `preferences.notification_channels` field must reach the delivery
+    /// store the dispatcher reads — email configured through the profile
+    /// endpoint has to queue in the durable outbox, exactly as it would
+    /// when configured through `PUT /notifications/preferences`.
+    #[tokio::test]
+    async fn put_me_notification_channels_reach_delivery_outbox() {
+        let (state, user_id, key) = bootstrap_user("put-me-channels").await;
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/users/me")
+                    .header("Authorization", format!("Bearer {key}"))
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        r#"{"preferences":{"notification_channels":{"in_app":true,"email":{"enabled":true,"digest":"Immediate","min_priority":"Low"},"webhook":null,"slack":null}}}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "channel config via PUT /users/me must be accepted"
+        );
+
+        // Persist an in-app notification for this user and run the
+        // production fan-out path (notify: create + dispatch_to_channels).
+        let notif = Notification::new(
+            Id::new(uuid::Uuid::new_v4().to_string()),
+            Id::new("ws-default"),
+            Id::new(user_id.clone()),
+            NotificationType::GateFailure, // High band
+            "gate failed",
+            "t-1",
+            1_700_000_000i64,
+        );
+        state.notifications.create(&notif).await.unwrap();
+        crate::notification_dispatcher::dispatch_to_channels(&state, &notif).await;
+
+        let outbox = state
+            .kv_store
+            .kv_list(crate::notification_dispatcher::EMAIL_OUTBOX_NS)
+            .await
+            .unwrap();
+        assert_eq!(
+            outbox.len(),
+            1,
+            "email configured via PUT /users/me must queue in the durable outbox"
+        );
+        let (k, v) = &outbox[0];
+        assert!(k.starts_with(&format!("{user_id}:")), "queued for the user");
+        let parsed: serde_json::Value = serde_json::from_str(v).unwrap();
+        assert_eq!(parsed["user_id"], user_id);
+    }
+
+    /// PUT /users/me must apply the SAME channel validation as the dedicated
+    /// endpoint — `in_app: false` and relative URLs cannot be smuggled in
+    /// through the profile preferences field.
+    #[tokio::test]
+    async fn put_me_notification_channels_rejects_invalid_config() {
+        let (state, _user_id, key) = bootstrap_user("put-me-channels-bad").await;
+        let app = crate::api::api_router().with_state(state.clone());
+        for (label, payload) in [
+            (
+                "in_app false",
+                r#"{"preferences":{"notification_channels":{"in_app":false,"email":{"enabled":true,"digest":"Off","min_priority":"Low"},"webhook":null,"slack":null}}}"#,
+            ),
+            (
+                "relative webhook url",
+                r#"{"preferences":{"notification_channels":{"in_app":true,"email":{"enabled":false,"digest":"Off","min_priority":"Low"},"webhook":{"url":"./local","secret":"s","min_priority":"Low"},"slack":null}}}"#,
+            ),
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("PUT")
+                        .uri("/api/v1/users/me")
+                        .header("Authorization", format!("Bearer {key}"))
+                        .header("Content-Type", "application/json")
+                        .body(Body::from(payload))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::BAD_REQUEST,
+                "invalid channel config ({label}) must be rejected by PUT /users/me"
+            );
+        }
+    }
+
+    /// The reverse direction of the single-effective-config invariant: a
+    /// config set via `PUT /notifications/preferences` must be echoed by
+    /// `GET /users/me`, so the preferences round-trip (GET then PUT the whole
+    /// object back) cannot silently revert delivery to a stale config.
+    #[tokio::test]
+    async fn put_channel_preferences_syncs_users_preferences() {
+        let (state, user_id, key) = bootstrap_user("notif-prefs-sync").await;
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/notifications/preferences")
+                    .header("Authorization", format!("Bearer {key}"))
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        r#"{"channels":{"in_app":true,"email":{"enabled":true,"digest":"Daily","min_priority":"High"},"webhook":null,"slack":null}}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me")
+                    .header("Authorization", format!("Bearer {key}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["id"], user_id);
+        assert_eq!(
+            json["preferences"]["notification_channels"],
+            serde_json::json!({
+                "in_app": true,
+                "email": {"enabled": true, "digest": "Daily", "min_priority": "High"},
+                "webhook": null,
+                "slack": null
+            }),
+            "GET /users/me must echo the same effective config the dispatcher reads"
+        );
+    }
+
     /// Helper: bootstrap a user via POST /api/v1/users (Admin-only) and
     /// return (state, user_id, raw_api_key). The API key authenticates as
     /// the new user, exercising the same auth extractor path production
@@ -1684,6 +4972,1132 @@ mod tests {
             json["user"]["id"].as_str().unwrap().to_string(),
             json["api_key"]["key"].as_str().unwrap().to_string(),
         )
+    }
+
+    // ── Session Management (user-management.md §Session Management) ──────
+
+    /// Provision a user with an authenticating API key; returns (state, raw key).
+    /// Thin wrapper over [`bootstrap_user`]: the session tests below do not
+    /// need the user id, only a state + a key that authenticates.
+    async fn provision_user_with_key() -> (std::sync::Arc<crate::AppState>, String) {
+        let (state, _user_id, raw_key) = bootstrap_user("session-user").await;
+        (state, raw_key)
+    }
+
+    #[tokio::test]
+    async fn sessions_endpoint_lists_session_created_by_auth() {
+        let (state, raw_key) = provision_user_with_key().await;
+
+        // Authenticated request through the real extractor — creates the
+        // session row for this credential+device.
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me/sessions")
+                    .header("Authorization", format!("Bearer {raw_key}"))
+                    .header("User-Agent", "gyre-cli/1.0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let sessions = json["sessions"].as_array().unwrap();
+        assert_eq!(
+            sessions.len(),
+            1,
+            "auth must have created exactly one session: {sessions:?}"
+        );
+        assert_eq!(sessions[0]["user_agent"], "gyre-cli/1.0");
+        // The token hash is never exposed.
+        assert!(sessions[0].get("token_hash").is_none());
+    }
+
+    #[tokio::test]
+    async fn revoke_session_then_credential_is_rejected() {
+        let (state, raw_key) = provision_user_with_key().await;
+
+        // Create the session via an authenticated request.
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me/sessions")
+                    .header("Authorization", format!("Bearer {raw_key}"))
+                    .header("User-Agent", "gyre-cli/1.0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let session_id = json["sessions"][0]["id"].as_str().unwrap().to_string();
+
+        // Revoke it.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/v1/users/me/sessions/{session_id}"))
+                    // Same User-Agent as the session being revoked: the
+                    // revoke request itself authenticates as the same
+                    // device (it must not mint a phantom second session).
+                    .header("Authorization", format!("Bearer {raw_key}"))
+                    .header("User-Agent", "gyre-cli/1.0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+        // The revoked session signs the credential out: auth middleware
+        // must reject the API key whose only session was revoked.
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me/sessions")
+                    .header("Authorization", format!("Bearer {raw_key}"))
+                    .header("User-Agent", "gyre-cli/1.0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "revoked session must reject the credential"
+        );
+    }
+
+    #[tokio::test]
+    async fn revoking_one_device_session_does_not_sign_out_other_devices() {
+        let (state, raw_key) = provision_user_with_key().await;
+
+        // Two devices authenticate with the same credential.
+        let app = crate::api::api_router().with_state(state.clone());
+        for ua in ["gyre-cli/1.0", "gyre-web/1.0"] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/v1/users/me/sessions")
+                        .header("Authorization", format!("Bearer {raw_key}"))
+                        .header("User-Agent", ua)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+        }
+
+        // List from the CLI device to find its session id.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me/sessions")
+                    .header("Authorization", format!("Bearer {raw_key}"))
+                    .header("User-Agent", "gyre-cli/1.0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let json = body_json(resp).await;
+        let sessions = json["sessions"].as_array().unwrap();
+        assert_eq!(sessions.len(), 2, "two devices = two sessions");
+        let cli_session_id = sessions
+            .iter()
+            .find(|s| s["user_agent"].as_str().unwrap() == "gyre-cli/1.0")
+            .map(|s| s["id"].as_str().unwrap().to_string())
+            .expect("CLI session must be listed");
+
+        // Revoke only the CLI device's session — from the web device, so
+        // the revoking request is not the session being revoked.
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/v1/users/me/sessions/{cli_session_id}"))
+                    .header("Authorization", format!("Bearer {raw_key}"))
+                    .header("User-Agent", "gyre-web/1.0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+        // The revoked device is signed out: its next request is rejected.
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me/sessions")
+                    .header("Authorization", format!("Bearer {raw_key}"))
+                    .header("User-Agent", "gyre-cli/1.0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "revoked device session must be rejected in auth middleware"
+        );
+
+        // The other device stays signed in (its session is untouched).
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me/sessions")
+                    .header("Authorization", format!("Bearer {raw_key}"))
+                    .header("User-Agent", "gyre-web/1.0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "unrevoked sibling device must keep access"
+        );
+    }
+
+    #[tokio::test]
+    async fn revoke_all_sessions_signs_out_everywhere() {
+        let (state, raw_key) = provision_user_with_key().await;
+
+        // Create two sessions for the same credential from two devices.
+        let app = crate::api::api_router().with_state(state.clone());
+        for ua in ["gyre-cli/1.0", "gyre-web/1.0"] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/v1/users/me/sessions")
+                        .header("Authorization", format!("Bearer {raw_key}"))
+                        .header("User-Agent", ua)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+        }
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me/sessions")
+                    .header("Authorization", format!("Bearer {raw_key}"))
+                    .header("User-Agent", "gyre-cli/1.0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let json = body_json(resp).await;
+        assert_eq!(
+            json["sessions"].as_array().unwrap().len(),
+            2,
+            "two devices = two sessions"
+        );
+
+        // Revoke all.
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/users/me/sessions/revoke-all")
+                    .header("Authorization", format!("Bearer {raw_key}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+        // "Sign out everywhere": the credential is rejected afterwards.
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me/sessions")
+                    .header("Authorization", format!("Bearer {raw_key}"))
+                    .header("User-Agent", "gyre-cli/1.0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "revoke-all must sign the credential out everywhere"
+        );
+    }
+
+    /// "Sign out everywhere" must cover devices never seen before the
+    /// revoke-all: the same credential presented from a NEW device (fresh
+    /// User-Agent, no session row of its own) is rejected by the
+    /// credential-wide `credential_revoked` check in the auth extractor —
+    /// the per-device session check cannot catch it because this device
+    /// has no revoked row. This is the stolen-credential scenario: without
+    /// the extractor-level check, a fresh device would mint a new session
+    /// and receive 200.
+    #[tokio::test]
+    async fn revoke_all_blocks_credential_from_never_seen_device() {
+        let (state, raw_key) = provision_user_with_key().await;
+
+        // One known device authenticates, creating its session row.
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me/sessions")
+                    .header("Authorization", format!("Bearer {raw_key}"))
+                    .header("User-Agent", "gyre-cli/1.0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Sign out everywhere from that device.
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/users/me/sessions/revoke-all")
+                    .header("Authorization", format!("Bearer {raw_key}"))
+                    .header("User-Agent", "gyre-cli/1.0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+        // A device that never authenticated before the revoke-all presents
+        // the same key. It has no session row (revoked or otherwise), so
+        // only the credential-wide check can reject it.
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me/sessions")
+                    .header("Authorization", format!("Bearer {raw_key}"))
+                    .header("User-Agent", "attacker-client/9.9")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "revoke-all must reject the credential itself, including from devices never seen before"
+        );
+    }
+
+    /// GET /users/me/sessions lists only ACTIVE sessions: a revoked
+    /// session and an expired session must not appear, even though both
+    /// rows persist in the store (revoked rows are the durable sign-out
+    /// record and are never deleted; expired rows await retention
+    /// cleanup). Removing the active-only filter from `list_my_sessions`
+    /// makes this test fail.
+    #[tokio::test]
+    async fn my_session_listing_excludes_revoked_and_expired_sessions() {
+        let (state, user_id, raw_key) = bootstrap_user("listing-user").await;
+
+        // Two live devices authenticate.
+        let app = crate::api::api_router().with_state(state.clone());
+        for ua in ["gyre-cli/1.0", "gyre-web/1.0"] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/v1/users/me/sessions")
+                        .header("Authorization", format!("Bearer {raw_key}"))
+                        .header("User-Agent", ua)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+        }
+
+        // A long-expired row for a third device, seeded directly: the row
+        // exists in the store but must never surface in the active
+        // listing (expiry is not activity).
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let expired = gyre_domain::UserSession::new(
+            Id::new("sess-listing-expired"),
+            Id::new(user_id.clone()),
+            "cred-listing-expired",
+            "10.3.3.3",
+            "gyre-old/1.0",
+            now - 7200,
+            now - 60,
+        );
+        state.sessions.create(&expired).await.unwrap();
+
+        // List from the web device: exactly the two live sessions — the
+        // expired row is absent.
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me/sessions")
+                    .header("Authorization", format!("Bearer {raw_key}"))
+                    .header("User-Agent", "gyre-web/1.0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let sessions = json["sessions"].as_array().unwrap();
+        let ids: Vec<&str> = sessions.iter().map(|s| s["id"].as_str().unwrap()).collect();
+        assert_eq!(
+            ids.len(),
+            2,
+            "only the two live sessions may be listed, got {sessions:?}"
+        );
+        assert!(
+            !ids.contains(&"sess-listing-expired"),
+            "an expired session must not appear in the active listing"
+        );
+        let cli_session_id = sessions
+            .iter()
+            .find(|s| s["user_agent"].as_str().unwrap() == "gyre-cli/1.0")
+            .map(|s| s["id"].as_str().unwrap().to_string())
+            .expect("CLI session must be listed");
+
+        // Revoke the CLI device's session — from the web device, so the
+        // listing request below still authenticates.
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/v1/users/me/sessions/{cli_session_id}"))
+                    .header("Authorization", format!("Bearer {raw_key}"))
+                    .header("User-Agent", "gyre-web/1.0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+        // List again from the web device: the revoked CLI session is gone
+        // — only the web device's own session remains.
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me/sessions")
+                    .header("Authorization", format!("Bearer {raw_key}"))
+                    .header("User-Agent", "gyre-web/1.0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let sessions = json["sessions"].as_array().unwrap();
+        assert_eq!(
+            sessions.len(),
+            1,
+            "a revoked session must not appear in the active listing, got {sessions:?}"
+        );
+        assert_eq!(
+            sessions[0]["user_agent"], "gyre-web/1.0",
+            "the remaining listed session must be the live web device"
+        );
+    }
+
+    /// The TenantAdmin listing (GET /users/:user_id/sessions) applies the
+    /// same active-only filter: revoked and expired rows of the target
+    /// user must not appear. Removing the filter from
+    /// `list_user_sessions` makes this test fail.
+    #[tokio::test]
+    async fn admin_session_listing_excludes_revoked_and_expired_sessions() {
+        let (state, user_id, raw_key) = bootstrap_user("admin-listing-user").await;
+
+        // Two live devices authenticate.
+        let app = crate::api::api_router().with_state(state.clone());
+        for ua in ["gyre-cli/1.0", "gyre-web/1.0"] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/v1/users/me/sessions")
+                        .header("Authorization", format!("Bearer {raw_key}"))
+                        .header("User-Agent", ua)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+        }
+
+        // A long-expired row for a third device.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let expired = gyre_domain::UserSession::new(
+            Id::new("sess-admin-listing-expired"),
+            Id::new(user_id.clone()),
+            "cred-admin-listing-expired",
+            "10.4.4.4",
+            "gyre-old/1.0",
+            now - 7200,
+            now - 60,
+        );
+        state.sessions.create(&expired).await.unwrap();
+
+        // Admin lists the target user's sessions: exactly the two live
+        // ones; the expired row is absent.
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/users/{user_id}/sessions"))
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let sessions = json["sessions"].as_array().unwrap();
+        assert_eq!(
+            sessions.len(),
+            2,
+            "admin listing must show only the two live sessions, got {sessions:?}"
+        );
+        let ids: Vec<&str> = sessions.iter().map(|s| s["id"].as_str().unwrap()).collect();
+        assert!(
+            !ids.contains(&"sess-admin-listing-expired"),
+            "an expired session must not appear in the admin active listing"
+        );
+        let cli_session_id = sessions
+            .iter()
+            .find(|s| s["user_agent"].as_str().unwrap() == "gyre-cli/1.0")
+            .map(|s| s["id"].as_str().unwrap().to_string())
+            .expect("CLI session must be listed");
+
+        // Admin revokes the CLI device's session, then lists again: the
+        // revoked session no longer appears.
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/v1/users/{user_id}/sessions/{cli_session_id}"))
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/users/{user_id}/sessions"))
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let sessions = json["sessions"].as_array().unwrap();
+        assert_eq!(
+            sessions.len(),
+            1,
+            "a revoked session must not appear in the admin active listing, got {sessions:?}"
+        );
+        assert_eq!(
+            sessions[0]["user_agent"], "gyre-web/1.0",
+            "the remaining listed session must be the live web device"
+        );
+    }
+
+    #[tokio::test]
+    async fn revoke_cannot_target_another_users_session() {
+        let (state, victim_key) = provision_user_with_key().await;
+
+        // Victim authenticates → session created.
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me/sessions")
+                    .header("Authorization", format!("Bearer {victim_key}"))
+                    .header("User-Agent", "victim-agent")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let json = body_json(resp).await;
+        let session_id = json["sessions"][0]["id"].as_str().unwrap().to_string();
+
+        // Attacker: a different user provisioned in the SAME state so both
+        // users share one session store (cross-user scoping is the point).
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/users")
+                    .header("Authorization", "Bearer test-token")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(r#"{"username":"attacker","tenant_id":"t-1"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let json = body_json(resp).await;
+        let attacker_key = json["api_key"]["key"].as_str().unwrap().to_string();
+
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/v1/users/me/sessions/{session_id}"))
+                    .header("Authorization", format!("Bearer {attacker_key}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "revoking another user's session id must 404, not silently succeed"
+        );
+
+        // The victim's session is still active.
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me/sessions")
+                    .header("Authorization", format!("Bearer {victim_key}"))
+                    .header("User-Agent", "victim-agent")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(
+            json["sessions"].as_array().unwrap().len(),
+            1,
+            "victim's session must survive the cross-user revoke attempt"
+        );
+    }
+
+    /// TenantAdmin views and revokes another user's sessions
+    /// (user-management.md §Session Management: "TenantAdmins can view
+    /// and revoke any user's sessions").
+    #[tokio::test]
+    async fn tenant_admin_can_view_and_revoke_another_users_sessions() {
+        let (state, victim_key) = provision_user_with_key().await;
+
+        // Victim authenticates → session created.
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me/sessions")
+                    .header("Authorization", format!("Bearer {victim_key}"))
+                    .header("User-Agent", "victim-agent")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let victim_session_id = json["sessions"][0]["id"].as_str().unwrap().to_string();
+
+        // The victim's user id is needed for the admin path. Create the
+        // user with a known username via the bootstrap endpoint, then find
+        // it in the store.
+        let victim_user_id = state
+            .users
+            .list()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|u| u.username == "session-user")
+            .map(|u| u.id.to_string())
+            .expect("provisioned victim user must exist");
+
+        // Admin (global test token resolves as Admin) views the victim's
+        // sessions through the admin endpoint.
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/users/{victim_user_id}/sessions"))
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "TenantAdmin must be able to view any user's sessions"
+        );
+        let json = body_json(resp).await;
+        let sessions = json["sessions"].as_array().unwrap();
+        assert_eq!(sessions.len(), 1, "victim has exactly one session");
+        assert_eq!(sessions[0]["id"].as_str().unwrap(), victim_session_id);
+
+        // Admin revokes the victim's session.
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!(
+                        "/api/v1/users/{victim_user_id}/sessions/{victim_session_id}"
+                    ))
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+        // The victim's device is signed out: next request rejected.
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me/sessions")
+                    .header("Authorization", format!("Bearer {victim_key}"))
+                    .header("User-Agent", "victim-agent")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "admin-revoked session must be rejected in auth middleware"
+        );
+    }
+
+    /// Non-admin callers cannot use the TenantAdmin session endpoints.
+    #[tokio::test]
+    async fn non_admin_cannot_view_or_revoke_another_users_sessions() {
+        let (state, victim_key) = provision_user_with_key().await;
+
+        // Victim authenticates → session created; find the victim's user id.
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me/sessions")
+                    .header("Authorization", format!("Bearer {victim_key}"))
+                    .header("User-Agent", "victim-agent")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let victim_user_id = state
+            .users
+            .list()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|u| u.username == "session-user")
+            .map(|u| u.id.to_string())
+            .expect("provisioned victim user must exist");
+
+        // Attacker: a non-admin user (roles: ["ReadOnly"]) in the same state.
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/users")
+                    .header("Authorization", "Bearer test-token")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        r#"{"username":"attacker","tenant_id":"t-1","roles":["ReadOnly"]}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let json = body_json(resp).await;
+        let attacker_key = json["api_key"]["key"].as_str().unwrap().to_string();
+
+        // View → Forbidden.
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/users/{victim_user_id}/sessions"))
+                    .header("Authorization", format!("Bearer {attacker_key}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "non-admin must not view another user's sessions"
+        );
+
+        // Revoke-all → Forbidden.
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/api/v1/users/{victim_user_id}/sessions/revoke-all"
+                    ))
+                    .header("Authorization", format!("Bearer {attacker_key}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "non-admin must not revoke another user's sessions"
+        );
+
+        // The victim's session survives the forbidden attempts.
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me/sessions")
+                    .header("Authorization", format!("Bearer {victim_key}"))
+                    .header("User-Agent", "victim-agent")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    /// TenantAdmin "sign out everywhere" for another user: revoke-all on
+    /// the admin path signs the victim's credential out.
+    #[tokio::test]
+    async fn tenant_admin_revoke_all_signs_user_out_everywhere() {
+        let (state, victim_key) = provision_user_with_key().await;
+
+        // Victim authenticates from two devices.
+        let app = crate::api::api_router().with_state(state.clone());
+        for ua in ["victim-cli/1.0", "victim-web/1.0"] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/v1/users/me/sessions")
+                        .header("Authorization", format!("Bearer {victim_key}"))
+                        .header("User-Agent", ua)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+        }
+
+        let victim_user_id = state
+            .users
+            .list()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|u| u.username == "session-user")
+            .map(|u| u.id.to_string())
+            .expect("provisioned victim user must exist");
+
+        // Admin revokes all of the victim's sessions.
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/api/v1/users/{victim_user_id}/sessions/revoke-all"
+                    ))
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+        // Both devices are signed out (credential fully revoked).
+        for ua in ["victim-cli/1.0", "victim-web/1.0"] {
+            let app = crate::api::api_router().with_state(state.clone());
+            let resp = app
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/v1/users/me/sessions")
+                        .header("Authorization", format!("Bearer {victim_key}"))
+                        .header("User-Agent", ua)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::UNAUTHORIZED,
+                "admin revoke-all must sign every device out ({ua})"
+            );
+        }
+    }
+
+    /// The admin session endpoints must not leak user existence: an
+    /// unknown user id is a 404 for admins and a 403 for non-admins.
+    #[tokio::test]
+    async fn admin_session_endpoints_unknown_user_is_404() {
+        let (state, _raw_key) = provision_user_with_key().await;
+
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/no-such-user/sessions")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "unknown user id must 404, not return an empty session list"
+        );
+    }
+
+    /// A TenantAdmin is scoped to their own tenant (user-management.md
+    /// §Roles): an Admin-role API-key principal of tenant t-2 must not
+    /// view or revoke the sessions of a tenant-t-1 user, while an Admin of
+    /// the SAME tenant still can (so the check is tenant containment, not
+    /// a blanket rejection of API-key principals).
+    #[tokio::test]
+    async fn cross_tenant_admin_cannot_view_or_revoke_another_tenants_user_sessions() {
+        let (state, victim_user_id, victim_key) = bootstrap_user("session-user").await;
+        // Second tenant so the cross-tenant attacker can be provisioned
+        // (create_user validates tenant existence, task-099 F1).
+        let t2 = gyre_domain::Tenant::new(gyre_common::Id::new("t-2"), "Beta", "beta", 0);
+        state.tenants.create(&t2).await.unwrap();
+
+        // Victim authenticates → session created.
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me/sessions")
+                    .header("Authorization", format!("Bearer {victim_key}"))
+                    .header("User-Agent", "victim-agent")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let victim_session_id = json["sessions"][0]["id"].as_str().unwrap().to_string();
+
+        // Provision two Admin-role users: one in the victim's tenant t-1,
+        // one in a different tenant t-2.
+        let app = crate::api::api_router().with_state(state.clone());
+        let (same_tenant_key, cross_tenant_key) = {
+            let mut keys = Vec::new();
+            for (username, tenant) in [("same-admin", "t-1"), ("cross-admin", "t-2")] {
+                let resp = app
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .method("POST")
+                            .uri("/api/v1/users")
+                            .header("Authorization", "Bearer test-token")
+                            .header("Content-Type", "application/json")
+                            .body(Body::from(format!(
+                                r#"{{"username":"{username}","tenant_id":"{tenant}"}}"#
+                            )))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(resp.status(), StatusCode::CREATED);
+                let json = body_json(resp).await;
+                assert_eq!(
+                    json["user"]["tenant_id"], tenant,
+                    "provisioned admin must be bound to the requested tenant"
+                );
+                keys.push(json["api_key"]["key"].as_str().unwrap().to_string());
+            }
+            (keys[0].clone(), keys[1].clone())
+        };
+
+        // Cross-tenant Admin: view → Forbidden.
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/users/{victim_user_id}/sessions"))
+                    .header("Authorization", format!("Bearer {cross_tenant_key}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "Admin of tenant t-2 must not view a tenant-t-1 user's sessions"
+        );
+
+        // Cross-tenant Admin: revoke one session → Forbidden.
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!(
+                        "/api/v1/users/{victim_user_id}/sessions/{victim_session_id}"
+                    ))
+                    .header("Authorization", format!("Bearer {cross_tenant_key}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "Admin of tenant t-2 must not revoke a tenant-t-1 user's session"
+        );
+
+        // Cross-tenant Admin: revoke-all → Forbidden.
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/api/v1/users/{victim_user_id}/sessions/revoke-all"
+                    ))
+                    .header("Authorization", format!("Bearer {cross_tenant_key}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "Admin of tenant t-2 must not sign a tenant-t-1 user out everywhere"
+        );
+
+        // The victim's session survived every forbidden attempt.
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me/sessions")
+                    .header("Authorization", format!("Bearer {victim_key}"))
+                    .header("User-Agent", "victim-agent")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "victim's session must survive the cross-tenant forbidden attempts"
+        );
+
+        // Same-tenant Admin still can (the containment is a tenant
+        // comparison, not a rejection of every API-key principal).
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/users/{victim_user_id}/sessions"))
+                    .header("Authorization", format!("Bearer {same_tenant_key}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "Admin of the SAME tenant must still view the user's sessions"
+        );
+        let json = body_json(resp).await;
+        let sessions = json["sessions"].as_array().unwrap();
+        assert_eq!(
+            sessions.len(),
+            1,
+            "same-tenant Admin sees the victim's live session"
+        );
+        assert_eq!(sessions[0]["id"].as_str().unwrap(), victim_session_id);
     }
 
     #[tokio::test]
@@ -1765,9 +6179,16 @@ mod tests {
         // Partial preferences payload: omitted fields keep their current
         // value (merge, not replace-with-defaults). The PUT above omitted
         // notification_channels and default_workspace_id entirely.
+        // notification_channels now serializes in the nested §Delivery
+        // Channels shape (merged task-112 config: email/webhook/slack).
         assert_eq!(
             json2["preferences"]["notification_channels"],
-            serde_json::json!({"in_app": true, "email_enabled": false, "email_digest": "Off"}),
+            serde_json::json!({
+                "in_app": true,
+                "email": {"enabled": false, "digest": "Off", "min_priority": "Medium"},
+                "webhook": null,
+                "slack": null
+            }),
             "omitted notification_channels must keep the stored value, not reset to default"
         );
         assert_eq!(
@@ -1819,6 +6240,54 @@ mod tests {
         assert_eq!(
             json2["display_name"], "put-me-bad",
             "rejected update must not partially apply"
+        );
+    }
+
+    /// Task-129 review round 3 (privilege escalation): display_name becomes
+    /// the caller's ABAC subject.id under API-key/JWT auth, and the seeded
+    /// `system-full-access` policy (priority 1000) matches the reserved
+    /// system identity — so a user renaming themselves to it must be
+    /// rejected, and nothing applied.
+    #[tokio::test]
+    async fn put_me_rejects_reserved_system_display_name() {
+        let (state, _user_id, key) = bootstrap_user("put-me-reserved").await;
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/users/me")
+                    .header("Authorization", format!("Bearer {key}"))
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        r#"{"display_name":"gyre-system-token","timezone":"UTC"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "the reserved system ABAC identity must not be assignable as display_name"
+        );
+
+        // Nothing was applied — the display_name is unchanged.
+        let app2 = crate::api::api_router().with_state(state);
+        let resp2 = app2
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me")
+                    .header("Authorization", format!("Bearer {key}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let json2 = body_json(resp2).await;
+        assert_ne!(
+            json2["display_name"], "gyre-system-token",
+            "rejected reserved-identity rename must not apply"
         );
     }
 
@@ -1879,5 +6348,1895 @@ mod tests {
             StatusCode::CONFLICT,
             "duplicate username must be a 409 conflict"
         );
+    }
+
+    // ── Workspace membership endpoints (user-management.md §Workspace
+    // Membership, §Ownership Transfer & Reclamation) ─────────────────────
+
+    use gyre_domain::{Team, TeamMembership, User, Workspace, WorkspaceMembership, WorkspaceRole};
+
+    /// Seed a workspace in tenant t-1 with one accepted Owner membership
+    /// whose user record exists. Returns (workspace_id, owner_user_id).
+    async fn seed_workspace_with_owner(
+        state: &std::sync::Arc<crate::AppState>,
+    ) -> (String, String) {
+        let now = 1_700_000_000u64;
+        let tenant = gyre_domain::Tenant::new(Id::new("t-1"), "Acme", "acme", 0);
+        state.tenants.create(&tenant).await.unwrap();
+
+        let ws_id = uuid::Uuid::new_v4().to_string();
+        let ws = Workspace::new(
+            Id::new(ws_id.clone()),
+            Id::new("t-1"),
+            format!("membership-ws-{ws_id}"),
+            format!("membership-ws-{ws_id}"),
+            now,
+        );
+        state.workspaces.create(&ws).await.unwrap();
+
+        let owner_id = uuid::Uuid::new_v4().to_string();
+        let mut owner = User::new(
+            Id::new(owner_id.clone()),
+            format!("owner-ext-{owner_id}"),
+            format!("owner-{owner_id}"),
+            now,
+        );
+        owner.tenant_id = Some(Id::new("t-1"));
+        state.users.create(&owner).await.unwrap();
+
+        let mut membership = WorkspaceMembership::new(
+            Id::new(uuid::Uuid::new_v4().to_string()),
+            Id::new(owner_id.clone()),
+            Id::new(ws_id.clone()),
+            WorkspaceRole::Owner,
+            Id::new("system"),
+            now,
+        );
+        // Mirror production (`create_workspace`): the creator's Owner
+        // membership is active from birth, never a pending invitation —
+        // otherwise the ownerless-workspace invariant and the pending-
+        // invitation list both see a phantom second "invitee".
+        membership.accept(now);
+        state
+            .workspace_memberships
+            .create(&membership)
+            .await
+            .unwrap();
+
+        (ws_id, owner_id)
+    }
+
+    #[tokio::test]
+    async fn last_owner_cannot_be_removed_or_downgraded() {
+        // user-management.md §Ownership Transfer & Reclamation: "Cannot
+        // remove last Owner" — removal and role downgrade must both be
+        // rejected until a new Owner is designated.
+        let state = test_state();
+        let (ws_id, owner_id) = seed_workspace_with_owner(&state).await;
+        let app = crate::api::api_router().with_state(state.clone());
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/v1/workspaces/{ws_id}/members/{owner_id}"))
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::CONFLICT,
+            "removing the last Owner must be a 409 conflict"
+        );
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!(
+                        "/api/v1/workspaces/{ws_id}/members/{owner_id}/role"
+                    ))
+                    .header("Authorization", "Bearer test-token")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"role": "Developer"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::CONFLICT,
+            "downgrading the last Owner must be a 409 conflict"
+        );
+
+        // The membership is untouched — the owner is still an Owner.
+        let m = state
+            .workspace_memberships
+            .find_by_user_and_workspace(&Id::new(owner_id), &Id::new(ws_id))
+            .await
+            .unwrap()
+            .expect("membership must survive the rejected operations");
+        assert_eq!(m.role, WorkspaceRole::Owner);
+    }
+
+    #[tokio::test]
+    async fn ownership_transfer_unblocks_old_owner_removal_and_is_audited() {
+        // user-management.md §Ownership Transfer & Reclamation: the Tenant
+        // Admin reassigns ownership via the role-change endpoint; the
+        // transfer is audit-logged and the previous Owner may then leave.
+        let state = test_state();
+        let (ws_id, owner_id) = seed_workspace_with_owner(&state).await;
+        let now = 1_700_000_000u64;
+
+        // A second member receives ownership.
+        let new_owner_id = uuid::Uuid::new_v4().to_string();
+        let mut new_owner = User::new(
+            Id::new(new_owner_id.clone()),
+            format!("new-owner-ext-{new_owner_id}"),
+            format!("new-owner-{new_owner_id}"),
+            now,
+        );
+        new_owner.tenant_id = Some(Id::new("t-1"));
+        state.users.create(&new_owner).await.unwrap();
+        let m = WorkspaceMembership::new(
+            Id::new(uuid::Uuid::new_v4().to_string()),
+            Id::new(new_owner_id.clone()),
+            Id::new(ws_id.clone()),
+            WorkspaceRole::Developer,
+            Id::new("system"),
+            now,
+        );
+        state.workspace_memberships.create(&m).await.unwrap();
+
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!(
+                        "/api/v1/workspaces/{ws_id}/members/{new_owner_id}/role"
+                    ))
+                    .header("Authorization", "Bearer test-token")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "role": "Owner",
+                            "reason": "ownership transfer"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+        // The transfer is audit-logged with previous/new role and reason.
+        let filter = gyre_ports::AuditQueryFilter {
+            event_type: Some("workspace_ownership_transferred".to_string()),
+            workspace_id: Some(ws_id.clone()),
+            limit: 10,
+            ..Default::default()
+        };
+        let events = state.audit.query(&filter).await.unwrap();
+        assert_eq!(events.len(), 1, "exactly one transfer audit event");
+        assert_eq!(events[0].detail["new_role"], serde_json::json!("Owner"));
+        assert_eq!(
+            events[0].detail["previous_role"],
+            serde_json::json!("Developer")
+        );
+        assert_eq!(
+            events[0].detail["reason"],
+            serde_json::json!("ownership transfer")
+        );
+
+        // With a second active Owner, the original Owner may be removed.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/v1/workspaces/{ws_id}/members/{owner_id}"))
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::NO_CONTENT,
+            "the previous Owner must be removable after the transfer"
+        );
+        assert!(state
+            .workspace_memberships
+            .find_by_user_and_workspace(&Id::new(owner_id), &Id::new(ws_id))
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn invite_member_rejects_duplicate_membership() {
+        let state = test_state();
+        let (ws_id, owner_id) = seed_workspace_with_owner(&state).await;
+        let app = crate::api::api_router().with_state(state.clone());
+
+        let body = serde_json::json!({"user_id": owner_id, "role": "Developer"}).to_string();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/workspaces/{ws_id}/members"))
+                    .header("Authorization", "Bearer test-token")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::CONFLICT,
+            "inviting an existing member must be a 409 conflict"
+        );
+    }
+
+    #[tokio::test]
+    async fn member_management_requires_owner_admin_or_tenant_admin() {
+        // A plain Developer member (API-key auth) must not be able to grant
+        // workspace membership. Runs the PRODUCTION pipeline (api router +
+        // abac_middleware + builtin policies, as build_router layers them):
+        // the request passes ABAC — the Developer global role may write, and
+        // the recorded decision is Allow — so the 403 provably comes from
+        // the handler's membership check, not from policy evaluation.
+        let state = test_state();
+        let (ws_id, _owner_id) = seed_workspace_with_owner(&state).await;
+        let now = 1_700_000_000u64;
+
+        let dev_id = uuid::Uuid::new_v4().to_string();
+        let mut dev = User::new(
+            Id::new(dev_id.clone()),
+            format!("dev-ext-{dev_id}"),
+            format!("dev-{dev_id}"),
+            now,
+        );
+        dev.tenant_id = Some(Id::new("t-1"));
+        dev.global_role = gyre_domain::GlobalRole::Member;
+        dev.roles = vec![gyre_domain::UserRole::Developer];
+        state.users.create(&dev).await.unwrap();
+        let m = WorkspaceMembership::new(
+            Id::new(uuid::Uuid::new_v4().to_string()),
+            Id::new(dev_id.clone()),
+            Id::new(ws_id.clone()),
+            WorkspaceRole::Developer,
+            Id::new("system"),
+            now,
+        );
+        state.workspace_memberships.create(&m).await.unwrap();
+        state
+            .api_keys
+            .create(
+                &crate::auth::hash_api_key("dev-key-membership"),
+                &Id::new(dev_id.clone()),
+                "test",
+            )
+            .await
+            .unwrap();
+
+        crate::abac_middleware::init_resolver();
+        crate::abac_middleware::seed_builtin_policies(&state)
+            .await
+            .expect("seed builtin policies");
+        let app = crate::api::api_router()
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                crate::abac_middleware::abac_middleware,
+            ))
+            .with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/workspaces/{ws_id}/members"))
+                    .header("Authorization", "Bearer dev-key-membership")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"user_id": dev_id, "role": "Viewer"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "a Developer member must not be able to grant membership"
+        );
+
+        // The 403 came from the handler: ABAC evaluated this exact request
+        // to Allow (Developer global role may write on workspace_member).
+        let decisions = state
+            .policies
+            .list_decisions(None, Some("workspace_member"), 50)
+            .await
+            .unwrap();
+        assert!(
+            decisions
+                .iter()
+                .any(|d| { d.decision == gyre_domain::PolicyEffect::Allow && d.action == "write" }),
+            "the request must have passed ABAC (Allow) so the 403 is the handler's"
+        );
+    }
+
+    // ── User management endpoints (user-management.md §API > User
+    // Management) — task-124 ────────────────────────────────────────────
+
+    /// Seed a user with an API key in tenant t-1. Returns (user_id, key).
+    async fn seed_keyed_user(
+        state: &std::sync::Arc<crate::AppState>,
+        username: &str,
+        roles: Vec<gyre_domain::UserRole>,
+    ) -> (String, String) {
+        let now = 1_700_000_000u64;
+        let mut user = User::new(
+            Id::new(uuid::Uuid::new_v4().to_string()),
+            format!("{username}-ext"),
+            username,
+            now,
+        );
+        user.tenant_id = Some(Id::new("t-1"));
+        user.roles = roles.clone();
+        user.global_role = if roles.contains(&gyre_domain::UserRole::Admin) {
+            gyre_domain::GlobalRole::TenantAdmin
+        } else {
+            gyre_domain::GlobalRole::Member
+        };
+        state.users.create(&user).await.unwrap();
+        let key = format!("key-{username}");
+        state
+            .api_keys
+            .create(&crate::auth::hash_api_key(&key), &user.id, "test")
+            .await
+            .unwrap();
+        (user.id.to_string(), key)
+    }
+
+    /// GET /api/v1/users/:username returns the tenant-public profile with
+    /// workspace memberships; a user of another tenant is indistinguishable
+    /// from a nonexistent one (404) — tenants are hard isolation
+    /// boundaries, so the endpoint cannot probe foreign handles.
+    #[tokio::test]
+    async fn get_user_by_username_is_tenant_scoped() {
+        let state = test_state();
+        let (ws_id, owner_id) = seed_workspace_with_owner(&state).await;
+
+        // Owner's handle via the system principal.
+        let owner = state
+            .users
+            .find_by_id(&Id::new(&owner_id))
+            .await
+            .unwrap()
+            .unwrap();
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/users/{}", owner.username))
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["id"], owner_id);
+        assert_eq!(json["username"], owner.username);
+        // Profile page surface: workspace memberships and roles.
+        let memberships = json["memberships"].as_array().unwrap();
+        assert_eq!(memberships.len(), 1);
+        assert_eq!(memberships[0]["workspace_id"], ws_id);
+        assert_eq!(memberships[0]["role"], "Owner");
+
+        // A same-tenant caller sees the profile too.
+        let (_, key) =
+            seed_keyed_user(&state, "peer", vec![gyre_domain::UserRole::Developer]).await;
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/users/{}", owner.username))
+                    .header("Authorization", format!("Bearer {key}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Cross-tenant: a t-2 user is invisible to a t-1 caller (404, not
+        // 403 — existence must not leak).
+        let now = 1_700_000_000u64;
+        let beta = gyre_domain::Tenant::new(Id::new("t-2"), "Beta", "beta", 0);
+        state.tenants.create(&beta).await.unwrap();
+        let mut foreign = User::new(Id::new("foreign-user"), "foreign-ext", "foreign-user", now);
+        foreign.tenant_id = Some(Id::new("t-2"));
+        state.users.create(&foreign).await.unwrap();
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/foreign-user")
+                    .header("Authorization", format!("Bearer {key}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        // Nonexistent handle: 404.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/nobody-here")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// GET /api/v1/users/:username includes team memberships drawn from
+    /// the subject's accepted workspace memberships (user-management.md
+    /// §User Profile Page: "Team memberships").
+    #[tokio::test]
+    async fn public_profile_includes_teams() {
+        let state = test_state();
+        let (ws_id, owner_id) = seed_workspace_with_owner(&state).await;
+        let owner = state
+            .users
+            .find_by_id(&Id::new(&owner_id))
+            .await
+            .unwrap()
+            .unwrap();
+
+        let team = Team::new(
+            Id::new("team-1"),
+            Id::new(ws_id.clone()),
+            "Platform",
+            "platform",
+            owner.id.clone(),
+            1_700_000_000u64,
+        );
+        state.teams.create(&team).await.unwrap();
+        state
+            .teams
+            .add_member(&TeamMembership::new(
+                team.id.clone(),
+                owner.id.clone(),
+                1_700_000_001,
+            ))
+            .await
+            .unwrap();
+
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/users/{}", owner.username))
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let teams = json["teams"].as_array().unwrap();
+        assert_eq!(teams.len(), 1);
+        assert_eq!(teams[0]["slug"], "platform");
+        assert_eq!(teams[0]["name"], "Platform");
+        assert_eq!(teams[0]["workspace_id"], ws_id);
+    }
+
+    /// GET /api/v1/users/:username/activity and /stats: real aggregates
+    /// over the subject's recorded public actions (MR reviews under the
+    /// user id, spec approvals under `user:{display_name}`, agent spawns
+    /// under the display name), newest-first ordering, pagination, and the
+    /// same tenant containment as the profile itself (404 cross-tenant —
+    /// existence must not leak).
+    #[tokio::test]
+    async fn public_profile_activity_and_stats() {
+        let state = test_state();
+        let (ws_id, owner_id) = seed_workspace_with_owner(&state).await;
+        let owner = state
+            .users
+            .find_by_id(&Id::new(&owner_id))
+            .await
+            .unwrap()
+            .unwrap();
+
+        // ── Seed the subject's public actions ──────────────────────────
+        // 1. One MR review (human reviews record the user id).
+        let mr = gyre_domain::MergeRequest::new(
+            Id::new("mr-1"),
+            Id::new("repo-1"),
+            Id::new(ws_id.clone()),
+            "Add feature",
+            "feature",
+            "main",
+            1_700_000_010u64,
+        );
+        state.merge_requests.create(&mr).await.unwrap();
+        state
+            .reviews
+            .submit_review(&gyre_domain::Review::new(
+                Id::new("review-1"),
+                mr.id.clone(),
+                owner.id.to_string(),
+                gyre_domain::ReviewDecision::Approved,
+                1_700_000_100u64,
+            ))
+            .await
+            .unwrap();
+
+        // 2. One approved spec ledger entry recorded under the canonical
+        //    user Id — the form approve_spec writes for human principals
+        //    (pinned by the specs.rs regression "ledger approver_id must be
+        //    the canonical user Id") — plus one rejected entry under the
+        //    legacy `user:{display_name}` form, pinning that historical
+        //    rows still attribute.
+        let mut approved = gyre_domain::SpecApproval::new(
+            Id::new("approval-1"),
+            "specs/system/vision.md",
+            "a".repeat(40),
+            owner.id.to_string(),
+        );
+        approved.approve(1_700_000_200).unwrap();
+        state.spec_approvals.create(&approved).await.unwrap();
+        let mut rejected = gyre_domain::SpecApproval::new(
+            Id::new("approval-2"),
+            "specs/system/old.md",
+            "b".repeat(40),
+            format!("user:{}", owner.display_name),
+        );
+        rejected
+            .reject(&owner.display_name, "superseded", 1_700_000_050)
+            .unwrap();
+        state.spec_approvals.create(&rejected).await.unwrap();
+
+        // 3. One agent spawn (spawn paths record the raw principal id —
+        //    the display name for user principals).
+        let mut agent =
+            gyre_domain::Agent::new(Id::new("agent-1"), "implementer-1", 1_700_000_300u64);
+        agent.workspace_id = Id::new(ws_id.clone());
+        agent.spawned_by = Some(owner.display_name.clone());
+        state.agents.create(&agent).await.unwrap();
+
+        // A control row that must NOT attribute to the owner: another
+        // reviewer's review.
+        state
+            .reviews
+            .submit_review(&gyre_domain::Review::new(
+                Id::new("review-other"),
+                mr.id.clone(),
+                "someone-else".to_string(),
+                gyre_domain::ReviewDecision::ChangesRequested,
+                1_700_000_400u64,
+            ))
+            .await
+            .unwrap();
+
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // ── Stats ──────────────────────────────────────────────────────
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/users/{}/stats", owner.username))
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let stats = body_json(resp).await;
+        assert_eq!(stats["mrs_reviewed"], 1, "only the owner's review counts");
+        assert_eq!(
+            stats["specs_approved"], 1,
+            "the rejected entry is not an approval"
+        );
+        assert_eq!(stats["agents_spawned"], 1);
+
+        // ── Activity feed ─────────────────────────────────────────────
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/users/{}/activity", owner.username))
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let feed = body_json(resp).await;
+        let events = feed["activity"].as_array().unwrap();
+        assert_eq!(events.len(), 4, "review + approval + rejection + spawn");
+        // Newest first: agent spawn (300) > approval (200) > review (100) > rejection (50).
+        let types: Vec<&str> = events
+            .iter()
+            .map(|e| e["event_type"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            types,
+            [
+                "agent_spawned",
+                "spec_approved",
+                "mr_review",
+                "spec_rejected"
+            ]
+        );
+        // The review event joins the MR for navigation.
+        assert_eq!(events[2]["mr_id"], "mr-1");
+        assert_eq!(events[2]["mr_title"], "Add feature");
+        assert_eq!(events[2]["repo_id"], "repo-1");
+        // The other reviewer's review is absent.
+        assert!(events
+            .iter()
+            .all(|e| e["event_type"] != "mr_review" || e["mr_id"] == "mr-1"));
+
+        // Pagination: limit=2 returns the two newest events.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/users/{}/activity?limit=2", owner.username))
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let feed = body_json(resp).await;
+        assert_eq!(feed["activity"].as_array().unwrap().len(), 2);
+        assert_eq!(feed["total"], 4);
+
+        // ── A same-tenant peer can read the feed (same ABAC "user" read
+        //    mapping as the profile itself; containment is the only gate). ──
+        let (_, peer_key) = seed_keyed_user(
+            &state,
+            "peer-viewer",
+            vec![gyre_domain::UserRole::Developer],
+        )
+        .await;
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/users/{}/activity", owner.username))
+                    .header("Authorization", format!("Bearer {peer_key}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // ── Tenant containment: a cross-tenant caller gets 404 on both
+        //    endpoints (indistinguishable from a nonexistent handle). ──
+        let (_, key) =
+            seed_keyed_user(&state, "t2-viewer", vec![gyre_domain::UserRole::Developer]).await;
+        // Re-bind the seeded viewer to t-2 for the cross-tenant case
+        // (seed_keyed_user always binds to t-1).
+        let mut t2 = state
+            .users
+            .find_by_username("t2-viewer")
+            .await
+            .unwrap()
+            .unwrap();
+        t2.tenant_id = Some(Id::new("t-2"));
+        state.users.update(&t2).await.unwrap();
+        for path in ["activity", "stats"] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/api/v1/users/{}/{}", owner.username, path))
+                        .header("Authorization", format!("Bearer {key}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::NOT_FOUND,
+                "{path} must 404 cross-tenant"
+            );
+        }
+    }
+
+    /// GET /api/v1/users is TenantAdmin-only and tenant-scoped, with
+    /// limit/offset pagination.
+    #[tokio::test]
+    async fn list_users_is_tenant_admin_only_scoped_and_paginated() {
+        let state = test_state();
+        seed_workspace_with_owner(&state).await; // t-1 + one owner user
+        let (admin_id, admin_key) =
+            seed_keyed_user(&state, "list-admin", vec![gyre_domain::UserRole::Admin]).await;
+        let (_, dev_key) =
+            seed_keyed_user(&state, "list-dev", vec![gyre_domain::UserRole::Developer]).await;
+
+        // Cross-tenant user must not appear in the t-1 listing.
+        let now = 1_700_000_000u64;
+        let beta = gyre_domain::Tenant::new(Id::new("t-2"), "Beta", "beta", 0);
+        state.tenants.create(&beta).await.unwrap();
+        let mut foreign = User::new(Id::new("foreign-list"), "foreign-ext", "foreign-list", now);
+        foreign.tenant_id = Some(Id::new("t-2"));
+        state.users.create(&foreign).await.unwrap();
+
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // A plain Developer member is rejected.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users")
+                    .header("Authorization", format!("Bearer {dev_key}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // The TenantAdmin gets their tenant's users only, paginated.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users?limit=1&offset=0")
+                    .header("Authorization", format!("Bearer {admin_key}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let users = json["users"].as_array().unwrap();
+        assert_eq!(users.len(), 1, "limit=1 must return one user");
+        // t-1 has the seeded owner + the admin + the developer = 3 users.
+        assert_eq!(
+            json["total"], 3,
+            "total must count only the caller's tenant"
+        );
+        let usernames: Vec<&str> = users
+            .iter()
+            .map(|u| u["username"].as_str().unwrap())
+            .collect();
+        assert!(!usernames.contains(&"foreign-list"));
+
+        // offset walks the same set.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users?limit=2&offset=2")
+                    .header("Authorization", format!("Bearer {admin_key}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let json = body_json(resp).await;
+        assert_eq!(json["users"].as_array().unwrap().len(), 1);
+
+        // The admin sees themselves in the full listing (sanity: the admin
+        // is a t-1 user).
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users")
+                    .header("Authorization", format!("Bearer {admin_key}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let json = body_json(resp).await;
+        let ids: Vec<&str> = json["users"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|u| u["id"].as_str().unwrap())
+            .collect();
+        assert!(ids.contains(&admin_id.as_str()));
+    }
+
+    /// PUT /api/v1/users/:id/deactivate — TenantAdmin-only, and the
+    /// deactivation cascades: the account stops authenticating, and a
+    /// workspace left without an active Owner is recorded ownerless with
+    /// the tenant's TenantAdmins notified.
+    #[tokio::test]
+    async fn deactivate_user_cascades_to_auth_and_ownership() {
+        let state = test_state();
+        let now = 1_700_000_000u64;
+        let tenant = gyre_domain::Tenant::new(Id::new("t-1"), "Acme", "acme", 0);
+        state.tenants.create(&tenant).await.unwrap();
+
+        // A workspace whose only Owner is the deactivation target.
+        let ws_id = uuid::Uuid::new_v4().to_string();
+        let ws = Workspace::new(
+            Id::new(ws_id.clone()),
+            Id::new("t-1"),
+            format!("deact-ws-{ws_id}"),
+            format!("deact-ws-{ws_id}"),
+            now,
+        );
+        state.workspaces.create(&ws).await.unwrap();
+        let (target_id, target_key) = seed_keyed_user(
+            &state,
+            "deact-target",
+            vec![gyre_domain::UserRole::Developer],
+        )
+        .await;
+        let m = WorkspaceMembership::new(
+            Id::new(uuid::Uuid::new_v4().to_string()),
+            Id::new(target_id.clone()),
+            Id::new(ws_id.clone()),
+            WorkspaceRole::Owner,
+            Id::new("system"),
+            now,
+        );
+        state.workspace_memberships.create(&m).await.unwrap();
+
+        // The acting TenantAdmin and a plain Developer.
+        let (admin_id, admin_key) =
+            seed_keyed_user(&state, "deact-admin", vec![gyre_domain::UserRole::Admin]).await;
+        let (_, dev_key) =
+            seed_keyed_user(&state, "deact-dev", vec![gyre_domain::UserRole::Developer]).await;
+
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // Pre-condition: the target's key authenticates.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me")
+                    .header("Authorization", format!("Bearer {target_key}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // A plain Developer member may not deactivate.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/users/{target_id}/deactivate"))
+                    .header("Authorization", format!("Bearer {dev_key}"))
+                    .header("Content-Type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // Self-deactivation is rejected.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/users/{admin_id}/deactivate"))
+                    .header("Authorization", format!("Bearer {admin_key}"))
+                    .header("Content-Type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+
+        // Cross-tenant target is rejected.
+        let beta = gyre_domain::Tenant::new(Id::new("t-2"), "Beta", "beta", 0);
+        state.tenants.create(&beta).await.unwrap();
+        let mut foreign = User::new(
+            Id::new("foreign-deact"),
+            "foreign-ext",
+            "foreign-deact",
+            now,
+        );
+        foreign.tenant_id = Some(Id::new("t-2"));
+        state.users.create(&foreign).await.unwrap();
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/users/foreign-deact/deactivate")
+                    .header("Authorization", format!("Bearer {admin_key}"))
+                    .header("Content-Type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // The TenantAdmin deactivates the target (last Owner of ws).
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/users/{target_id}/deactivate"))
+                    .header("Authorization", format!("Bearer {admin_key}"))
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"reason": "leaving the company"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert!(
+            json["deactivated_at"].as_u64().is_some(),
+            "response must carry the deactivation stamp"
+        );
+
+        // Cascade 1 — the account no longer authenticates with the same key.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me")
+                    .header("Authorization", format!("Bearer {target_key}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "a deactivated user's API key must stop authenticating"
+        );
+
+        // Cascade 2 — the workspace lost its only active Owner: ownerless.
+        assert!(
+            !crate::workspace_ownership::has_active_owner(&state, &Id::new(&ws_id))
+                .await
+                .unwrap(),
+            "a deactivated Owner is not an active Owner"
+        );
+        let record = state
+            .kv_store
+            .kv_get("workspace_ownership", &ws_id)
+            .await
+            .unwrap();
+        assert!(
+            record.is_some(),
+            "the ownerless transition must be recorded"
+        );
+
+        // Cascade 3 — the tenant's TenantAdmins were notified.
+        let notifs = state
+            .notifications
+            .list_for_user(
+                &Id::new(&admin_id),
+                None,
+                None,
+                None,
+                None,
+                None,
+                &[],
+                50,
+                0,
+            )
+            .await
+            .unwrap();
+        assert!(
+            notifs
+                .iter()
+                .any(|n| n.notification_type == NotificationType::WorkspaceOwnerless),
+            "the acting TenantAdmin must have received a WorkspaceOwnerless notification"
+        );
+
+        // The deactivation is audit-logged with the reason.
+        let filter = gyre_ports::AuditQueryFilter {
+            event_type: Some("user_deactivated".to_string()),
+            limit: 10,
+            ..Default::default()
+        };
+        let events = state.audit.query(&filter).await.unwrap();
+        assert_eq!(events.len(), 1, "exactly one user_deactivated audit event");
+        assert_eq!(
+            events[0].detail["reason"],
+            serde_json::json!("leaving the company")
+        );
+
+        // Deactivation is idempotent — a second call succeeds and keeps the
+        // original stamp.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/users/{target_id}/deactivate"))
+                    .header("Authorization", format!("Bearer {admin_key}"))
+                    .header("Content-Type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json2 = body_json(resp).await;
+        assert_eq!(json2["deactivated_at"], json["deactivated_at"]);
+    }
+
+    // ─── Teams (user-management.md §Team Management) ─────────────────────────
+
+    /// Seed a Developer workspace member (tenant t-1) and return the user id.
+    async fn seed_workspace_developer(
+        state: &std::sync::Arc<crate::AppState>,
+        ws_id: &str,
+    ) -> String {
+        let now = 1_700_000_000u64;
+        let dev_id = uuid::Uuid::new_v4().to_string();
+        let mut dev = User::new(
+            Id::new(dev_id.clone()),
+            format!("dev-ext-{dev_id}"),
+            format!("dev-{dev_id}"),
+            now,
+        );
+        dev.tenant_id = Some(Id::new("t-1"));
+        state.users.create(&dev).await.unwrap();
+        let membership = WorkspaceMembership::new(
+            Id::new(uuid::Uuid::new_v4().to_string()),
+            Id::new(dev_id.clone()),
+            Id::new(ws_id.to_string()),
+            WorkspaceRole::Developer,
+            Id::new("system"),
+            now,
+        );
+        state
+            .workspace_memberships
+            .create(&membership)
+            .await
+            .unwrap();
+        dev_id
+    }
+
+    /// Seed a tenant user with NO workspace membership; returns the user id.
+    async fn seed_tenant_user_without_membership(
+        state: &std::sync::Arc<crate::AppState>,
+    ) -> String {
+        let now = 1_700_000_000u64;
+        let uid = uuid::Uuid::new_v4().to_string();
+        let mut user = User::new(
+            Id::new(uid.clone()),
+            format!("loner-ext-{uid}"),
+            format!("loner-{uid}"),
+            now,
+        );
+        user.tenant_id = Some(Id::new("t-1"));
+        state.users.create(&user).await.unwrap();
+        uid
+    }
+
+    async fn create_team_via_api(
+        app: &Router,
+        ws_id: &str,
+        body: serde_json::Value,
+    ) -> axum::response::Response {
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/workspaces/{ws_id}/teams"))
+                    .header("Authorization", "Bearer test-token")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn team_crud_slug_lead_and_membership_flow() {
+        // user-management.md §Team Management + §API > Teams: create carries
+        // slug (derived from the name) + lead (a workspace member);
+        // membership add/remove endpoints carry added_at.
+        let state = test_state();
+        let (ws_id, owner_id) = seed_workspace_with_owner(&state).await;
+        let dev_id = seed_workspace_developer(&state, &ws_id).await;
+        let app = crate::api::api_router().with_state(state.clone());
+
+        let resp = create_team_via_api(
+            &app,
+            &ws_id,
+            serde_json::json!({"name": "Platform Team", "lead": owner_id}),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let team = body_json(resp).await;
+        assert_eq!(team["slug"], "platform-team", "slug derives from the name");
+        assert_eq!(team["lead"], owner_id);
+        assert_eq!(team["member_ids"].as_array().unwrap().len(), 0);
+        let team_id = team["id"].as_str().unwrap().to_string();
+
+        // Add a member — the response carries the membership's added_at.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/api/v1/workspaces/{ws_id}/teams/{team_id}/members"
+                    ))
+                    .header("Authorization", "Bearer test-token")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"user_id": dev_id}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let membership = body_json(resp).await;
+        assert_eq!(membership["team_id"], team_id);
+        assert_eq!(membership["user_id"], dev_id);
+        assert!(
+            membership["added_at"].as_u64().unwrap() > 0,
+            "membership must carry a real added_at timestamp"
+        );
+
+        // Duplicate membership → 409.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/api/v1/workspaces/{ws_id}/teams/{team_id}/members"
+                    ))
+                    .header("Authorization", "Bearer test-token")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"user_id": dev_id}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+
+        // List reflects the real membership table.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/workspaces/{ws_id}/teams"))
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let list = body_json(resp).await;
+        assert_eq!(list["teams"].as_array().unwrap().len(), 1);
+        assert_eq!(list["teams"][0]["member_ids"].as_array().unwrap().len(), 1);
+        assert_eq!(list["teams"][0]["member_ids"][0], dev_id);
+
+        // Update carries the new fields.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/workspaces/{ws_id}/teams/{team_id}"))
+                    .header("Authorization", "Bearer test-token")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"description": "Owns the platform"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let updated = body_json(resp).await;
+        assert_eq!(updated["description"], "Owns the platform");
+        assert_eq!(updated["slug"], "platform-team");
+
+        // Remove the member — idempotent.
+        for expected in [StatusCode::NO_CONTENT, StatusCode::NO_CONTENT] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("DELETE")
+                        .uri(format!(
+                            "/api/v1/workspaces/{ws_id}/teams/{team_id}/members/{dev_id}"
+                        ))
+                        .header("Authorization", "Bearer test-token")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), expected);
+        }
+        let members = state
+            .teams
+            .list_members(&Id::new(team_id.clone()))
+            .await
+            .unwrap();
+        assert_eq!(members.len(), 0);
+
+        // Delete the team.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/v1/workspaces/{ws_id}/teams/{team_id}"))
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        assert!(state
+            .teams
+            .find_by_id(&Id::new(team_id))
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn team_slug_validation_and_uniqueness() {
+        let state = test_state();
+        let (ws_id, owner_id) = seed_workspace_with_owner(&state).await;
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // Explicit slugs must be URL-safe — never silently rewritten.
+        for bad_slug in [
+            "Bad Slug!",
+            "-platform",
+            "platform-",
+            "platform--team",
+            "Platform",
+        ] {
+            let resp = create_team_via_api(
+                &app,
+                &ws_id,
+                serde_json::json!({"name": "Platform", "slug": bad_slug, "lead": owner_id}),
+            )
+            .await;
+            assert_eq!(
+                resp.status(),
+                StatusCode::BAD_REQUEST,
+                "explicit slug {bad_slug:?} must be rejected"
+            );
+        }
+
+        // A name with no URL-safe derivation requires an explicit slug.
+        let resp = create_team_via_api(
+            &app,
+            &ws_id,
+            serde_json::json!({"name": "!!!", "lead": owner_id}),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // Create two teams whose derived slugs collide → second is a 409
+        // (slug is unique within the workspace).
+        let resp = create_team_via_api(
+            &app,
+            &ws_id,
+            serde_json::json!({"name": "Platform Team", "lead": owner_id}),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let resp = create_team_via_api(
+            &app,
+            &ws_id,
+            serde_json::json!({"name": "platform team", "lead": owner_id}),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::CONFLICT,
+            "duplicate slug within a workspace must be a 409"
+        );
+
+        // The same slug in a DIFFERENT workspace is fine.
+        let (ws2_id, owner2_id) = seed_workspace_with_owner(&state).await;
+        let resp = create_team_via_api(
+            &app,
+            &ws2_id,
+            serde_json::json!({"name": "Platform Team", "lead": owner2_id}),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+    }
+
+    #[tokio::test]
+    async fn team_lead_and_members_must_be_workspace_members() {
+        // "Teams don't grant additional permissions beyond workspace
+        // membership" — the lead and every member must already belong to the
+        // workspace.
+        let state = test_state();
+        let (ws_id, owner_id) = seed_workspace_with_owner(&state).await;
+        let loner = seed_tenant_user_without_membership(&state).await;
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // Lead outside the workspace → 400.
+        let resp = create_team_via_api(
+            &app,
+            &ws_id,
+            serde_json::json!({"name": "Platform", "lead": loner}),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "a lead who is not a workspace member must be rejected"
+        );
+
+        // Member outside the workspace → 400.
+        let resp = create_team_via_api(
+            &app,
+            &ws_id,
+            serde_json::json!({"name": "Platform", "lead": owner_id}),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let team_id = body_json(resp).await["id"].as_str().unwrap().to_string();
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/api/v1/workspaces/{ws_id}/teams/{team_id}/members"
+                    ))
+                    .header("Authorization", "Bearer test-token")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"user_id": loner}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "a team member who is not a workspace member must be rejected"
+        );
+        // Nothing was written.
+        assert_eq!(
+            state
+                .teams
+                .list_members(&Id::new(team_id))
+                .await
+                .unwrap()
+                .len(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn team_routes_are_workspace_scoped() {
+        // A team from workspace B addressed through workspace A's path is a
+        // 404, not a cross-workspace read/write.
+        let state = test_state();
+        let (ws1_id, owner1) = seed_workspace_with_owner(&state).await;
+        let (ws2_id, owner2) = seed_workspace_with_owner(&state).await;
+        let app = crate::api::api_router().with_state(state.clone());
+
+        let resp = create_team_via_api(
+            &app,
+            &ws2_id,
+            serde_json::json!({"name": "Platform", "lead": owner2}),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let team_id = body_json(resp).await["id"].as_str().unwrap().to_string();
+
+        for (method, uri) in [
+            (
+                "PUT",
+                format!("/api/v1/workspaces/{ws1_id}/teams/{team_id}"),
+            ),
+            (
+                "DELETE",
+                format!("/api/v1/workspaces/{ws1_id}/teams/{team_id}"),
+            ),
+            (
+                "POST",
+                format!("/api/v1/workspaces/{ws1_id}/teams/{team_id}/members"),
+            ),
+            (
+                "DELETE",
+                format!("/api/v1/workspaces/{ws1_id}/teams/{team_id}/members/{owner1}"),
+            ),
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(uri.clone())
+                        .header("Authorization", "Bearer test-token")
+                        .header("Content-Type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({"user_id": owner1}).to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::NOT_FOUND,
+                "{method} {uri} must be workspace-scoped"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn team_update_validates_slug_conflict_and_lead() {
+        let state = test_state();
+        let (ws_id, owner_id) = seed_workspace_with_owner(&state).await;
+        let dev_id = seed_workspace_developer(&state, &ws_id).await;
+        let app = crate::api::api_router().with_state(state.clone());
+
+        let resp = create_team_via_api(
+            &app,
+            &ws_id,
+            serde_json::json!({"name": "Platform", "lead": owner_id}),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let _t1 = body_json(resp).await["id"].as_str().unwrap().to_string();
+
+        let resp = create_team_via_api(
+            &app,
+            &ws_id,
+            serde_json::json!({"name": "SRE", "lead": owner_id}),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let t2 = body_json(resp).await["id"].as_str().unwrap().to_string();
+
+        // Renaming t2 onto t1's slug → 409.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/workspaces/{ws_id}/teams/{t2}"))
+                    .header("Authorization", "Bearer test-token")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"slug": "platform"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+
+        // Changing the lead to a non-member → 400.
+        let loner = seed_tenant_user_without_membership(&state).await;
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/workspaces/{ws_id}/teams/{t2}"))
+                    .header("Authorization", "Bearer test-token")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(serde_json::json!({"lead": loner}).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // A valid update (lead swap to a real member) lands.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/workspaces/{ws_id}/teams/{t2}"))
+                    .header("Authorization", "Bearer test-token")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(serde_json::json!({"lead": dev_id}).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(body_json(resp).await["lead"], dev_id);
+    }
+
+    #[tokio::test]
+    async fn team_management_requires_owner_admin_or_tenant_admin() {
+        // Team management is an Owner/Admin capability (user-management.md
+        // §UI Pages: "Team Management | Create/edit teams, manage
+        // membership"). A plain Developer member must get 403 from the
+        // handler — the same guard as membership management.
+        let state = test_state();
+        let (ws_id, owner_id) = seed_workspace_with_owner(&state).await;
+        let dev_id = seed_workspace_developer(&state, &ws_id).await;
+
+        // API key for the Developer so auth resolves through the real path.
+        state
+            .api_keys
+            .create(
+                &crate::auth::hash_api_key("dev-key-teams"),
+                &Id::new(dev_id),
+                "test",
+            )
+            .await
+            .unwrap();
+
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/workspaces/{ws_id}/teams"))
+                    .header("Authorization", "Bearer dev-key-teams")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"name": "Platform", "lead": owner_id}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "a Developer member must not be able to create teams"
+        );
+        assert_eq!(
+            state
+                .teams
+                .list_by_workspace(&Id::new(ws_id))
+                .await
+                .unwrap()
+                .len(),
+            0
+        );
+    }
+
+    /// GET /users/me/judgments?type=<unknown> must 400 — the same contract
+    /// as the sibling notification-preferences PUT and the notifications
+    /// priority param. Silently mapping an unparseable type to "no filter"
+    /// returns unfiltered results the caller did not ask for (review F5).
+    #[tokio::test]
+    async fn judgments_unknown_type_returns_400() {
+        let app = app();
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me/judgments?type=bogus")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "an unparseable ?type= must be rejected, not ignored"
+        );
+
+        // Every canonical JudgmentType string is accepted (no filter drop).
+        for t in ["approval", "rejection", "gate", "trust", "meta-spec"] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/api/v1/users/me/judgments?type={t}"))
+                        .header("Authorization", "Bearer test-token")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK, "type={t} must be valid");
+        }
+    }
+
+    // ─── PUT /api/v1/users/:id/role (inline global-role management) ─────────
+
+    /// The TenantAdmin role-change surface for the Users tab
+    /// (user-management.md §UI Pages > Tenant User Management: "role
+    /// management (TenantAdmin only)"). Covers the full contract: a
+    /// Developer may not change roles; an invalid role is a 400; an admin
+    /// promotion flips GlobalRole AND the UserRole vec in lockstep; a
+    /// demotion back to Member flips both back; the response reports the
+    /// stored record (which `is_tenant_admin` reads on every call, so the
+    /// change is effective immediately, not cosmetic).
+    #[tokio::test]
+    async fn update_user_role_changes_global_and_user_roles_in_lockstep() {
+        let state = test_state();
+        let tenant = gyre_domain::Tenant::new(Id::new("t-1"), "Acme", "acme", 0);
+        state.tenants.create(&tenant).await.unwrap();
+        let (target_id, _target_key) = seed_keyed_user(
+            &state,
+            "role-target",
+            vec![gyre_domain::UserRole::Developer],
+        )
+        .await;
+        let (admin_id, admin_key) =
+            seed_keyed_user(&state, "role-admin", vec![gyre_domain::UserRole::Admin]).await;
+        let (_, dev_key) =
+            seed_keyed_user(&state, "role-dev", vec![gyre_domain::UserRole::Developer]).await;
+
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // A plain Developer may not change roles.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/users/{target_id}/role"))
+                    .header("Authorization", format!("Bearer {dev_key}"))
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"role": "TenantAdmin"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // An unknown role is a 400, not a silent default.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/users/{target_id}/role"))
+                    .header("Authorization", format!("Bearer {admin_key}"))
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(serde_json::json!({"role": "Bogus"}).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // Self-change is rejected (same rationale as self-deactivation).
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/users/{admin_id}/role"))
+                    .header("Authorization", format!("Bearer {admin_key}"))
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"role": "Member"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+
+        // Admin promotes the target to TenantAdmin.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/users/{target_id}/role"))
+                    .header("Authorization", format!("Bearer {admin_key}"))
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"role": "TenantAdmin", "reason": "promotion"})
+                            .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["global_role"], "TenantAdmin");
+        assert_eq!(json["roles"], serde_json::json!(["Admin"]));
+
+        // The stored record carries both fields (what is_tenant_admin reads).
+        let stored = state
+            .users
+            .find_by_id(&Id::new(target_id.clone()))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.global_role, gyre_domain::GlobalRole::TenantAdmin);
+        assert!(stored.roles.contains(&gyre_domain::UserRole::Admin));
+        assert!(!stored.roles.contains(&gyre_domain::UserRole::Developer));
+
+        // The audit trail records the privilege change.
+        let filter = gyre_ports::AuditQueryFilter {
+            event_type: Some("user_global_role_changed".to_string()),
+            limit: 10,
+            ..Default::default()
+        };
+        let events = state.audit.query(&filter).await.unwrap();
+        assert_eq!(events.len(), 1, "exactly one role-change audit event");
+        assert_eq!(
+            events[0].detail["previous_role"],
+            serde_json::json!("Member")
+        );
+        assert_eq!(
+            events[0].detail["new_role"],
+            serde_json::json!("TenantAdmin")
+        );
+        assert_eq!(events[0].detail["reason"], serde_json::json!("promotion"));
+
+        // Demotion back to Member flips both fields back.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/users/{target_id}/role"))
+                    .header("Authorization", format!("Bearer {admin_key}"))
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"role": "Member"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["global_role"], "Member");
+        assert_eq!(json["roles"], serde_json::json!(["Developer"]));
+
+        // A no-op change (same role) is idempotent and emits no extra audit.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/users/{target_id}/role"))
+                    .header("Authorization", format!("Bearer {admin_key}"))
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"role": "Member"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let events = state.audit.query(&filter).await.unwrap();
+        assert_eq!(events.len(), 2, "promotion + demotion only");
+    }
+
+    /// Cross-tenant and deactivated-target guards on the role surface.
+    #[tokio::test]
+    async fn update_user_role_guards_cross_tenant_and_deactivated() {
+        let state = test_state();
+        let now = 1_700_000_000u64;
+        let tenant = gyre_domain::Tenant::new(Id::new("t-1"), "Acme", "acme", 0);
+        state.tenants.create(&tenant).await.unwrap();
+        let (deact_id, _dk) =
+            seed_keyed_user(&state, "role-deact", vec![gyre_domain::UserRole::Developer]).await;
+        let (_, admin_key) =
+            seed_keyed_user(&state, "role-admin2", vec![gyre_domain::UserRole::Admin]).await;
+
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // Deactivate the first target through the real endpoint.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/users/{deact_id}/deactivate"))
+                    .header("Authorization", format!("Bearer {admin_key}"))
+                    .header("Content-Type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Role change on the deactivated account is rejected.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/users/{deact_id}/role"))
+                    .header("Authorization", format!("Bearer {admin_key}"))
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"role": "TenantAdmin"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+
+        // Cross-tenant target is rejected.
+        let beta = gyre_domain::Tenant::new(Id::new("t-2"), "Beta", "beta", 0);
+        state.tenants.create(&beta).await.unwrap();
+        let mut foreign = User::new(
+            Id::new("foreign-role"),
+            "foreign-role-ext",
+            "foreign-role",
+            now,
+        );
+        foreign.tenant_id = Some(Id::new("t-2"));
+        state.users.create(&foreign).await.unwrap();
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/users/foreign-role/role")
+                    .header("Authorization", format!("Bearer {admin_key}"))
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"role": "TenantAdmin"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     }
 }

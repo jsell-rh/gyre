@@ -90,3 +90,23 @@ table.tasks td.dev-last { max-width: 440px; overflow: hidden; text-overflow: ell
 .dev-stream-bottom[hidden],.dev-stream-count[hidden] { display: none; }
 @media (max-width: 1000px) { .dev-metrics { grid-template-columns: repeat(3,1fr); } .dev-overview-grid { grid-template-columns: 1fr; } }
 @media (max-width: 650px) { .dev-metrics { grid-template-columns: repeat(2,1fr); } .dev-deps { grid-template-columns: 1fr; } .dev-task-button { flex-wrap: wrap; } .dev-coverage { grid-template-columns: 1fr; gap: 8px; } .health .sep { display: none; } .health-spacer { display: none; } }
+
+.dev-decision { margin: 1rem 0; padding-top: 1rem; border-top: 1px solid var(--border, #39434a); }
+.dev-decision > p { white-space: pre-wrap; }
+.dev-decision-options { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1rem; }
+.dev-decision-option { border: 1px solid var(--border, #39434a); border-radius: 8px; padding: 1rem; }
+.dev-decision a { display: block; overflow-wrap: anywhere; }
+@media (max-width: 900px) { .dev-decision-options { grid-template-columns: 1fr; } }
+@media (max-width: 700px) {
+  header.masthead { flex-wrap: wrap; height: auto; padding: 12px; gap: 10px; }
+  .masthead .spacer { display: none; }
+  .masthead nav.views { order: 3; width: 100%; overflow-x: auto; }
+  .masthead input#global-search { max-width: 100%; min-width: 0; }
+}
+
+/* Planning identities and canonical paths can be longer than numbered tasks. */
+.dev-overview-grid > div { min-width: 0; }
+.dev-panel { overflow-wrap: anywhere; }
+.dev-task-button .mono { max-width: 100%; overflow-wrap: anywhere; }
+#drawer header { flex-wrap: wrap; }
+#drawer header .id, #drawer header .title { min-width: 0; overflow-wrap: anywhere; }

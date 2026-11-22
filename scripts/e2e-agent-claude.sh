@@ -57,7 +57,16 @@ fi
 
 # ── Heartbeat ────────────────────────────────────────────────────────────────
 
+# The heartbeat carries the session's X.509-SVID (identity-security.md
+# Layer 1): the server verifies the workload identity fail-closed before
+# recording liveness. GYRE_SVID_PEM holds the PEM chain (multi-line), so
+# the JSON body is built with node (already required by this script's
+# agent-runner.mjs) rather than shell interpolation — same pattern as
+# docker/gyre-agent/entrypoint.sh.
+SVID_PAYLOAD=$(node -e 'process.stdout.write(JSON.stringify({ svid: process.env.GYRE_SVID_PEM || "", stack_fingerprint: process.env.GYRE_STACK_HASH || "" }))' 2>/dev/null || printf '{"svid":""}')
 curl -sf -X PUT -H "Authorization: Bearer $GYRE_AUTH_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "$SVID_PAYLOAD" \
   "${GYRE_SERVER_URL}/api/v1/agents/${GYRE_AGENT_ID}/heartbeat" >/dev/null 2>&1 || true
 
 # ── Clone repo ───────────────────────────────────────────────────────────────

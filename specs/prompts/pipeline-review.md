@@ -7,6 +7,12 @@ Run meaningful focused checks. A test that still passes with the relevant
 production behavior disabled is not proof. Save actual probe command, source,
 exit code, and output under /tmp/stage/review-evidence.
 
+For a formatting-only repair, compare the new source with the pinned formatter's
+output on the previously cited candidate. If they match and there are no other
+functional changes, inspect that diff and leave runtime execution to verification;
+do not cold-compile unchanged behavior. Always issue a fresh verdict for the
+current candidate; no earlier approval transfers.
+
 If `/tmp/stage/review-resume.json` exists, read it first. It identifies saved
 notes and probe evidence from an interrupted review of this exact candidate.
 Continue from those artifacts after checking their relevance; no previous
@@ -45,3 +51,15 @@ Large gyre-server builds/test compilation must run in the independent verifier,
 after the model exits, to fit the hard 4 GiB budget. Use cargo check for server
 type checking and focused tests of smaller explicit packages. Record the server
 tests the verifier must execute. Do not bypass the build wrapper.
+
+Generated `web/dist/` is owned by the deterministic verifier, not implementation
+or review. It may intentionally match the upstream bundle in this checkpoint.
+Review the authored frontend source and tests. Do not reject for stale/missing
+bundle regeneration, generated merge conflicts, or lack of an agent-run build.
+The verifier rebuilds remotely after integration, runs all checks, commits the
+resulting assets, and binds publication to that exact tested tree. Record any
+pure generated-output observation separately; real source defects remain blocking.
+
+The verifier rebuilds web/dist and regenerates specs/coverage/SUMMARY.md from
+clean merged matrices. Review source and matrix statuses for real accuracy;
+a stale generated summary alone is not a production-code repair finding.

@@ -119,6 +119,7 @@ pub enum MessageKind {
     ReviewRequest,
     StatusUpdate,
     Escalation,
+    GateResult,             // per agent-gates.md §Gate Failure Feedback — forge → author agent (added task-137)
 
     // ── Tier 2: Events (signed + persisted with TTL) ──────────────────
     AgentCreated,
@@ -171,7 +172,7 @@ pub enum MessageKind {
 - Telemetry tier requires `Destination::Workspace(id)`. Telemetry + Broadcast is rejected with 400 — there is no valid `TelemetryBuffer` key for `workspace_id: None`. Telemetry + Agent is rejected — telemetry is observability, not communication.
 - Event tier works with any destination.
 
-**Kind + Origin constraint:** `MessageKind` should expose a `fn server_only(&self) -> bool` method that returns `true` for all **built-in** Event-tier kinds (from `AgentCreated` through `ReconciliationCompleted`, plus `DataSeeded` and `QueueUpdated`), but `false` for `Custom(String)` even though Custom defaults to Event tier. The rule is: built-in Event variants are server-only; Custom and Directed/Telemetry variants are agent-allowed. The send handler checks: if `kind.server_only() && origin != Server`, reject with 403.
+**Kind + Origin constraint:** `MessageKind` should expose a `fn server_only(&self) -> bool` method that returns `true` for all **built-in** Event-tier kinds (from `AgentCreated` through `ReconciliationCompleted`, plus `DataSeeded` and `QueueUpdated`), but `false` for `Custom(String)` even though Custom defaults to Event tier. The rule is: built-in Event variants are server-only; Custom and Directed/Telemetry variants are agent-allowed — with one exception added in task-137: `GateResult` is Directed but server-only, because a gate outcome is forge authority (an agent must not be able to forge a gate pass/fail for another agent's MR). The send handler checks: if `kind.server_only() && origin != Server`, reject with 403.
 
 **Broadcast-only kinds:** `DataSeeded` and `QueueUpdated` use `Destination::Broadcast` with `workspace_id: None`. They are server-only AND storage-exempt — they flow through the in-memory broadcast channel only, never hitting `MessageRepository::store()`. The send path must short-circuit before attempting storage for these kinds.
 
@@ -211,6 +212,7 @@ Each `MessageKind` has a defined payload schema. The server validates payloads o
 | `AgentCompleted` | `agent_id: Id, task_id: Id, spec_ref: Option<String>, decisions: [{what, why, confidence, alternatives_considered?}], uncertainties: [String], conversation_sha: Option<String>` | `agent_id`, `task_id` |
 | `ReconciliationCompleted` | `workspace_id: Id, persona_id: Id, persona_name: String, specs_evaluated: u32, specs_changed: u32, preview_branch: Option<String>` | `workspace_id`, `persona_id` |
 | `GateFailure` | `mr_id: Id, gate_name: String, gate_type: String, status: String, output: String, spec_ref: Option<String>, gate_agent_id: Id` | `mr_id`, `gate_name` |
+| `GateResult` | `mr_id: Id, gate_name: String, gate_type: String, status: String, output: String, spec_ref: Option<String>, attempt: u32, gate_agent_id: Id` | `mr_id`, `gate_name`, `attempt` (added task-137, per agent-gates.md §Gate Failure Feedback — the forge → author agent inbox delivery) |
 | `StaleSpecWarning` | `mr_id: Id, repo_id: Id, spec_path: String, spec_sha: String, current_sha: String` | all |
 | `SpeculativeConflict` | `repo_id: Id, branch: String, conflicting_files: Vec<String>` | all |
 | `SpeculativeMergeClean` | `repo_id: Id, branch: String` | both |

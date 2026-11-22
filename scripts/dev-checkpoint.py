@@ -10,7 +10,7 @@ def git(*args):
 
 
 def restore(branch):
-    if not re.fullmatch(r'pipeline/task-\d+/[a-f0-9]{32}-\d+', branch):
+    if not re.fullmatch(r'pipeline/(?:task-\d+|spec-[a-f0-9]{24})/[a-f0-9]{32}-\d+', branch):
         raise ValueError('invalid task branch')
     if git('branch', '--show-current') != branch:
         raise RuntimeError('agent left the assigned branch; refuse to checkpoint another checkout')

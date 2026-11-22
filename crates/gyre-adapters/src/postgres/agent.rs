@@ -74,6 +74,7 @@ struct AgentRow {
     orchestrator_type: String,
     repo_id: Option<String>,
     restart_on_failure: bool,
+    attestation_level: Option<i32>,
     persona_id: Option<String>,
 }
 
@@ -96,6 +97,7 @@ impl AgentRow {
             orchestrator_type: str_to_orchestrator_type(&self.orchestrator_type)?,
             repo_id: self.repo_id.map(Id::new),
             restart_on_failure: self.restart_on_failure,
+            attestation_level: self.attestation_level.map(|v| v.clamp(0, 255) as u8),
             persona_id: self.persona_id.map(Id::new),
         })
     }
@@ -118,6 +120,7 @@ struct NewAgentRow<'a> {
     orchestrator_type: &'a str,
     repo_id: Option<&'a str>,
     restart_on_failure: bool,
+    attestation_level: Option<i32>,
     persona_id: Option<&'a str>,
 }
 
@@ -144,6 +147,7 @@ impl AgentRepository for PgStorage {
                 orchestrator_type: orchestrator_type_to_str(&a.orchestrator_type),
                 repo_id: a.repo_id.as_ref().map(|id| id.as_str()),
                 restart_on_failure: a.restart_on_failure,
+                attestation_level: a.attestation_level.map(|v| v as i32),
                 persona_id: a.persona_id.as_ref().map(|id| id.as_str()),
             };
             diesel::insert_into(agents::table)
@@ -162,6 +166,7 @@ impl AgentRepository for PgStorage {
                     agents::orchestrator_type.eq(row.orchestrator_type),
                     agents::repo_id.eq(row.repo_id),
                     agents::restart_on_failure.eq(row.restart_on_failure),
+                    agents::attestation_level.eq(row.attestation_level),
                     agents::persona_id.eq(row.persona_id),
                 ))
                 .execute(&mut *conn)
@@ -255,9 +260,11 @@ impl AgentRepository for PgStorage {
                 agents::current_task_id.eq(a.current_task_id.as_ref().map(|id| id.as_str())),
                 agents::lifetime_budget_secs.eq(a.lifetime_budget_secs.map(|v| v as i64)),
                 agents::last_heartbeat.eq(a.last_heartbeat.map(|v| v as i64)),
+                agents::spawned_by.eq(a.spawned_by.as_deref()),
                 agents::orchestrator_type.eq(orchestrator_type_to_str(&a.orchestrator_type)),
                 agents::repo_id.eq(a.repo_id.as_ref().map(|id| id.as_str())),
                 agents::restart_on_failure.eq(a.restart_on_failure),
+                agents::attestation_level.eq(a.attestation_level.map(|v| v as i32)),
                 agents::persona_id.eq(a.persona_id.as_ref().map(|id| id.as_str())),
             ))
             .execute(&mut *conn)
@@ -296,6 +303,23 @@ impl AgentRepository for PgStorage {
                 .order(agents::spawned_at.asc())
                 .load::<AgentRow>(&mut *conn)
                 .context("list agents by workspace")?;
+            rows.into_iter().map(|r| r.into_agent()).collect()
+        })
+        .await?
+    }
+
+    async fn list_by_spawner(&self, spawned_by: &str) -> Result<Vec<Agent>> {
+        let pool = Arc::clone(&self.pool);
+        let spawner = spawned_by.to_string();
+        let tenant = self.tenant_id.clone();
+        tokio::task::spawn_blocking(move || -> Result<Vec<Agent>> {
+            let mut conn = pool.get().context("get db connection")?;
+            let rows = agents::table
+                .filter(agents::tenant_id.eq(&tenant))
+                .filter(agents::spawned_by.eq(&spawner))
+                .order(agents::spawned_at.desc())
+                .load::<AgentRow>(&mut *conn)
+                .context("list agents by spawner")?;
             rows.into_iter().map(|r| r.into_agent()).collect()
         })
         .await?

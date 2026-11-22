@@ -301,10 +301,10 @@ describe('ExplorerCanvas liveness — trace play icon (Layer 2 scaffolding)', ()
     fireEvent.mouseDown(canvas, { clientX: icon.x, clientY: icon.y, button: 0 });
     fireEvent.click(canvas, { clientX: icon.x, clientY: icon.y });
 
-    // Lens switched to evaluative
-    const evalBtn = Array.from(container.querySelectorAll('.lens-group .tb-btn'))
-      .find((b) => b.textContent.includes('Evaluative'));
-    expect(evalBtn?.classList.contains('active')).toBe(true);
+    // Lens switched to evaluative — checkbox group (ui-navigation.md §3)
+    const evalCheck = Array.from(container.querySelectorAll('.lens-group input[type="checkbox"]'))
+      .find((i) => i.closest('label').textContent.includes('Evaluative'));
+    expect(evalCheck?.checked).toBe(true);
     // Playback started — the toolbar play button now shows the pause glyph
     // (two rects) instead of the play triangle.
     const pbBtn = container.querySelector('.trace-pb-btn');

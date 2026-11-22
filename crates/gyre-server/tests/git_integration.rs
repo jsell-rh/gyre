@@ -62,6 +62,12 @@ fn git_local(args: &[&str], dir: &std::path::Path) {
 
 /// Bind a server, return (port, base_url, auth_token).
 async fn start_server(auth_token: &str) -> (u16, String) {
+    // task-264: production's default signing mode is keyless Fulcio; this
+    // harness drives real pushes with non-JWT dev tokens, so it explicitly
+    // opts into local forge-key signing (`GYRE_SIGNING_MODE=local`, the
+    // documented operator opt-in). Keyless/fail-loud signing has its own
+    // dedicated suites (api/jj.rs, git_http.rs, merge_processor.rs).
+    unsafe { std::env::set_var("GYRE_SIGNING_MODE", "local") };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let base_url = format!("http://127.0.0.1:{port}");
@@ -468,6 +474,11 @@ async fn push_records_agent_commit_provenance() {
     // Agent clones, commits, and pushes using its per-agent token.
     let base_url_c = base_url.clone();
     let agent_token_c = agent_token.clone();
+    // task-270: the server (system) token performs the initial default-branch
+    // push — agent principals may not push directly to the default branch
+    // (specs/development/agent-workflow.md §PRs as the Collaboration
+    // Primitive). The agent keeps pushing its feature branch.
+    let system_token_c = token.to_string();
     let _repo_id_c = repo_id.clone();
     let ws_id_c = ws_id.clone();
 
@@ -486,11 +497,12 @@ async fn push_records_agent_commit_provenance() {
         git_local(&["config", "user.email", "prov@gyre.local"], &dir);
         git_local(&["config", "user.name", "Prov Agent"], &dir);
 
-        // Initial commit on main.
+        // Initial commit on main — pushed with the system token: the default
+        // branch is protected from agent-principal pushes (task-270).
         std::fs::write(dir.join("readme.md"), "# prov\n").unwrap();
         git_local(&["add", "."], &dir);
         git_local(&["commit", "-m", "chore: initial commit"], &dir);
-        let push_main = git_with_token(&["push", "origin", "HEAD:main"], &dir, &agent_token_c);
+        let push_main = git_with_token(&["push", "origin", "HEAD:main"], &dir, &system_token_c);
         let push_stderr = String::from_utf8_lossy(&push_main.stderr).to_string();
         assert!(
             push_main.status.success(),
@@ -593,6 +605,11 @@ async fn merge_queue_auto_merges_mr_and_commit_on_main() {
     // Agent clones, commits, and pushes.
     let base_url_c = base_url.clone();
     let agent_token_c = agent_token.clone();
+    // task-270: the initial default-branch push uses the system token —
+    // agent principals may not push directly to the default branch. The
+    // merge queue's landing of the MR on main is server-side (git_ops
+    // port) and unaffected by the HTTP-path protection.
+    let system_token_c = token.to_string();
     let _repo_id_c = repo_id.clone();
     let ws_id_c = ws_id.clone();
     tokio::task::spawn_blocking(move || {
@@ -610,11 +627,12 @@ async fn merge_queue_auto_merges_mr_and_commit_on_main() {
         git_local(&["config", "user.email", "mq@gyre.local"], &dir);
         git_local(&["config", "user.name", "MQ Agent"], &dir);
 
-        // Establish main branch.
+        // Establish main branch (system token — the default branch is
+        // protected from agent-principal pushes, task-270).
         std::fs::write(dir.join("readme.md"), "# mq\n").unwrap();
         git_local(&["add", "."], &dir);
         git_local(&["commit", "-m", "chore: initial commit"], &dir);
-        let push_main = git_with_token(&["push", "origin", "HEAD:main"], &dir, &agent_token_c);
+        let push_main = git_with_token(&["push", "origin", "HEAD:main"], &dir, &system_token_c);
         assert!(push_main.status.success(), "push main failed");
 
         // Feature branch.
@@ -730,13 +748,21 @@ async fn merge_queue_blocks_mr_with_pending_dependency() {
     let auth_hdr = format!("Bearer {token}");
     let client = reqwest::Client::new();
 
+    // Seed a real repository: create_mr resolves the MR's workspace scope
+    // from its repository and refuses unknown repositories (M34
+    // scope-fabrication repair), so MR fixtures need an existing repo like
+    // every other test in this file. Autonomous trust keeps the queue
+    // mechanics under test free of the supervised-trust approval hold.
+    let ws_id = uniq("ws-dep-block");
+    let repo_id = create_repo(&client, &api, &auth_hdr, &ws_id, "dep-block-repo").await;
+
     // Create two MRs via the API (no real git operations needed for this test).
     // MR-A: the dependency (open, not yet enqueued)
     let mr_a: serde_json::Value = client
         .post(format!("{api}/merge-requests"))
         .header("Authorization", &auth_hdr)
         .json(&serde_json::json!({
-            "repository_id": "dep-test-repo",
+            "repository_id": repo_id.clone(),
             "title": "dep-block: MR A (dependency)",
             "source_branch": "feat/dep-a",
             "target_branch": "main",
@@ -755,7 +781,7 @@ async fn merge_queue_blocks_mr_with_pending_dependency() {
         .post(format!("{api}/merge-requests"))
         .header("Authorization", &auth_hdr)
         .json(&serde_json::json!({
-            "repository_id": "dep-test-repo",
+            "repository_id": repo_id,
             "title": "dep-block: MR B (depends on A)",
             "source_branch": "feat/dep-b",
             "target_branch": "main",
@@ -1298,18 +1324,25 @@ async fn queue_graph_reflects_enqueued_mrs_and_deps() {
     let auth_hdr = format!("Bearer {token}");
     let client = reqwest::Client::new();
 
+    // Seed a real repository: create_mr resolves the MR's workspace scope
+    // from its repository and refuses unknown repositories (M34
+    // scope-fabrication repair), so MR fixtures need an existing repo.
+    let ws_id = uniq("ws-graph");
+    let repo_id = create_repo(&client, &api, &auth_hdr, &ws_id, "graph-repo").await;
+
     // Create 3 MRs: C → B → A (C depends on B, B depends on A).
     let create_mr = |title: &str| {
         let client = client.clone();
         let api = api.clone();
         let auth_hdr = auth_hdr.clone();
+        let repository_id = repo_id.clone();
         let title = title.to_string();
         async move {
             let resp: serde_json::Value = client
                 .post(format!("{api}/merge-requests"))
                 .header("Authorization", auth_hdr)
                 .json(&serde_json::json!({
-                    "repository_id": "graph-repo",
+                    "repository_id": repository_id,
                     "title": title,
                     "source_branch": "feat/x",
                     "target_branch": "main",
@@ -1420,27 +1453,12 @@ async fn spec_approval_auto_invalidated_on_spec_change() {
     let repo_id = create_repo(&client, &api, &auth_hdr, &ws_id, "spec-inv-repo").await;
     assert!(!repo_id.is_empty());
 
-    let task_id = create_task(&client, &api, &auth_hdr, "spec-inv: setup task").await;
-
-    // Spawn an agent to get a scoped token.
-    let spawn_resp: serde_json::Value = client
-        .post(format!("{api}/agents/spawn"))
-        .header("Authorization", &auth_hdr)
-        .json(&serde_json::json!({
-            "name": "spec-inv-agent",
-            "repo_id": repo_id,
-            "task_id": task_id,
-            "branch": "feat/spec-inv",
-        }))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-
-    let agent_token = spawn_resp["token"].as_str().unwrap().to_string();
-    let _agent_hdr = format!("Bearer {agent_token}");
+    // task-270: pushes to the default branch are rejected for AGENT
+    // principals (agent-workflow.md §PRs as the Collaboration Primitive);
+    // spec-lifecycle post-receive processing (registry sync, approval
+    // invalidation) is the human/system push path (spec-lifecycle.md
+    // §Automatic Task Creation), so this test drives its main pushes with
+    // the global dev token — the system principal, an exempt caller class.
 
     // Build clone URL using repo_id.
     let clone_url = format!("{base_url}/git/{ws_id}/spec-inv-repo.git");
@@ -1449,13 +1467,13 @@ async fn spec_approval_auto_invalidated_on_spec_change() {
     // The manifest entry makes the push-triggered spec_registry sync register
     // "system/test-spec.md" in the ledger with its git blob SHA.
     let clone_url_c = clone_url.clone();
-    let agent_token_c = agent_token.clone();
+    let push_token = token.to_string();
     tokio::task::spawn_blocking(move || {
         let work = TempDir::new().unwrap();
         let dir = work.path().join("repo");
         let clone_url = clone_url_c;
 
-        let clone_out = git_with_token(&["clone", &clone_url, "repo"], work.path(), &agent_token_c);
+        let clone_out = git_with_token(&["clone", &clone_url, "repo"], work.path(), &push_token);
         let stderr = String::from_utf8_lossy(&clone_out.stderr).to_string();
         let ok = clone_out.status.success()
             || stderr.contains("empty repository")
@@ -1481,7 +1499,7 @@ async fn spec_approval_auto_invalidated_on_spec_change() {
         git_local(&["commit", "-m", "docs: add test spec file"], &dir);
 
         // Push initial commit to main.
-        let push = git_with_token(&["push", "origin", "HEAD:main"], &dir, &agent_token_c);
+        let push = git_with_token(&["push", "origin", "HEAD:main"], &dir, &push_token);
         assert!(
             push.status.success(),
             "initial push failed: {}",
@@ -1564,16 +1582,12 @@ async fn spec_approval_auto_invalidated_on_spec_change() {
 
     // Step 3: push a modification to the spec file.
     let clone_url_c = clone_url.clone();
-    let agent_token_c = agent_token.clone();
+    let push_token = token.to_string();
     tokio::task::spawn_blocking(move || {
         let work = TempDir::new().unwrap();
         let dir = work.path().join("repo");
 
-        let clone_out = git_with_token(
-            &["clone", &clone_url_c, "repo"],
-            work.path(),
-            &agent_token_c,
-        );
+        let clone_out = git_with_token(&["clone", &clone_url_c, "repo"], work.path(), &push_token);
         let stderr = String::from_utf8_lossy(&clone_out.stderr).to_string();
         let ok = clone_out.status.success()
             || stderr.contains("empty repository")
@@ -1604,7 +1618,7 @@ async fn spec_approval_auto_invalidated_on_spec_change() {
         git_local(&["commit", "-m", "docs: update test spec file"], &dir);
 
         // Push modification to main.
-        let push = git_with_token(&["push", "origin", "HEAD:main"], &dir, &agent_token_c);
+        let push = git_with_token(&["push", "origin", "HEAD:main"], &dir, &push_token);
         assert!(
             push.status.success(),
             "spec modification push failed: {}",
@@ -1684,5 +1698,72 @@ async fn mirror_endpoint_with_full_middleware_returns_201() {
         status,
         reqwest::StatusCode::CREATED,
         "Expected 201 CREATED from POST /repos/mirror with full middleware stack, got {status}: {body}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 13: Archived repos reject pushes (repo-lifecycle.md §4 step 5)
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn push_to_archived_repo_rejected() {
+    let token = "git-test-archived-push-token";
+    let (_port, base_url) = start_server(token).await;
+    let api = format!("{base_url}/api/v1");
+    let auth_hdr = format!("Bearer {token}");
+    let client = reqwest::Client::new();
+
+    let ws_id = uniq("ws-archived");
+    let repo_id = create_repo(&client, &api, &auth_hdr, &ws_id, "archived-repo").await;
+
+    // Archive the repo via the API.
+    let archive_resp = client
+        .post(format!("{api}/repos/{repo_id}/archive"))
+        .header("Authorization", &auth_hdr)
+        .send()
+        .await
+        .unwrap();
+    assert!(archive_resp.status().is_success());
+
+    // A real `git push` against the archived repo must fail.
+    let base_url_c = base_url.clone();
+    let token_owned = token.to_string();
+    let ws_id_c = ws_id.clone();
+
+    let (push_ok, push_stderr) = tokio::task::spawn_blocking(move || {
+        let work = TempDir::new().unwrap();
+        let dir = work.path().join("repo");
+        let clone_url = format!("{base_url_c}/git/{ws_id_c}/archived-repo.git");
+
+        // Clone still works — archived repos are read-only, not invisible.
+        let clone_out = git_with_token(&["clone", &clone_url, "repo"], work.path(), &token_owned);
+        let stderr = String::from_utf8_lossy(&clone_out.stderr).to_string();
+        let ok = clone_out.status.success()
+            || stderr.contains("empty repository")
+            || stderr.contains("warning");
+        assert!(ok, "clone failed: {stderr}");
+
+        git_local(&["config", "user.email", "test@gyre.local"], &dir);
+        git_local(&["config", "user.name", "Test Agent"], &dir);
+        std::fs::write(dir.join("readme.md"), "# test\n").unwrap();
+        git_local(&["add", "."], &dir);
+        git_local(&["commit", "-m", "feat: push to archived repo"], &dir);
+
+        let push_out = git_with_token(&["push", "origin", "HEAD:main"], &dir, &token_owned);
+        (
+            push_out.status.success(),
+            String::from_utf8_lossy(&push_out.stderr).to_string(),
+        )
+    })
+    .await
+    .unwrap();
+
+    assert!(
+        !push_ok,
+        "push to archived repo should be rejected, but it succeeded"
+    );
+    assert!(
+        push_stderr.contains("archived"),
+        "push rejection should explain the repo is archived, got: {push_stderr}"
     );
 }

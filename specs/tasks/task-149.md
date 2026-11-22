@@ -3,11 +3,11 @@ title: "Implement analytics dashboard UI and data retention policy"
 spec_ref: "analytics.md §Analytics Dashboard (UI)"
 depends_on:
   - task-147
-progress: not-started
+progress: complete
 coverage_sections:
   - "analytics.md §Analytics Dashboard (UI)"
   - "analytics.md §Data Retention"
-commits: []
+commits: ["7947e7562af8b70391ec557be173d99dd2fb5787", "c78037ad4b30f6a003b218b939d0d8773565e90d", "7e0fbc2aa6d30a56ebc06212d638559b7f3dd617", "cc026cc601699cedb121b668d2c02e2523685c2c", "af587a17fcee2909f749dbe050f409d710d8b6db", "f2d6db71f21c89feb052220e030f5faa754be5e7", "7fe3cf781b95a87c0c01d95dd35fc74dfc4beef5"]
 ---
 
 ## Spec Excerpt
@@ -106,3 +106,143 @@ Analytics events are retained for 365 days by default (configurable via `PUT /ap
 - For charts, check if a chart library is already in `web/package.json` — if not, use simple SVG
 - The Svelte SPA uses fetch API calls to the backend — follow existing API call patterns
 - Svelte 5 caveat: `$state` proxies cannot be structured-cloned — use `$state.snapshot()` if needed for workers
+
+## Shipped
+
+The product analytics dashboard (analytics.md §Analytics Dashboard (UI)) and
+the analytics-scoped retention configuration surface (§Data Retention).
+
+### Behavior
+
+- **`web/src/components/AnalyticsView.svelte`** — full-page dashboard with
+  all five specced sections, wired to the real analytics API:
+  - **Event counts bar chart** — `GET /analytics/daily?days=30` rendered as
+    an SVG bar chart, one bar per day, zero-filled across all 30 calendar
+    days (the chart shows volume over time, not just active days), peak
+    count in the axis meta. The endpoint returns TOTAL daily event volume
+    across all event names (review repair af587a17): `event_name` is an
+    optional filter on `GET /analytics/daily` — absent or empty (the
+    spec's `?event_name=&days=30` form) aggregates across every event
+    name via `AnalyticsRepository::aggregate_by_day(Option<&str>)`, so
+    the bare `?days=30` request the chart sends is valid and returns the
+    aggregate series, not a 400 and not a single-name series.
+  - **Recent events** — paginated table (event, agent, timestamp, properties
+    preview) from `GET /analytics/events?limit=50`; filterable by event
+    name, agent, and workspace (dropdown options derived from the live
+    data via `/top` and `group_by` queries); clicking a row expands the
+    full properties JSON; "Load more" advances a timestamp cursor
+    (oldest seen timestamp) with client-side id dedupe so same-second
+    events are never duplicated across pages.
+  - **Decision panel** — dropdown of exactly the six built-in decisions,
+    editable JSON context, Evaluate → `GET /analytics/decide` (context
+    JSON-validated client-side; invalid JSON never reaches the API);
+    result rendered with outcome fields (promote/rollback/healthy,
+    confidence, reason) highlighted and metrics below.
+  - **Funnel view** — default funnel agent.spawned →
+    task.status_changed(new_status:InProgress) → agent.completed →
+    mr.merged with per-step counts from `GET /analytics/count` (the
+    InProgress step uses the new `property=key:value` filter) and
+    drop-off percentages between steps; custom funnel definitions
+    (one `event_name [key:value]` per line, validated with inline
+    errors, minimum 2 steps) replace and refetch the funnel.
+  - **Top agents** — `GET /analytics/top?dimension=agent&limit=10&since=<30d>`
+    table: rank, agent, event count, completed, failed, completion rate
+    (— when the agent neither completed nor failed), average completion
+    duration; scoped to the current workspace.
+  - Retention window surfaced read-only from `GET /admin/retention`
+    ("Events retained N days"; hidden for callers who cannot read it).
+- **Backend support** (real queries, no new routes — all ABAC-registered
+  already):
+  - `GET /analytics/top?dimension=agent` ranks agents by events generated
+    with completion rate (`agent.completed / (completed + failed)`, null
+    when neither) and mean `duration_secs` over `agent.completed`; the
+    optional `workspace_id` filter is validated against the caller's
+    tenant (403 cross-tenant, 404 unknown — same rule as `decide`),
+    unknown dimensions are rejected 400.
+  - `GET /analytics/count` gained the optional `property=key:value`
+    equality filter for funnel steps and optional `since`/`until`
+    (defaults 0/now); malformed property filters are rejected 400.
+  - `PUT /admin/retention` accepts the analytics.md §Data Retention body
+    form `{"retention_days": N}` in addition to the complete 7-type
+    policy list: it updates only the `analytics_events` policy (>= 1
+    validated; 0 would purge everything on the next nightly run), leaves
+    every sibling policy untouched, and persists durably before the 204.
+    The enforcement itself is real (business-continuity §5, task-207):
+    365-day default for analytics events, nightly 02:00 UTC cleanup job
+    hard-deleting expired events via `delete_older_than` on the
+    SQLite/Postgres/mem adapters with per-run purge counts logged.
+- **Navigation** (ui-navigation.md two-mode model — the spec's sidebar no
+  longer exists, Principle 5): top-bar chart button next to the workspace
+  settings gear, `/workspaces/:slug/analytics` URL route (parse/urlFor,
+  popstate and initial-load handling), sub-page breadcrumb with back
+  arrow, mobile drawer link, Esc returns to workspace home. `api.js`
+  helpers: `analyticsDaily`, `analyticsCount`, `analyticsDecide`,
+  `adminRetention`, `setAnalyticsRetention`.
+
+### Test evidence
+
+- This round (CI repair on merged head b0e87da5 = PR head 6a2a7152 +
+  assignment base 9afd66c7; no source change was needed):
+  - CI run 43612637906 (PR #836, head 6a2a7152) failed its Development
+    controller job at `python3 -m unittest discover -s scripts -p
+    'test_dev*.py'` (job 132500792766, exit 1; no annotations with test
+    detail; run-level blob log fetch is blocked by the sandbox network
+    policy for remote verification).
+  - The failing step was reproduced locally as GREEN on the exact
+    CI-tested tree — a depth-1 checkout of 6a2a7152 (PR head already
+    contains the PR base 44cf25bf via merge 32882eff, so the
+    pull_request merge-ref tree equals the head tree) under
+    runner-matching python3.12.3 and git 2.43.0 with a clean
+    environment: 61/61 pass. Also green on the current merged head
+    b0e87da5 and on a full worktree of 6a2a7152. The PR changes no
+    scripts/, tools/, or CI files (product code only) and the suite is
+    fixture-based, so the failure was not content-derived.
+  - Re-ran the failed job via the API (rerun-failed-jobs): Development
+    controller attempt 2 (job 132509394830) completed success; full run
+    43612637906 now completed success (all jobs green). Evidence saved
+    under the attempt's review-evidence directory.
+  - `node --test scripts/dashboard/test/*.test.mjs` (7/7) and
+    `node --test scripts/test/*.test.mjs` (18/18) pass on the current
+    head — the steps the failed CI attempt had skipped.
+  - Local `test_pipeline*.py` shows 2 failures in this sandbox; both
+    reproduce identically on plain main 9afd66c7 here (process-kill
+    restrictions, "Operation not permitted") — sandbox artifacts, not
+    regressions, and CI passes that step on main and on this PR's rerun.
+  - Staged web/dist rebuild artifacts from a prior in-session turn were
+    dropped (uncommitted): final integration rebuilds and publishes
+    generated web/dist assets remotely; `git diff HEAD -- web/dist` is
+    empty.
+- Prior rounds' retained evidence: `cargo check/clippy/fmt -p
+  gyre-server --all-targets` clean; `cargo test -p gyre-adapters --lib
+  sqlite::analytics::tests` 17 passed; AnalyticsView component suite
+  13/13 (five-section render, 30 zero-filled bars, properties
+  expansion, filters, cursor pagination, decision evaluation, funnel
+  drop-off math, custom funnel, top-agent rates, retention display).
+- **gyre-server test compilation is blocked by the in-sandbox 4 GiB
+  build wrapper — the independent verifier must run:**
+  `cargo test -p gyre-server --lib analytics::tests` (all dashboard,
+  decide, top-agents, funnel-count, and retention handler suites,
+  including `top_agents_dimension_ranks_and_computes_rates`,
+  `top_agents_workspace_scope_validated_against_caller_tenant`,
+  `top_dimension_rejects_unknown`,
+  `count_property_filter_matches_property_equality`,
+  `daily_events_bare_days_form_returns_total_volume`,
+  `admin_update_retention_analytics_form_updates_analytics_only`,
+  `admin_update_retention_rejects_invalid_analytics_form`),
+  `cargo test -p gyre-server --lib retention::tests`
+  (`run_cleanup_purges_old_and_keeps_new`, `run_cleanup_is_idempotent`,
+  `default_policies_present` — 365-day analytics default), and
+  `cargo test -p gyre-server --test api_integration --
+  analytics_record_and_query admin_retention_list_and_update`.
+
+### Sandbox limitations recorded
+
+- The build wrapper hard-blocks gyre-server test compilation (code
+  generation exceeds the 4 GiB cgroup budget) — server test binaries
+  are enumerated for the verifier above, not skipped silently;
+  `cargo check` (which fits) was run in prior rounds.
+- GitHub run-log blob hosts (results-receiver.actions.githubusercontent.com,
+  *.blob.core.windows.net) are TCP-blocked in this sandbox; job/step
+  conclusions and annotations were read via api.github.com instead.
+  This is a transport restriction recorded for remote verification, not
+  a code defect.

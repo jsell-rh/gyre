@@ -1,5 +1,11 @@
 <script>
   import { columnLayout } from './layout-engines.js';
+  import GhostOverlay from './GhostOverlay.svelte';
+  import {
+    normalizeGhosts,
+    positionGhosts,
+    ghostEdges,
+  } from './ghostOverlay.js';
   import { t } from 'svelte-i18n';
   import EmptyState from './EmptyState.svelte';
 
@@ -14,7 +20,12 @@
    * Props:
    *   nodes          — array of { id, label?, name?, kind?, node_type?, spec_path? }
    *   edges          — array of { source, target, label? } or { source_id, target_id, ... }
-   *   ghostOverlays  — array of { nodeId, type: 'new'|'modified'|'removed' }
+   *   ghostOverlays  — normalized ghosts (ghostOverlay.js) or the legacy
+   *                     { nodeId, type } overlay shape; both render the §3
+   *                     ghost visual language via the GhostOverlay layer
+   *   ghostMode      — 'predicted' | 'previewing' (agent running — pulsing
+   *                     ghost borders) | 'confirmed' (preview complete —
+   *                     solid ghost borders)
    *   highlightNodeIds — array of node IDs to highlight (cross-navigation)
    *   size           — 'mini' (~300px height, no pan/zoom) | 'full' (full canvas, pan/zoom)
    *   onNodeClick    — callback(nodeId) when a node is clicked
@@ -23,6 +34,7 @@
     nodes = [],
     edges = [],
     ghostOverlays = [],
+    ghostMode = 'predicted',
     highlightNodeIds = [],
     size = 'full',
     onNodeClick = undefined,
@@ -38,21 +50,40 @@
     return nodePositions[id] ?? { x: 100, y: 100 };
   }
 
-  // ── Ghost overlay lookup ───────────────────────────────────────────────────
+  // ── Ghost overlay layer (system-explorer.md §3) ────────────────────────────
+  // Any input shape (legacy {nodeId,type} or §3 prediction items) is
+  // normalized once; the GhostOverlay layer renders the full visual
+  // language (dotted outlines, action colors, strikethroughs, dotted
+  // green edges, confidence opacity, tooltips, pulse/solid modes).
+  let ghosts = $derived(normalizeGhosts(ghostOverlays));
+
+  // Existing nodes carrying a ghost keep a marker for the node itself
+  // (ghost-node class + data-ghost-type) so cross-navigation and tests can
+  // attribute the overlay to the underlying node.
   let ghostByNodeId = $derived.by(() => {
     const m = new Map();
-    for (const g of ghostOverlays) m.set(g.nodeId, g.type);
+    for (const g of ghosts) {
+      if (g.nodeId && !m.has(g.nodeId)) m.set(g.nodeId, g);
+    }
     return m;
   });
+
+  // Ghost positions relative to the existing nodes (§3 canvas
+  // integration: modify/remove overlay their node, add sits near its
+  // predicted parent or in free space).
+  let ghostPositions = $derived(positionGhosts(ghosts, nodePositions, nodes));
+  let ghostEdgeList = $derived(
+    ghostEdges(ghosts, ghostPositions, nodePositions, nodes),
+  );
 
   // ── Highlight set ──────────────────────────────────────────────────────────
   let highlightSet = $derived.by(() => new Set(highlightNodeIds));
 
   // ── Canvas bounds ──────────────────────────────────────────────────────────
   let canvasBounds = $derived.by(() => {
-    const pos = nodePositions;
-    const xs = Object.values(pos).map(p => p.x);
-    const ys = Object.values(pos).map(p => p.y);
+    const pts = [...Object.values(nodePositions), ...Object.values(ghostPositions)];
+    const xs = pts.map((p) => p.x);
+    const ys = pts.map((p) => p.y);
     if (!xs.length) return { w: 600, h: 300 };
     const w = Math.max(size === 'mini' ? 400 : 600, Math.max(...xs) + 120);
     const h = Math.max(size === 'mini' ? 200 : 400, Math.max(...ys) + 80);
@@ -133,15 +164,6 @@
     }
   }
 
-  function ghostOverlayStyle(ghostType) {
-    switch (ghostType) {
-      case 'new':      return { stroke: '#22c55e', dasharray: '5 3' };
-      case 'modified': return { stroke: '#eab308', dasharray: '5 3' };
-      case 'removed':  return { stroke: '#ef4444', dasharray: '5 3' };
-      default:         return null;
-    }
-  }
-
   function rectPath(cx, cy, w, h) {
     const r = 3;
     const x = cx - w / 2, y = cy - h / 2;
@@ -157,7 +179,7 @@
 </script>
 
 <div class="arch-canvas-wrap" class:mini={size === 'mini'} class:full={size === 'full'}>
-  {#if !nodes.length}
+  {#if !nodes.length && !ghosts.length}
     <EmptyState title={$t('explorer_canvas.no_graph')} description={$t('explorer_canvas.no_graph_desc')} />
   {:else}
     {#if size === 'full'}
@@ -167,7 +189,7 @@
           {$t('explorer_canvas.reset')}
         </button>
         <span class="arch-node-count">{nodes.length} {nodes.length === 1 ? $t('explorer_canvas.node') : $t('explorer_canvas.nodes')} · {edges.length} {edges.length === 1 ? $t('explorer_canvas.edge') : $t('explorer_canvas.edges')}</span>
-        {#if ghostOverlays.length}
+        {#if ghosts.length}
           <span class="arch-ghost-legend">
             <span class="ghost-chip new">{$t('explorer_canvas.ghost_new')}</span>
             <span class="ghost-chip modified">{$t('explorer_canvas.ghost_modified')}</span>
@@ -216,45 +238,28 @@
         {@const pos = getPos(node.id)}
         {@const colors = nodeTypeColor(node.node_type ?? node.kind)}
         {@const isHighlighted = highlightSet.has(node.id)}
-        {@const ghostType = ghostByNodeId.get(node.id)}
-        {@const ghost = ghostType ? ghostOverlayStyle(ghostType) : null}
+        {@const ghost = ghostByNodeId.get(node.id)}
         {@const isGhost = !!ghost}
         <g
           class="arch-node"
           class:highlighted={isHighlighted}
           class:ghost-node={isGhost}
           data-node-id={node.id}
-          data-ghost-type={ghostType ?? ''}
+          data-ghost-type={ghost ? (ghost.rawType ?? ghost.action) : ''}
           transform="translate({pos.x},{pos.y})"
           role="button"
           tabindex="0"
           aria-label="{node.node_type ?? node.kind ?? 'node'}: {node.label ?? node.name ?? node.id}"
           onclick={() => handleNodeClick(node)}
           onkeydown={(e) => e.key === 'Enter' && handleNodeClick(node)}>
-          <!-- Ghost border overlay (dashed ring) -->
-          {#if ghost}
-            <rect
-              class="ghost-border"
-              x={-nodeW / 2 - 4}
-              y={-nodeH / 2 - 4}
-              width={nodeW + 8}
-              height={nodeH + 8}
-              rx="5"
-              fill="none"
-              stroke={ghost.stroke}
-              stroke-width="2"
-              stroke-dasharray={ghost.dasharray}
-              pointer-events="none"
-              aria-hidden="true" />
-          {/if}
           <!-- Node body -->
           <path
             d={rectPath(0, 0, nodeW, nodeH)}
-            fill={isGhost ? 'transparent' : colors.fill}
+            fill={colors.fill}
             stroke={isHighlighted ? '#facc15' : colors.stroke}
-            stroke-width={isHighlighted ? 2.5 : isGhost ? 1 : 1.5}
-            stroke-dasharray={isGhost ? '4 2' : 'none'}
-            opacity={isGhost ? 0.55 : 0.9} />
+            stroke-width={isHighlighted ? 2.5 : 1.5}
+            stroke-dasharray="none"
+            opacity={0.9} />
           <!-- Highlight ring -->
           {#if isHighlighted}
             <rect
@@ -284,6 +289,16 @@
           </text>
         </g>
       {/each}
+
+      <!-- §3 ghost overlay layer: predicted add/modify/remove nodes,
+           dotted green relationship edges, tooltips, pulse/solid modes.
+           Rendered after the nodes so ghosts sit on top; hover opens the
+           prediction-reason tooltip but never navigates. -->
+      <GhostOverlay
+        ghosts={ghosts}
+        positions={ghostPositions}
+        edges={ghostEdgeList}
+        mode={ghostMode} />
     </svg>
   {/if}
 </div>
@@ -410,7 +425,6 @@
 
   .arch-node.ghost-node {
     cursor: default;
-    pointer-events: none;
   }
 
   .arch-node:focus-visible {

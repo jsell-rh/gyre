@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use gyre_ports::{ComputeTarget, ProcessHandle, SpawnConfig};
+use std::collections::HashMap;
 use tokio::process::Command;
 
 /// Spawns processes on remote hosts via SSH.
@@ -11,6 +12,13 @@ pub struct SshTarget {
     pub identity_file: Option<String>,
     /// Optional SSH port (default: 22).
     pub port: Option<u16>,
+    /// Optional local ssh client binary (default: `ssh` from PATH).
+    /// Deployment knob for pinned or non-standard client locations —
+    /// mirrors `kubectl_path` on the Kubernetes target. Applies to every
+    /// client invocation this target makes (tunnels, bare-process
+    /// spawn/kill/liveness, and the docker-over-SSH commands of
+    /// [`SshDockerTarget`]).
+    pub ssh_path: Option<String>,
 }
 
 impl SshTarget {
@@ -20,6 +28,7 @@ impl SshTarget {
             host: host.into(),
             identity_file: None,
             port: None,
+            ssh_path: None,
         }
     }
 
@@ -31,6 +40,45 @@ impl SshTarget {
     pub fn with_port(mut self, port: u16) -> Self {
         self.port = Some(port);
         self
+    }
+
+    /// Pin the local ssh client binary (see [`SshTarget::ssh_path`]).
+    pub fn with_ssh_path(mut self, path: impl Into<String>) -> Self {
+        self.ssh_path = Some(path.into());
+        self
+    }
+
+    /// The ssh client binary to invoke: the pinned `ssh_path` when set,
+    /// else `ssh` resolved from PATH.
+    fn ssh_bin(&self) -> &str {
+        self.ssh_path.as_deref().unwrap_or("ssh")
+    }
+
+    /// Reconstruct a target from a recorded handle so out-of-band
+    /// operations (kill, liveness) reach the RIGHT host. `handle.id` is
+    /// `user@host:pid` (see `spawn_process`); the identity file and port
+    /// recorded in `handle.options` at spawn time are restored so a
+    /// non-default SSH config still authenticates.
+    pub fn from_handle(handle: &ProcessHandle) -> Option<Self> {
+        // `user@host:pid` — split off the trailing pid, then user from host.
+        // Never slice at fixed byte indexes: user/host are arbitrary UTF-8.
+        let (destination, _pid) = handle.id.rsplit_once(':')?;
+        let (user, host) = destination.split_once('@')?;
+        if user.is_empty() || host.is_empty() {
+            return None;
+        }
+        let mut target = Self::new(user, host);
+        if let Some(identity_file) = handle.options.get("identity_file") {
+            target = target.with_identity(identity_file.clone());
+        }
+        if let Some(port) = handle
+            .options
+            .get("port")
+            .and_then(|p| p.parse::<u16>().ok())
+        {
+            target = target.with_port(port);
+        }
+        Some(target)
     }
 
     fn destination(&self) -> String {
@@ -103,7 +151,7 @@ impl SshTarget {
         args.push(spec);
         args.push(self.destination());
 
-        let child = Command::new("ssh")
+        let child = Command::new(self.ssh_bin())
             .args(&args)
             // Redirect I/O so the background process does not block the server
             .stdin(std::process::Stdio::null())
@@ -217,7 +265,7 @@ impl ComputeTarget for SshTarget {
         ssh_args.push(self.destination());
         ssh_args.push(remote_cmd);
 
-        let output = Command::new("ssh")
+        let output = Command::new(self.ssh_bin())
             .args(&ssh_args)
             .output()
             .await
@@ -237,6 +285,20 @@ impl ComputeTarget for SshTarget {
             id: format!("{}:{}", self.destination(), pid),
             target_type: "ssh".to_string(),
             pid: Some(pid),
+            // Connection details for later out-of-band kills: the registry
+            // stores only the handle, and reconstructing the target from
+            // `user@host:pid` alone would drop a configured identity file
+            // or non-default port.
+            options: {
+                let mut options = HashMap::new();
+                if let Some(ref id) = self.identity_file {
+                    options.insert("identity_file".to_string(), id.clone());
+                }
+                if let Some(port) = self.port {
+                    options.insert("port".to_string(), port.to_string());
+                }
+                options
+            },
         })
     }
 
@@ -247,7 +309,7 @@ impl ComputeTarget for SshTarget {
             ssh_args.push(self.destination());
             ssh_args.push(remote_cmd);
 
-            let status = Command::new("ssh")
+            let status = Command::new(self.ssh_bin())
                 .args(&ssh_args)
                 .status()
                 .await
@@ -267,13 +329,30 @@ impl ComputeTarget for SshTarget {
             ssh_args.push(self.destination());
             ssh_args.push(remote_cmd);
 
-            let status = Command::new("ssh")
+            let output = Command::new(self.ssh_bin())
                 .args(&ssh_args)
-                .status()
+                .output()
                 .await
                 .context("ssh is_alive check failed")?;
 
-            Ok(status.success())
+            if output.status.success() {
+                return Ok(true);
+            }
+            // A failed remote `kill -0` (process gone, or not ours) exits
+            // non-zero with EMPTY stderr — that is a confirmed exit. SSH
+            // transport failures (connection refused, timeout, auth) also
+            // exit non-zero but print an "ssh: ..." diagnostic to stderr;
+            // those are probe failures, not evidence of death, and must not
+            // trigger the exit monitor's destructive teardown.
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if ssh_transport_failed(&stderr) {
+                return Err(anyhow::anyhow!(
+                    "ssh is_alive probe to {} failed: {}",
+                    self.destination(),
+                    stderr.trim()
+                ));
+            }
+            Ok(false)
         } else {
             Ok(false)
         }
@@ -283,6 +362,14 @@ impl ComputeTarget for SshTarget {
 /// Minimal shell quoting: wrap in single quotes, escape embedded single quotes.
 fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
+}
+
+/// True when non-zero-exit ssh stderr shows an ssh CLIENT failure ("ssh: ..."
+/// diagnostics: connection refused, timeout, auth). A remote command that
+/// merely exits non-zero prints nothing to stderr — that is a confirmed
+/// remote result, not a transport failure.
+fn ssh_transport_failed(stderr: &str) -> bool {
+    stderr.lines().any(|l| l.starts_with("ssh:"))
 }
 
 // ---------------------------------------------------------------------------
@@ -391,7 +478,7 @@ impl SshDockerTarget {
         let mut ssh_args = self.ssh.base_ssh_args();
         ssh_args.push(self.ssh.destination());
         ssh_args.push(remote_cmd);
-        let output = Command::new("ssh")
+        let output = Command::new(self.ssh.ssh_bin())
             .args(&ssh_args)
             .output()
             .await
@@ -462,6 +549,21 @@ impl ComputeTarget for SshDockerTarget {
             id: container_id,
             target_type: "ssh".to_string(),
             pid: None,
+            // Connection details for out-of-band operations. The handle id
+            // is the remote container id (not `user@host:pid`), so
+            // `SshTarget::from_handle` refuses to reconstruct a bare-ssh
+            // target from it — kills must go through the recorded backend
+            // (`spawned_backends`), which knows this is a remote container.
+            options: {
+                let mut options = HashMap::new();
+                if let Some(ref id) = self.ssh.identity_file {
+                    options.insert("identity_file".to_string(), id.clone());
+                }
+                if let Some(port) = self.ssh.port {
+                    options.insert("port".to_string(), port.to_string());
+                }
+                options
+            },
         })
     }
 
@@ -474,23 +576,45 @@ impl ComputeTarget for SshDockerTarget {
     }
 
     async fn is_alive(&self, handle: &ProcessHandle) -> Result<bool> {
-        let out = self
+        match self
             .remote_docker(&[
                 "inspect".to_string(),
                 "--format={{.State.Running}}".to_string(),
                 handle.id.clone(),
             ])
             .await
-            .unwrap_or_default();
-        Ok(out.trim() == "true")
+        {
+            Ok(out) => Ok(out.trim() == "true"),
+            // `docker run --rm` auto-removes an exited container, so "No
+            // such object" is the CONFIRMED-exit signal on this backend —
+            // not a probe failure.
+            Err(e) if remote_container_is_missing(&e) => Ok(false),
+            // SSH/daemon/transport failure: the container's state is
+            // UNKNOWN. Reporting `Ok(false)` here would make one transient
+            // probe failure look like a confirmed exit, and the exit
+            // monitor destroys preview work (token, worktree, budget slot)
+            // unrecoverably on that signal. Propagate the error so the
+            // monitor keeps polling instead of tearing down.
+            Err(e) => Err(e),
+        }
     }
+}
+
+/// True when a failed remote-docker command failed because the container
+/// does not exist (docker's "No such object" stderr) — a confirmed exit on
+/// this backend, since containers run with `--rm` are auto-removed when
+/// they stop. Anything else (SSH connection refused, daemon down) is a
+/// probe failure, not evidence of death.
+fn remote_container_is_missing(err: &anyhow::Error) -> bool {
+    format!("{err:#}").contains("No such object")
 }
 
 /// Build an [`SshDockerTarget`] from a compute-target config blob
 /// (agent-runtime.md §3 Supported Backends — SSH).
 ///
 /// Recognized keys: `user` (required in practice; defaults `root`),
-/// `host`, `port`, `identity_file`, `image`, `network`, `memory_limit`,
+/// `host`, `port`, `identity_file`, `ssh_path` (local ssh client binary;
+/// defaults to `ssh` from PATH), `image`, `network`, `memory_limit`,
 /// `pids_limit`, `user_as` (container `--user`; named `user_as` to avoid
 /// colliding with the SSH login user), `docker_binary`.
 /// Absent security keys fall back to the spec defaults
@@ -512,6 +636,9 @@ pub fn ssh_docker_target_from_config(config: &serde_json::Value) -> SshDockerTar
     }
     if let Some(port) = config.get("port").and_then(|v| v.as_u64()) {
         ssh = ssh.with_port(port as u16);
+    }
+    if let Some(bin) = config.get("ssh_path").and_then(|v| v.as_str()) {
+        ssh = ssh.with_ssh_path(bin);
     }
     let mut t = SshDockerTarget::new(
         ssh,
@@ -581,6 +708,69 @@ mod tests {
         let target = SshTarget::new("user", "host");
         let args = target.base_ssh_args();
         assert!(args.contains(&"BatchMode=yes".to_string()));
+    }
+
+    /// `from_handle` must round-trip the destination recorded in
+    /// `user@host:pid` — an out-of-band kill depends on reaching the RIGHT
+    /// host, and a mis-parse must fail loudly (None), never guess.
+    #[test]
+    fn from_handle_parses_destination_and_pid() {
+        let handle = ProcessHandle {
+            id: "ubuntu@192.168.1.10:4242".to_string(),
+            target_type: "ssh".to_string(),
+            pid: Some(4242),
+            options: HashMap::new(),
+        };
+        let target = SshTarget::from_handle(&handle).expect("valid handle must parse");
+        assert_eq!(target.user, "ubuntu");
+        assert_eq!(target.host, "192.168.1.10");
+        assert_eq!(target.identity_file, None);
+        assert_eq!(target.port, None);
+    }
+
+    /// Connection options recorded at spawn time (identity file, non-default
+    /// port) must survive the round trip — dropping them would make
+    /// reconstructed kills fail authentication against configured targets.
+    #[test]
+    fn from_handle_restores_connection_options() {
+        let mut options = HashMap::new();
+        options.insert("identity_file".to_string(), "/etc/gyre/ssh_key".to_string());
+        options.insert("port".to_string(), "2222".to_string());
+        let handle = ProcessHandle {
+            id: "root@builder.internal:99".to_string(),
+            target_type: "ssh".to_string(),
+            pid: Some(99),
+            options,
+        };
+        let target = SshTarget::from_handle(&handle).expect("valid handle must parse");
+        assert_eq!(target.user, "root");
+        assert_eq!(target.host, "builder.internal");
+        assert_eq!(target.identity_file.as_deref(), Some("/etc/gyre/ssh_key"));
+        assert_eq!(target.port, Some(2222));
+    }
+
+    /// Malformed handle ids must yield `None` — a reconstruction that
+    /// "falls back" to some destination would kill the wrong host's process.
+    #[test]
+    fn from_handle_rejects_malformed_ids() {
+        for bad in [
+            "4242",                // bare pid: no destination
+            "localhost:4242",      // no user@ separator
+            "ubuntu@:4242",        // empty host
+            "@localhost:4242",     // empty user
+            "ubuntu@192.168.1.10", // no pid suffix
+        ] {
+            let handle = ProcessHandle {
+                id: bad.to_string(),
+                target_type: "ssh".to_string(),
+                pid: None,
+                options: HashMap::new(),
+            };
+            assert!(
+                SshTarget::from_handle(&handle).is_none(),
+                "malformed id {bad:?} must not reconstruct a target"
+            );
+        }
     }
 
     #[test]
@@ -694,6 +884,68 @@ mod tests {
         assert!(res.is_err(), "spawn must fail when ssh is missing");
     }
 
+    /// `ssh_path` must drive the actual binary `spawn_process` invokes —
+    /// a stub ssh that answers `docker run` with a container id (and
+    /// records the invocation) proves the config override reaches the
+    /// Command invocation. Mirrors `spawn_uses_configured_kubectl_path`.
+    #[tokio::test]
+    async fn ssh_docker_spawn_uses_configured_ssh_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("saw-docker-run");
+        let stub = dir.path().join("ssh-stub");
+        std::fs::write(
+            &stub,
+            format!(
+                "#!/bin/sh\ncmd=\nfor arg in \"$@\"; do cmd=$arg; done\ncmd=$(printf '%s' \"$cmd\" | tr -d \"'\")\ncase $cmd in\n  'docker run '*) echo stubcontainer000000000; touch {marker} ;;\n  *) echo \"stub ssh: unhandled: $cmd\" >&2; exit 1 ;;\nesac\n",
+                marker = marker.display()
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let t = ssh_docker_target_from_config(&serde_json::json!({
+            "user": "ci",
+            "host": "fake-remote",
+            "ssh_path": stub.to_str().unwrap()
+        }));
+        assert_eq!(
+            t.ssh.ssh_path.as_deref(),
+            Some(stub.to_str().unwrap()),
+            "config ssh_path must be parsed onto the target"
+        );
+        let handle = gyre_ports::ComputeTarget::spawn_process(&t, &ssh_docker_config("path-agent"))
+            .await
+            .expect("spawn via stub ssh must succeed");
+        assert_eq!(handle.id, "stubcontainer000000000");
+        assert!(
+            handle.pid.is_none(),
+            "remote-container handles are pid-less"
+        );
+        assert!(
+            marker.exists(),
+            "the stub ssh must have received the remote docker run command"
+        );
+    }
+
+    /// No `ssh_path` in the config must leave the binary at the PATH
+    /// default (`ssh`), never a fabricated or empty client path.
+    #[test]
+    fn ssh_docker_config_without_ssh_path_defaults_to_path_ssh() {
+        let t = ssh_docker_target_from_config(&serde_json::json!({
+            "user": "ci",
+            "host": "fake-remote"
+        }));
+        assert!(
+            t.ssh.ssh_path.is_none(),
+            "no config ssh_path must fall back to ssh from PATH"
+        );
+        assert_eq!(t.ssh.ssh_bin(), "ssh");
+    }
+
     fn which_exists(bin: &str) -> bool {
         std::env::var_os("PATH")
             .map(|paths| std::env::split_paths(&paths).any(|dir| dir.join(bin).exists()))
@@ -760,5 +1012,43 @@ mod tests {
         assert!(tunnel.is_alive().await);
 
         tunnel.close().await.unwrap();
+    }
+
+    /// Task-206 review F5: a docker-inspect failure must only read as a
+    /// confirmed exit when docker itself says the container is gone —
+    // "No such object" is the `--rm` auto-remove exit signal. SSH and
+    /// daemon failures are probe failures and must stay errors.
+    #[test]
+    fn docker_inspect_failure_classifies_missing_container() {
+        let missing =
+            anyhow::anyhow!("remote docker on user@host failed: Error: No such object: abc123");
+        assert!(remote_container_is_missing(&missing));
+
+        let refused = anyhow::anyhow!(
+            "remote docker on user@host failed: ssh: connect to host host port 22: Connection refused"
+        );
+        assert!(!remote_container_is_missing(&refused));
+
+        let daemon_down = anyhow::anyhow!(
+            "remote docker on user@host failed: Cannot connect to the Docker daemon at unix:///var/run/docker.sock"
+        );
+        assert!(!remote_container_is_missing(&daemon_down));
+    }
+
+    /// Task-206 review F5: bare-SSH stderr classification — an ssh client
+    /// diagnostic ("ssh: ...") is a transport failure; a silent non-zero
+    /// exit is the remote command's confirmed result.
+    #[test]
+    fn ssh_stderr_classifies_transport_failure() {
+        assert!(ssh_transport_failed(
+            "ssh: connect to host 10.0.0.9 port 22: Connection timed out\r\n"
+        ));
+        assert!(ssh_transport_failed(
+            "ssh: Could not resolve hostname host: Name or service not known"
+        ));
+        // Remote kill -0 on a gone process: non-zero exit, empty stderr.
+        assert!(!ssh_transport_failed(""));
+        // Remote command noise is not an ssh client diagnostic.
+        assert!(!ssh_transport_failed("kill: (4242) - No such process\n"));
     }
 }

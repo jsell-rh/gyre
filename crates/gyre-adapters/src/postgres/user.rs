@@ -33,12 +33,15 @@ struct UserRow {
     display_name: Option<String>,
     timezone: Option<String>,
     locale: Option<String>,
+    oidc_issuer: Option<String>,
     username: String,
     avatar_url: Option<String>,
     preferences: Option<String>,
     last_login_at: Option<i64>,
     tenant_id: Option<String>,
     global_role: String,
+    deactivated_at: Option<i64>,
+    manager_id: Option<String>,
 }
 
 impl From<UserRow> for User {
@@ -67,9 +70,12 @@ impl From<UserRow> for User {
         u.locale = r.locale.unwrap_or_else(|| "en".to_string());
         u.avatar_url = r.avatar_url;
         u.preferences = preferences;
-        u.last_login_at = r.last_login_at.map(|v| v as u64);
+        u.oidc_issuer = r.oidc_issuer;
+        u.last_login_at = r.last_login_at.map(|v| v.max(0) as u64);
         u.tenant_id = r.tenant_id.map(Id::new);
         u.global_role = global_role;
+        u.deactivated_at = r.deactivated_at.map(|v| v as u64);
+        u.manager_id = r.manager_id.map(Id::new);
         u
     }
 }
@@ -104,6 +110,8 @@ struct UserRecord<'a> {
     last_login_at: Option<i64>,
     tenant_id: Option<&'a str>,
     global_role: String,
+    deactivated_at: Option<i64>,
+    manager_id: Option<&'a str>,
 }
 
 #[derive(Insertable)]
@@ -159,6 +167,8 @@ impl UserRepository for PgStorage {
                 last_login_at: u.last_login_at.map(|v| v as i64),
                 tenant_id: u.tenant_id.as_ref().map(|t| t.as_str()),
                 global_role: global_role_to_str(&u.global_role).to_string(),
+                deactivated_at: u.deactivated_at.map(|v| v as i64),
+                manager_id: u.manager_id.as_ref().map(|m| m.as_str()),
             };
             diesel::insert_into(users::table)
                 .values(&record)
@@ -195,6 +205,30 @@ impl UserRepository for PgStorage {
                 .optional()
                 .context("find user by username")?;
             Ok(result.map(User::from))
+        })
+        .await?
+    }
+
+    async fn find_by_email(&self, email: &str) -> Result<Vec<User>> {
+        let pool = Arc::clone(&self.pool);
+        let email = email.to_lowercase();
+        tokio::task::spawn_blocking(move || -> Result<Vec<User>> {
+            let mut conn = pool.get().context("get db connection")?;
+            // Case-insensitive match via lower() (portable across SQLite
+            // and PostgreSQL): invitation emails are normalized to
+            // lowercase, but SSO-provisioned accounts store the IdP's raw
+            // casing. Email is not unique (same person, multiple
+            // tenants), so every match is returned; callers scope by
+            // tenant. Ordered by creation for a deterministic pick.
+            let rows = users::table
+                .filter(
+                    diesel::dsl::sql::<diesel::sql_types::Bool>("lower(users.email) = ")
+                        .bind::<diesel::sql_types::Text, _>(email),
+                )
+                .order(users::created_at.asc())
+                .load::<UserRow>(&mut *conn)
+                .context("find users by email")?;
+            Ok(rows.into_iter().map(User::from).collect())
         })
         .await?
     }
@@ -270,9 +304,44 @@ impl UserRepository for PgStorage {
                     users::last_login_at.eq(u.last_login_at.map(|v| v as i64)),
                     users::tenant_id.eq(u.tenant_id.as_ref().map(|t| t.as_str())),
                     users::global_role.eq(global_role_to_str(&u.global_role)),
+                    users::deactivated_at.eq(u.deactivated_at.map(|v| v as i64)),
+                    users::manager_id.eq(u.manager_id.as_ref().map(|m| m.as_str())),
                 ))
                 .execute(&mut *conn)
                 .context("update user")?;
+            Ok(())
+        })
+        .await?
+    }
+
+    async fn claim_external_id(&self, user_id: &Id, new_external_id: &str) -> Result<()> {
+        let pool = Arc::clone(&self.pool);
+        let user_id = user_id.clone();
+        let new_external_id = new_external_id.to_string();
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let mut conn = pool.get().context("get db connection")?;
+            // Port contract: fail if another user already owns the new
+            // external_id, or the target user does not exist.
+            let dup: Option<String> = users::table
+                .filter(
+                    users::external_id
+                        .eq(new_external_id.as_str())
+                        .and(users::id.ne(user_id.as_str())),
+                )
+                .select(users::id)
+                .first::<String>(&mut *conn)
+                .optional()
+                .context("check external_id owner")?;
+            if let Some(owner) = dup {
+                anyhow::bail!("external_id already owned by user {owner}");
+            }
+            let updated = diesel::update(users::table.find(user_id.as_str()))
+                .set(users::external_id.eq(new_external_id.as_str()))
+                .execute(&mut *conn)
+                .context("claim external_id")?;
+            if updated == 0 {
+                anyhow::bail!("cannot claim external_id for user {user_id}: not found");
+            }
             Ok(())
         })
         .await?
@@ -286,6 +355,44 @@ impl UserRepository for PgStorage {
             diesel::delete(users::table.find(id.as_str()))
                 .execute(&mut *conn)
                 .context("delete user")?;
+            Ok(())
+        })
+        .await?
+    }
+
+    async fn record_login(
+        &self,
+        user_id: &Id,
+        oidc_issuer: &str,
+        at: u64,
+        min_interval_secs: u64,
+    ) -> Result<()> {
+        let pool = Arc::clone(&self.pool);
+        let uid = user_id.clone();
+        let iss = oidc_issuer.to_string();
+        // Interval check and write in ONE statement (no read-modify-write race):
+        // the row is only touched when the verified issuer differs from the
+        // stored one, or last_login_at is NULL or at/older than the debounce
+        // threshold (the provisioning path re-stamps last_login_at on every
+        // auth, so the issuer carve-out is what keeps provenance correct).
+        let threshold = at.saturating_sub(min_interval_secs) as i64;
+        let at_i = at as i64;
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let mut conn = pool.get().context("get db connection")?;
+            diesel::update(users::table.find(uid.as_str()))
+                .set((
+                    users::oidc_issuer.eq(iss.as_str()),
+                    users::last_login_at.eq(at_i),
+                ))
+                .filter(
+                    users::oidc_issuer
+                        .is_null()
+                        .or(users::oidc_issuer.ne(iss.as_str()))
+                        .or(users::last_login_at.is_null())
+                        .or(users::last_login_at.le(threshold)),
+                )
+                .execute(&mut *conn)
+                .context("record_login")?;
             Ok(())
         })
         .await?

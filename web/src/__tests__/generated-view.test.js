@@ -13,8 +13,10 @@ import {
   normalizeNodeType,
   normalizeEdgeType,
   viewSpecToViewQuery,
+  viewDocumentToQuery,
   parseGenerateSse,
 } from '../lib/generated-view.js';
+import { resolveScopeNodes } from '../lib/view-query-scope.js';
 
 describe('normalizeNodeType', () => {
   it('lowercases TitleCase ViewSpec node types', () => {
@@ -52,7 +54,7 @@ describe('viewSpecToViewQuery', () => {
     expect(viewSpecToViewQuery([1, 2])).toBeNull();
   });
 
-  it('maps data.concept to a concept scope with normalized edges and depth', () => {
+  it('maps data.concept to a substring-matched concept scope with normalized edges and depth', () => {
     const query = viewSpecToViewQuery({
       name: 'How auth works',
       data: {
@@ -63,13 +65,43 @@ describe('viewSpecToViewQuery', () => {
       },
       layout: 'hierarchical',
     });
+    // seed_match 'substring': the ViewSpec data.concept field is a
+    // case-insensitive substring search on node name/qualified_name
+    // (ui-layout.md §4 Data Layer) — NOT an exact seed name — so the
+    // translated concept scope marks its seeds for substring matching.
     expect(query.scope).toEqual({
       type: 'concept',
       seed_nodes: ['auth'],
+      seed_match: 'substring',
       expand_direction: 'both',
       expand_edges: ['contains', 'routes_to'],
       expand_depth: 2,
     });
+  });
+
+  it('maps data.concept with depth 0 to a matched-nodes-only concept scope (ui-layout.md §4: 0 = matched nodes only)', () => {
+    const query = viewSpecToViewQuery({
+      data: { concept: 'auth', depth: 0 },
+      layout: 'graph',
+    });
+    expect(query.scope.expand_depth).toBe(0);
+  });
+
+  it('a concept ViewSpec resolves to the substring-matched nodes — the Ask concept path end to end (translation + scope resolution)', () => {
+    // The reviewer probe scenario: "show me everything related to
+    // authentication" → data.concept 'auth' over a graph where no node is
+    // NAMED 'auth'. Exact seed matching resolves nothing (scope null →
+    // full graph, no fade); substring matching seeds every node whose
+    // name/qualified_name contains 'auth'.
+    const nodes = [
+      { id: 'a', name: 'JwtAuthProvider', qualified_name: 'auth::JwtAuthProvider', node_type: 'type' },
+      { id: 'b', name: 'AuthMiddleware', qualified_name: 'auth::AuthMiddleware', node_type: 'function' },
+      { id: 'c', name: 'ShippingCalculator', qualified_name: 'shipping::ShippingCalculator', node_type: 'type' },
+    ];
+    const query = viewSpecToViewQuery({ data: { concept: 'auth' }, layout: 'graph' });
+    const out = resolveScopeNodes(query.scope, nodes, []);
+    expect(out, 'substring concept must resolve to the auth nodes, not null').not.toBeNull();
+    expect(out.map((n) => n.id).sort()).toEqual(['a', 'b']);
   });
 
   it('maps node_types to a filter scope when there is no concept', () => {
@@ -146,6 +178,54 @@ describe('viewSpecToViewQuery', () => {
       layout: 'graph',
     });
     expect(query.annotation).toBeUndefined();
+  });
+});
+
+describe('viewDocumentToQuery', () => {
+  it('passes a ViewQuery-shaped document through with its concept scope intact (ad-hoc concept reload)', () => {
+    // The exact spec the Create-concept dialog persists via
+    // POST /workspaces/:id/explorer-views (task-182): a ViewQuery concept
+    // scope seeded with the grouped nodes. The reload path must apply the
+    // grouping, not flatten it to {scope:{type:'all'}}.
+    const saved = {
+      scope: {
+        type: 'concept',
+        seed_nodes: ['JwtAuthProvider', 'TokenStore'],
+        expand_edges: [],
+        expand_depth: 0,
+        expand_direction: 'both',
+      },
+      emphasis: { highlight: { matched: { color: '#a78bfa' } }, dim_unmatched: 0.15 },
+      zoom: 'fit',
+      annotation: { title: 'Concept: Auth core', description: '2 grouped nodes' },
+    };
+    const query = viewDocumentToQuery(saved);
+    expect(query.scope).toEqual(saved.scope);
+    expect(query.annotation).toEqual(saved.annotation);
+    expect(query.emphasis).toEqual(saved.emphasis);
+    // Deep copy — applying the query must not mutate the stored document.
+    query.scope.seed_nodes.push('Mutated');
+    expect(saved.scope.seed_nodes).toEqual(['JwtAuthProvider', 'TokenStore']);
+  });
+
+  it('translates ViewSpec-shaped documents via viewSpecToViewQuery', () => {
+    const query = viewDocumentToQuery({
+      name: 'How auth works',
+      data: { concept: 'auth' },
+      layout: 'graph',
+    });
+    expect(query.scope).toEqual({
+      type: 'concept',
+      seed_nodes: ['auth'],
+      seed_match: 'substring',
+      expand_direction: 'both',
+    });
+  });
+
+  it('returns null for non-objects', () => {
+    expect(viewDocumentToQuery(null)).toBeNull();
+    expect(viewDocumentToQuery('spec')).toBeNull();
+    expect(viewDocumentToQuery([1, 2])).toBeNull();
   });
 });
 

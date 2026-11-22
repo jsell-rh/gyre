@@ -13,6 +13,17 @@ from .execution import ROOT, Retry, Wait, gateway
 
 def prompt(execution, task):
     role = execution.claim['stage']
+    planning={}
+    if task['data'].get('spec_planner'):
+        from .spec_backlog import planning_context, previous_report
+        context=planning_context(task,execution.store)
+        planning={'document':context['document'],'requirements':context['requirements'],
+            'heading_count':len(context['sections']),'audit_available':bool(context.get('audit')),
+            'plan_available':bool(context.get('plan')),
+            'revision_draft_available':bool(context.get('revision_draft')),
+            'other_plan_count':len(context['other_plans']),
+            'previous_report_available':bool(previous_report(execution)),
+            'machine_context':'/tmp/stage/planning-context.json'}
     task_path = execution.directory / 'task.md'
     task_path.write_text(task['body'])
     bounded = (task['body'][:16000] if role == 'triage' and safe_metadata(task['body']).get('metadata_error') else
@@ -28,15 +39,21 @@ def prompt(execution, task):
     findings = [finding | {'log_tail': finding['log_tail'][-allowance:]}
                 if finding.get('log_tail') else finding for finding in findings]
     return '\n\n'.join(((ROOT / 'specs/GOAL.md').read_text(),
-                        (ROOT / f'specs/prompts/pipeline-{role}.md').read_text(),
+                        (ROOT / ('specs/prompts/pipeline-decision.md' if execution.claim['input'].get('decision_request') else f'specs/prompts/pipeline-{role}.md')).read_text(),
                         'Assigned task:\n' + bounded,
                         'Exact assignment:\n' + json.dumps(execution.claim['input']),
+                        'Planning context:\n' + json.dumps(planning),
                         'Current requirement inputs:\n' + json.dumps((task['data'].get('requirements') or {}).get('components', {})),
                         'Previous assignment outcome:\n' + str(execution.claim.get('result') or 'none')[-4000:],
-                        'Durable findings:\n' + json.dumps(findings)))
+                        'Durable findings:\n' + json.dumps(findings),
+                        ('Authorized amendment paths (exact paths; no other edits):\n' +
+                         json.dumps(task['data']['decision_allowed_paths'])) if task['data'].get('source_decision') else ''))
 
 
 def triage(execution, task):
+    if execution.claim['input'].get('decision_request'):
+        from .decisions import prepare
+        return prepare(execution,task)
     if execution.claim['input'].get('baseline_probe'):
         from .repairs import recheck
         return recheck(execution, task)
@@ -72,7 +89,22 @@ def triage(execution, task):
 
 
 def implement(execution, task):
-    result = execution.cloud_step(task, prompt(execution, task))
+    from .contract_recovery import normalize
+    result = normalize(execution, task) or execution.cloud_step(task, prompt(execution, task))
+    if task['data'].get('backlog_manifest'):
+        from .spec_backlog import validate_manifest
+        validate_manifest(checkout(execution,result['head']),task['data']['backlog_manifest'])
+    if task['data'].get('source_decision') or task['data'].get('backlog_plan'):
+        path=checkout(execution,result['head'])
+        base=execution.claim['input']['base']
+        changed=execution.command('git','diff','--name-only','-z',base,result['head'],cwd=path).stdout.rstrip('\0').split('\0')
+        changed=[name for name in changed if name]
+        allowed=set(task['data']['decision_allowed_paths'])
+        invalid=[name for name in changed if name not in allowed]
+        if invalid:
+            from .execution import Attention
+            error=Attention('Decision amendment changed files outside its approved task/spec scope: '+', '.join(invalid))
+            error.category='decision_scope';error.diagnostic={'head':result['head'],'invalid':invalid};raise error
     # A partial source checkpoint survives inference failures. It is never
     # sent to review as though the agent completed its assignment.
     progress = safe_metadata(result['task_body'])['progress']
@@ -99,15 +131,23 @@ def implement(execution, task):
     # not require unrelated production edits merely to clear its finding.
     requires_fix = (repair.get('category') in ('review', 'verification', 'ci') and
                     execution.claim['input']['base'] == task['data'].get('candidate_base'))
-    if not contract_changed and (not complete or requires_fix):
+    if not complete or requires_fix:
         path = checkout(execution, result['head'])
         seed = execution.claim['input'].get('candidate') or execution.claim['input']['base']
         execution.command('git', 'fetch', '--quiet', 'origin', seed, cwd=path, timeout=180)
         changed = execution.command('git', 'diff', '--name-only', seed, result['head'], cwd=path).stdout.splitlines()
         substantive = [name for name in changed if name != f"specs/tasks/{task['name']}.md"
                        and not name.startswith(('web/dist/', 'specs/reviews/'))]
+        from .repair_budget import task_document_repair
+        if complete and task_document_repair(task['name'],repair) and f"specs/tasks/{task['name']}.md" in changed:
+            # Correcting a specifically reviewed Shipped statement is valid
+            # work. It still needs a fresh independent exact-source review.
+            substantive.append(f"specs/tasks/{task['name']}.md")
         if not substantive:
-            raise Retry('Implementation did not change source relevant to its unfinished assignment or repair. Resume the same task and address its findings; changing progress or notes alone does not resolve them.', fresh_model=True)
+            from .repair_budget import check
+            check(execution,task,path,result['head'],{'category':'contract','delta':contract_delta} if contract_changed else
+                  {'category':'no_source_progress','repair':repair.get('details') or repair.get('detail')})
+            if not contract_changed:raise Retry('Implementation did not change source relevant to its unfinished assignment or repair. Resume the same task and address its findings; changing progress or notes alone does not resolve them.', fresh_model=True)
     updates = {'candidate': result['head'], 'candidate_base': result.get('base', execution.claim['input']['base']),
                'branch': result['branch'], 'task_override': result['task_body'],
                'review': None, 'verified': None,
@@ -126,6 +166,10 @@ def implement(execution, task):
 
 
 def review(execution, task):
+    from .review_preflight import check
+    deferred = check(execution, task)
+    if deferred:
+        return deferred
     result = execution.cloud_step(task, prompt(execution, task))
     if result.get('agent_exit') != 0 or result.get('stream_exit') != 0:
         from .diagnostics import diagnose
@@ -148,19 +192,38 @@ def review(execution, task):
         result['valid'] = False
         result['source_edits'] = invalid
     verdict = result.get('verdict') or {}
-    approved = (result['valid'] and verdict.get('approved') is True and
+    from .repair_budget import source_findings
+    findings,deferred=source_findings(verdict.get('findings'))
+    # Generated assets have a mandatory deterministic rebuild/test/publish gate.
+    # The original independent verdict remains in outcome.json.
+    affirmative=(verdict.get('approved') is True or bool(deferred) and not findings)
+    approved = (result['valid'] and affirmative and
                 verdict.get('candidate') == execution.claim['input']['candidate'] and
-                isinstance(verdict.get('findings'), list) and not verdict['findings'])
+                isinstance(verdict.get('findings'), list) and not findings)
     receipt = {'candidate': execution.claim['input']['candidate'], 'approved': approved,
                'checkpoint': result['head'], 'branch': result['branch'],
                'record': next((name for name in changes if name.startswith('specs/reviews/')), None),
-               'artifact': str(execution.directory / 'outcome.json')}
+               'artifact': str(execution.directory / 'outcome.json'), 'deferred_generated_findings':deferred}
     if approved:
         return result, {'review': receipt, 'retained_artifacts': None}, []
     finding = {'category': 'review', 'source': execution.claim['input']['candidate'],
                'review_checkpoint': result['head'], 'branch': result['branch'],
                'details': result.get('source_edits') or verdict.get('findings') or ['review did not produce an affirmative exact-source verdict'],
                'artifact': receipt['artifact'], 'id': execution.claim['id']}
+    if (task['data'].get('backlog_manifest') and result['valid'] and findings
+            and isinstance(verdict.get('findings'),list)
+            and verdict.get('candidate')==assigned and verdict.get('approved') is False):
+        from .requirements import digest
+        parent_name='spec-'+digest(task['data']['backlog_manifest']['document'])[:24]
+        parent=execution.store.task(parent_name)
+        if (parent['generation']==task['data']['backlog_manifest']['requirements']
+                and parent['data'].get('publication_rejections',0)>=2):
+            from .execution import Attention
+            error=Attention('Three reviewed backlog publications were rejected; inspect the planner and retained review findings before retrying')
+            error.category='spec_plan';error.diagnostic=finding;raise error
+        return result, {'review':receipt,'backlog_rejected':finding,'repair':None}, [finding]
+    from .repair_budget import check
+    check(execution,task,path,assigned,findings or finding['details'])
     return result, {'review': receipt, 'repair': finding}, [finding]
 
 
@@ -223,6 +286,9 @@ def verify(execution, task):
         return {'passed': False}, {'repair': finding}, [finding]
     head = execution.command('git', 'rev-parse', 'HEAD', cwd=path).stdout.strip()
     tree = execution.command('git', 'rev-parse', 'HEAD^{tree}', cwd=path).stdout.strip()
+    if task['data'].get('backlog_manifest'):
+        from .spec_backlog import validate_manifest
+        validate_manifest(path,task['data']['backlog_manifest'])
     remote = remote_verify(execution, path, {'candidate': inp['candidate'], 'base': inp['base'], 'head': head, 'tree': tree})
     records = remote['checks']
     if not remote['passed']:
@@ -266,10 +332,15 @@ def verify(execution, task):
                'tree': tree, 'branch': branch, 'checks': records, 'passed': True,
                'engine': 'gateway', 'sandbox': remote['sandbox'],
                'tested_head':remote.get('head'),'artifacts':remote.get('publication')}
+    if remote.get('policy'):receipt['policy']=remote['policy']
+    if remote.get('cache'):receipt['cache']=remote['cache']
     (execution.directory / 'verified.json').write_text(json.dumps(receipt))
     return receipt, {'verified': receipt}, []
 
 def publish(execution, task):
+    if task['data'].get('backlog_manifest'):
+        from .spec_backlog import validate_spec_source
+        validate_spec_source(execution.store.directory/'source',task['data']['backlog_manifest'])
     from .ci import publication, read as observe_ci, failure as ci_failure
     verified = execution.claim['input']['verified']
     head = verified['head']
@@ -286,12 +357,24 @@ def publish(execution, task):
             raise Retry('The associated PR was closed. Await an operator decision before publishing or changing code.')
         if observation['state'] == 'MERGED':
             if observation['headRefOid'] != head:
-                raise RuntimeError('merged PR does not match verified source')
+                from .publication_recovery import superseded, PublicationMismatch
+                updates = superseded(task, observation, verified)
+                if updates:
+                    proof = {'pr': url, 'merged': observation['mergeCommit']['oid'],
+                             'previous_head': observation['headRefOid'], 'pending_head': head}
+                    execution.store.event('historical_publication_detached', proof, task['name'], execution.claim['id'])
+                    return {'historical_publication': proof}, updates, []
+                error = PublicationMismatch('Merged PR head differs from the verified source; inspect the retained publication evidence before retrying')
+                error.diagnostic = {'pr': url, 'observed': observation, 'verified': verified}
+                raise error
             sha = observation['mergeCommit']['oid']
             path = checkout(execution, sha)
             tree = execution.command('git', 'rev-parse', 'HEAD^{tree}', cwd=path).stdout.strip()
             if tree != verified['tree']:
-                raise RuntimeError('upstream merge tree differs from verified tree')
+                from .publication_recovery import PublicationMismatch
+                error = PublicationMismatch('Upstream merge tree differs from the verified tree; inspect before retrying')
+                error.diagnostic = {'pr': url, 'sha': sha, 'observed_tree': tree, 'verified': verified}
+                raise error
             for resource in execution.store.db.execute("SELECT name FROM resources WHERE work=? AND kind='merge'", (execution.claim['id'],)).fetchall():
                 execution.store.resource_state(resource['name'], 'absent')
             return {'merged': sha, 'pr': url}, {'progress': 'complete', 'delivered': {'sha': sha, 'pr': url,
@@ -301,11 +384,13 @@ def publish(execution, task):
             # Do not overwrite a known failing published head with another
             # integration merge before its failure reaches implementation.
             observed = observe_ci(execution,task,previous)
-            rejected = ci_failure(execution,task,previous,observed)
-            if rejected:
-                return rejected
-            if observed['status'] not in ('passed','policy_pending','artifact_refresh') or observed.get('checks') != 'green':
-                raise Wait('Awaiting CI on the recorded published head before changing the branch')
+            from .ci import completed_refresh
+            refreshed=completed_refresh(execution.store,task,verified,previous,observed)
+            if not refreshed:
+                rejected = ci_failure(execution,task,previous,observed)
+                if rejected:return rejected
+                if observed['status'] not in ('passed','policy_pending','artifact_refresh') or observed.get('checks') != 'green':
+                    raise Wait('Awaiting CI on the recorded published head before changing the branch')
     path = checkout(execution, head)
     shipped = helper('dev-merge-message').message(task['name'],
                                                 path / 'specs/tasks' / (task['name'] + '.md'),
@@ -348,26 +433,27 @@ def publish(execution, task):
     task = execution.store.task(task['name'])
     observation = observe_ci(execution,task,verified)
     if observation['status'] == 'infrastructure':
-        for ident in observation.get('runs', []):
-            if ident is not None:
-                execution.command('gh', 'run', 'rerun', str(ident), '--failed', '--repo', repo,
-                                  timeout=30, check=False)
-        raise Retry('GitHub infrastructure checks were rerun on the same verified head')
+        from .ci import retry_infrastructure
+        retry_infrastructure(execution,task,verified,observation)
     rejected = ci_failure(execution,task,verified,observation)
     if rejected:
         return rejected
+    merge_base=verified['base']
     if observation.get('checks') == 'green':
         latest = execution.command('git', 'ls-remote', 'origin', 'refs/heads/main', cwd=path).stdout.split()[0]
         if latest != verified['base']:
-            return {'base_changed': latest}, {'verified': None}, []
+            from .integration import same_merge_tree
+            if (observation.get('merge_state')=='BEHIND' or not same_merge_tree(execution,path,latest,verified)):
+                return {'base_changed': latest}, {'verified': None}, []
+            merge_base=latest
     if observation['status'] != 'passed':
         raise Wait('GitHub merge gate: ' + observation['status'])
     permit = 'merge-' + execution.claim['id']
     if not execution.store.reserve(permit, execution.claim['id'], execution.claim['token'], 'merge', 1,
-                                   {'url': url, 'head': head, 'base': verified['base']}):
-        raise Retry('another upstream merge is awaiting confirmation')
+                                   {'url': url, 'head': head, 'base': merge_base}):
+        raise Wait('another upstream merge is awaiting confirmation')
     latest = execution.command('git', 'ls-remote', 'origin', 'refs/heads/main', cwd=path).stdout.split()[0]
-    if latest != verified['base']:
+    if latest != merge_base:
         execution.store.resource_state(permit, 'absent')
         return {'base_changed': latest}, {'verified': None}, []
     method = merge_method(execution, repo)
@@ -454,8 +540,8 @@ def baseline_repair(execution, observation):
                             continue
             if (signature and previous_signature == signature) or task['data'].get('baseline_key') == key:
                 return task['name']
-        number = max((int(task['name'][5:]) for task in store.tasks()), default=0) + 1
-        name = f'task-{number:03d}'
+        from .spec_backlog import allocate
+        name = allocate(store,1,'baseline repair '+key)[0]
         data = metadata(body) | {'baseline_key': key, 'catalog_generation': generation,
                                 'baseline_probe': observation.get('probe'), 'baseline_failure': signature}
         if shared:data.update(ci_environment=observation['environment_failure'],triaged=generation)
@@ -527,6 +613,15 @@ def cleanup(execution, task):
         return {'merge_observed': observation}, {}, []
     execution.login()
     if record['kind'] == 'provider':
+        # Providers cannot be removed while their owned sandbox is attached.
+        # Wait without a failed CLI delete; cleanup of the sandbox is independent.
+        attached = execution.store.db.execute(
+            "SELECT name FROM resources WHERE work=? AND token=? AND kind='sandbox' AND state<>'absent'",
+            (record['work'], record['token'])).fetchall()
+        if attached:
+            wait = Wait('Waiting for owned sandbox deletion before provider cleanup: ' + ', '.join(row['name'] for row in attached))
+            wait.retry_delay = 900
+            raise wait
         # A paginated list cannot establish this provider's absence.
         observed = execution.os('provider', 'get', resource, timeout=30, check=False)
         if observed.returncode == 0:
@@ -575,6 +670,15 @@ for p in pairs:
 """
         try:
             if item['phase'].lower() != 'ready' and not any(old_directory.parent.glob('*/remote.offset')):
+                try:
+                    diagnostic=json.loads((old_directory/'diagnostic.json').read_text())
+                except (OSError,ValueError):
+                    diagnostic={}
+                if old_work and old_work['stage']=='implement' and diagnostic.get('category')=='sandbox_provisioning':
+                    saved=json.loads(record['data'])
+                    execution.store.resource_state(resource, record['state'], saved|{'source_capture':{
+                        'state':'not_started','reason':'Provisioning failed before agent attachment',
+                        'work':record['work'],'token':record['token']}})
                 raise RuntimeError('No agent was attached; skip unreachable source capture and purge the unready sandbox')
             if old_work and old_work['stage']=='implement':
                 execution.os('sandbox','upload',resource,str(ROOT/'scripts/pipeline-agent.py'),'/tmp/stage/pipeline-agent.py','--no-git-ignore',timeout=60)
@@ -637,3 +741,7 @@ HANDLERS = {'triage': triage, 'assess': assess, 'implement': implement, 'review'
             'verify': verify, 'publish': publish, 'cleanup': cleanup}
 from .ci import observe
 HANDLERS['observe'] = observe
+
+from .spec_backlog import run_model as plan_specs, reconcile as reconcile_backlog
+HANDLERS.update({stage:plan_specs for stage in ('spec_audit','decompose','plan_review')})
+HANDLERS['backlog']=reconcile_backlog

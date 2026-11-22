@@ -1,5 +1,10 @@
 # Implementation assignment
 
+The trusted checkpoint finalizer formats newly added Rust files and records
+source commit attribution before review. Leave full-history attribution scans
+and workspace-wide gates to the executor. For formatting-only feedback, preserve
+behavior and fix formatting; do not cold-build an unchanged crate for that.
+
 Implement the assigned task in production code. Read its referenced specs and
 relevant development docs. The task contract and durable findings are the input;
 do not reproduce old diagnostic ledgers in the task or prompt.
@@ -40,3 +45,8 @@ Large gyre-server builds/test compilation must run in the independent verifier,
 after the model exits, to fit the hard 4 GiB budget. Use cargo check for server
 type checking and focused tests of smaller explicit packages. Record the server
 tests the verifier must execute. Do not bypass the build wrapper.
+
+Acceptance criteria are immutable requirements. Do not tick their checkboxes,
+append test status, or annotate them with deferred-verification notes. Put all
+progress and deferred test details under exactly ## Shipped. The executor may
+restore checkbox markers mechanically; this never asserts a test passed.

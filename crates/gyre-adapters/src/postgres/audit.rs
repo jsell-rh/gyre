@@ -13,7 +13,7 @@ use crate::schema::audit_events;
 #[derive(Queryable, Selectable)]
 #[diesel(table_name = audit_events)]
 #[diesel(check_for_backend(diesel::pg::Pg))]
-struct AuditEventRow {
+pub(crate) struct AuditEventRow {
     id: String,
     event_type: String,
     agent_id: Option<String>,
@@ -39,7 +39,11 @@ impl AuditEventRow {
     /// the row is compressed. Decompression or JSON parse failure of a
     /// compressed payload is a hard error: a corrupted audit record must
     /// surface, not silently degrade to an empty detail object.
-    fn into_event(self) -> Result<AuditEvent> {
+    ///
+    /// Shared by every audit_events read path in this adapter (AuditRepository
+    /// query/since_timestamp and the JudgmentLedgerRepository source-2 query)
+    /// so compressed rows decompress transparently everywhere.
+    pub(crate) fn into_event(self) -> Result<AuditEvent> {
         let detail = match self.detail_zstd {
             Some(z) if !z.is_empty() => {
                 let raw =
@@ -141,32 +145,7 @@ impl AuditRepository for PgStorage {
         let filter = filter.clone();
         tokio::task::spawn_blocking(move || -> Result<Vec<AuditEvent>> {
             let mut conn = pool.get().context("get db connection")?;
-            let mut query = audit_events::table.into_boxed();
-            if let Some(s) = filter.since {
-                query = query.filter(audit_events::timestamp.ge(s as i64));
-            }
-            if let Some(u) = filter.until {
-                query = query.filter(audit_events::timestamp.le(u as i64));
-            }
-            if let Some(a) = &filter.agent_id {
-                query = query.filter(audit_events::agent_id.eq(a.as_str()));
-            }
-            if let Some(et) = &filter.event_type {
-                query = query.filter(audit_events::event_type.eq(et.as_str()));
-            }
-            if let Some(w) = &filter.workspace_id {
-                query = query.filter(audit_events::workspace_id.eq(w.as_str()));
-            }
-            if let Some(u) = &filter.user_id {
-                query = query.filter(audit_events::user_id.eq(u.as_str()));
-            }
-            if let Some(rt) = &filter.resource_type {
-                query = query.filter(audit_events::resource_type.eq(rt.as_str()));
-            }
-            if let Some(o) = filter.outcome {
-                query = query.filter(audit_events::outcome.eq(o.as_str()));
-            }
-            let rows = query
+            let rows = apply_filters(audit_events::table.into_boxed(), &filter)
                 .order(audit_events::timestamp.desc())
                 .limit(filter.limit as i64)
                 .load::<AuditEventRow>(&mut *conn)
@@ -186,6 +165,22 @@ impl AuditRepository for PgStorage {
                 .count()
                 .get_result::<i64>(&mut *conn)
                 .context("count audit_events")?;
+            Ok(n as u64)
+        })
+        .await?
+    }
+
+    async fn count_filtered(&self, filter: &AuditQueryFilter) -> Result<u64> {
+        let pool = Arc::clone(&self.pool);
+        let filter = filter.clone();
+        tokio::task::spawn_blocking(move || -> Result<u64> {
+            let mut conn = pool.get().context("get db connection")?;
+            // `limit` deliberately not applied: the count covers the full
+            // filtered set (port contract).
+            let n = apply_filters(audit_events::table.into_boxed(), &filter)
+                .count()
+                .get_result::<i64>(&mut *conn)
+                .context("count audit_events (filtered)")?;
             Ok(n as u64)
         })
         .await?
@@ -282,4 +277,42 @@ impl AuditRepository for PgStorage {
         })
         .await?
     }
+}
+
+type BoxedAuditQuery =
+    diesel::dsl::IntoBoxed<'static, crate::schema::audit_events::table, diesel::pg::Pg>;
+
+/// Mirror of the sqlite adapter's filter builder — the same port contract
+/// (every `AuditQueryFilter` dimension, including `repo_id`) compiled to
+/// SQL. Shared by `query` and `count_filtered` so the two can never
+/// disagree on what matches.
+fn apply_filters(mut query: BoxedAuditQuery, filter: &AuditQueryFilter) -> BoxedAuditQuery {
+    if let Some(s) = filter.since {
+        query = query.filter(audit_events::timestamp.ge(s as i64));
+    }
+    if let Some(u) = filter.until {
+        query = query.filter(audit_events::timestamp.le(u as i64));
+    }
+    if let Some(a) = &filter.agent_id {
+        query = query.filter(audit_events::agent_id.eq(a.clone()));
+    }
+    if let Some(et) = &filter.event_type {
+        query = query.filter(audit_events::event_type.eq(et.clone()));
+    }
+    if let Some(w) = &filter.workspace_id {
+        query = query.filter(audit_events::workspace_id.eq(w.clone()));
+    }
+    if let Some(u) = &filter.user_id {
+        query = query.filter(audit_events::user_id.eq(u.clone()));
+    }
+    if let Some(r) = &filter.repo_id {
+        query = query.filter(audit_events::repo_id.eq(r.clone()));
+    }
+    if let Some(rt) = &filter.resource_type {
+        query = query.filter(audit_events::resource_type.eq(rt.clone()));
+    }
+    if let Some(o) = filter.outcome {
+        query = query.filter(audit_events::outcome.eq(o.as_str()));
+    }
+    query
 }

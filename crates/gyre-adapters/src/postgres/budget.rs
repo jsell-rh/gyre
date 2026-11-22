@@ -1,12 +1,33 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use diesel::prelude::*;
-use gyre_domain::BudgetConfig;
+use gyre_domain::{BudgetConfig, BudgetEnforcementAction};
 use gyre_ports::BudgetRepository;
 use std::sync::Arc;
 
 use super::PgStorage;
 use crate::schema::budget_configs;
+
+/// String encoding of `BudgetEnforcementAction` in the `budget_configs`
+/// table — the serde snake_case variant names. Mirrors the SQLite adapter.
+fn enforcement_action_to_db(a: &BudgetEnforcementAction) -> &'static str {
+    match a {
+        BudgetEnforcementAction::Warn => "warn",
+        BudgetEnforcementAction::GracefulStop => "graceful_stop",
+        BudgetEnforcementAction::HardKill => "hard_kill",
+        BudgetEnforcementAction::QueuePause => "queue_pause",
+    }
+}
+
+fn enforcement_action_from_db(s: &str) -> Option<BudgetEnforcementAction> {
+    match s {
+        "warn" => Some(BudgetEnforcementAction::Warn),
+        "graceful_stop" => Some(BudgetEnforcementAction::GracefulStop),
+        "hard_kill" => Some(BudgetEnforcementAction::HardKill),
+        "queue_pause" => Some(BudgetEnforcementAction::QueuePause),
+        _ => None,
+    }
+}
 
 #[derive(Queryable, Selectable)]
 #[diesel(table_name = budget_configs)]
@@ -17,6 +38,7 @@ struct BudgetConfigRow {
     max_cost_per_day: Option<f64>,
     max_concurrent_agents: Option<i32>,
     max_agent_lifetime_secs: Option<i64>,
+    enforcement_action: Option<String>,
     #[allow(dead_code)]
     updated_at: i64,
 }
@@ -28,6 +50,10 @@ impl BudgetConfigRow {
             max_cost_per_day: self.max_cost_per_day,
             max_concurrent_agents: self.max_concurrent_agents.map(|v| v as u32),
             max_agent_lifetime_secs: self.max_agent_lifetime_secs.map(|v| v as u64),
+            enforcement_action: self
+                .enforcement_action
+                .as_deref()
+                .and_then(enforcement_action_from_db),
         }
     }
 }
@@ -40,6 +66,7 @@ struct NewBudgetConfigRow<'a> {
     max_cost_per_day: Option<f64>,
     max_concurrent_agents: Option<i32>,
     max_agent_lifetime_secs: Option<i64>,
+    enforcement_action: Option<&'a str>,
     updated_at: i64,
 }
 
@@ -65,6 +92,7 @@ impl BudgetRepository for PgStorage {
                 max_cost_per_day: c.max_cost_per_day,
                 max_concurrent_agents: c.max_concurrent_agents.map(|v| v as i32),
                 max_agent_lifetime_secs: c.max_agent_lifetime_secs.map(|v| v as i64),
+                enforcement_action: c.enforcement_action.as_ref().map(enforcement_action_to_db),
                 updated_at: now,
             };
             diesel::insert_into(budget_configs::table)
@@ -76,6 +104,7 @@ impl BudgetRepository for PgStorage {
                     budget_configs::max_cost_per_day.eq(row.max_cost_per_day),
                     budget_configs::max_concurrent_agents.eq(row.max_concurrent_agents),
                     budget_configs::max_agent_lifetime_secs.eq(row.max_agent_lifetime_secs),
+                    budget_configs::enforcement_action.eq(row.enforcement_action),
                     budget_configs::updated_at.eq(now),
                 ))
                 .execute(&mut *conn)

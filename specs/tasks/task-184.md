@@ -2,10 +2,10 @@
 title: "Flow Traces — animated particle flow visualization"
 spec_ref: "system-explorer.md §5"
 depends_on: [task-178, task-170]
-progress: not-started
+progress: complete
 coverage_sections:
   - "system-explorer.md §5. Flow Traces"
-commits: []
+commits: ["23fbb3b60500026eb0751cc34614e2338083f337", "152e7f833b1c3f5d055203b2c77c6de75c2065d1"]
 ---
 
 ## Spec Excerpt
@@ -97,3 +97,67 @@ system-explorer.md §5 defines Flow Traces — behavioral views showing how data
 ## Agent Instructions
 
 Read `system-explorer.md` §5 "Flow Traces" and `ui-layout.md` §4 "Layout Layer" (flow layout detail section) for the full specification. The view spec grammar (task-170) defines the `"flow"` layout type with `trace_source` in the data layer. Check if gate trace data is available via existing API endpoints — search for `GateTrace` or trace-related types in `crates/gyre-domain/`. The particle rendering should use a `<canvas>` element overlaid on the SVG graph. For span data, check the `human-system-interface.md` §3a "Test-Time Trace Capture" spec for the data format. The Canvas 2D API is sufficient for <100 particles; WebGL is the fallback for performance. Register the flow layout in the layout registry pattern from task-170.
+
+## Shipped
+
+The flow-layout particle machinery (SVG node/edge layer + Canvas 2D/WebGL2
+particle overlay, playback controls with scrub/step/speed/test selector,
+span-tree particle resolution with spec colors and 200ms/20px fading
+trails, node/particle/edge click interactions, per-node span-count /
+error-rate / mean-duration badges) already shipped on the task-065/015
+substrate (`FlowCanvas.svelte`, `flow-particles.js`, `particle-layer.js`,
+`PlaybackControls.svelte`; ExplorerCanvas delegates to FlowCanvas for the
+`"flow"` layout registered in `layoutRegistry.js`). This task closed the
+two §5 gaps that remained on top of it:
+
+### Predefined flow templates (the §5 "predefined flows" requirement)
+
+`web/src/lib/flow-templates.js` defines the three spec-mandated flows —
+agent spawn, MR merge, spec approval — each with a starting point, an
+expected call path (word-token node-name matching against the loaded
+graph), and its governing spec. The Explorer View selector gains a "Trace
+flows" section listing them. Selecting one resolves the path against the
+current graph, applies the flow layout scoped to the matched nodes
+(concept-seeded ViewQuery, depth 0), and animates it with the captured
+gate trace of the best-matching workspace MR: MR discovery goes through
+`GET /workspaces/:id/merge-requests?has_trace=true` (new
+`api.workspaceMergeRequests`; the same `get_by_mr` lookup the trace
+endpoint serves), `pickTraceMr` prefers the MR whose title/spec_ref/branch
+matches the template, and `api.mrTrace` loads its spans. Spans that do not
+map onto the path produce no particles — nothing is fabricated; with no
+traced MR the expected path renders structurally with an explanatory
+toast. Custom flows remain the canvas's trace-from-node action (§5 "trace
+custom flows by selecting a starting function").
+
+### Flow-layout view query scoping
+
+FlowCanvas previously ignored the active ViewQuery's scope (a flow view
+rendered the full graph regardless of its spec's data layer).
+ExplorerCanvas now forwards `queryMatchedIds` as `visibleNodeIds` and
+FlowCanvas filters its node set by it — the same "scope filters the node
+set" contract every registry renderer implements.
+
+### Test evidence
+
+- `flow-templates.test.js` (new, 11 tests): token-aware pattern matching
+  (no substring false positives), spec/file/test node exclusion, template
+  path resolution and dedup, empty-match honesty, ViewQuery construction
+  (concept seeds, depth 0, spec-linked annotation), trace-MR selection
+  (pattern preference, newest fallback, null on empty).
+- `ExplorerViewFlowTemplates.test.js` (new, 4 tests): the "Trace flows"
+  section lists all three flows; applying a template swaps to the flow
+  layout scoped to the matched path (unrelated node filtered out),
+  resolves the trace through the workspace has_trace discovery picking the
+template-matching MR, and renders the playback bar + spec-linked
+  annotation; no-trace renders the path structurally with no playback bar;
+  a graph matching no step warns and changes nothing.
+- `ExplorerCanvas.flow.test.js`: two new tests pin the query-scoping
+  delegation (scoped nodes only, edges into unmatched nodes dropped; full
+  graph without a query).
+- `ExplorerDefaultViews.test.js`: updated for the three new selector
+  options.
+- Full `web` vitest suite: 2156 passed (the one failing assertion was the
+  updated default-views option list). No Rust surface changed; no
+  server-side tests required (the workspace MR list route and its
+  `has_trace` filter pre-date this task and are covered by
+  `merge_requests.rs` tests).

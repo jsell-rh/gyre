@@ -113,6 +113,16 @@ mod tests {
     }
 
     #[test]
+    fn frozen_clock_keeps_bucket_exhausted() {
+        let rl = RateLimiter::with_clock(1, frozen_clock());
+        assert!(rl.try_acquire());
+        assert!(
+            !rl.try_acquire(),
+            "with a frozen clock the bucket never refills"
+        );
+    }
+
+    #[test]
     fn refills_to_full_rate_on_new_second() {
         // Scripted clock: the test advances the shared tick between acquires,
         // so the second-boundary refill is exercised deterministically.

@@ -8,6 +8,7 @@
 //! Adapters depend on ports, not the other way around.
 //! Domain logic MUST NOT import this crate.
 
+pub mod attestation_storage;
 pub mod call_graph;
 pub mod call_graph_rust;
 pub mod compute;
@@ -18,9 +19,11 @@ pub mod mem_graph;
 pub mod mem_saved_view;
 pub mod mem_search;
 pub mod postgres;
+pub mod rekor;
 pub mod schema;
 pub mod sqlite;
 
+pub use attestation_storage::MergeAttestationStorage;
 pub use call_graph::SubprocessCallGraphExtractor;
 pub use compute::{DockerTarget, LocalTarget, SshTarget};
 pub use git2_ops::Git2OpsAdapter;
@@ -30,4 +33,5 @@ pub use mem_graph::MemGraphStore;
 pub use mem_saved_view::MemSavedViewRepository;
 pub use mem_search::MemSearchAdapter;
 pub use postgres::PgStorage;
+pub use rekor::HttpRekorClient;
 pub use sqlite::SqliteStorage;

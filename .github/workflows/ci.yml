@@ -52,7 +52,7 @@ jobs:
         with:
           fetch-depth: 2
       - name: Install mold linker
-        run: sudo apt-get install -y mold
+        run: bash scripts/ci-install-mold.sh
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -68,10 +68,10 @@ jobs:
     steps:                                                                                                                                      
       - uses: actions/checkout@v4                                                                                                               
       - run: bash scripts/check-arch.sh                                                                                                         
-      - name: API auth coverage lint (advisory)
-        run: bash scripts/check-api-auth.sh || true
-      - name: Tenant filter lint (advisory)
-        run: bash scripts/check-tenant-filter.sh || true
+      - name: API auth coverage lint
+        run: bash scripts/check-api-auth.sh
+      - name: Tenant filter lint
+        run: bash scripts/check-tenant-filter.sh
       - name: Hierarchy lint (M34)
         run: GYRE_CHECK_HIERARCHY=1 bash scripts/check-hierarchy.sh
       - name: Dead parameter lint (advisory)
@@ -108,6 +108,8 @@ jobs:
         run: bash scripts/check-byte-slice-truncation.sh
       - name: Dead MessageKind lint
         run: bash scripts/check-dead-message-kinds.sh
+      - name: Notification toggle coverage lint
+        run: bash scripts/check-notification-toggle-coverage.sh
       - name: Em-dash check                                                                                                                     
         run: |                                                                                                                                  
           find crates -name '*.rs' -o -name '*.toml' | xargs bash scripts/check-no-em-dash.sh || true  
@@ -118,7 +120,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install mold linker
-        run: sudo apt-get install -y mold
+        run: bash scripts/ci-install-mold.sh
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -181,7 +183,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install mold linker
-        run: sudo apt-get install -y mold
+        run: bash scripts/ci-install-mold.sh
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:

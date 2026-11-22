@@ -71,6 +71,8 @@ struct ReviewRow {
     reviewer_agent_id: String,
     decision: String,
     body: Option<String>,
+    reviewer_persona: Option<String>,
+    gate_id: Option<String>,
     created_at: i64,
 }
 
@@ -88,6 +90,8 @@ impl ReviewRow {
             decision,
             body: self.body,
             created_at: self.created_at as u64,
+            reviewer_persona: self.reviewer_persona,
+            gate_id: self.gate_id.map(Id::new),
         })
     }
 }
@@ -100,6 +104,8 @@ struct ReviewRecord<'a> {
     reviewer_agent_id: &'a str,
     decision: &'a str,
     body: Option<&'a str>,
+    reviewer_persona: Option<&'a str>,
+    gate_id: Option<&'a str>,
     created_at: i64,
 }
 
@@ -154,6 +160,8 @@ impl ReviewRepository for SqliteStorage {
                 reviewer_agent_id: &r.reviewer_agent_id,
                 decision,
                 body: r.body.as_deref(),
+                reviewer_persona: r.reviewer_persona.as_deref(),
+                gate_id: r.gate_id.as_ref().map(|g| g.as_str()),
                 created_at: r.created_at as i64,
             };
             diesel::insert_into(reviews::table)
@@ -175,6 +183,21 @@ impl ReviewRepository for SqliteStorage {
                 .order(reviews::created_at.asc())
                 .load::<ReviewRow>(&mut *conn)
                 .context("list reviews")?;
+            rows.into_iter().map(|r| r.into_review()).collect()
+        })
+        .await?
+    }
+
+    async fn list_by_reviewer(&self, reviewer_agent_id: &str) -> Result<Vec<Review>> {
+        let pool = Arc::clone(&self.pool);
+        let reviewer = reviewer_agent_id.to_string();
+        tokio::task::spawn_blocking(move || -> Result<Vec<Review>> {
+            let mut conn = pool.get().context("get db connection")?;
+            let rows = reviews::table
+                .filter(reviews::reviewer_agent_id.eq(reviewer))
+                .order(reviews::created_at.desc())
+                .load::<ReviewRow>(&mut *conn)
+                .context("list reviews by reviewer")?;
             rows.into_iter().map(|r| r.into_review()).collect()
         })
         .await?
@@ -224,6 +247,7 @@ mod tests {
         let mr = MergeRequest::new(
             Id::new(mr_id),
             Id::new("r1"),
+            Id::new("default"),
             "Test MR",
             "feat/x",
             "main",
@@ -238,6 +262,70 @@ mod tests {
 
     fn make_review(id: &str, mr_id: &str, decision: ReviewDecision) -> Review {
         Review::new(Id::new(id), Id::new(mr_id), "agent-1", decision, 1000)
+    }
+
+    #[tokio::test]
+    async fn review_attribution_persists_and_roundtrips() {
+        // task-135 (agent-gates.md §Gate Agent Lifecycle): a gate agent's
+        // review carries which gate persona produced it. The columns must
+        // round-trip through SQLite — a drift here silently strips
+        // attribution from every persisted gate review while the mem
+        // adapter (plain clone) keeps it green.
+        let (_tmp, s) = setup();
+        seed_mr(&s, "mr1").await;
+        let mut r = make_review("r-attr", "mr1", ReviewDecision::Approved);
+        r.reviewer_persona = Some("personas/security.md".to_string());
+        r.gate_id = Some(Id::new("gate-9"));
+        ReviewRepository::submit_review(&s, &r).await.unwrap();
+
+        let reviews = ReviewRepository::list_reviews(&s, &Id::new("mr1"))
+            .await
+            .unwrap();
+        assert_eq!(reviews.len(), 1);
+        assert_eq!(
+            reviews[0].reviewer_persona.as_deref(),
+            Some("personas/security.md")
+        );
+        assert_eq!(reviews[0].gate_id, Some(Id::new("gate-9")));
+    }
+
+    #[tokio::test]
+    async fn review_without_attribution_stays_null() {
+        let (_tmp, s) = setup();
+        seed_mr(&s, "mr1").await;
+        let r = make_review("r-plain", "mr1", ReviewDecision::Approved);
+        ReviewRepository::submit_review(&s, &r).await.unwrap();
+
+        let reviews = ReviewRepository::list_reviews(&s, &Id::new("mr1"))
+            .await
+            .unwrap();
+        assert_eq!(reviews.len(), 1);
+        assert!(reviews[0].reviewer_persona.is_none());
+        assert!(reviews[0].gate_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn list_by_reviewer_filters_and_orders_newest_first() {
+        // Public-profile stats/activity attribution (user-management.md
+        // §User Profile Page): only the named reviewer's rows come back,
+        // newest first.
+        let (_tmp, s) = setup();
+        seed_mr(&s, "mr1").await;
+        for (id, ts) in [("r-old", 1000u64), ("r-new", 2000)] {
+            let mut r = make_review(id, "mr1", ReviewDecision::Approved);
+            r.created_at = ts;
+            ReviewRepository::submit_review(&s, &r).await.unwrap();
+        }
+        let mut other = make_review("r-other", "mr1", ReviewDecision::Approved);
+        other.reviewer_agent_id = "agent-2".to_string();
+        ReviewRepository::submit_review(&s, &other).await.unwrap();
+
+        let mine = ReviewRepository::list_by_reviewer(&s, "agent-1")
+            .await
+            .unwrap();
+        assert_eq!(mine.len(), 2);
+        assert_eq!(mine[0].id.as_str(), "r-new");
+        assert_eq!(mine[1].id.as_str(), "r-old");
     }
 
     #[tokio::test]

@@ -4,18 +4,18 @@ use anyhow::Result;
 use async_trait::async_trait;
 use gyre_common::Id;
 use gyre_domain::spec_approval::ApprovalTransitionError;
+use gyre_domain::BudgetUsage;
 use gyre_domain::{
     Agent, AgentCommit, AgentStatus, AgentUsage, AgentWorktree, AnalyticsEvent, AuditEvent,
     CostEntry, DependencyEdge, LlmFunctionConfig, MergeQueueEntry, MergeQueueEntryStatus,
     MergeRequest, MrStatus, NetworkPeer, Persona, PersonaScope, Repository, Review, ReviewComment,
-    ReviewDecision, Task, TaskStatus, Tenant, User, Workspace,
+    ReviewDecision, Session, Task, TaskStatus, Tenant, User, Workspace,
 };
 #[cfg(test)]
 use gyre_domain::{BranchInfo, CommitInfo, DiffResult, MergeResult};
-use gyre_domain::{BudgetCallRecord, BudgetUsage};
 use gyre_ports::{
-    AgentCommitRepository, AgentRepository, AnalyticsRepository, ApiKeyRepository,
-    AuditQueryFilter, AuditRepository, BudgetCallRepository, BudgetRepository,
+    AgentCommitRepository, AgentRepository, AgentSessionRepository, AnalyticsQueryFilter,
+    AnalyticsRepository, ApiKeyRepository, AuditQueryFilter, AuditRepository, BudgetRepository,
     BudgetUsageRepository, CostRepository, DependencyRepository, KvJsonStore, LlmConfigRepository,
     MergeQueueRepository, MergeRequestRepository, MetaSpecSetRepository, NetworkPeerRepository,
     PersonaRepository, RepoRepository, ReviewRepository, RolloutPolicyRepository, SpawnLogEntry,
@@ -23,7 +23,7 @@ use gyre_ports::{
     UserRepository, UserWorkspaceStateRepository, WorkspaceRepository, WorktreeRepository,
 };
 #[cfg(test)]
-use gyre_ports::{GitOpsPort, JjChange, JjOpsPort};
+use gyre_ports::{GitOpsPort, JjChange, JjNewChange, JjOpsPort};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -113,6 +113,10 @@ impl GitOpsPort for NoopGitOps {
         Ok(())
     }
 
+    async fn force_remove_worktree(&self, _repo_path: &str, _worktree_path: &str) -> Result<()> {
+        Ok(())
+    }
+
     async fn list_worktrees(&self, _repo_path: &str) -> Result<Vec<String>> {
         Ok(vec![])
     }
@@ -139,6 +143,10 @@ impl GitOpsPort for NoopGitOps {
         _branch_name: &str,
         _from_ref: &str,
     ) -> Result<()> {
+        Ok(())
+    }
+
+    async fn delete_branch(&self, _repo_path: &str, _branch_name: &str) -> Result<()> {
         Ok(())
     }
 
@@ -314,6 +322,10 @@ impl GitOpsPort for ConfigurableGitOps {
         Ok(())
     }
 
+    async fn force_remove_worktree(&self, _repo_path: &str, _worktree_path: &str) -> Result<()> {
+        Ok(())
+    }
+
     async fn list_worktrees(&self, _repo_path: &str) -> Result<Vec<String>> {
         Ok(vec![])
     }
@@ -340,6 +352,10 @@ impl GitOpsPort for ConfigurableGitOps {
         _branch_name: &str,
         _from_ref: &str,
     ) -> Result<()> {
+        Ok(())
+    }
+
+    async fn delete_branch(&self, _repo_path: &str, _branch_name: &str) -> Result<()> {
         Ok(())
     }
 
@@ -408,8 +424,14 @@ impl JjOpsPort for NoopJjOps {
         Ok(())
     }
 
-    async fn jj_new(&self, _repo_path: &str, _description: &str) -> Result<String> {
-        Ok("noop-change-id".to_string())
+    async fn jj_new(&self, _repo_path: &str, _description: &str) -> Result<JjNewChange> {
+        Ok(JjNewChange {
+            change_id: "noop-change-id".to_string(),
+            // Distinct from the NoopJjOps squash SHA so both surfaces can
+            // be exercised against the same repo in one test without
+            // colliding on the (repo_id, commit_sha) signature key.
+            commit_id: "0000000000000000000000000000000000000001".to_string(),
+        })
     }
 
     async fn jj_describe(
@@ -526,8 +548,11 @@ impl JjOpsPort for ConfigurableJjOps {
         Ok(())
     }
 
-    async fn jj_new(&self, _repo_path: &str, _description: &str) -> Result<String> {
-        Ok("cfg-change-id".to_string())
+    async fn jj_new(&self, _repo_path: &str, _description: &str) -> Result<JjNewChange> {
+        Ok(JjNewChange {
+            change_id: "cfg-change-id".to_string(),
+            commit_id: "0000000000000000000000000000000000000002".to_string(),
+        })
     }
 
     async fn jj_describe(
@@ -687,6 +712,149 @@ impl AgentCommitRepository for MemAgentCommitRepository {
             .filter(|ac| ac.task_id.as_deref() == Some(task_id))
             .cloned()
             .collect())
+    }
+
+    async fn find_by_session(&self, session_id: &Id) -> Result<Vec<AgentCommit>> {
+        // Chronological (oldest first): the session-to-commit mapping is
+        // ordered by when each commit landed. The mem adapter has no ORDER
+        // BY, so the sort is done in code (same contract as the SQLite and
+        // PostgreSQL adapters).
+        let mut commits: Vec<AgentCommit> = self
+            .store
+            .lock()
+            .await
+            .iter()
+            .filter(|ac| ac.session_id.as_deref() == Some(session_id.as_str()))
+            .cloned()
+            .collect();
+        commits.sort_by(|a, b| {
+            a.timestamp
+                .cmp(&b.timestamp)
+                .then_with(|| a.id.as_str().cmp(b.id.as_str()))
+        });
+        Ok(commits)
+    }
+
+    async fn find_by_file(&self, repo_id: &Id, path: &str) -> Result<Vec<AgentCommit>> {
+        // Exact path match against the recorded files_changed lists (same
+        // contract as the SQLite and PostgreSQL adapters).
+        let mut commits: Vec<AgentCommit> = self
+            .store
+            .lock()
+            .await
+            .iter()
+            .filter(|ac| {
+                ac.repository_id.as_str() == repo_id.as_str()
+                    && ac.files_changed.iter().any(|f| f == path)
+            })
+            .cloned()
+            .collect();
+        commits.sort_by(|a, b| {
+            a.timestamp
+                .cmp(&b.timestamp)
+                .then_with(|| a.id.as_str().cmp(b.id.as_str()))
+        });
+        Ok(commits)
+    }
+}
+
+#[derive(Default)]
+pub struct MemAgentSessionRepository {
+    store: Arc<Mutex<Vec<Session>>>,
+}
+
+#[async_trait]
+impl AgentSessionRepository for MemAgentSessionRepository {
+    async fn create(&self, session: &Session) -> Result<()> {
+        let mut store = self.store.lock().await;
+        // Port contract: fails if a session with the same id already
+        // exists. Guarded in code because the mem adapter has no schema to
+        // enforce the SQLite/PostgreSQL primary key.
+        if store.iter().any(|s| s.id == session.id) {
+            anyhow::bail!("session {} already exists", session.id);
+        }
+        store.push(session.clone());
+        Ok(())
+    }
+
+    async fn find_by_agent(&self, agent_id: &Id) -> Result<Vec<Session>> {
+        // Chronological (oldest first), same contract as the DB adapters,
+        // including the same-second tie-break: an ended session predates a
+        // still-open session started in the same second (one agent's
+        // sessions are sequential context windows), then ended_at, then the
+        // id as the final deterministic fallback — never the random-UUID id
+        // alone, which orders same-second sessions arbitrarily.
+        let mut sessions: Vec<Session> = self
+            .store
+            .lock()
+            .await
+            .iter()
+            .filter(|s| s.agent_id.as_str() == agent_id.as_str())
+            .cloned()
+            .collect();
+        sessions.sort_by(|a, b| {
+            a.started_at
+                .cmp(&b.started_at)
+                .then_with(|| a.ended_at.is_none().cmp(&b.ended_at.is_none()))
+                .then_with(|| a.ended_at.cmp(&b.ended_at))
+                .then_with(|| a.id.as_str().cmp(b.id.as_str()))
+        });
+        Ok(sessions)
+    }
+
+    async fn find_by_repo(&self, repository_id: &Id) -> Result<Vec<Session>> {
+        // Same ordering contract as find_by_agent (see there).
+        let mut sessions: Vec<Session> = self
+            .store
+            .lock()
+            .await
+            .iter()
+            .filter(|s| s.repository_id.as_str() == repository_id.as_str())
+            .cloned()
+            .collect();
+        sessions.sort_by(|a, b| {
+            a.started_at
+                .cmp(&b.started_at)
+                .then_with(|| a.ended_at.is_none().cmp(&b.ended_at.is_none()))
+                .then_with(|| a.ended_at.cmp(&b.ended_at))
+                .then_with(|| a.id.as_str().cmp(b.id.as_str()))
+        });
+        Ok(sessions)
+    }
+
+    async fn find_by_id(&self, id: &Id) -> Result<Option<Session>> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .iter()
+            .find(|s| s.id == *id)
+            .cloned())
+    }
+
+    async fn find_open_by_agent(&self, agent_id: &Id) -> Result<Option<Session>> {
+        // The latest session without ended_at (there is at most one per
+        // agent, but the query must return the newest if several exist).
+        Ok(self
+            .store
+            .lock()
+            .await
+            .iter()
+            .filter(|s| s.agent_id.as_str() == agent_id.as_str() && s.ended_at.is_none())
+            .max_by_key(|s| (s.started_at, s.id.to_string()))
+            .cloned())
+    }
+
+    async fn update(&self, session: &Session) -> Result<()> {
+        let mut store = self.store.lock().await;
+        // Port contract: fails if the session does not exist (same guard
+        // as the SQLite and PostgreSQL adapters' zero-rows check).
+        let existing = store
+            .iter_mut()
+            .find(|s| s.id == session.id)
+            .ok_or_else(|| anyhow::anyhow!("session {} does not exist", session.id))?;
+        *existing = session.clone();
+        Ok(())
     }
 }
 
@@ -877,6 +1045,19 @@ impl AgentRepository for MemAgentRepository {
             .collect())
     }
 
+    async fn list_by_spawner(&self, spawned_by: &str) -> Result<Vec<Agent>> {
+        let mut out: Vec<Agent> = self
+            .store
+            .lock()
+            .await
+            .values()
+            .filter(|a| a.spawned_by.as_deref() == Some(spawned_by))
+            .cloned()
+            .collect();
+        out.sort_by_key(|a| std::cmp::Reverse(a.spawned_at));
+        Ok(out)
+    }
+
     async fn update_status(&self, agent_id: &Id, status: AgentStatus) -> Result<()> {
         let mut store = self.store.lock().await;
         if let Some(agent) = store.get_mut(agent_id.as_str()) {
@@ -894,6 +1075,16 @@ impl AgentRepository for MemAgentRepository {
 #[derive(Default)]
 pub struct MemTaskRepository {
     store: Arc<Mutex<HashMap<String, Task>>>,
+}
+
+impl MemTaskRepository {
+    /// Construct over an externally-owned task store — pair with
+    /// `MemPersonaRepository::with_task_store` so the atomic
+    /// `apply_approval_reset_with_task` write and every normal task write
+    /// land in the same store.
+    pub fn from_store(store: Arc<Mutex<HashMap<String, Task>>>) -> Self {
+        Self { store }
+    }
 }
 
 #[async_trait]
@@ -1130,6 +1321,19 @@ impl ReviewRepository for MemReviewRepository {
         Ok(reviews)
     }
 
+    async fn list_by_reviewer(&self, reviewer_agent_id: &str) -> Result<Vec<Review>> {
+        let mut reviews: Vec<Review> = self
+            .reviews
+            .lock()
+            .await
+            .values()
+            .filter(|r| r.reviewer_agent_id == reviewer_agent_id)
+            .cloned()
+            .collect();
+        reviews.sort_by_key(|r| std::cmp::Reverse(r.created_at));
+        Ok(reviews)
+    }
+
     async fn is_approved(&self, mr_id: &Id) -> Result<bool> {
         let reviews = self.list_reviews(mr_id).await?;
         if reviews.is_empty() {
@@ -1267,6 +1471,24 @@ impl UserRepository for MemUserRepository {
             .cloned())
     }
 
+    async fn find_by_email(&self, email: &str) -> Result<Vec<User>> {
+        // Case-insensitive: invitation emails are normalized to lowercase,
+        // but SSO-provisioned accounts store the IdP's raw casing. Email
+        // is not unique (same person, multiple tenants), so every match is
+        // returned; callers scope by tenant. Ordered by creation for a
+        // deterministic pick.
+        let email = email.to_lowercase();
+        let store = self.store.lock().await;
+        let mut matches: Vec<User> = store
+            .values()
+            .filter(|u| u.email.as_ref().is_some_and(|e| e.to_lowercase() == email))
+            .cloned()
+            .collect();
+        drop(store);
+        matches.sort_by_key(|u| u.created_at);
+        Ok(matches)
+    }
+
     async fn list(&self) -> Result<Vec<User>> {
         Ok(self.store.lock().await.values().cloned().collect())
     }
@@ -1296,8 +1518,52 @@ impl UserRepository for MemUserRepository {
         Ok(())
     }
 
+    async fn claim_external_id(&self, user_id: &Id, new_external_id: &str) -> Result<()> {
+        let mut store = self.store.lock().await;
+        // Port contract: fail if another user already owns the new
+        // external_id, or the target user does not exist.
+        if let Some(owner) = store
+            .values()
+            .find(|u| u.external_id == new_external_id && u.id != *user_id)
+        {
+            anyhow::bail!("external_id already owned by user {}", owner.id);
+        }
+        let user = store.get_mut(user_id.as_str()).ok_or_else(|| {
+            anyhow::anyhow!("cannot claim external_id for user {user_id}: not found")
+        })?;
+        user.external_id = new_external_id.to_string();
+        Ok(())
+    }
+
     async fn delete(&self, id: &Id) -> Result<()> {
         self.store.lock().await.remove(id.as_str());
+        Ok(())
+    }
+
+    async fn record_login(
+        &self,
+        user_id: &Id,
+        oidc_issuer: &str,
+        at: u64,
+        min_interval_secs: u64,
+    ) -> Result<()> {
+        // Same debounce contract as the SQL adapters: write only when the
+        // verified issuer differs from the stored one, or the stored
+        // last_login_at is unset or at/older than the threshold (the
+        // provisioning path re-stamps last_login_at on every auth, so the
+        // issuer carve-out is what keeps provenance correct).
+        let mut store = self.store.lock().await;
+        if let Some(u) = store.get_mut(user_id.as_str()) {
+            let issuer_changed = u.oidc_issuer.as_deref() != Some(oidc_issuer);
+            let stale = match u.last_login_at {
+                None => true,
+                Some(prev) => prev <= at.saturating_sub(min_interval_secs),
+            };
+            if issuer_changed || stale {
+                u.oidc_issuer = Some(oidc_issuer.to_string());
+                u.last_login_at = Some(at);
+            }
+        }
         Ok(())
     }
 }
@@ -1333,6 +1599,40 @@ pub struct MemAnalyticsRepository {
     store: Arc<Mutex<Vec<AnalyticsEvent>>>,
 }
 
+/// Shared filter predicate for `MemAnalyticsRepository` — the exact
+/// semantics of `AnalyticsRepository::query_filtered` (exact or
+/// trailing-`*` event_name, scope equality, inclusive since/until).
+/// `count_grouped` reuses it so the grouped path can never drift from
+/// the filtered path.
+fn analytics_event_matches_filter(e: &AnalyticsEvent, filter: &AnalyticsQueryFilter) -> bool {
+    let name_ok = match &filter.event_name {
+        None => true,
+        Some(pat) => match pat.strip_suffix('*') {
+            Some(prefix) => e.event_name.starts_with(prefix),
+            None => e.event_name == *pat,
+        },
+    };
+    name_ok
+        && filter
+            .agent_id
+            .as_ref()
+            .is_none_or(|id| e.agent_id.as_ref() == Some(id))
+        && filter
+            .user_id
+            .as_ref()
+            .is_none_or(|id| e.user_id.as_ref() == Some(id))
+        && filter
+            .workspace_id
+            .as_ref()
+            .is_none_or(|id| e.workspace_id.as_ref() == Some(id))
+        && filter
+            .repo_id
+            .as_ref()
+            .is_none_or(|id| e.repo_id.as_ref() == Some(id))
+        && filter.since.is_none_or(|s| e.timestamp >= s)
+        && filter.until.is_none_or(|u| e.timestamp <= u)
+}
+
 #[async_trait]
 impl AnalyticsRepository for MemAnalyticsRepository {
     async fn record(&self, event: &AnalyticsEvent) -> Result<()> {
@@ -1355,8 +1655,20 @@ impl AnalyticsRepository for MemAnalyticsRepository {
             })
             .cloned()
             .collect();
-        events.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        events.sort_by_key(|e| std::cmp::Reverse(e.timestamp));
         events.truncate(limit);
+        Ok(events)
+    }
+
+    async fn query_filtered(&self, filter: &AnalyticsQueryFilter) -> Result<Vec<AnalyticsEvent>> {
+        let store = self.store.lock().await;
+        let mut events: Vec<AnalyticsEvent> = store
+            .iter()
+            .filter(|e| analytics_event_matches_filter(e, filter))
+            .cloned()
+            .collect();
+        events.sort_by_key(|e| std::cmp::Reverse(e.timestamp));
+        events.truncate(filter.limit);
         Ok(events)
     }
 
@@ -1369,9 +1681,42 @@ impl AnalyticsRepository for MemAnalyticsRepository {
         Ok(count as u64)
     }
 
+    async fn count_grouped(
+        &self,
+        filter: &AnalyticsQueryFilter,
+        group_by: gyre_ports::AnalyticsGroupBy,
+    ) -> Result<Vec<(String, u64)>> {
+        use std::collections::BTreeMap;
+        // Aggregate the FULL filtered set (task-146 review F1): the
+        // event-level limit never truncates the input; `filter.limit`
+        // bounds the number of returned groups, mirroring the SQL
+        // adapters' `GROUP BY ... LIMIT`.
+        let store = self.store.lock().await;
+        let mut groups: BTreeMap<String, u64> = BTreeMap::new();
+        for e in store.iter() {
+            if !analytics_event_matches_filter(e, filter) {
+                continue;
+            }
+            let key = match group_by {
+                gyre_ports::AnalyticsGroupBy::EventName => e.event_name.clone(),
+                gyre_ports::AnalyticsGroupBy::AgentId => {
+                    e.agent_id.clone().unwrap_or_else(|| "(none)".into())
+                }
+                gyre_ports::AnalyticsGroupBy::WorkspaceId => {
+                    e.workspace_id.clone().unwrap_or_else(|| "(none)".into())
+                }
+                gyre_ports::AnalyticsGroupBy::Day => {
+                    epoch_days_to_date((e.timestamp / 86_400) as i64)
+                }
+            };
+            *groups.entry(key).or_insert(0) += 1;
+        }
+        Ok(groups.into_iter().take(filter.limit).collect())
+    }
+
     async fn aggregate_by_day(
         &self,
-        event_name: &str,
+        event_name: Option<&str>,
         since: u64,
         until: u64,
     ) -> Result<Vec<(String, u64)>> {
@@ -1379,7 +1724,14 @@ impl AnalyticsRepository for MemAnalyticsRepository {
         let store = self.store.lock().await;
         let mut by_day: BTreeMap<String, u64> = BTreeMap::new();
         for e in store.iter() {
-            if e.event_name == event_name && e.timestamp >= since && e.timestamp <= until {
+            let name_match = match event_name {
+                Some(name) => e.event_name == name,
+                // None = total volume across ALL event names (the
+                // dashboard bar-chart form, analytics.md §Analytics
+                // Dashboard).
+                None => true,
+            };
+            if name_match && e.timestamp >= since && e.timestamp <= until {
                 // Simple day bucketing: seconds / 86400 -> day number, format as YYYY-MM-DD
                 let secs = e.timestamp as i64;
                 let days_since_epoch = secs / 86400;
@@ -1414,6 +1766,281 @@ fn epoch_days_to_date(days: i64) -> String {
     format!("{:04}-{:02}-{:02}", y, m, d)
 }
 
+#[cfg(test)]
+mod analytics_query_tests {
+    use super::*;
+    use gyre_ports::AnalyticsGroupBy;
+    use gyre_ports::AnalyticsRepository;
+
+    fn scoped_event(
+        id: &str,
+        name: &str,
+        agent_id: Option<&str>,
+        user_id: Option<&str>,
+        workspace_id: Option<&str>,
+        repo_id: Option<&str>,
+        ts: u64,
+    ) -> AnalyticsEvent {
+        AnalyticsEvent {
+            id: Id::new(id),
+            event_name: name.to_string(),
+            agent_id: agent_id.map(str::to_string),
+            user_id: user_id.map(str::to_string),
+            session_id: None,
+            workspace_id: workspace_id.map(str::to_string),
+            repo_id: repo_id.map(str::to_string),
+            properties: serde_json::json!({}),
+            timestamp: ts,
+        }
+    }
+
+    #[tokio::test]
+    async fn query_filtered_matches_sqlite_filter_semantics() {
+        let repo = MemAnalyticsRepository::default();
+        repo.record(&scoped_event(
+            "e1",
+            "mr.merged",
+            Some("a1"),
+            None,
+            Some("ws-1"),
+            Some("r1"),
+            100,
+        ))
+        .await
+        .unwrap();
+        repo.record(&scoped_event(
+            "e2",
+            "mr.merged",
+            Some("a2"),
+            Some("u9"),
+            Some("ws-2"),
+            Some("r1"),
+            200,
+        ))
+        .await
+        .unwrap();
+        repo.record(&scoped_event(
+            "e3",
+            "task.status_changed",
+            Some("a1"),
+            None,
+            Some("ws-1"),
+            None,
+            300,
+        ))
+        .await
+        .unwrap();
+
+        // Prefix wildcard.
+        let f = AnalyticsQueryFilter {
+            event_name: Some("mr.*".into()),
+            ..AnalyticsQueryFilter::new()
+        };
+        let out = repo.query_filtered(&f).await.unwrap();
+        assert_eq!(out.len(), 2, "mr.* prefix match");
+
+        // Literal, case-sensitive prefix semantics (task-146 review R4,
+        // same contract as the SQLite/Postgres adapters): `MR.*` and a
+        // wildcard-bearing `mr.m_rged*` must not match `mr.merged`.
+        let f = AnalyticsQueryFilter {
+            event_name: Some("MR.*".into()),
+            ..AnalyticsQueryFilter::new()
+        };
+        let out = repo.query_filtered(&f).await.unwrap();
+        assert!(
+            out.is_empty(),
+            "case-variant prefix must not match: {out:?}"
+        );
+        let f = AnalyticsQueryFilter {
+            event_name: Some("mr.m_rged*".into()),
+            ..AnalyticsQueryFilter::new()
+        };
+        let out = repo.query_filtered(&f).await.unwrap();
+        assert!(
+            out.is_empty(),
+            "wildcard-bearing prefix must not match: {out:?}"
+        );
+
+        // Scope filters are conjunctive.
+        let f = AnalyticsQueryFilter {
+            event_name: Some("mr.merged".into()),
+            repo_id: Some("r1".into()),
+            workspace_id: Some("ws-2".into()),
+            ..AnalyticsQueryFilter::new()
+        };
+        let out = repo.query_filtered(&f).await.unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].id, Id::new("e2"));
+
+        // user_id filter.
+        let f = AnalyticsQueryFilter {
+            user_id: Some("u9".into()),
+            ..AnalyticsQueryFilter::new()
+        };
+        let out = repo.query_filtered(&f).await.unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].id, Id::new("e2"));
+
+        // since/until inclusive bounds.
+        let f = AnalyticsQueryFilter {
+            since: Some(200),
+            until: Some(200),
+            ..AnalyticsQueryFilter::new()
+        };
+        let out = repo.query_filtered(&f).await.unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].id, Id::new("e2"));
+
+        // limit truncates (newest first ordering).
+        let f = AnalyticsQueryFilter {
+            limit: 2,
+            ..AnalyticsQueryFilter::new()
+        };
+        let out = repo.query_filtered(&f).await.unwrap();
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].id, Id::new("e3"), "newest event first");
+    }
+
+    #[tokio::test]
+    async fn count_grouped_over_full_filtered_set() {
+        // task-146 review F1 regression (mem contract): grouped counts
+        // aggregate the FULL filtered set — the event-level limit bounds
+        // the number of returned groups, never the input to the
+        // aggregation. Mirrors the SQLite adapter test.
+        let repo = MemAnalyticsRepository::default();
+        for i in 0..150u64 {
+            repo.record(&scoped_event(
+                &format!("m{i}"),
+                "mr.merged",
+                Some("a1"),
+                None,
+                Some("ws-1"),
+                None,
+                1000 + i,
+            ))
+            .await
+            .unwrap();
+        }
+        repo.record(&scoped_event(
+            "c0",
+            "mr.closed",
+            Some("a2"),
+            None,
+            Some("ws-2"),
+            None,
+            2000,
+        ))
+        .await
+        .unwrap();
+        repo.record(&scoped_event(
+            "c1",
+            "mr.closed",
+            None,
+            None,
+            Some("ws-2"),
+            None,
+            2001,
+        ))
+        .await
+        .unwrap();
+
+        let f = AnalyticsQueryFilter {
+            limit: 100,
+            ..AnalyticsQueryFilter::new()
+        };
+        let out = repo
+            .count_grouped(&f, AnalyticsGroupBy::EventName)
+            .await
+            .unwrap();
+        assert_eq!(
+            out,
+            vec![("mr.closed".to_string(), 2), ("mr.merged".to_string(), 150)],
+            "grouped totals must not be truncated by the event-level limit"
+        );
+
+        // Consistent with count() on the same question (i64::MAX, not
+        // u64::MAX: the SQL adapters bind `until` as i64).
+        assert_eq!(
+            repo.count("mr.merged", 0, i64::MAX as u64).await.unwrap(),
+            150
+        );
+
+        // limit bounds the number of returned groups.
+        let f = AnalyticsQueryFilter {
+            limit: 1,
+            ..AnalyticsQueryFilter::new()
+        };
+        let out = repo
+            .count_grouped(&f, AnalyticsGroupBy::EventName)
+            .await
+            .unwrap();
+        assert_eq!(out, vec![("mr.closed".to_string(), 2)]);
+
+        // NULL agent_id groups under "(none)".
+        let out = repo
+            .count_grouped(&AnalyticsQueryFilter::new(), AnalyticsGroupBy::AgentId)
+            .await
+            .unwrap();
+        assert_eq!(
+            out,
+            vec![
+                ("(none)".to_string(), 1),
+                ("a1".to_string(), 150),
+                ("a2".to_string(), 1)
+            ]
+        );
+
+        // Same filter semantics as query_filtered: prefix + workspace.
+        let f = AnalyticsQueryFilter {
+            event_name: Some("mr.m*".into()),
+            workspace_id: Some("ws-1".into()),
+            ..AnalyticsQueryFilter::new()
+        };
+        let out = repo
+            .count_grouped(&f, AnalyticsGroupBy::EventName)
+            .await
+            .unwrap();
+        assert_eq!(out, vec![("mr.merged".to_string(), 150)]);
+
+        // Day grouping: Jan 1 / Jan 2 2024 UTC buckets.
+        let day1: u64 = 1_704_067_200;
+        repo.record(&scoped_event("d1", "ev2", None, None, None, None, day1))
+            .await
+            .unwrap();
+        repo.record(&scoped_event(
+            "d2",
+            "ev2",
+            None,
+            None,
+            None,
+            None,
+            day1 + 3600,
+        ))
+        .await
+        .unwrap();
+        repo.record(&scoped_event(
+            "d3",
+            "ev2",
+            None,
+            None,
+            None,
+            None,
+            day1 + 86_400,
+        ))
+        .await
+        .unwrap();
+        let f = AnalyticsQueryFilter {
+            event_name: Some("ev2".into()),
+            ..AnalyticsQueryFilter::new()
+        };
+        let out = repo.count_grouped(&f, AnalyticsGroupBy::Day).await.unwrap();
+        assert_eq!(
+            out,
+            vec![("2024-01-01".to_string(), 2), ("2024-01-02".to_string(), 1)]
+        );
+    }
+}
+
 #[derive(Default)]
 pub struct MemCostRepository {
     store: Arc<Mutex<Vec<CostEntry>>>,
@@ -1435,7 +2062,7 @@ impl CostRepository for MemCostRepository {
             })
             .cloned()
             .collect();
-        entries.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        entries.sort_by_key(|e| std::cmp::Reverse(e.timestamp));
         Ok(entries)
     }
 
@@ -1446,7 +2073,7 @@ impl CostRepository for MemCostRepository {
             .filter(|e| e.task_id.as_ref().map(|id| id.as_str()) == Some(task_id.as_str()))
             .cloned()
             .collect();
-        entries.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        entries.sort_by_key(|e| std::cmp::Reverse(e.timestamp));
         Ok(entries)
     }
 
@@ -1474,7 +2101,7 @@ impl CostRepository for MemCostRepository {
 /// raw JSON lives only in `detail_zstd` and `event.detail` is `Null` —
 /// mirroring the SQLite/Postgres adapters, where compression blanks the
 /// `detail` column and stores the zstd payload in `detail_zstd`.
-struct MemAuditEntry {
+pub(crate) struct MemAuditEntry {
     event: AuditEvent,
     detail_zstd: Option<Vec<u8>>,
 }
@@ -1500,6 +2127,49 @@ pub struct MemAuditRepository {
     store: Arc<Mutex<Vec<MemAuditEntry>>>,
 }
 
+impl MemAuditRepository {
+    /// Shared handle so the in-memory judgment ledger aggregates the SAME
+    /// audit store this repo writes to (HSI §12). Entries stay wrapped in
+    /// MemAuditEntry (compression-aware); consumers materialize them.
+    pub fn shared(&self) -> Arc<Mutex<Vec<MemAuditEntry>>> {
+        Arc::clone(&self.store)
+    }
+}
+
+/// Evaluate an [`AuditQueryFilter`] against one event in code — the mem
+/// adapter has no schema, so the port's filter contract (every dimension,
+/// including `repo_id`) is guarded here. Shared by `query` and
+/// `count_filtered` so the two can never disagree on what matches.
+fn audit_entry_matches(e: &AuditEvent, filter: &AuditQueryFilter) -> bool {
+    filter
+        .agent_id
+        .as_ref()
+        .is_none_or(|a| e.agent_id.as_ref().is_some_and(|id| id.as_str() == a))
+        && filter
+            .event_type
+            .as_ref()
+            .is_none_or(|t| e.event_type.as_str() == *t)
+        && filter
+            .workspace_id
+            .as_ref()
+            .is_none_or(|w| e.workspace_id.as_ref().is_some_and(|id| id.as_str() == w))
+        && filter
+            .user_id
+            .as_ref()
+            .is_none_or(|u| e.user_id.as_ref().is_some_and(|id| id.as_str() == u))
+        && filter
+            .repo_id
+            .as_ref()
+            .is_none_or(|r| e.repo_id.as_ref().is_some_and(|id| id.as_str() == r))
+        && filter
+            .resource_type
+            .as_ref()
+            .is_none_or(|rt| e.resource_type == *rt)
+        && filter.outcome.is_none_or(|o| e.outcome == o)
+        && filter.since.is_none_or(|s| e.timestamp >= s)
+        && filter.until.is_none_or(|u| e.timestamp <= u)
+}
+
 #[async_trait]
 impl AuditRepository for MemAuditRepository {
     async fn record(&self, event: &AuditEvent) -> Result<()> {
@@ -1512,35 +2182,11 @@ impl AuditRepository for MemAuditRepository {
 
     async fn query(&self, filter: &AuditQueryFilter) -> Result<Vec<AuditEvent>> {
         let store = self.store.lock().await;
-        let mut events: Vec<AuditEvent> =
-            store
-                .iter()
-                .filter(|e| {
-                    filter.agent_id.as_ref().is_none_or(|a| {
-                        e.event.agent_id.as_ref().is_some_and(|id| id.as_str() == a)
-                    }) && filter
-                        .event_type
-                        .as_ref()
-                        .is_none_or(|t| e.event.event_type.as_str() == *t)
-                        && filter.workspace_id.as_ref().is_none_or(|w| {
-                            e.event
-                                .workspace_id
-                                .as_ref()
-                                .is_some_and(|id| id.as_str() == w)
-                        })
-                        && filter.user_id.as_ref().is_none_or(|u| {
-                            e.event.user_id.as_ref().is_some_and(|id| id.as_str() == u)
-                        })
-                        && filter
-                            .resource_type
-                            .as_ref()
-                            .is_none_or(|rt| e.event.resource_type == *rt)
-                        && filter.outcome.is_none_or(|o| e.event.outcome == o)
-                        && filter.since.is_none_or(|s| e.event.timestamp >= s)
-                        && filter.until.is_none_or(|u| e.event.timestamp <= u)
-                })
-                .map(MemAuditEntry::materialize)
-                .collect::<Result<Vec<_>>>()?;
+        let mut events: Vec<AuditEvent> = store
+            .iter()
+            .filter(|e| audit_entry_matches(&e.event, filter))
+            .map(MemAuditEntry::materialize)
+            .collect::<Result<Vec<_>>>()?;
         events.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
         events.truncate(filter.limit);
         Ok(events)
@@ -1548,6 +2194,14 @@ impl AuditRepository for MemAuditRepository {
 
     async fn count(&self) -> Result<u64> {
         Ok(self.store.lock().await.len() as u64)
+    }
+
+    async fn count_filtered(&self, filter: &AuditQueryFilter) -> Result<u64> {
+        let store = self.store.lock().await;
+        Ok(store
+            .iter()
+            .filter(|e| audit_entry_matches(&e.event, filter))
+            .count() as u64)
     }
 
     async fn stats_by_type(&self) -> Result<Vec<(String, u64)>> {
@@ -2095,7 +2749,7 @@ impl WorkspaceRepository for MemWorkspaceRepository {
         if delete_trust_policies {
             policies.retain(|_, p| {
                 !(p.name.starts_with("trust:")
-                    && p.scope_id.as_deref() == Some(workspace.id.as_str()))
+                    && p.scope_id.as_ref().map(|i| i.as_str()) == Some(workspace.id.as_str()))
             });
         }
         for p in new_policies {
@@ -2108,6 +2762,42 @@ impl WorkspaceRepository for MemWorkspaceRepository {
 #[derive(Default)]
 pub struct MemPersonaRepository {
     store: Arc<Mutex<HashMap<String, Persona>>>,
+    /// Task store SHARED with `MemTaskRepository` — the mem side of the
+    /// `apply_approval_reset_with_task` port contract (persona approval
+    /// reset + approval task in one atomic write). `None` on the Default
+    /// constructor: a standalone persona repo cannot write tasks, so the
+    /// atomic method fails rather than silently skipping the task half.
+    task_store: Option<Arc<Mutex<HashMap<String, Task>>>>,
+    /// Test hook: when set, `apply_approval_reset_with_task`'s task write
+    /// fails after the persona write — exercising the port's rollback
+    /// contract (the persona write must be undone, never stranded).
+    fail_task_writes: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl MemPersonaRepository {
+    /// Construct a persona repo whose `apply_approval_reset_with_task`
+    /// writes tasks into `task_store` — pair it with a
+    /// `MemTaskRepository::from_store(Arc::clone(&task_store))` so both
+    /// halves of the atomic write (and every normal task write) land in the
+    /// same store.
+    pub fn with_task_store(
+        store: Arc<Mutex<HashMap<String, Persona>>>,
+        task_store: Arc<Mutex<HashMap<String, Task>>>,
+    ) -> Self {
+        Self {
+            store,
+            task_store: Some(task_store),
+            fail_task_writes: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }
+    }
+
+    /// Test hook: make the task half of `apply_approval_reset_with_task`
+    /// fail (persona write must roll back).
+    #[cfg(test)]
+    pub fn set_fail_task_writes(&self, fail: bool) {
+        self.fail_task_writes
+            .store(fail, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 #[async_trait]
@@ -2163,6 +2853,43 @@ impl PersonaRepository for MemPersonaRepository {
 
     async fn delete(&self, id: &Id) -> Result<()> {
         self.store.lock().await.remove(id.as_str());
+        Ok(())
+    }
+
+    async fn apply_approval_reset_with_task(&self, persona: &Persona, task: &Task) -> Result<()> {
+        // The mem store has no schema, so the port's atomicity contract is
+        // guarded in code: the persona write is held under the store lock
+        // until the task write succeeds; a task-write failure restores the
+        // previous persona row (or removes a newly-inserted one) so a reset
+        // persona is never stranded without its approval task.
+        let Some(task_store) = &self.task_store else {
+            anyhow::bail!(
+                "MemPersonaRepository built without a shared task store; \
+                 apply_approval_reset_with_task cannot atomically create the \
+                 approval task — pair with_task_store with MemTaskRepository::from_store"
+            );
+        };
+        let mut personas = self.store.lock().await;
+        let previous = personas.get(persona.id.as_str()).cloned();
+        personas.insert(persona.id.to_string(), persona.clone());
+        if self
+            .fail_task_writes
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            match previous {
+                Some(prev) => {
+                    personas.insert(persona.id.to_string(), prev);
+                }
+                None => {
+                    personas.remove(persona.id.as_str());
+                }
+            }
+            anyhow::bail!("approval task write failed (mem test hook)");
+        }
+        task_store
+            .lock()
+            .await
+            .insert(task.id.to_string(), task.clone());
         Ok(())
     }
 }
@@ -2247,7 +2974,7 @@ impl gyre_ports::PolicyRepository for MemPolicyRepository {
             .lock()
             .await
             .values()
-            .filter(|p| &p.scope == scope && p.scope_id.as_deref() == scope_id)
+            .filter(|p| &p.scope == scope && p.scope_id.as_ref().map(|i| i.as_str()) == scope_id)
             .cloned()
             .collect())
     }
@@ -2293,7 +3020,10 @@ impl gyre_ports::PolicyRepository for MemPolicyRepository {
         let mut store = self.policies.lock().await;
         let to_delete: Vec<String> = store
             .values()
-            .filter(|p| p.name.starts_with(prefix) && p.scope_id.as_deref() == Some(scope_id))
+            .filter(|p| {
+                p.name.starts_with(prefix)
+                    && p.scope_id.as_ref().map(|i| i.as_str()) == Some(scope_id)
+            })
             .map(|p| p.id.to_string())
             .collect();
         let count = to_delete.len() as u64;
@@ -2412,24 +3142,269 @@ impl WorkspaceMembershipRepository for MemWorkspaceMembershipRepository {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// SCIM groups + group-to-workspace mappings (identity-security.md
+// §SCIM Provisioning / §Group-to-Workspace Mapping, task-266)
+// ──────────────────────────────────────────────────────────────────────────────
+
+use gyre_domain::{ScimGroup, ScimGroupMember, ScimWorkspaceMapping};
+use gyre_ports::{ScimGroupRepository, ScimMappingRepository};
+
+#[derive(Default)]
+pub struct MemScimGroupRepository {
+    groups: Arc<Mutex<HashMap<String, ScimGroup>>>,
+    members: Arc<Mutex<Vec<ScimGroupMember>>>,
+}
+
+#[async_trait]
+impl ScimGroupRepository for MemScimGroupRepository {
+    async fn create(&self, group: &ScimGroup) -> Result<()> {
+        let mut groups = self.groups.lock().await;
+        // Port contract: create fails when a group with the same
+        // non-empty external_id already exists. The mem adapter has no
+        // schema, so the guard lives in code (check-mem-port-contracts).
+        if !group.external_id.is_empty()
+            && groups.values().any(|g| g.external_id == group.external_id)
+        {
+            return Err(anyhow::anyhow!(
+                "SCIM group with external_id {:?} already exists",
+                group.external_id
+            ));
+        }
+        groups.insert(group.id.to_string(), group.clone());
+        Ok(())
+    }
+
+    async fn find_by_id(&self, id: &Id) -> Result<Option<ScimGroup>> {
+        Ok(self.groups.lock().await.get(id.as_str()).cloned())
+    }
+
+    async fn find_by_external_id(&self, external_id: &str) -> Result<Option<ScimGroup>> {
+        Ok(self
+            .groups
+            .lock()
+            .await
+            .values()
+            .find(|g| !g.external_id.is_empty() && g.external_id == external_id)
+            .cloned())
+    }
+
+    async fn list(&self) -> Result<Vec<ScimGroup>> {
+        let mut groups: Vec<ScimGroup> = self.groups.lock().await.values().cloned().collect();
+        groups.sort_by(|a, b| {
+            (a.created_at, &a.id.to_string()).cmp(&(b.created_at, &b.id.to_string()))
+        });
+        Ok(groups)
+    }
+
+    async fn update(&self, group: &ScimGroup) -> Result<()> {
+        self.groups
+            .lock()
+            .await
+            .insert(group.id.to_string(), group.clone());
+        Ok(())
+    }
+
+    async fn delete(&self, id: &Id) -> Result<()> {
+        self.groups.lock().await.remove(id.as_str());
+        self.members.lock().await.retain(|m| m.group_id != *id);
+        Ok(())
+    }
+
+    async fn list_members(&self, group_id: &Id) -> Result<Vec<ScimGroupMember>> {
+        let mut members: Vec<ScimGroupMember> = self
+            .members
+            .lock()
+            .await
+            .iter()
+            .filter(|m| m.group_id == *group_id)
+            .cloned()
+            .collect();
+        members.sort_by(|a, b| {
+            (a.added_at, &a.user_id.to_string()).cmp(&(b.added_at, &b.user_id.to_string()))
+        });
+        Ok(members)
+    }
+
+    async fn add_member(&self, member: &ScimGroupMember) -> Result<()> {
+        let mut members = self.members.lock().await;
+        // Port contract: idempotent row-wise — adding an existing member
+        // is Ok() and never duplicates the row. A push carrying a
+        // `display` refreshes the stored one (upsert, same contract as
+        // the SQLite/PostgreSQL adapters); a push without one leaves any
+        // previously stored `display` untouched.
+        if let Some(existing) = members
+            .iter_mut()
+            .find(|m| m.group_id == member.group_id && m.user_id == member.user_id)
+        {
+            if member.display.is_some() {
+                existing.display = member.display.clone();
+            }
+        } else {
+            members.push(member.clone());
+        }
+        Ok(())
+    }
+
+    async fn remove_member(&self, group_id: &Id, user_id: &Id) -> Result<()> {
+        self.members
+            .lock()
+            .await
+            .retain(|m| !(m.group_id == *group_id && m.user_id == *user_id));
+        Ok(())
+    }
+
+    async fn replace_members(&self, group_id: &Id, members: &[ScimGroupMember]) -> Result<()> {
+        let mut store = self.members.lock().await;
+        store.retain(|m| m.group_id != *group_id);
+        store.extend_from_slice(members);
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+pub struct MemScimMappingRepository {
+    mappings: Arc<Mutex<Vec<ScimWorkspaceMapping>>>,
+}
+
+#[async_trait]
+impl ScimMappingRepository for MemScimMappingRepository {
+    async fn replace_for_workspace(
+        &self,
+        workspace_id: &Id,
+        mappings: &[ScimWorkspaceMapping],
+    ) -> Result<()> {
+        let mut store = self.mappings.lock().await;
+        store.retain(|m| m.workspace_id != *workspace_id);
+        store.extend_from_slice(mappings);
+        Ok(())
+    }
+
+    async fn list_by_workspace(&self, workspace_id: &Id) -> Result<Vec<ScimWorkspaceMapping>> {
+        let mut mappings: Vec<ScimWorkspaceMapping> = self
+            .mappings
+            .lock()
+            .await
+            .iter()
+            .filter(|m| m.workspace_id == *workspace_id)
+            .cloned()
+            .collect();
+        mappings.sort_by(|a, b| a.idp_group.cmp(&b.idp_group));
+        Ok(mappings)
+    }
+
+    async fn list_by_idp_group(&self, idp_group: &str) -> Result<Vec<ScimWorkspaceMapping>> {
+        let mut mappings: Vec<ScimWorkspaceMapping> = self
+            .mappings
+            .lock()
+            .await
+            .iter()
+            .filter(|m| m.idp_group == idp_group)
+            .cloned()
+            .collect();
+        mappings.sort_by_key(|m| m.workspace_id.to_string());
+        Ok(mappings)
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Repo access overrides (user-management.md §Repo Access)
+// ──────────────────────────────────────────────────────────────────────────────
+
+use gyre_domain::RepoAccessOverride;
+use gyre_ports::RepoAccessOverrideRepository;
+
+#[derive(Default)]
+pub struct MemRepoAccessOverrideRepository {
+    store: Arc<Mutex<HashMap<String, RepoAccessOverride>>>,
+}
+
+#[async_trait]
+impl RepoAccessOverrideRepository for MemRepoAccessOverrideRepository {
+    async fn create(&self, o: &RepoAccessOverride) -> Result<()> {
+        let mut store = self.store.lock().await;
+        // Port contract: create fails when an override for the same
+        // (repo_id, user_id) pair already exists. The mem adapter has no
+        // schema, so the guard lives in code (check-mem-port-contracts).
+        if store
+            .values()
+            .any(|e| e.repo_id == o.repo_id && e.user_id == o.user_id)
+        {
+            return Err(anyhow::anyhow!(
+                "repo access override for user {} on repo {} already exists",
+                o.user_id,
+                o.repo_id
+            ));
+        }
+        store.insert(o.id.to_string(), o.clone());
+        Ok(())
+    }
+
+    async fn find_by_repo_and_user(
+        &self,
+        repo_id: &Id,
+        user_id: &Id,
+    ) -> Result<Option<RepoAccessOverride>> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .values()
+            .find(|e| e.repo_id == *repo_id && e.user_id == *user_id)
+            .cloned())
+    }
+
+    async fn list_by_repo(&self, repo_id: &Id) -> Result<Vec<RepoAccessOverride>> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .values()
+            .filter(|e| e.repo_id == *repo_id)
+            .cloned()
+            .collect())
+    }
+
+    async fn delete(&self, repo_id: &Id, user_id: &Id) -> Result<bool> {
+        let mut store = self.store.lock().await;
+        let key = store
+            .values()
+            .find(|e| e.repo_id == *repo_id && e.user_id == *user_id)
+            .map(|e| e.id.to_string());
+        match key {
+            Some(k) => {
+                store.remove(&k);
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // Team
 // ──────────────────────────────────────────────────────────────────────────────
 
-use gyre_domain::Team;
+use gyre_domain::{Team, TeamMembership};
 use gyre_ports::TeamRepository;
 
 #[derive(Default)]
 pub struct MemTeamRepository {
     store: Arc<Mutex<HashMap<String, Team>>>,
+    members: Arc<Mutex<HashMap<(String, String), TeamMembership>>>,
 }
 
 #[async_trait]
 impl TeamRepository for MemTeamRepository {
     async fn create(&self, team: &Team) -> Result<()> {
-        self.store
-            .lock()
-            .await
-            .insert(team.id.to_string(), team.clone());
+        let mut store = self.store.lock().await;
+        // Port contract: the slug is unique within the workspace.
+        if store
+            .values()
+            .any(|t| t.workspace_id == team.workspace_id && t.slug == team.slug)
+        {
+            anyhow::bail!("team slug already exists in workspace");
+        }
+        store.insert(team.id.to_string(), team.clone());
         Ok(())
     }
 
@@ -2437,28 +3412,100 @@ impl TeamRepository for MemTeamRepository {
         Ok(self.store.lock().await.get(id.as_str()).cloned())
     }
 
-    async fn list_by_workspace(&self, workspace_id: &Id) -> Result<Vec<Team>> {
+    async fn find_by_slug(&self, workspace_id: &Id, slug: &str) -> Result<Option<Team>> {
         Ok(self
+            .store
+            .lock()
+            .await
+            .values()
+            .find(|t| t.workspace_id == *workspace_id && t.slug == slug)
+            .cloned())
+    }
+
+    async fn list_by_workspace(&self, workspace_id: &Id) -> Result<Vec<Team>> {
+        let mut teams: Vec<Team> = self
             .store
             .lock()
             .await
             .values()
             .filter(|t| t.workspace_id == *workspace_id)
             .cloned()
-            .collect())
+            .collect();
+        teams.sort_by_key(|t| t.created_at);
+        Ok(teams)
     }
 
     async fn update(&self, team: &Team) -> Result<()> {
-        self.store
-            .lock()
-            .await
-            .insert(team.id.to_string(), team.clone());
+        let mut store = self.store.lock().await;
+        // Port contract: the new slug must not collide with another team's
+        // slug in the same workspace.
+        if store
+            .values()
+            .any(|t| t.id != team.id && t.workspace_id == team.workspace_id && t.slug == team.slug)
+        {
+            anyhow::bail!("team slug already exists in workspace");
+        }
+        store.insert(team.id.to_string(), team.clone());
         Ok(())
     }
 
     async fn delete(&self, id: &Id) -> Result<()> {
         self.store.lock().await.remove(id.as_str());
+        // Memberships go with the team.
+        self.members
+            .lock()
+            .await
+            .retain(|(team_id, _), _| team_id != id.as_str());
         Ok(())
+    }
+
+    async fn add_member(&self, membership: &TeamMembership) -> Result<()> {
+        let mut members = self.members.lock().await;
+        let key = (
+            membership.team_id.to_string(),
+            membership.user_id.to_string(),
+        );
+        // Port contract: duplicate membership fails.
+        if members.contains_key(&key) {
+            anyhow::bail!("user is already a member of the team");
+        }
+        members.insert(key, membership.clone());
+        Ok(())
+    }
+
+    async fn remove_member(&self, team_id: &Id, user_id: &Id) -> Result<()> {
+        self.members
+            .lock()
+            .await
+            .remove(&(team_id.to_string(), user_id.to_string()));
+        Ok(())
+    }
+
+    async fn list_members(&self, team_id: &Id) -> Result<Vec<TeamMembership>> {
+        let mut memberships: Vec<TeamMembership> = self
+            .members
+            .lock()
+            .await
+            .values()
+            .filter(|m| m.team_id == *team_id)
+            .cloned()
+            .collect();
+        memberships.sort_by_key(|m| m.added_at);
+        Ok(memberships)
+    }
+
+    async fn list_for_user(&self, workspace_id: &Id, user_id: &Id) -> Result<Vec<Team>> {
+        let store = self.store.lock().await;
+        let members = self.members.lock().await;
+        let mut teams: Vec<Team> = members
+            .values()
+            .filter(|m| m.user_id == *user_id)
+            .filter_map(|m| store.get(m.team_id.as_str()))
+            .filter(|t| t.workspace_id == *workspace_id)
+            .cloned()
+            .collect();
+        teams.sort_by_key(|t| t.created_at);
+        Ok(teams)
     }
 }
 
@@ -2497,7 +3544,9 @@ impl NotificationRepository for MemNotificationRepository {
         workspace_id: Option<&Id>,
         min_priority: Option<u8>,
         max_priority: Option<u8>,
-        notification_type: Option<&str>,
+        notification_types: Option<&[&str]>,
+        repo_id: Option<&Id>,
+        exclude_types: &[&str],
         limit: u32,
         offset: u32,
     ) -> Result<Vec<Notification>> {
@@ -2509,7 +3558,57 @@ impl NotificationRepository for MemNotificationRepository {
                     && workspace_id.is_none_or(|ws| n.workspace_id == *ws)
                     && min_priority.is_none_or(|min| n.priority_rank >= min)
                     && max_priority.is_none_or(|max| n.priority_rank <= max)
-                    && notification_type.is_none_or(|nt| n.notification_type.as_str() == nt)
+                    // Exact-match set on the type (port contract): an empty
+                    // set matches nothing — `contains` is false for every
+                    // item — never a no-op.
+                    && notification_types.is_none_or(|ts| ts.contains(&n.notification_type.as_str()))
+                    && repo_id.is_none_or(|r| n.source.repo_id.as_ref() == Some(r))
+                    && !exclude_types.contains(&n.notification_type.as_str())
+            })
+            .cloned()
+            .collect();
+        items.sort_by(|a, b| {
+            a.priority_rank
+                .cmp(&b.priority_rank)
+                .then(b.created_at.cmp(&a.created_at))
+        });
+        Ok(items
+            .into_iter()
+            .skip(offset as usize)
+            .take(limit as usize)
+            .collect())
+    }
+
+    async fn list_active_for_user(
+        &self,
+        user_id: &Id,
+        workspace_id: Option<&Id>,
+        min_priority: Option<u8>,
+        max_priority: Option<u8>,
+        notification_types: Option<&[&str]>,
+        repo_id: Option<&Id>,
+        limit: u32,
+        offset: u32,
+    ) -> Result<Vec<Notification>> {
+        // Same filters as list_for_user plus the active guard (resolved and
+        // dismissed rows excluded) — the drawer's listing. Guarded in code
+        // like every other mem contract (no schema to enforce it): an empty
+        // type set matches nothing, same as the SQL adapters.
+        let store = self.store.lock().await;
+        let mut items: Vec<Notification> = store
+            .iter()
+            .filter(|n| {
+                n.user_id == *user_id
+                    && n.resolved_at.is_none()
+                    && n.dismissed_at.is_none()
+                    && workspace_id.is_none_or(|ws| n.workspace_id == *ws)
+                    && min_priority.is_none_or(|min| n.priority_rank >= min)
+                    && max_priority.is_none_or(|max| n.priority_rank <= max)
+                    && match notification_types {
+                        None => true,
+                        Some(ts) => !ts.is_empty() && ts.contains(&n.notification_type.as_str()),
+                    }
+                    && repo_id.is_none_or(|r| n.source.repo_id.as_ref() == Some(r))
             })
             .cloned()
             .collect();
@@ -2591,7 +3690,28 @@ impl NotificationRepository for MemNotificationRepository {
         Ok(())
     }
 
-    async fn count_unresolved(&self, user_id: &Id, workspace_id: Option<&Id>) -> Result<u64> {
+    async fn count_unresolved(
+        &self,
+        user_id: &Id,
+        workspace_id: Option<&Id>,
+        exclude_types: &[&str],
+    ) -> Result<u64> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .iter()
+            .filter(|n| {
+                n.user_id == *user_id
+                    && n.resolved_at.is_none()
+                    && n.dismissed_at.is_none()
+                    && workspace_id.is_none_or(|ws| n.workspace_id == *ws)
+                    && !exclude_types.contains(&n.notification_type.as_str())
+            })
+            .count() as u64)
+    }
+
+    async fn count_unread(&self, user_id: &Id, workspace_id: Option<&Id>) -> Result<u64> {
         Ok(self
             .store
             .lock()
@@ -2600,10 +3720,30 @@ impl NotificationRepository for MemNotificationRepository {
             .filter(|n| {
                 n.user_id == *user_id
                     && workspace_id.is_none_or(|ws| n.workspace_id == *ws)
+                    && !n.read
                     && n.resolved_at.is_none()
                     && n.dismissed_at.is_none()
             })
             .count() as u64)
+    }
+
+    async fn mark_all_read(&self, user_id: &Id, workspace_id: Option<&Id>) -> Result<u64> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        let mut updated = 0u64;
+        for n in self.store.lock().await.iter_mut() {
+            if n.user_id == *user_id
+                && !n.read
+                && workspace_id.is_none_or(|ws| n.workspace_id == *ws)
+            {
+                n.read = true;
+                n.read_at = Some(now);
+                updated += 1;
+            }
+        }
+        Ok(updated)
     }
 
     async fn list_recent(&self, limit: usize) -> Result<Vec<Notification>> {
@@ -2611,6 +3751,26 @@ impl NotificationRepository for MemNotificationRepository {
         let mut items: Vec<Notification> = store.iter().cloned().collect();
         items.sort_by(|a, b| b.created_at.cmp(&a.created_at));
         items.truncate(limit);
+        Ok(items)
+    }
+
+    async fn list_by_workspace_type_since(
+        &self,
+        workspace_id: &Id,
+        notification_type: &str,
+        since: i64,
+    ) -> Result<Vec<Notification>> {
+        let store = self.store.lock().await;
+        let mut items: Vec<Notification> = store
+            .iter()
+            .filter(|n| {
+                n.workspace_id == *workspace_id
+                    && n.notification_type.as_str() == notification_type
+                    && n.created_at >= since
+            })
+            .cloned()
+            .collect();
+        items.sort_by_key(|n| std::cmp::Reverse(n.created_at));
         Ok(items)
     }
 
@@ -2783,14 +3943,19 @@ impl gyre_ports::QualityGateRepository for MemQualityGateRepository {
         Ok(self.gates.lock().await.get(id).cloned())
     }
     async fn list_by_repo_id(&self, repo_id: &str) -> Result<Vec<gyre_domain::QualityGate>> {
-        Ok(self
+        let mut gates: Vec<gyre_domain::QualityGate> = self
             .gates
             .lock()
             .await
             .values()
             .filter(|g| g.repo_id.to_string() == repo_id)
             .cloned()
-            .collect())
+            .collect();
+        // Chain order (agent-gates.md §Gate Chains): position first,
+        // creation order as the tiebreak — mirrors the SQL adapters'
+        // ORDER BY position, created_at.
+        gates.sort_by_key(|g| (g.position, g.created_at));
+        Ok(gates)
     }
     async fn delete(&self, id: &str) -> Result<()> {
         self.gates.lock().await.remove(id);
@@ -2860,6 +4025,7 @@ impl BudgetUsageRepository for MemBudgetUsageRepository {
                 cost_today: 0.0,
                 active_agents: 0,
                 period_start: now,
+                compute_minutes: 0,
             });
         usage.active_agents = usage.active_agents.saturating_add(1);
         Ok(usage.clone())
@@ -2892,19 +4058,34 @@ impl BudgetUsageRepository for MemBudgetUsageRepository {
                 cost_today: 0.0,
                 active_agents: 0,
                 period_start: now,
+                compute_minutes: 0,
             });
         usage.tokens_used_today = usage.tokens_used_today.saturating_add(tokens);
         usage.cost_today += cost_usd;
         Ok(())
     }
 
-    async fn reset_daily_counters(&self, now: u64) -> Result<()> {
+    async fn add_compute_minutes(
+        &self,
+        entity_key: &str,
+        entity_type: &str,
+        entity_id: &str,
+        now: u64,
+        minutes: u64,
+    ) -> Result<()> {
         let mut guard = self.store.lock().await;
-        for usage in guard.values_mut() {
-            usage.tokens_used_today = 0;
-            usage.cost_today = 0.0;
-            usage.period_start = now;
-        }
+        let usage = guard
+            .entry(entity_key.to_string())
+            .or_insert_with(|| BudgetUsage {
+                entity_type: entity_type.to_string(),
+                entity_id: gyre_common::Id::new(entity_id.to_string()),
+                tokens_used_today: 0,
+                cost_today: 0.0,
+                active_agents: 0,
+                period_start: now,
+                compute_minutes: 0,
+            });
+        usage.compute_minutes = usage.compute_minutes.saturating_add(minutes);
         Ok(())
     }
 }
@@ -2912,19 +4093,21 @@ impl BudgetUsageRepository for MemBudgetUsageRepository {
 // ── MemBudgetCallRepository ───────────────────────────────────────────────────
 
 /// In-memory BudgetCallRepository for tests and development.
-/// Mirrors the SQLite/Postgres adapters: insert-only with duplicate-id
-/// rejection, workspace-scoped reads newest-first.
 #[derive(Default)]
 pub struct MemBudgetCallRepository {
-    store: Arc<Mutex<Vec<BudgetCallRecord>>>,
+    store: Mutex<Vec<gyre_domain::BudgetCallRecord>>,
 }
 
 #[async_trait]
-impl BudgetCallRepository for MemBudgetCallRepository {
-    async fn save(&self, record: &BudgetCallRecord) -> Result<()> {
+impl gyre_ports::BudgetCallRepository for MemBudgetCallRepository {
+    async fn save(&self, record: &gyre_domain::BudgetCallRecord) -> Result<()> {
         let mut store = self.store.lock().await;
-        if store.iter().any(|r| r.id.as_str() == record.id.as_str()) {
-            anyhow::bail!("budget call record {} already exists", record.id.as_str());
+        // Port contract: "Insert-only; the record id is unique." The SQL
+        // adapters enforce this via the PRIMARY KEY; the mem adapter guards
+        // in code (check-mem-port-contracts.sh) so both backends reject a
+        // duplicate id identically.
+        if store.iter().any(|r| r.id == record.id) {
+            anyhow::bail!("budget call record {} already exists", record.id);
         }
         store.push(record.clone());
         Ok(())
@@ -2935,11 +4118,33 @@ impl BudgetCallRepository for MemBudgetCallRepository {
         workspace_id: &str,
         since: u64,
         limit: i64,
-    ) -> Result<Vec<BudgetCallRecord>> {
-        let store = self.store.lock().await;
-        let mut records: Vec<BudgetCallRecord> = store
+    ) -> Result<Vec<gyre_domain::BudgetCallRecord>> {
+        let mut records: Vec<gyre_domain::BudgetCallRecord> = self
+            .store
+            .lock()
+            .await
             .iter()
             .filter(|r| r.workspace_id.as_str() == workspace_id && r.timestamp >= since)
+            .cloned()
+            .collect();
+        records.sort_by(|a, b| {
+            b.timestamp
+                .cmp(&a.timestamp)
+                .then(b.id.as_str().cmp(a.id.as_str()))
+        });
+        records.truncate(limit.max(0) as usize);
+        Ok(records)
+    }
+
+    async fn list_since(
+        &self,
+        since: u64,
+        limit: i64,
+    ) -> Result<Vec<gyre_domain::BudgetCallRecord>> {
+        let store = self.store.lock().await;
+        let mut records: Vec<gyre_domain::BudgetCallRecord> = store
+            .iter()
+            .filter(|r| r.timestamp >= since)
             .cloned()
             .collect();
         records.sort_by_key(|r| std::cmp::Reverse(r.timestamp));
@@ -2999,6 +4204,13 @@ impl gyre_ports::GateResultRepository for MemGateResultRepository {
             .cloned()
             .collect())
     }
+    async fn delete_by_mr_id_and_gate_id(&self, mr_id: &str, gate_id: &str) -> Result<()> {
+        self.results
+            .lock()
+            .await
+            .retain(|_, r| !(r.mr_id.to_string() == mr_id && r.gate_id.to_string() == gate_id));
+        Ok(())
+    }
 }
 
 #[derive(Default)]
@@ -3053,7 +4265,13 @@ impl gyre_ports::SpecLifecycleRepository for MemSpecLifecycleRepository {
 pub struct MemSpecApprovalRepository {
     store: Arc<Mutex<HashMap<String, gyre_domain::SpecApproval>>>,
 }
+
 impl MemSpecApprovalRepository {
+    /// Shared handle for the in-memory judgment ledger (HSI §12).
+    pub fn shared(&self) -> Arc<Mutex<HashMap<String, gyre_domain::SpecApproval>>> {
+        Arc::clone(&self.store)
+    }
+
     /// Apply a domain transition (approve/revoke/reject) to a stored entry:
     /// load, validate via the domain's transition rules, persist the full
     /// record so mutual exclusivity is guaranteed. Returns Ok(None) when the
@@ -3071,6 +4289,7 @@ impl MemSpecApprovalRepository {
         Ok(Some(()))
     }
 }
+
 #[async_trait]
 impl gyre_ports::SpecApprovalRepository for MemSpecApprovalRepository {
     async fn create(&self, approval: &gyre_domain::SpecApproval) -> Result<()> {
@@ -3093,7 +4312,7 @@ impl gyre_ports::SpecApprovalRepository for MemSpecApprovalRepository {
             .filter(|a| a.spec_path == spec_path)
             .cloned()
             .collect();
-        out.reverse(); // insertion order: newest first, mirroring SQL id-desc
+        out.sort_by(|a, b| b.id.as_str().cmp(a.id.as_str())); // SQL id-desc
         Ok(out)
     }
     async fn find_by_spec_sha(
@@ -3109,7 +4328,7 @@ impl gyre_ports::SpecApprovalRepository for MemSpecApprovalRepository {
             .filter(|a| a.spec_path == spec_path && a.spec_sha == spec_sha)
             .cloned()
             .collect();
-        out.reverse(); // insertion order: newest first, mirroring SQL id-desc
+        out.sort_by(|a, b| b.id.as_str().cmp(a.id.as_str())); // SQL id-desc
         Ok(out)
     }
     async fn list_active_by_path(&self, spec_path: &str) -> Result<Vec<gyre_domain::SpecApproval>> {
@@ -3121,11 +4340,27 @@ impl gyre_ports::SpecApprovalRepository for MemSpecApprovalRepository {
             .filter(|a| a.spec_path == spec_path && a.is_active())
             .cloned()
             .collect();
-        out.reverse();
+        out.sort_by(|a, b| b.id.as_str().cmp(a.id.as_str())); // SQL id-desc
         Ok(out)
     }
     async fn list_all(&self) -> Result<Vec<gyre_domain::SpecApproval>> {
         Ok(self.store.lock().await.values().cloned().collect())
+    }
+
+    async fn list_by_approver(&self, approver_id: &str) -> Result<Vec<gyre_domain::SpecApproval>> {
+        let mut out: Vec<_> = self
+            .store
+            .lock()
+            .await
+            .values()
+            .filter(|a| a.approver_id == approver_id)
+            .cloned()
+            .collect();
+        // The store is a HashMap (arbitrary iteration order), so ordering
+        // must be derived from the rows, not insertion: sort by id string
+        // descending, mirroring the SQL adapters' ORDER BY id DESC.
+        out.sort_by(|a, b| b.id.as_str().cmp(a.id.as_str()));
+        Ok(out)
     }
 
     async fn approve(&self, id: &Id, now: u64) -> Result<Option<()>, ApprovalTransitionError> {
@@ -3296,6 +4531,14 @@ pub struct MemSpecLedgerRepository {
     store: Arc<Mutex<HashMap<String, gyre_domain::SpecLedgerEntry>>>,
 }
 
+impl MemSpecLedgerRepository {
+    /// Shared handle for the in-memory judgment ledger (HSI §12 workspace
+    /// attribution of spec approvals).
+    pub fn shared(&self) -> Arc<Mutex<HashMap<String, gyre_domain::SpecLedgerEntry>>> {
+        Arc::clone(&self.store)
+    }
+}
+
 #[async_trait]
 impl gyre_ports::SpecLedgerRepository for MemSpecLedgerRepository {
     async fn find_by_path(&self, path: &str) -> Result<Option<gyre_domain::SpecLedgerEntry>> {
@@ -3314,6 +4557,157 @@ impl gyre_ports::SpecLedgerRepository for MemSpecLedgerRepository {
     async fn delete_by_path(&self, path: &str) -> Result<()> {
         self.store.lock().await.remove(path);
         Ok(())
+    }
+}
+
+#[derive(Default)]
+pub struct MemSpecLinkRepository {
+    store: Arc<Mutex<Vec<gyre_domain::spec_links::SpecLinkEntry>>>,
+}
+
+#[async_trait]
+impl gyre_ports::SpecLinkRepository for MemSpecLinkRepository {
+    async fn list_all(&self) -> Result<Vec<gyre_domain::spec_links::SpecLinkEntry>> {
+        Ok(self.store.lock().await.clone())
+    }
+    async fn replace_for_source(
+        &self,
+        source_repo_id: &str,
+        source_path: &str,
+        links: &[gyre_domain::spec_links::SpecLinkEntry],
+    ) -> Result<()> {
+        let mut store = self.store.lock().await;
+        // Match the SQL adapters' (source_repo_id, source_path) scoping:
+        // `source_repo_id` None in the entry means the unscoped/legacy bucket.
+        let source_repo_key = |e: &gyre_domain::spec_links::SpecLinkEntry| {
+            e.source_repo_id.clone().unwrap_or_default()
+        };
+        store.retain(|l| !(source_repo_key(l) == source_repo_id && l.source_path == source_path));
+        store.extend(links.iter().cloned());
+        Ok(())
+    }
+    async fn save(&self, entry: &gyre_domain::spec_links::SpecLinkEntry) -> Result<()> {
+        let mut store = self.store.lock().await;
+        match store.iter().position(|l| l.id == entry.id) {
+            Some(i) => store[i] = entry.clone(),
+            None => store.push(entry.clone()),
+        }
+        Ok(())
+    }
+    async fn delete_by_source_repo(&self, source_repo_id: &str) -> Result<()> {
+        self.store
+            .lock()
+            .await
+            .retain(|l| l.source_repo_id.as_deref().unwrap_or_default() != source_repo_id);
+        Ok(())
+    }
+}
+
+/// Task-198 AC: `SpecLinkEntry` must round-trip losslessly through the mem
+/// adapter (used by the in-memory test constructor and mem-mode server) —
+/// every `SpecLinkType` variant and every `Option` column, with the same
+/// `(source_repo_id, source_path)` scoping contract the SQL adapters enforce.
+#[cfg(test)]
+mod spec_link_contract_tests {
+    use super::*;
+    use gyre_domain::spec_links::{SpecLinkEntry, SpecLinkType};
+    use gyre_ports::SpecLinkRepository;
+
+    fn entry(id: &str, link_type: SpecLinkType) -> SpecLinkEntry {
+        SpecLinkEntry {
+            id: id.to_string(),
+            source_path: format!("system/source-{id}.md"),
+            source_repo_id: Some("repo-1".to_string()),
+            source_sha: format!("sha-{id}"),
+            link_type,
+            target_path: "system/target.md".to_string(),
+            target_repo_id: Some("repo-2".to_string()),
+            target_display: Some("@ws/repo-2/system/target.md".to_string()),
+            target_sha: Some("target-sha".to_string()),
+            reason: Some("why".to_string()),
+            status: "active".to_string(),
+            created_at: 1_700_000_000,
+            stale_since: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn round_trips_every_link_type_and_option_columns() {
+        let repo = MemSpecLinkRepository::default();
+        let variants = [
+            SpecLinkType::Implements,
+            SpecLinkType::Supersedes,
+            SpecLinkType::DependsOn,
+            SpecLinkType::ConflictsWith,
+            SpecLinkType::Extends,
+            SpecLinkType::References,
+        ];
+        let mut expected: Vec<SpecLinkEntry> = Vec::new();
+        for (i, lt) in variants.iter().enumerate() {
+            let e = entry(&format!("link-{i}"), lt.clone());
+            repo.save(&e).await.unwrap();
+            expected.push(e);
+        }
+        // Option columns exercised in their None forms too.
+        let mut none_opts = entry("link-none", SpecLinkType::DependsOn);
+        none_opts.source_repo_id = None;
+        none_opts.target_repo_id = None;
+        none_opts.target_display = None;
+        none_opts.target_sha = None;
+        none_opts.reason = None;
+        none_opts.stale_since = Some(1_700_000_500);
+        repo.save(&none_opts).await.unwrap();
+        expected.push(none_opts);
+
+        let all = repo.list_all().await.unwrap();
+        assert_eq!(all.len(), expected.len());
+        for exp in &expected {
+            let got = all.iter().find(|l| l.id == exp.id).expect("link present");
+            assert_eq!(
+                got,
+                exp,
+                "entry {id} must round-trip losslessly",
+                id = exp.id
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn replace_for_source_scopes_to_repo_and_path() {
+        let repo = MemSpecLinkRepository::default();
+        let old = entry("old-1", SpecLinkType::Implements);
+        repo.save(&old).await.unwrap();
+        // Unrelated link — must survive the replace.
+        let other = entry("other-1", SpecLinkType::Extends);
+        repo.save(&other).await.unwrap();
+
+        let replacement = entry("new-1", SpecLinkType::DependsOn);
+        repo.replace_for_source(
+            "repo-1",
+            &old.source_path,
+            std::slice::from_ref(&replacement),
+        )
+        .await
+        .unwrap();
+
+        let all = repo.list_all().await.unwrap();
+        assert_eq!(all.len(), 2, "old row replaced, unrelated row kept");
+        assert!(all.iter().any(|l| l.id == "new-1"));
+        assert!(all.iter().any(|l| l.id == "other-1"));
+        assert!(!all.iter().any(|l| l.id == "old-1"));
+    }
+
+    #[tokio::test]
+    async fn replace_for_source_empty_set_clears_rows() {
+        let repo = MemSpecLinkRepository::default();
+        let e = entry("gone-1", SpecLinkType::Implements);
+        repo.save(&e).await.unwrap();
+        // A manifest edit that removes all links must clear the rows, not
+        // skip them (an empty set is a delete, matching sync_spec_ledger).
+        repo.replace_for_source("repo-1", &e.source_path, &[])
+            .await
+            .unwrap();
+        assert!(repo.list_all().await.unwrap().is_empty());
     }
 }
 
@@ -3616,8 +5010,18 @@ impl LlmConfigRepository for MemLlmConfigRepository {
     }
 }
 
-/// sha -> (agent_id, workspace_id, tenant_id, blob)
-type ConvMap = Arc<Mutex<HashMap<String, (String, String, String, Vec<u8>)>>>;
+/// Stored conversation blob with its scope identity. Named carrier
+/// (TASK-048 F1): the previous positional 4-tuple
+/// `(agent_id, workspace_id, tenant_id, blob)` was a field-swap hazard.
+struct ConversationBlob {
+    agent_id: String,
+    workspace_id: String,
+    tenant_id: String,
+    data: Vec<u8>,
+}
+
+/// sha -> stored conversation blob
+type ConvMap = Arc<Mutex<HashMap<String, ConversationBlob>>>;
 
 /// In-memory ConversationRepository for development and tests.
 pub struct MemConversationRepository {
@@ -3650,27 +5054,25 @@ impl gyre_ports::ConversationRepository for MemConversationRepository {
             .lock()
             .await
             .entry(sha.clone())
-            .or_insert_with(|| {
-                (
-                    agent_id.as_str().to_string(),
-                    workspace_id.as_str().to_string(),
-                    tenant_id.as_str().to_string(),
-                    conversation.to_vec(),
-                )
+            .or_insert_with(|| ConversationBlob {
+                agent_id: agent_id.as_str().to_string(),
+                workspace_id: workspace_id.as_str().to_string(),
+                tenant_id: tenant_id.as_str().to_string(),
+                data: conversation.to_vec(),
             });
         Ok(sha)
     }
 
     async fn get(&self, conversation_sha: &str, tenant_id: &Id) -> Result<Option<Vec<u8>>> {
         let guard = self.convs.lock().await;
-        let Some((_, _, tid, blob)) = guard.get(conversation_sha) else {
+        let Some(record) = guard.get(conversation_sha) else {
             return Ok(None);
         };
-        if tid != tenant_id.as_str() {
+        if record.tenant_id != tenant_id.as_str() {
             return Ok(None);
         }
         // Decompress.
-        let decompressed = zstd::decode_all(blob.as_slice())
+        let decompressed = zstd::decode_all(record.data.as_slice())
             .map_err(|e| anyhow::anyhow!("zstd decompress: {e}"))?;
         Ok(Some(decompressed))
     }
@@ -3702,20 +5104,25 @@ impl gyre_ports::ConversationRepository for MemConversationRepository {
         tenant_id: &Id,
     ) -> Result<Option<(Id, Id)>> {
         let guard = self.convs.lock().await;
-        let Some((aid, wid, tid, _)) = guard.get(conversation_sha) else {
+        let Some(record) = guard.get(conversation_sha) else {
             return Ok(None);
         };
-        if tid != tenant_id.as_str() {
+        if record.tenant_id != tenant_id.as_str() {
             return Ok(None);
         }
-        Ok(Some((Id::new(aid), Id::new(wid))))
+        Ok(Some((
+            Id::new(&record.agent_id),
+            Id::new(&record.workspace_id),
+        )))
     }
 
     async fn list_by_agent(&self, agent_id: &Id, tenant_id: &Id) -> Result<Vec<String>> {
         let guard = self.convs.lock().await;
         Ok(guard
             .iter()
-            .filter(|(_, (aid, _, tid, _))| aid == agent_id.as_str() && tid == tenant_id.as_str())
+            .filter(|(_, rec)| {
+                rec.agent_id == agent_id.as_str() && rec.tenant_id == tenant_id.as_str()
+            })
             .map(|(sha, _)| sha.clone())
             .collect())
     }
@@ -3744,12 +5151,18 @@ impl gyre_ports::ConversationRepository for MemConversationRepository {
 /// In-memory MessageRepository for tests.
 pub struct MemMessageRepository {
     store: Arc<Mutex<HashMap<String, gyre_common::message::Message>>>,
+    /// Ack reason per message id — mirrors the SQLite `ack_reason` column.
+    /// `acknowledge()` records `"explicit"`; `acknowledge_all()` records the
+    /// passed reason. `expire_acked_inboxes()` only deletes agent-targeted
+    /// messages acked with `agent_completed`/`agent_orphaned` (port contract).
+    ack_reasons: Arc<Mutex<HashMap<String, String>>>,
 }
 
 impl Default for MemMessageRepository {
     fn default() -> Self {
         Self {
             store: Arc::new(Mutex::new(HashMap::new())),
+            ack_reasons: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
@@ -3757,6 +5170,19 @@ impl Default for MemMessageRepository {
 #[async_trait]
 impl gyre_ports::MessageRepository for MemMessageRepository {
     async fn store(&self, message: &gyre_common::message::Message) -> Result<()> {
+        // Port contract (message-bus.md §Message Envelope), enforced in code
+        // by every adapter (SQLite/PostgreSQL `message_to_new_row` reject the
+        // same condition): store() returns Err on workspace_id: None — never
+        // panics, never silently inserts. Broadcast messages are never
+        // passed to store() by any send path (they are not persisted); a
+        // Broadcast (or any scopeless) message reaching this method is a
+        // contract violation and is rejected.
+        if message.workspace_id.is_none() {
+            return Err(anyhow::anyhow!(
+                "cannot store message without workspace scope (workspace_id is None; \
+                 Broadcast messages are never persisted)"
+            ));
+        }
         self.store
             .lock()
             .await
@@ -3835,20 +5261,26 @@ impl gyre_ports::MessageRepository for MemMessageRepository {
         use gyre_common::message::Destination;
         let mut guard = self.store.lock().await;
         if let Some(m) = guard.get_mut(message_id.as_str()) {
-            if matches!(&m.to, Destination::Agent(id) if id == agent_id) {
+            if matches!(&m.to, Destination::Agent(id) if id == agent_id) && !m.acknowledged {
                 m.acknowledged = true;
+                self.ack_reasons
+                    .lock()
+                    .await
+                    .insert(message_id.as_str().to_string(), "explicit".to_string());
             }
         }
         Ok(())
     }
 
-    async fn acknowledge_all(&self, agent_id: &Id, _reason: &str) -> Result<u64> {
+    async fn acknowledge_all(&self, agent_id: &Id, reason: &str) -> Result<u64> {
         use gyre_common::message::Destination;
         let mut guard = self.store.lock().await;
+        let mut reasons = self.ack_reasons.lock().await;
         let mut count = 0u64;
         for m in guard.values_mut() {
             if matches!(&m.to, Destination::Agent(id) if id == agent_id) && !m.acknowledged {
                 m.acknowledged = true;
+                reasons.insert(m.id.as_str().to_string(), reason.to_string());
                 count += 1;
             }
         }
@@ -3906,9 +5338,19 @@ impl gyre_ports::MessageRepository for MemMessageRepository {
     }
 
     async fn expire_acked_inboxes(&self, older_than: u64) -> Result<u64> {
+        use gyre_common::message::Destination;
+        // Lock order: store before ack_reasons (matches acknowledge_all).
         let mut guard = self.store.lock().await;
+        let reasons = self.ack_reasons.lock().await;
         let before = guard.len();
-        guard.retain(|_, m| !m.acknowledged || m.created_at >= older_than);
+        guard.retain(|_, m| {
+            let dead_agent = matches!(&m.to, Destination::Agent(_))
+                && reasons
+                    .get(m.id.as_str())
+                    .map(|r| r == "agent_completed" || r == "agent_orphaned")
+                    .unwrap_or(false);
+            !(dead_agent && m.created_at < older_than)
+        });
         Ok((before - guard.len()) as u64)
     }
 
@@ -3924,18 +5366,74 @@ impl gyre_ports::MessageRepository for MemMessageRepository {
     }
 }
 
+#[cfg(test)]
+mod message_store_contract_tests {
+    use super::MemMessageRepository;
+    use gyre_common::message::{Destination, Message, MessageKind, MessageOrigin};
+    use gyre_common::Id;
+    use gyre_ports::MessageRepository as _;
+
+    /// Port contract (message-bus.md §Message Envelope), mirroring the
+    /// SQLite adapter's `store_broadcast_returns_error` test: store()
+    /// returns Err on workspace_id: None — never panics, never silently
+    /// inserts. Broadcast messages are never passed to store() by any send
+    /// path (both the REST and MCP handlers and the internal emitter skip
+    /// persistence for Broadcast); one reaching this method is a contract
+    /// violation.
+    #[tokio::test]
+    async fn mem_store_rejects_scopeless_message() {
+        let repo = MemMessageRepository::default();
+
+        let broadcast = Message {
+            id: Id::new("msg-broadcast"),
+            tenant_id: Id::new("tenant-1"),
+            from: MessageOrigin::Server,
+            workspace_id: None, // Broadcast — never persisted
+            to: Destination::Broadcast,
+            kind: MessageKind::DataSeeded,
+            payload: None,
+            created_at: 1_000,
+            signature: None,
+            key_id: None,
+            acknowledged: false,
+        };
+        assert!(repo.store(&broadcast).await.is_err());
+
+        // A malformed non-Broadcast message without a workspace scope is the
+        // same contract violation (the scopeless-message guard class).
+        let scopeless = Message {
+            id: Id::new("msg-scopeless"),
+            workspace_id: None,
+            to: Destination::Agent(Id::new("agent-1")),
+            kind: MessageKind::TaskAssignment,
+            ..broadcast.clone()
+        };
+        assert!(repo.store(&scopeless).await.is_err());
+        assert!(repo.find_by_id(&scopeless.id).await.unwrap().is_none());
+
+        // A properly scoped message stores fine (the guard must not
+        // over-block the happy path).
+        let scoped = Message {
+            id: Id::new("msg-scoped"),
+            workspace_id: Some(Id::new("ws-1")),
+            to: Destination::Agent(Id::new("agent-1")),
+            ..scopeless
+        };
+        assert!(repo.store(&scoped).await.is_ok());
+        assert!(repo.find_by_id(&scoped.id).await.unwrap().is_some());
+    }
+}
+
 /// Build an AppState with all in-memory repositories for tests.
 #[cfg(test)]
 pub fn test_state() -> Arc<crate::AppState> {
-    let (workspaces, policies, ws_store) = shared_workspace_policy_pair(false);
+    let (workspaces, policies, ws_store) = shared_workspace_policy_pair_seeded();
     test_state_inner(
         Arc::new(NoopGitOps),
         workspaces,
         policies,
         ws_store,
-        None,
-        None,
-        None,
+        TestStateOverrides::default(),
     )
 }
 
@@ -3949,13 +5447,63 @@ pub fn test_state_with_jj_ops(jj_ops: Arc<dyn gyre_ports::JjOpsPort>) -> Arc<cra
         workspaces,
         policies,
         ws_store,
-        None,
-        None,
-        None,
+        TestStateOverrides::default(),
     );
     let s = Arc::get_mut(&mut state).expect("test state is uniquely owned");
     s.jj_ops = jj_ops;
     state
+}
+
+/// Build an AppState with a custom RekorClient for tests that need to
+/// control/observe transparency-log submission of merge attestation
+/// bundles (task-264).
+#[cfg(test)]
+pub fn test_state_with_rekor(rekor: Arc<dyn gyre_ports::RekorClient>) -> Arc<crate::AppState> {
+    let (workspaces, policies, ws_store) = shared_workspace_policy_pair(false);
+    let mut state = test_state_inner(
+        Arc::new(NoopGitOps),
+        workspaces,
+        policies,
+        ws_store,
+        TestStateOverrides::default(),
+    );
+    let s = Arc::get_mut(&mut state).expect("test state is uniquely owned");
+    s.rekor = rekor;
+    state
+}
+
+/// Ensure a workspace record exists so server-originated emissions resolve a
+/// real tenant.
+///
+/// `emit_event`/`emit_telemetry` resolve the owning tenant from the workspace
+/// record and DROP messages whose scope cannot be determined (never
+/// fabricate a "default" identity). Tests that expect messages to be emitted
+/// must create the workspace their entities live in — this helper makes that
+/// a one-liner. Idempotent.
+#[cfg(test)]
+pub async fn ensure_test_workspace(state: &crate::AppState, ws_id: &str) {
+    let id = gyre_common::Id::new(ws_id);
+    if state
+        .workspaces
+        .find_by_id(&id)
+        .await
+        .expect("workspace lookup")
+        .is_some()
+    {
+        return;
+    }
+    let ws = gyre_domain::Workspace::new(
+        id,
+        gyre_common::Id::new("tenant-1"),
+        format!("Workspace {ws_id}"),
+        ws_id,
+        0,
+    );
+    state
+        .workspaces
+        .create(&ws)
+        .await
+        .expect("workspace create");
 }
 
 /// Build a test AppState backed by a real `StoragePort` (e.g. a temp-file
@@ -3970,9 +5518,27 @@ pub fn test_state_with_storage(
         workspaces,
         policies,
         ws_store,
-        Some(storage),
-        None,
-        None,
+        TestStateOverrides {
+            storage: Some(storage),
+            ..Default::default()
+        },
+    )
+}
+
+/// Build a test AppState whose search port is the given adapter — used to
+/// exercise the reindex coordinator against a real SQLite FTS5 backend.
+#[cfg(test)]
+pub fn test_state_with_search(search: Arc<dyn gyre_ports::SearchPort>) -> Arc<crate::AppState> {
+    let (workspaces, policies, ws_store) = shared_workspace_policy_pair(false);
+    test_state_inner(
+        Arc::new(NoopGitOps),
+        workspaces,
+        policies,
+        ws_store,
+        TestStateOverrides {
+            search: Some(search),
+            ..Default::default()
+        },
     )
 }
 
@@ -3985,7 +5551,13 @@ pub fn test_state_with_jj_and_git_ops(
     git_ops: Arc<dyn gyre_ports::GitOpsPort>,
 ) -> Arc<crate::AppState> {
     let (workspaces, policies, ws_store) = shared_workspace_policy_pair(false);
-    let mut state = test_state_inner(git_ops, workspaces, policies, ws_store, None, None, None);
+    let mut state = test_state_inner(
+        git_ops,
+        workspaces,
+        policies,
+        ws_store,
+        TestStateOverrides::default(),
+    );
     let s = Arc::get_mut(&mut state).expect("test state is uniquely owned");
     s.jj_ops = jj_ops;
     state
@@ -4004,9 +5576,10 @@ pub fn test_state_with_secrets(
         workspaces,
         policies,
         ws_store,
-        None,
-        Some(secrets),
-        None,
+        TestStateOverrides {
+            secrets: Some(secrets),
+            ..Default::default()
+        },
     )
 }
 
@@ -4021,9 +5594,10 @@ pub fn test_state_with_kv_store(kv: Arc<dyn gyre_ports::KvJsonStore>) -> Arc<cra
         workspaces,
         policies,
         ws_store,
-        None,
-        None,
-        Some(kv),
+        TestStateOverrides {
+            kv: Some(kv),
+            ..Default::default()
+        },
     )
 }
 
@@ -4037,9 +5611,7 @@ pub fn test_state_failing_trust() -> Arc<crate::AppState> {
         workspaces,
         policies,
         ws_store,
-        None,
-        None,
-        None,
+        TestStateOverrides::default(),
     )
 }
 
@@ -4058,9 +5630,7 @@ pub fn test_state_failing_policy_creates() -> Arc<crate::AppState> {
         Arc::new(workspaces),
         Arc::new(policies),
         ws_store,
-        None,
-        None,
-        None,
+        TestStateOverrides::default(),
     )
 }
 
@@ -4080,9 +5650,7 @@ pub fn test_state_failing_policy_lists() -> Arc<crate::AppState> {
         Arc::new(workspaces),
         Arc::new(policies),
         ws_store,
-        None,
-        None,
-        None,
+        TestStateOverrides::default(),
     )
 }
 
@@ -4116,49 +5684,259 @@ fn shared_workspace_policy_pair(fail_trust: bool) -> SharedWorkspacePolicyPair {
     (Arc::new(workspaces), policies, ws_store)
 }
 
+/// Production-parity variant of [`shared_workspace_policy_pair`]: the
+/// shared policy store comes pre-populated with the full built-in ABAC
+/// policy set — `abac_middleware::m34_builtin_policies()` chained with
+/// `abac_middleware::domain_builtin_policies()`, the exact set
+/// [`abac_middleware::seed_builtin_policies`] persists at startup
+/// (main.rs), keyed by policy id exactly as `MemPolicyRepository::create`
+/// writes them. Constructing the map synchronously (before it is wrapped
+/// in the store mutex) keeps every `test_state*` builder callable from
+/// sync and current-thread-runtime contexts alike.
+///
+/// task-129 removed the middleware's system-token bypass: the global
+/// GYRE_AUTH_TOKEN is allowed BY the `system-full-access` policy
+/// (priority 1000), so a test state whose policy store is empty
+/// default-denies every ABAC-evaluated route — the seeded builtin set is
+/// part of production wiring (`main.rs` seeds it before serving), not an
+/// optional extra. Test states that specifically exercise empty- or
+/// failing-policy behavior (`test_state_failing_policy_creates`,
+/// `test_state_failing_policy_lists`) build their own stores and stay
+/// unseeded.
+#[cfg(test)]
+fn shared_workspace_policy_pair_seeded() -> SharedWorkspacePolicyPair {
+    let mut seeded = std::collections::HashMap::new();
+    for policy in crate::abac_middleware::m34_builtin_policies()
+        .into_iter()
+        .chain(crate::abac_middleware::domain_builtin_policies())
+    {
+        seeded.insert(policy.id.to_string(), policy);
+    }
+    let pol_store = Arc::new(tokio::sync::Mutex::new(seeded));
+    let policies = Arc::new(MemPolicyRepository::from_store(Arc::clone(&pol_store)));
+    let ws_store = Arc::new(Mutex::new(HashMap::<String, Workspace>::new()));
+    let workspaces = MemWorkspaceRepository::with_policy_store(pol_store)
+        .with_workspace_store(Arc::clone(&ws_store));
+    (Arc::new(workspaces), policies, ws_store)
+}
+
 /// Build an AppState with a custom GitOpsPort for tests that need to control
 /// git operation behavior (e.g., configurable `can_merge` results).
 #[cfg(test)]
 pub fn test_state_with_git_ops(git_ops: Arc<dyn gyre_ports::GitOpsPort>) -> Arc<crate::AppState> {
     let (workspaces, policies, ws_store) = shared_workspace_policy_pair(false);
-    test_state_inner(git_ops, workspaces, policies, ws_store, None, None, None)
+    test_state_inner(
+        git_ops,
+        workspaces,
+        policies,
+        ws_store,
+        TestStateOverrides::default(),
+    )
 }
+
+/// Build a test AppState with the meta-spec preview knobs pinned, so TTL expiry
+/// and the preview concurrency cap are testable without mutating the process
+/// environment (which every other test in this binary reads).
+#[cfg(test)]
+pub fn test_state_with_preview_config(
+    git_ops: Arc<dyn gyre_ports::GitOpsPort>,
+    preview_ttl_secs: u64,
+    preview_budget_max_concurrent: Option<u64>,
+) -> Arc<crate::AppState> {
+    let (workspaces, policies, ws_store) = shared_workspace_policy_pair(false);
+    let mut state = test_state_inner(
+        git_ops,
+        workspaces,
+        policies,
+        ws_store,
+        TestStateOverrides::default(),
+    );
+    let s = Arc::get_mut(&mut state).expect("test state is uniquely owned");
+    s.preview_ttl_secs = preview_ttl_secs;
+    s.preview_budget_max_concurrent = preview_budget_max_concurrent;
+    state
+}
+/// Optional port overrides for `test_state_inner`: each field replaces the
+/// default in-memory implementation when `Some`. Bundling them in one struct
+/// keeps the shared builder under clippy's `too_many_arguments` threshold.
+#[cfg(test)]
+#[derive(Default)]
+struct TestStateOverrides {
+    storage: Option<Arc<dyn gyre_ports::storage::StoragePort>>,
+    search: Option<Arc<dyn gyre_ports::SearchPort>>,
+    secrets: Option<Arc<dyn gyre_ports::SecretRepository>>,
+    kv: Option<Arc<dyn gyre_ports::KvJsonStore>>,
+    messages: Option<Arc<dyn gyre_ports::MessageRepository>>,
+}
+
+/// Build a test AppState whose message repository is replaced by `messages`
+/// (e.g. a counting wrapper asserting whether store() was called — the
+/// scopeless-message guard test needs to prove no message reaches the
+/// persistence port).
+#[cfg(test)]
+pub fn test_state_with_messages(
+    messages: Arc<dyn gyre_ports::MessageRepository>,
+) -> Arc<crate::AppState> {
+    let (workspaces, policies, ws_store) = shared_workspace_policy_pair_seeded();
+    test_state_inner(
+        Arc::new(NoopGitOps),
+        workspaces,
+        policies,
+        ws_store,
+        TestStateOverrides {
+            messages: Some(messages),
+            ..TestStateOverrides::default()
+        },
+    )
+}
+
 /// Shared builder for all in-memory test states. Callers supply the git ops
-/// adapter plus a paired workspace/policy repo (see `shared_workspace_policy_pair`);
-/// `secrets` overrides the default in-memory SecretRepository when given.
+/// adapter plus a paired workspace/policy repo (see
+/// `shared_workspace_policy_pair`); `overrides` replaces individual default
+/// in-memory ports (storage/search/secrets/kv) when set.
 #[cfg(test)]
 fn test_state_inner(
     git_ops: Arc<dyn gyre_ports::GitOpsPort>,
     workspaces: Arc<dyn WorkspaceRepository>,
     policies: Arc<dyn gyre_ports::PolicyRepository>,
     ws_store: Arc<Mutex<HashMap<String, Workspace>>>,
-    storage: Option<Arc<dyn gyre_ports::storage::StoragePort>>,
-    secrets: Option<Arc<dyn gyre_ports::SecretRepository>>,
-    kv: Option<Arc<dyn gyre_ports::KvJsonStore>>,
+    overrides: TestStateOverrides,
 ) -> Arc<crate::AppState> {
+    let spec_link_repo: Arc<dyn gyre_ports::SpecLinkRepository> =
+        Arc::new(MemSpecLinkRepository::default());
+    let spec_links_store = crate::spec_registry::SpecLinksStore::default();
+    crate::load_spec_links_into_store(&spec_link_repo, &spec_links_store);
     use std::collections::HashMap;
     use tokio::sync::{broadcast, Mutex};
+    let (message_dispatch_tx, message_dispatch_rx) = tokio::sync::mpsc::channel(256);
+    // In-memory judgment ledger aggregates the SAME audit / spec-approval /
+    // spec-ledger stores these repos write through (HSI §12).
+    let mem_audit = Arc::new(MemAuditRepository::default());
+    let mem_spec_approvals = Arc::new(MemSpecApprovalRepository::default());
+    let mem_spec_ledger = Arc::new(MemSpecLedgerRepository::default());
+
+    let TestStateOverrides {
+        storage,
+        search,
+        secrets,
+        kv,
+        messages,
+    } = overrides;
     // Shared binding store: the meta-spec delete guard must see bindings
     // written through `meta_spec_bindings` (same wiring as lib.rs).
     let meta_spec_binding_store = Arc::new(tokio::sync::RwLock::new(Vec::new()));
+    // §Performance: wrap the policy repo in the read-through cache, same as
+    // build_state, so middleware/engine tests exercise the cached path.
+    let policy_cache = Arc::new(crate::policy_cache::PolicyCache::default());
+    let cached_policies: Arc<dyn gyre_ports::PolicyRepository> = Arc::new(
+        crate::policy_cache::CachedPolicyRepository::new(policies, Arc::clone(&policy_cache)),
+    );
+
+    // Mirror production wiring (lib.rs): entity repositories are wrapped in
+    // search-sync decorators so tests exercise the same index-on-write
+    // behavior as every real write path. The search port is wrapped in the
+    // tenant-resolution decorator (search_scope) exactly like production.
+    let search = crate::search_scope::with_tenant_resolution(
+        search.unwrap_or_else(|| {
+            Arc::new(gyre_adapters::MemSearchAdapter::new()) as Arc<dyn gyre_ports::SearchPort>
+        }),
+        Arc::clone(&workspaces),
+    );
+    let agents = crate::search_sync::wrap_agents(
+        Arc::new(MemAgentRepository::default()),
+        Arc::clone(&search),
+    );
+    // The persona repo shares the task store so the atomic
+    // `apply_approval_reset_with_task` write (persona approval reset +
+    // approval task) lands in the same store as every normal task write.
+    let task_store: Arc<Mutex<HashMap<String, Task>>> = Arc::default();
+    let tasks = crate::search_sync::wrap_tasks(
+        Arc::new(MemTaskRepository::from_store(Arc::clone(&task_store))),
+        Arc::clone(&search),
+    );
+    let merge_requests =
+        crate::search_sync::wrap_mrs(Arc::new(MemMrRepository::default()), Arc::clone(&search));
+    let reviews = crate::search_sync::wrap_reviews(
+        Arc::new(MemReviewRepository::default()),
+        Arc::clone(&merge_requests),
+        Arc::clone(&search),
+    );
+    let personas = crate::search_sync::wrap_personas(
+        Arc::new(MemPersonaRepository::with_task_store(
+            Arc::default(),
+            Arc::clone(&task_store),
+        )),
+        Arc::clone(&search),
+    );
+    let analytics = crate::search_sync::wrap_analytics(
+        Arc::new(MemAnalyticsRepository::default()),
+        Arc::clone(&search),
+    );
+    // The audit repo keeps both concerns: search-sync indexing (task-202,
+    // mirroring production lib.rs wiring) AND store sharing with the
+    // judgment ledger (task-209, HSI §12) — the decorator wraps the shared
+    // mem store instead of constructing its own.
+    let audit = crate::search_sync::wrap_audit(
+        Arc::clone(&mem_audit) as Arc<dyn AuditRepository>,
+        Arc::clone(&search),
+    );
+    // Mirror production wiring (lib.rs): attestation bundles are stored
+    // through the AttestationStorage port over the same audit repository,
+    // and Rekor is the real HTTP client (task-264) — left UNCONFIGURED in
+    // tests (no GYRE_REKOR_URL) so no test ever contacts a transparency
+    // log; submissions fail explicitly, exactly like an unconfigured
+    // production deployment.
+    let attestation_storage: Arc<dyn gyre_ports::AttestationStorage> = Arc::new(
+        gyre_adapters::MergeAttestationStorage::new(Arc::clone(&audit)),
+    );
+
+    let forge_key = Arc::new(crate::auth::AgentSigningKey::generate());
+    let rekor: Arc<dyn gyre_ports::RekorClient> = Arc::new(gyre_adapters::HttpRekorClient::new(
+        None,
+        forge_key.public_key_pem(),
+    ));
+
     Arc::new(crate::AppState {
         auth_token: "test-token".to_string(),
         base_url: "http://localhost:3000".to_string(),
+        spiffe: Arc::new(
+            crate::spiffe::SpiffeService::local(
+                "gyre.example.com".to_string(),
+                gyre_spiffe::TrustDomainCa::generate("gyre.example.com")
+                    .expect("test CA generation must succeed"),
+                gyre_spiffe::BASE_SVID_TTL_SECS,
+            )
+            .expect("test SPIFFE service construction must succeed"),
+        ),
+        // No federation peers configured by default; tests that exercise
+        // SPIFFE federation install a registry with a local test endpoint.
+        spiffe_federation: Arc::new(crate::spiffe_federation::FederationBundles::new(
+            vec![],
+            std::time::Duration::from_secs(300),
+        )),
         repos: Arc::new(MemRepoRepository::default()),
-        agents: Arc::new(MemAgentRepository::default()),
-        tasks: Arc::new(MemTaskRepository::default()),
-        merge_requests: Arc::new(MemMrRepository::default()),
-        reviews: Arc::new(MemReviewRepository::default()),
+        agents,
+        tasks,
+        merge_requests,
+        reviews,
         merge_queue: Arc::new(MemMergeQueueRepository::default()),
         git_ops,
         jj_ops: Arc::new(NoopJjOps),
         agent_commits: Arc::new(MemAgentCommitRepository::default()),
+        agent_sessions: Arc::new(MemAgentSessionRepository::default()),
         worktrees: Arc::new(MemWorktreeRepository::default()),
         telemetry_buffer: Arc::new(gyre_common::message::TelemetryBuffer::new(1_000, 10)),
         message_broadcast_tx: broadcast::channel(16).0,
         kv_store: kv.unwrap_or_else(|| Arc::new(MemKvStore::default())),
-        agent_signing_key: Arc::new(crate::auth::AgentSigningKey::generate()),
+        agent_signing_key: forge_key.clone(),
+        signing_key_history: Vec::new(),
+        attestation_verifier: Arc::new(crate::merge_attestation::ForgeAttestationVerifier::new(
+            forge_key.clone(),
+        )),
         agent_jwt_ttl_secs: 3600,
+        preview_ttl_secs: 86_400,
+        preview_jwt_ttl_secs: 1_800,
+        preview_budget_max_concurrent: None,
         users: Arc::new(MemUserRepository::default()),
         api_keys: Arc::new(MemApiKeyRepository::default()),
         jwt_config: None,
@@ -4172,11 +5950,17 @@ fn test_state_inner(
         explorer_sessions: Arc::new(crate::explorer_ws::ExplorerSessionRegistry::new()),
         retention_store: crate::retention::RetentionStore::new(),
         job_registry: Arc::new(crate::jobs::JobRegistry::new()),
-        analytics: Arc::new(MemAnalyticsRepository::default()),
+        budget_grace_in_progress: Arc::new(tokio::sync::Mutex::new(
+            std::collections::HashSet::new(),
+        )),
+        analytics,
         costs: Arc::new(MemCostRepository::default()),
-        audit: Arc::new(MemAuditRepository::default()),
+        audit,
+        attestation_storage,
+        rekor,
         siem_store: crate::siem::SiemStore::new(),
         audit_broadcast_tx: broadcast::channel(64).0,
+        notification_broadcast_tx: broadcast::channel(64).0,
         network_peers: Arc::new(MemNetworkPeerRepository::default()),
         dependencies: Arc::new(MemDependencyRepository::default()),
         breaking_changes: Arc::new(MemBreakingChangeRepository::default()),
@@ -4195,49 +5979,62 @@ fn test_state_inner(
         spawn_log: Arc::new(MemSpawnLogRepository::default()),
         db_storage: None,
         storage,
-        spec_approvals: Arc::new(MemSpecApprovalRepository::default()),
+        spec_approvals: Arc::clone(&mem_spec_approvals)
+            as Arc<dyn gyre_ports::SpecApprovalRepository>,
         spec_policies: Arc::new(MemSpecPolicyRepository::default()),
         attestation_store: Arc::new(MemAttestationRepository::default()),
         chain_attestations: Arc::new(MemChainAttestationRepository::default()),
         key_bindings: Arc::new(MemKeyBindingRepository::default()),
         trusted_issuers: vec![],
         commit_signatures: Arc::new(MemCommitSignatureRepository::default()),
-        signing_config: crate::commit_signatures::SigningConfig::default(),
+        // task-264: production's default signing mode is keyless Fulcio;
+        // the shared test fixture EXPLICITLY configures local forge-key
+        // signing (the documented operator opt-in) so tests exercise the
+        // signing surfaces without a reachable Fulcio. Fulcio-mode
+        // behavior has its own tests that override this config.
+        signing_config: crate::commit_signatures::SigningConfig {
+            mode: crate::commit_signatures::SigningMode::Local,
+            fulcio_url: "https://fulcio.invalid".to_string(),
+            rekor_url: "https://rekor.invalid".to_string(),
+        },
         remote_jwks_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         trusted_proxies: crate::trusted_proxy::TrustedProxies::default(),
         tunnel_store: Arc::new(Mutex::new(HashMap::new())),
         container_audits: Arc::new(MemContainerAuditRepository::default()),
-        spec_ledger: Arc::new(MemSpecLedgerRepository::default()),
+        spec_ledger: Arc::clone(&mem_spec_ledger) as Arc<dyn gyre_ports::SpecLedgerRepository>,
         spec_approval_history: Arc::new(MemSpecApprovalEventRepository::default()),
+        spec_link_repo: spec_link_repo.clone(),
         spec_assertion_results: Arc::new(MemSpecAssertionResultRepository::default()),
         trust_anchors: Arc::new(MemTrustAnchorRepository::default()),
-        spec_links_store: Arc::new(Mutex::new(Vec::new())),
+        spec_links_store,
         budget_configs: Arc::new(MemBudgetConfigRepository::default()),
         budget_usages: Arc::new(MemBudgetUsageRepository::default()),
         budget_calls: Arc::new(MemBudgetCallRepository::default()),
-        search: Arc::new(gyre_adapters::MemSearchAdapter::new()),
+        search,
         tenants: Arc::new(MemTenantRepository::default()),
         workspaces,
-        personas: Arc::new(MemPersonaRepository::default()),
-        policies,
+        personas,
+        policies: cached_policies,
+        policy_cache,
         workspace_memberships: Arc::new(MemWorkspaceMembershipRepository::default()),
+        repo_access_overrides: Arc::new(MemRepoAccessOverrideRepository::default()),
         teams: Arc::new(MemTeamRepository::default()),
         notifications: Arc::new(MemNotificationRepository::default()),
+        tenant_invitations: Arc::new(MemTenantInvitationRepository::default()),
+        workspace_invitations: Arc::new(MemWorkspaceInvitationRepository::default()),
+        scim_groups: Arc::new(MemScimGroupRepository::default()),
+        scim_mappings: Arc::new(MemScimMappingRepository::default()),
         graph_store: Arc::new(gyre_adapters::MemGraphStore::new()),
         saved_views: Arc::new(gyre_adapters::MemSavedViewRepository::default()),
         wg_config: crate::WireGuardConfig::from_env(),
         agent_inbox_max: 1000,
         user_workspace_state: Arc::new(MemUserWorkspaceStateRepository::default()),
         rollout_policies: Arc::new(MemRolloutPolicyRepository::default()),
-        messages: Arc::new(MemMessageRepository::default()),
-        message_dispatch_tx: {
-            let (tx, rx) = tokio::sync::mpsc::channel(256);
-            tokio::spawn(async move {
-                let mut rx = rx;
-                while rx.recv().await.is_some() {}
-            });
-            tx
-        },
+        messages: messages.unwrap_or_else(|| Arc::new(MemMessageRepository::default())),
+        message_dispatch_tx,
+        message_dispatch_rx: std::sync::Arc::new(tokio::sync::Mutex::new(Some(
+            message_dispatch_rx,
+        ))),
         meta_specs: Arc::new(MemMetaSpecRepository::with_binding_store(Arc::clone(
             &meta_spec_binding_store,
         ))),
@@ -4268,8 +6065,14 @@ fn test_state_inner(
         compute_targets: Arc::new(MemComputeTargetRepository::with_workspace_store(ws_store)),
         llm: Some(Arc::new(gyre_adapters::MockLlmPortFactory::echo())),
         user_notification_prefs: Arc::new(MemUserNotificationPreferenceRepository::default()),
+        user_channel_prefs: Arc::new(MemUserChannelPreferenceRepository::default()),
         user_tokens: Arc::new(MemUserTokenRepository::default()),
-        judgment_ledger: Arc::new(MemJudgmentLedgerRepository),
+        sessions: Arc::new(MemSessionRepository::default()),
+        judgment_ledger: Arc::new(MemJudgmentLedgerRepository::with_sources(
+            &mem_audit,
+            &mem_spec_approvals,
+            &mem_spec_ledger,
+        )),
         secrets: secrets.unwrap_or_else(|| Arc::new(MemSecretRepository::default())),
         orchestrator_registry: crate::signal_chain::OrchestratorRegistry::new(),
         ws_tickets: crate::auth::WsTicketStore::new(),
@@ -4988,6 +6791,38 @@ impl gyre_ports::UserNotificationPreferenceRepository for MemUserNotificationPre
     }
 }
 
+// ─── MemUserChannelPreferenceRepository ──────────────────────────────────────
+
+#[derive(Default)]
+pub struct MemUserChannelPreferenceRepository {
+    channels: Arc<tokio::sync::RwLock<Vec<(Id, gyre_domain::NotificationChannels)>>>,
+}
+
+#[async_trait]
+impl gyre_ports::UserChannelPreferenceRepository for MemUserChannelPreferenceRepository {
+    async fn find(&self, user_id: &Id) -> Result<Option<gyre_domain::NotificationChannels>> {
+        let guard = self.channels.read().await;
+        Ok(guard
+            .iter()
+            .find(|(uid, _)| uid == user_id)
+            .map(|(_, ch)| ch.clone()))
+    }
+
+    async fn upsert(
+        &self,
+        user_id: &Id,
+        channels: &gyre_domain::NotificationChannels,
+    ) -> Result<()> {
+        let mut guard = self.channels.write().await;
+        if let Some(existing) = guard.iter_mut().find(|(uid, _)| uid == user_id) {
+            existing.1 = channels.clone();
+        } else {
+            guard.push((user_id.clone(), channels.clone()));
+        }
+        Ok(())
+    }
+}
+
 // ── In-memory MetaSpecRepository ─────────────────────────────────────────────
 
 #[derive(Default)]
@@ -5218,23 +7053,326 @@ impl gyre_ports::UserTokenRepository for MemUserTokenRepository {
     }
 }
 
-// ─── MemJudgmentLedgerRepository ─────────────────────────────────────────────
+// ─── MemSessionRepository ────────────────────────────────────────────────────
 
 #[derive(Default)]
-pub struct MemJudgmentLedgerRepository;
+pub struct MemSessionRepository {
+    sessions: Arc<tokio::sync::RwLock<Vec<gyre_domain::UserSession>>>,
+}
+
+#[async_trait]
+impl gyre_ports::SessionRepository for MemSessionRepository {
+    async fn create(&self, session: &gyre_domain::UserSession) -> Result<()> {
+        let mut guard = self.sessions.write().await;
+        if guard.iter().any(|s| s.id == session.id) {
+            anyhow::bail!("session {} already exists", session.id);
+        }
+        guard.push(session.clone());
+        Ok(())
+    }
+
+    async fn list_for_user(&self, user_id: &Id) -> Result<Vec<gyre_domain::UserSession>> {
+        let guard = self.sessions.read().await;
+        Ok(guard
+            .iter()
+            .filter(|s| &s.user_id == user_id)
+            .cloned()
+            .collect())
+    }
+
+    async fn find_by_id(&self, id: &Id) -> Result<Option<gyre_domain::UserSession>> {
+        Ok(self
+            .sessions
+            .read()
+            .await
+            .iter()
+            .find(|s| &s.id == id)
+            .cloned())
+    }
+
+    async fn find_by_token_hash(
+        &self,
+        token_hash: &str,
+    ) -> Result<Option<gyre_domain::UserSession>> {
+        Ok(self
+            .sessions
+            .read()
+            .await
+            .iter()
+            .filter(|s| s.token_hash == token_hash)
+            .max_by_key(|s| (s.created_at, s.id.to_string()))
+            .cloned())
+    }
+
+    async fn find_by_credential_and_device(
+        &self,
+        user_id: &Id,
+        credential_hash: &str,
+        ip_address: &str,
+        user_agent: &str,
+    ) -> Result<Option<gyre_domain::UserSession>> {
+        Ok(self
+            .sessions
+            .read()
+            .await
+            .iter()
+            .filter(|s| {
+                &s.user_id == user_id
+                    && s.token_hash == credential_hash
+                    && s.ip_address == ip_address
+                    && s.user_agent == user_agent
+            })
+            // Newest match first: after a re-mint both the stale expired
+            // row and the fresh row match; the fresh one must be found.
+            .max_by_key(|s| (s.created_at, s.id.to_string()))
+            .cloned())
+    }
+
+    async fn touch(&self, id: &Id, last_active_at: u64, expires_at: u64) -> Result<()> {
+        let mut guard = self.sessions.write().await;
+        if let Some(s) = guard.iter_mut().find(|s| &s.id == id) {
+            s.last_active_at = last_active_at;
+            s.expires_at = expires_at;
+        }
+        Ok(())
+    }
+
+    async fn revoke(&self, id: &Id, user_id: &Id) -> Result<()> {
+        let mut guard = self.sessions.write().await;
+        if let Some(s) = guard
+            .iter_mut()
+            .find(|s| s.id == *id && s.user_id == *user_id)
+        {
+            s.revoked = true;
+        }
+        Ok(())
+    }
+
+    async fn revoke_all_for_user(&self, user_id: &Id) -> Result<()> {
+        let mut guard = self.sessions.write().await;
+        for s in guard.iter_mut().filter(|s| &s.user_id == user_id) {
+            s.revoked = true;
+        }
+        Ok(())
+    }
+
+    async fn delete_expired_before(&self, cutoff: u64) -> Result<u64> {
+        let mut guard = self.sessions.write().await;
+        let before = guard.len();
+        // Port contract: revoked rows are never deleted — they are the
+        // durable record that keeps a signed-out credential rejected.
+        guard.retain(|s| s.revoked || s.expires_at >= cutoff);
+        Ok((before - guard.len()) as u64)
+    }
+}
+
+// ─── MemJudgmentLedgerRepository ─────────────────────────────────────────────
+
+/// Aggregates the judgment ledger (HSI §12) from the SAME in-memory stores
+/// the audit / spec-approval / spec-ledger repos use — construct via
+/// [`MemJudgmentLedgerRepository::with_sources`] so the sources are shared.
+#[derive(Default)]
+pub struct MemJudgmentLedgerRepository {
+    audits: Arc<Mutex<Vec<MemAuditEntry>>>,
+    approvals: Arc<Mutex<HashMap<String, gyre_domain::SpecApproval>>>,
+    spec_ledger: Arc<Mutex<HashMap<String, gyre_domain::SpecLedgerEntry>>>,
+}
+
+impl MemJudgmentLedgerRepository {
+    pub fn with_sources(
+        audit: &MemAuditRepository,
+        approvals: &MemSpecApprovalRepository,
+        spec_ledger: &MemSpecLedgerRepository,
+    ) -> Self {
+        Self {
+            audits: audit.shared(),
+            approvals: approvals.shared(),
+            spec_ledger: spec_ledger.shared(),
+        }
+    }
+}
 
 #[async_trait]
 impl gyre_ports::JudgmentLedgerRepository for MemJudgmentLedgerRepository {
     async fn list_for_user(
         &self,
-        _user_id: &str,
-        _workspace_id: Option<&Id>,
-        _judgment_type: Option<gyre_domain::JudgmentType>,
-        _since: Option<u64>,
-        _limit: u32,
-        _offset: u32,
+        approver_id: &str,
+        workspace_id: Option<&Id>,
+        judgment_type: Option<gyre_domain::JudgmentType>,
+        since: Option<u64>,
+        limit: u32,
+        offset: u32,
     ) -> Result<Vec<gyre_domain::JudgmentEntry>> {
-        Ok(vec![])
+        use gyre_domain::{AuditEventType, JudgmentEntry, JudgmentType};
+        let jt = judgment_type;
+        let mut entries: Vec<JudgmentEntry> = Vec::new();
+
+        // ── Source 1: spec approvals & rejections ────────────────────────────
+        let want_approvals = jt
+            .is_none_or(|t| matches!(t, JudgmentType::SpecApproval | JudgmentType::SpecRejection));
+        if want_approvals {
+            let approvals = self.approvals.lock().await;
+            let wid_for_path: Vec<(String, Option<Id>)> = {
+                let ledger = self.spec_ledger.lock().await;
+                ledger
+                    .values()
+                    .map(|e| (e.path.clone(), e.workspace_id.as_ref().map(Id::new)))
+                    .collect()
+            };
+            // Attribution (HSI §12): an approval is the approver's judgment
+            // (`approver_id` = canonical user Id, written by the approve
+            // endpoint); a rejection/revocation is the declining human's
+            // judgment (`rejected_by`/`revoked_by` = canonical user Id).
+            // Mirrors the SQL adapters: the WHERE matches any of the three
+            // keys and the row loop re-checks the right one per status.
+            for a in approvals.values().filter(|a| {
+                a.approver_id == approver_id
+                    || a.rejected_by.as_deref() == Some(approver_id)
+                    || a.revoked_by.as_deref() == Some(approver_id)
+            }) {
+                let wid = wid_for_path
+                    .iter()
+                    .find(|(p, _)| p == &a.spec_path)
+                    .and_then(|(_, w)| w.clone());
+                // Workspace filter: unknown-workspace entries are excluded.
+                if workspace_id.is_some() && wid.as_ref() != workspace_id {
+                    continue;
+                }
+                // The spec approval ledger derives status from which
+                // timestamp column is non-null (mutually exclusive); the
+                // judgment timestamp is whichever fired. Pending entries
+                // (all None) carry no judgment yet and are excluded.
+                let judgment_ts = a.approved_at.or(a.rejected_at).or(a.revoked_at);
+                let Some(judgment_ts) = judgment_ts else {
+                    continue;
+                };
+                if judgment_ts < since.unwrap_or(0) {
+                    continue;
+                }
+                let rejected = a.revoked_at.is_some() || a.rejected_at.is_some();
+                if rejected
+                    && a.revoked_by.as_deref() != Some(approver_id)
+                    && a.rejected_by.as_deref() != Some(approver_id)
+                {
+                    // The rejection belongs to the human who declined or
+                    // withdrew it — not to the original approver.
+                    continue;
+                }
+                let jtype = if rejected {
+                    JudgmentType::SpecRejection
+                } else {
+                    JudgmentType::SpecApproval
+                };
+                if jt.is_some_and(|f| f != jtype) {
+                    continue;
+                }
+                let detail = if rejected {
+                    a.revocation_reason
+                        .clone()
+                        .or_else(|| a.rejected_reason.clone())
+                } else {
+                    None
+                };
+                entries.push(JudgmentEntry::new(
+                    jtype,
+                    a.spec_path.clone(),
+                    wid,
+                    judgment_ts,
+                    detail,
+                ));
+            }
+        }
+
+        // ── Source 2: audit-carried judgments (gate / trust / meta-spec) ─────
+        let want_audit = jt.is_none_or(|t| {
+            matches!(
+                t,
+                JudgmentType::GateOverride | JudgmentType::TrustGrant | JudgmentType::MetaSpec
+            )
+        });
+        if want_audit {
+            let audits = self.audits.lock().await;
+            for stored in audits.iter() {
+                // Materialize decompresses detail for compression-processed
+                // entries; the ledger reads `detail` fields (mr_id, from/to).
+                let ev = stored.materialize()?;
+                if ev.user_id.as_ref().map(|u| u.as_str()) != Some(approver_id) {
+                    continue;
+                }
+                let jtype = match ev.event_type {
+                    AuditEventType::GateOverride => JudgmentType::GateOverride,
+                    AuditEventType::TrustChange => JudgmentType::TrustGrant,
+                    AuditEventType::MetaSpecPublish => JudgmentType::MetaSpec,
+                    _ => continue,
+                };
+                if jt.is_some_and(|f| f != jtype) {
+                    continue;
+                }
+                if workspace_id.is_some() && ev.workspace_id.as_ref() != workspace_id {
+                    continue;
+                }
+                if ev.timestamp < since.unwrap_or(0) {
+                    continue;
+                }
+                let str_field = |k: &str| -> Option<String> {
+                    ev.detail
+                        .get(k)
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string)
+                };
+                let rid = ev.resource_id.clone();
+                let (entity_ref, entry_detail) = match jtype {
+                    JudgmentType::GateOverride => (
+                        str_field("mr_id").or(rid).unwrap_or_default(),
+                        format!(
+                            "gate {} overridden: {} -> {}",
+                            str_field("gate_type").unwrap_or_else(|| "unknown".into()),
+                            str_field("from_status").unwrap_or_else(|| "failed".into()),
+                            str_field("to_status").unwrap_or_else(|| "overridden".into()),
+                        ),
+                    ),
+                    JudgmentType::TrustGrant => (
+                        str_field("workspace_id")
+                            .or_else(|| ev.workspace_id.as_ref().map(|w| w.as_str().to_string()))
+                            .unwrap_or_default(),
+                        format!(
+                            "trust {} -> {}",
+                            str_field("from").unwrap_or_default(),
+                            str_field("to").unwrap_or_default(),
+                        ),
+                    ),
+                    _ => (
+                        str_field("name").or(rid).unwrap_or_default(),
+                        format!(
+                            "{} v{}",
+                            str_field("kind").unwrap_or_default(),
+                            ev.detail
+                                .get("version")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(0),
+                        ),
+                    ),
+                };
+                entries.push(JudgmentEntry::new(
+                    jtype,
+                    entity_ref,
+                    ev.workspace_id.clone(),
+                    ev.timestamp,
+                    Some(entry_detail),
+                ));
+            }
+        }
+
+        entries.sort_by(|a, b| {
+            b.timestamp
+                .cmp(&a.timestamp)
+                .then_with(|| b.entity_ref.cmp(&a.entity_ref))
+        });
+        Ok(entries
+            .into_iter()
+            .skip(offset as usize)
+            .take(limit as usize)
+            .collect())
     }
 }
 
@@ -5582,6 +7720,213 @@ impl gyre_ports::TrustAnchorRepository for MemTrustAnchorRepository {
     }
 }
 
+// ──────────────────────────────────────────────────────────────────────────────
+// Invitations (user-management.md §Tenant-Level User Onboarding, §Workspace
+// Invitation Flow, §Invitation Expiry — task-110)
+// ──────────────────────────────────────────────────────────────────────────────
+
+use gyre_domain::{InvitationStatus, TenantInvitation, WorkspaceInvitation};
+use gyre_ports::{TenantInvitationRepository, WorkspaceInvitationRepository};
+
+#[derive(Default)]
+pub struct MemTenantInvitationRepository {
+    store: Arc<Mutex<HashMap<String, TenantInvitation>>>,
+}
+
+#[async_trait]
+impl TenantInvitationRepository for MemTenantInvitationRepository {
+    async fn create(&self, inv: &TenantInvitation) -> Result<()> {
+        let mut store = self.store.lock().await;
+        // Port contract: fail if a pending invitation for the same
+        // (tenant, email) already exists.
+        if store.values().any(|i| {
+            i.tenant_id == inv.tenant_id
+                && i.email == inv.email
+                && i.status == InvitationStatus::Pending
+        }) {
+            anyhow::bail!(
+                "a pending invitation for {} in tenant {} already exists",
+                inv.email,
+                inv.tenant_id
+            );
+        }
+        store.insert(inv.id.to_string(), inv.clone());
+        Ok(())
+    }
+
+    async fn find_by_id(&self, id: &Id) -> Result<Option<TenantInvitation>> {
+        Ok(self.store.lock().await.get(id.as_str()).cloned())
+    }
+
+    async fn find_by_token_hash(&self, token_hash: &str) -> Result<Option<TenantInvitation>> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .values()
+            .find(|i| i.token_hash == token_hash)
+            .cloned())
+    }
+
+    async fn list_by_tenant(&self, tenant_id: &Id) -> Result<Vec<TenantInvitation>> {
+        let mut items: Vec<TenantInvitation> = self
+            .store
+            .lock()
+            .await
+            .values()
+            .filter(|i| i.tenant_id == *tenant_id)
+            .cloned()
+            .collect();
+        items.sort_by_key(|i| std::cmp::Reverse(i.created_at));
+        Ok(items)
+    }
+
+    async fn list_by_status(&self, status: InvitationStatus) -> Result<Vec<TenantInvitation>> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .values()
+            .filter(|i| i.status == status)
+            .cloned()
+            .collect())
+    }
+
+    async fn transition_status(
+        &self,
+        id: &Id,
+        from: InvitationStatus,
+        to: InvitationStatus,
+        accepted_at: Option<u64>,
+    ) -> Result<bool> {
+        // Check-and-set under the store lock: the mem adapter has no
+        // schema, so the `from` precondition is guarded in code — the
+        // guard and the write happen inside one critical section, which
+        // is the single-use acceptance contract (same as the adapters'
+        // conditional UPDATE).
+        let mut store = self.store.lock().await;
+        match store.get_mut(id.as_str()) {
+            Some(inv) if inv.status == from => {
+                inv.status = to;
+                inv.accepted_at = accepted_at;
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
+    async fn delete(&self, id: &Id) -> Result<()> {
+        self.store.lock().await.remove(id.as_str());
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+pub struct MemWorkspaceInvitationRepository {
+    store: Arc<Mutex<HashMap<String, WorkspaceInvitation>>>,
+}
+
+#[async_trait]
+impl WorkspaceInvitationRepository for MemWorkspaceInvitationRepository {
+    async fn create(&self, inv: &WorkspaceInvitation) -> Result<()> {
+        let mut store = self.store.lock().await;
+        // Port contract: fail if a pending invitation for the same
+        // (workspace, user) already exists.
+        if store.values().any(|i| {
+            i.workspace_id == inv.workspace_id
+                && i.user_id == inv.user_id
+                && i.status == InvitationStatus::Pending
+        }) {
+            anyhow::bail!(
+                "a pending invitation for user {} in workspace {} already exists",
+                inv.user_id,
+                inv.workspace_id
+            );
+        }
+        store.insert(inv.id.to_string(), inv.clone());
+        Ok(())
+    }
+
+    async fn find_by_id(&self, id: &Id) -> Result<Option<WorkspaceInvitation>> {
+        Ok(self.store.lock().await.get(id.as_str()).cloned())
+    }
+
+    async fn find_by_token_hash(&self, token_hash: &str) -> Result<Option<WorkspaceInvitation>> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .values()
+            .find(|i| i.token_hash == token_hash)
+            .cloned())
+    }
+
+    async fn list_by_workspace(&self, workspace_id: &Id) -> Result<Vec<WorkspaceInvitation>> {
+        let mut items: Vec<WorkspaceInvitation> = self
+            .store
+            .lock()
+            .await
+            .values()
+            .filter(|i| i.workspace_id == *workspace_id)
+            .cloned()
+            .collect();
+        items.sort_by_key(|i| std::cmp::Reverse(i.created_at));
+        Ok(items)
+    }
+
+    async fn list_by_user(&self, user_id: &Id) -> Result<Vec<WorkspaceInvitation>> {
+        let mut items: Vec<WorkspaceInvitation> = self
+            .store
+            .lock()
+            .await
+            .values()
+            .filter(|i| i.user_id == *user_id)
+            .cloned()
+            .collect();
+        items.sort_by_key(|i| std::cmp::Reverse(i.created_at));
+        Ok(items)
+    }
+
+    async fn list_by_status(&self, status: InvitationStatus) -> Result<Vec<WorkspaceInvitation>> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .values()
+            .filter(|i| i.status == status)
+            .cloned()
+            .collect())
+    }
+
+    async fn transition_status(
+        &self,
+        id: &Id,
+        from: InvitationStatus,
+        to: InvitationStatus,
+        accepted_at: Option<u64>,
+    ) -> Result<bool> {
+        // Check-and-set under the store lock: the mem adapter has no
+        // schema, so the `from` precondition is guarded in code — the
+        // guard and the write happen inside one critical section, which
+        // is the single-use acceptance contract (same as the adapters'
+        // conditional UPDATE).
+        let mut store = self.store.lock().await;
+        match store.get_mut(id.as_str()) {
+            Some(inv) if inv.status == from => {
+                inv.status = to;
+                inv.accepted_at = accepted_at;
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
+    async fn delete(&self, id: &Id) -> Result<()> {
+        self.store.lock().await.remove(id.as_str());
+        Ok(())
+    }
+}
+
 // ── In-memory CommitSignatureRepository (identity-security.md §Layer 3) ──────
 
 /// In-memory `CommitSignatureRepository` for pure-mem mode and tests.
@@ -5623,6 +7968,45 @@ impl gyre_ports::commit_signature_repo::CommitSignatureRepository for MemCommitS
     }
 }
 
+#[cfg(test)]
+mod budget_call_tests {
+    use super::*;
+    use gyre_ports::BudgetCallRepository;
+
+    fn record(id: &str) -> gyre_domain::BudgetCallRecord {
+        gyre_domain::BudgetCallRecord {
+            id: Id::new(id),
+            tenant_id: Id::new("tenant-1"),
+            workspace_id: Id::new("ws-1"),
+            repo_id: None,
+            agent_id: None,
+            task_id: None,
+            usage_type: "llm_query".to_string(),
+            input_tokens: 10,
+            output_tokens: 5,
+            cost_usd: 0.001,
+            model: "test-model".to_string(),
+            prompt_template_sha: None,
+            timestamp: 1000,
+        }
+    }
+
+    #[tokio::test]
+    async fn save_rejects_duplicate_id() {
+        // Port contract: "Insert-only; the record id is unique." The SQL
+        // adapters enforce this via the PRIMARY KEY; the mem adapter must
+        // reject a duplicate identically or SQLite-only suites would pass
+        // while the in-memory backend silently accepts rewrites.
+        let repo = MemBudgetCallRepository::default();
+        repo.save(&record("dup-1")).await.unwrap();
+        let err = repo.save(&record("dup-1")).await.unwrap_err();
+        assert!(err.to_string().contains("already exists"));
+        // Distinct ids still append.
+        repo.save(&record("dup-2")).await.unwrap();
+        let listed = repo.list_by_workspace("ws-1", 0, 10).await.unwrap();
+        assert_eq!(listed.len(), 2);
+    }
+}
 #[cfg(test)]
 mod secret_contract_tests {
     //! F1 (task-097): the mem adapter must enforce the SecretRepository port's
@@ -5912,5 +8296,174 @@ mod trace_payload_tests {
             .expect("promoted trace's payloads must survive delete_by_mr");
         let input = payload.input.map(|b| String::from_utf8(b).unwrap());
         assert_eq!(input.as_deref(), Some("i"));
+    }
+}
+
+#[cfg(test)]
+mod team_contract_tests {
+    use super::*;
+    use gyre_ports::TeamRepository;
+
+    fn team(id: &str, ws: &str, slug: &str) -> Team {
+        Team::new(
+            Id::new(id),
+            Id::new(ws),
+            "Platform",
+            slug,
+            Id::new("u-lead"),
+            1000,
+        )
+    }
+
+    /// Mirrors sqlite's team contract tests: the mem adapter must enforce
+    /// the port's duplicate constraints in code (it has no schema to lean
+    /// on) — duplicate slug within a workspace on create and update, and
+    /// duplicate team membership.
+    #[tokio::test]
+    async fn mem_team_enforces_duplicate_contracts() {
+        let repo = MemTeamRepository::default();
+
+        repo.create(&team("t-1", "ws-1", "platform")).await.unwrap();
+        let err = repo
+            .create(&team("t-2", "ws-1", "platform"))
+            .await
+            .expect_err("duplicate slug in workspace must fail");
+        assert!(format!("{err:#}").contains("team slug already exists"));
+        // Same slug in another workspace is fine.
+        repo.create(&team("t-3", "ws-2", "platform")).await.unwrap();
+
+        repo.create(&team("t-4", "ws-1", "sre")).await.unwrap();
+        let mut t4 = repo.find_by_id(&Id::new("t-4")).await.unwrap().unwrap();
+        t4.slug = "platform".to_string();
+        let err = repo
+            .update(&t4)
+            .await
+            .expect_err("renaming onto another team's slug must fail");
+        assert!(format!("{err:#}").contains("team slug already exists"));
+
+        repo.add_member(&TeamMembership::new(Id::new("t-1"), Id::new("u-1"), 2000))
+            .await
+            .unwrap();
+        let err = repo
+            .add_member(&TeamMembership::new(Id::new("t-1"), Id::new("u-1"), 3000))
+            .await
+            .expect_err("duplicate membership must fail");
+        assert!(format!("{err:#}").contains("already a member"));
+
+        // find_by_slug / list_for_user / delete-with-memberships.
+        assert_eq!(
+            repo.find_by_slug(&Id::new("ws-1"), "platform")
+                .await
+                .unwrap()
+                .unwrap()
+                .id
+                .as_str(),
+            "t-1"
+        );
+        let teams = repo
+            .list_for_user(&Id::new("ws-1"), &Id::new("u-1"))
+            .await
+            .unwrap();
+        assert_eq!(teams.len(), 1);
+        repo.delete(&Id::new("t-1")).await.unwrap();
+        assert_eq!(repo.list_members(&Id::new("t-1")).await.unwrap().len(), 0);
+    }
+
+    /// Port contract (PersonaRepository::apply_approval_reset_with_task):
+    /// the persona write and its human-approval task persist atomically —
+    /// when the task write fails, the persona write is rolled back (a
+    /// freshly-inserted persona is removed; an updated one is restored), so
+    /// an approval-reset persona is never stranded without its task.
+    #[tokio::test]
+    async fn mem_persona_approval_reset_with_task_is_atomic() {
+        use gyre_domain::{PersonaApprovalStatus, TaskStatus};
+
+        let persona_store: Arc<Mutex<HashMap<String, Persona>>> = Arc::default();
+        let task_store: Arc<Mutex<HashMap<String, Task>>> = Arc::default();
+        let tasks = MemTaskRepository::from_store(Arc::clone(&task_store));
+        let personas = MemPersonaRepository::with_task_store(
+            Arc::clone(&persona_store),
+            Arc::clone(&task_store),
+        );
+
+        let scope = gyre_domain::PersonaScope::Workspace(Id::new("ws-1"));
+
+        // Case 1 — NEW persona: task-write failure removes the inserted row.
+        let mut p_new = Persona::new(
+            Id::new("persona-new"),
+            "backend-dev".to_string(),
+            "backend-dev".to_string(),
+            scope.clone(),
+            "prompt".to_string(),
+            1000,
+        );
+        p_new.approval_status = PersonaApprovalStatus::Pending;
+        let task_new = Task::new(Id::new("task-new"), "Approve persona", 1000);
+        personas.set_fail_task_writes(true);
+        let err = personas
+            .apply_approval_reset_with_task(&p_new, &task_new)
+            .await
+            .expect_err("task-write failure must propagate");
+        assert!(format!("{err:#}").contains("approval task write failed"));
+        assert!(
+            persona_store.lock().await.get("persona-new").is_none(),
+            "the newly-inserted persona must be rolled out on task failure"
+        );
+        assert!(task_store.lock().await.get("task-new").is_none());
+
+        // Case 2 — EXISTING persona: task-write failure restores the
+        // previous row (approved state), not a half-reset one.
+        let mut p_prev = Persona::new(
+            Id::new("persona-exist"),
+            "sre".to_string(),
+            "sre".to_string(),
+            scope,
+            "prompt".to_string(),
+            1000,
+        );
+        p_prev.approval_status = PersonaApprovalStatus::Approved;
+        personas.create(&p_prev).await.unwrap();
+        let mut p_reset = p_prev.clone();
+        p_reset.version += 1;
+        p_reset.approval_status = PersonaApprovalStatus::Pending;
+        let task_exist = Task::new(Id::new("task-exist"), "Approve persona", 1000);
+        let err = personas
+            .apply_approval_reset_with_task(&p_reset, &task_exist)
+            .await
+            .expect_err("task-write failure must propagate");
+        assert!(format!("{err:#}").contains("approval task write failed"));
+        let stored = persona_store
+            .lock()
+            .await
+            .get("persona-exist")
+            .cloned()
+            .expect("the previous persona row must be restored, not deleted");
+        assert_eq!(stored.approval_status, PersonaApprovalStatus::Approved);
+        assert_eq!(stored.version, p_prev.version);
+
+        // Case 3 — success path: both halves land, atomically visible to
+        // the paired task repository (shared store).
+        personas.set_fail_task_writes(false);
+        let mut p_ok = Persona::new(
+            Id::new("persona-ok"),
+            "frontend-dev".to_string(),
+            "frontend-dev".to_string(),
+            gyre_domain::PersonaScope::Workspace(Id::new("ws-1")),
+            "prompt".to_string(),
+            1000,
+        );
+        p_ok.approval_status = PersonaApprovalStatus::Pending;
+        let task_ok = Task::new(Id::new("task-ok"), "Approve persona", 1000);
+        personas
+            .apply_approval_reset_with_task(&p_ok, &task_ok)
+            .await
+            .unwrap();
+        assert!(persona_store.lock().await.get("persona-ok").is_some());
+        let stored_task = tasks
+            .find_by_id(&Id::new("task-ok"))
+            .await
+            .unwrap()
+            .expect("the approval task must be visible through the paired task repository");
+        assert_eq!(stored_task.status, TaskStatus::Backlog);
     }
 }

@@ -24,6 +24,14 @@ import { render, waitFor, fireEvent } from '@testing-library/svelte';
 vi.mock('../lib/api.js', () => ({
   api: {
     me: vi.fn().mockResolvedValue({ username: 'admin', email: 'admin@example.com', role: 'Admin' }),
+    listUsers: vi.fn().mockResolvedValue({ users: [], total: 0 }),
+    deactivateUser: vi.fn().mockResolvedValue({}),
+    provisionUser: vi.fn().mockResolvedValue({ user: {}, api_key: { key: 'gyre_x' } }),
+    updateUserGlobalRole: vi.fn().mockResolvedValue({ id: 'u-1', global_role: 'TenantAdmin' }),
+    tenantInvitations: vi.fn().mockResolvedValue({ invitations: [] }),
+    inviteToTenant: vi.fn().mockResolvedValue({ id: 'inv-1', email: 'new@example.com', invite_url: 'http://localhost:3000/invite/tok'.replace('tok', 't'.repeat(64)) }),
+    bulkInviteToTenant: vi.fn().mockResolvedValue({ created: [], errors: [], created_count: 0, error_count: 0 }),
+    revokeTenantInvitation: vi.fn().mockResolvedValue(null),
     computeList: vi.fn().mockResolvedValue([]),
     budgetSummary: vi.fn().mockResolvedValue(null),
     adminAudit: vi.fn().mockResolvedValue([]),
@@ -44,6 +52,15 @@ vi.mock('../lib/api.js', () => ({
     secretCreate: vi.fn().mockResolvedValue({}),
     secretDelete: vi.fn().mockResolvedValue(null),
     secretRotate: vi.fn().mockResolvedValue({}),
+    // ABAC policy management surface (task-132) — the Policies tab's
+    // PolicyManager calls the global /policies endpoints.
+    policies: vi.fn().mockResolvedValue([]),
+    createPolicy: vi.fn().mockResolvedValue({}),
+    updatePolicy: vi.fn().mockResolvedValue({}),
+    deletePolicy: vi.fn().mockResolvedValue(null),
+    policyDecisions: vi.fn().mockResolvedValue([]),
+    evaluatePolicy: vi.fn().mockResolvedValue({}),
+    effectivePermissions: vi.fn().mockResolvedValue([]),
   },
 }));
 
@@ -166,6 +183,95 @@ describe('TenantSettings', () => {
     }, { timeout: 3000 });
   });
 
+  it('Users tab lists tenant users with search and deactivate action', async () => {
+    api.me.mockResolvedValue({ id: 'u-admin', username: 'admin', tenant_id: 't-1' });
+    api.listUsers.mockResolvedValue({
+      users: [
+        { id: 'u-1', username: 'alice', display_name: 'Alice', global_role: 'Member', created_at: 1690000000, deactivated_at: null },
+        { id: 'u-admin', username: 'admin', global_role: 'TenantAdmin', created_at: 1690000000, deactivated_at: null },
+      ],
+      total: 2,
+    });
+    const { container } = render(TenantSettings);
+    await waitFor(() => {
+      expect(api.listUsers).toHaveBeenCalledWith({ limit: 200 });
+    }, { timeout: 3000 });
+    const table = await waitFor(() => {
+      const el = container.querySelector('[data-testid="tenant-users-table"]');
+      expect(el).toBeTruthy();
+      return el;
+    });
+    const rows = table.querySelectorAll('[data-testid="tenant-user-row"]');
+    expect(rows.length).toBe(2);
+    // Self-deactivation is hidden (server rejects it too).
+    expect(container.querySelector('[data-testid="deactivate-user-u-admin"]')).toBeNull();
+    expect(container.querySelector('[data-testid="deactivate-user-u-1"]')).toBeTruthy();
+    // Search filters the list client-side.
+    const search = container.querySelector('[data-testid="tenant-users-search"]');
+    await fireEvent.input(search, { target: { value: 'alice' } });
+    expect(container.querySelectorAll('[data-testid="tenant-user-row"]').length).toBe(1);
+  });
+
+  it('Users tab renders resolved i18n strings, never raw tenant_settings.users.* keys', async () => {
+    // Regression guard (review 44b2bd1d): en.json once lacked
+    // tenant_settings.users.col_role / .count_note, so the Users table
+    // header and count note rendered the literal dotted key paths —
+    // svelte-i18n falls back to the raw key for missing entries.
+    api.me.mockResolvedValue({ id: 'u-admin', username: 'admin', tenant_id: 't-1' });
+    api.listUsers.mockResolvedValue({
+      users: [
+        { id: 'u-1', username: 'alice', global_role: 'Member', created_at: 1690000000, deactivated_at: null },
+        { id: 'u-admin', username: 'admin', global_role: 'TenantAdmin', created_at: 1690000000, deactivated_at: null },
+      ],
+      total: 2,
+    });
+    const { container } = render(TenantSettings);
+    const table = await waitFor(() => {
+      const el = container.querySelector('[data-testid="tenant-users-table"]');
+      expect(el).toBeTruthy();
+      return el;
+    }, { timeout: 3000 });
+    // Role column header resolves to real copy.
+    expect(table.querySelector('thead').textContent).toContain('Role');
+    // Count note interpolates shown/total.
+    const panel = container.querySelector('[data-testid="tenant-tab-users"]');
+    expect(panel.textContent).toContain('Showing 2 of 2 users.');
+    // Any future missing key in this namespace renders as its raw dotted
+    // path — none may leak into the page.
+    expect(panel.textContent).not.toContain('tenant_settings.users.');
+  });
+
+  it('Users tab deactivates a user through the API', async () => {
+    window.prompt = vi.fn(() => 'offboarding');
+    window.confirm = vi.fn(() => true);
+    api.me.mockResolvedValue({ id: 'u-admin', username: 'admin', tenant_id: 't-1' });
+    api.listUsers.mockResolvedValue({
+      users: [{ id: 'u-1', username: 'alice', global_role: 'Member', created_at: 1690000000, deactivated_at: null }],
+      total: 1,
+    });
+    const { container } = render(TenantSettings);
+    const btn = await waitFor(() => {
+      const el = container.querySelector('[data-testid="deactivate-user-u-1"]');
+      expect(el).toBeTruthy();
+      return el;
+    }, { timeout: 3000 });
+    await fireEvent.click(btn);
+    await waitFor(() => {
+      expect(api.deactivateUser).toHaveBeenCalledWith('u-1', 'offboarding');
+    });
+  });
+
+  it('Users tab shows the not-admin note when the listing is forbidden', async () => {
+    api.me.mockResolvedValue({ username: 'dev', tenant_id: 't-1' });
+    api.listUsers.mockRejectedValue(Object.assign(new Error('forbidden'), { status: 403 }));
+    const { container } = render(TenantSettings);
+    await waitFor(() => {
+      const panel = container.querySelector('[data-testid="tenant-tab-users"]');
+      expect(panel?.textContent).toContain('TenantAdmin');
+    }, { timeout: 3000 });
+    expect(container.querySelector('[data-testid="tenant-users-table"]')).toBeNull();
+  });
+
   it('Users tab shows error state gracefully', async () => {
     api.me.mockRejectedValue(new Error('Auth error'));
     const { container } = render(TenantSettings);
@@ -174,6 +280,158 @@ describe('TenantSettings', () => {
       expect(panel?.textContent).toContain('Auth error');
     }, { timeout: 3000 });
   });
+
+  // ── Invitations tab (user-management.md §UI Pages > Tenant Invitation
+  // Management; task-110 endpoints) ───────────────────────────────────
+  it('Invitations tab loads and lists tenant invitations with status and revoke action', async () => {
+    api.tenantInvitations.mockResolvedValue({
+      invitations: [
+        { id: 'inv-1', email: 'alice@example.com', role: 'Member', workspace_ids: [], status: 'Pending', expires_at: Math.floor(Date.now() / 1000) + 86400, created_at: 1700000000 },
+        { id: 'inv-2', email: 'bob@example.com', role: 'TenantAdmin', workspace_ids: ['ws-1'], status: 'Accepted', expires_at: 1700000000, created_at: 1690000000, accepted_at: 1700000100 },
+      ],
+    });
+    const { container } = render(TenantSettings);
+    container.querySelector('[data-testid="tenant-settings-tab-invitations"]')?.click();
+    const table = await waitFor(() => {
+      const el = container.querySelector('[data-testid="tenant-invitations-table"]');
+      expect(el).toBeTruthy();
+      return el;
+    }, { timeout: 3000 });
+    expect(api.tenantInvitations).toHaveBeenCalledWith(undefined);
+    const rows = table.querySelectorAll('[data-testid="tenant-invitation-row"]');
+    expect(rows.length).toBe(2);
+    expect(table.textContent).toContain('alice@example.com');
+    expect(table.textContent).toContain('bob@example.com');
+    // Only Pending invitations offer revoke.
+    expect(container.querySelector('[data-testid="revoke-invitation-inv-1"]')).toBeTruthy();
+    expect(container.querySelector('[data-testid="revoke-invitation-inv-2"]')).toBeNull();
+  });
+
+  it('Invitations tab status filter re-queries with the selected status', async () => {
+    api.tenantInvitations.mockResolvedValue({ invitations: [] });
+    const { container } = render(TenantSettings);
+    container.querySelector('[data-testid="tenant-settings-tab-invitations"]')?.click();
+    await waitFor(() => {
+      expect(api.tenantInvitations).toHaveBeenCalledWith(undefined);
+    }, { timeout: 3000 });
+    await fireEvent.change(container.querySelector('[data-testid="invitations-status-filter"]'), { target: { value: 'Pending' } });
+    await waitFor(() => {
+      expect(api.tenantInvitations).toHaveBeenCalledWith('Pending');
+    });
+  });
+
+  it('Invitations tab invite modal creates an invitation and shows the one-time magic link', async () => {
+    const inviteUrl = 'http://gyre.example/invite/' + 'a'.repeat(64);
+    api.inviteToTenant.mockResolvedValue({ id: 'inv-9', email: 'new@example.com', invite_url: inviteUrl });
+    api.tenantInvitations.mockResolvedValue({ invitations: [] });
+    const { container } = render(TenantSettings);
+    container.querySelector('[data-testid="tenant-settings-tab-invitations"]')?.click();
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="invite-to-tenant-btn"]')).toBeTruthy();
+    }, { timeout: 3000 });
+    await fireEvent.click(container.querySelector('[data-testid="invite-to-tenant-btn"]'));
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="invite-modal"]')).toBeTruthy();
+    });
+    await fireEvent.input(container.querySelector('[data-testid="invite-email-input"]'), { target: { value: 'new@example.com' } });
+    await fireEvent.change(container.querySelector('[data-testid="invite-role-select"]'), { target: { value: 'TenantAdmin' } });
+    await fireEvent.click(container.querySelector('[data-testid="invite-submit-btn"]'));
+    await waitFor(() => {
+      expect(api.inviteToTenant).toHaveBeenCalledWith({ email: 'new@example.com', role: 'TenantAdmin' });
+    });
+    const banner = await waitFor(() => {
+      const el = container.querySelector('[data-testid="invite-link-banner"]');
+      expect(el).toBeTruthy();
+      return el;
+    });
+    expect(banner.textContent).toContain(inviteUrl);
+    expect(container.querySelector('[data-testid="copy-invite-link-btn"]')).toBeTruthy();
+  });
+
+  it('Invitations tab bulk invite parses the entered emails into a batch payload', async () => {
+    api.bulkInviteToTenant.mockResolvedValue({
+      created: [{ email: 'a@example.com', id: 'inv-a', invite_url: 'http://gyre.example/invite/aaa' }],
+      errors: [{ index: 1, error: 'invalid email' }],
+      created_count: 1,
+      error_count: 1,
+    });
+    api.tenantInvitations.mockResolvedValue({ invitations: [] });
+    const { container } = render(TenantSettings);
+    container.querySelector('[data-testid="tenant-settings-tab-invitations"]')?.click();
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="bulk-invite-btn"]')).toBeTruthy();
+    }, { timeout: 3000 });
+    await fireEvent.click(container.querySelector('[data-testid="bulk-invite-btn"]'));
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="bulk-invite-modal"]')).toBeTruthy();
+    });
+    await fireEvent.input(container.querySelector('[data-testid="bulk-emails-input"]'), {
+      target: { value: 'a@example.com\nnot-an-email' },
+    });
+    await fireEvent.click(container.querySelector('[data-testid="bulk-submit-btn"]'));
+    await waitFor(() => {
+      expect(api.bulkInviteToTenant).toHaveBeenCalledWith({
+        invitations: [{ email: 'a@example.com' }, { email: 'not-an-email' }],
+      });
+    });
+    const result = await waitFor(() => {
+      const el = container.querySelector('[data-testid="bulk-invite-result"]');
+      expect(el).toBeTruthy();
+      return el;
+    });
+    expect(result.textContent).toContain('1');
+  });
+
+  it('Invitations tab revoke calls the revoke endpoint after confirmation', async () => {
+    window.confirm = vi.fn(() => true);
+    api.tenantInvitations.mockResolvedValue({
+      invitations: [
+        { id: 'inv-1', email: 'alice@example.com', role: 'Member', workspace_ids: [], status: 'Pending', expires_at: Math.floor(Date.now() / 1000) + 86400, created_at: 1700000000 },
+      ],
+    });
+    const { container } = render(TenantSettings);
+    container.querySelector('[data-testid="tenant-settings-tab-invitations"]')?.click();
+    const btn = await waitFor(() => {
+      const el = container.querySelector('[data-testid="revoke-invitation-inv-1"]');
+      expect(el).toBeTruthy();
+      return el;
+    }, { timeout: 3000 });
+    await fireEvent.click(btn);
+    await waitFor(() => {
+      expect(api.revokeTenantInvitation).toHaveBeenCalledWith('inv-1');
+    });
+  });
+
+  it('Invitations tab shows the not-admin note when the listing is forbidden', async () => {
+    api.tenantInvitations.mockRejectedValue(Object.assign(new Error('forbidden'), { status: 403 }));
+    const { container } = render(TenantSettings);
+    container.querySelector('[data-testid="tenant-settings-tab-invitations"]')?.click();
+    await waitFor(() => {
+      const panel = container.querySelector('[data-testid="tenant-tab-invitations"]');
+      expect(panel?.textContent).toContain('TenantAdmin');
+    }, { timeout: 3000 });
+    expect(container.querySelector('[data-testid="tenant-invitations-table"]')).toBeNull();
+  });
+
+  it('Users tab changes a user global role through the inline role select', async () => {
+    window.confirm = vi.fn(() => true);
+    api.me.mockResolvedValue({ id: 'u-admin', username: 'admin', tenant_id: 't-1' });
+    api.listUsers.mockResolvedValue({
+      users: [{ id: 'u-1', username: 'alice', global_role: 'Member', created_at: 1690000000, deactivated_at: null }],
+      total: 1,
+    });
+    const { container } = render(TenantSettings);
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="tenant-users-table"]')).toBeTruthy();
+    }, { timeout: 3000 });
+    // Inline select for a manageable user; none for self.
+    expect(container.querySelector('[data-testid="user-role-select-u-1"]')).toBeTruthy();
+    await fireEvent.change(container.querySelector('[data-testid="user-role-select-u-1"]'), { target: { value: 'TenantAdmin' } });
+    await waitFor(() => {
+      expect(api.updateUserGlobalRole).toHaveBeenCalledWith('u-1', { role: 'TenantAdmin' });
+    });
+  });
+
 
   // ── Compute Targets tab ────────────────────────────────────────────────────
   it('Compute Targets tab loads compute list on tab switch', async () => {
@@ -452,7 +710,8 @@ describe('TenantSettings', () => {
     usersTab.focus();
     fireEvent.keyDown(tabBar, { key: 'ArrowRight' });
     await waitFor(() => {
-      expect(document.activeElement?.getAttribute('data-testid')).toBe('tenant-settings-tab-compute');
+      // Invitations sits between Users and Compute (task-127).
+      expect(document.activeElement?.getAttribute('data-testid')).toBe('tenant-settings-tab-invitations');
     }, { timeout: 3000 });
   });
 
@@ -466,7 +725,8 @@ describe('TenantSettings', () => {
     computeTab.focus();
     fireEvent.keyDown(tabBar, { key: 'ArrowLeft' });
     await waitFor(() => {
-      expect(document.activeElement?.getAttribute('data-testid')).toBe('tenant-settings-tab-users');
+      // Invitations sits between Users and Compute (task-127).
+      expect(document.activeElement?.getAttribute('data-testid')).toBe('tenant-settings-tab-invitations');
     }, { timeout: 3000 });
   });
 
@@ -540,6 +800,26 @@ describe('TenantSettings', () => {
         expect(api.createWorkspace).toHaveBeenCalledWith(
           expect.objectContaining({ name: 'Risk Engine', slug: 'risk-engine' })
         );
+      }, { timeout: 3000 });
+    });
+  });
+
+  // ── ABAC policy management (abac-policy-engine.md §UI, task-132) ─────
+  describe('Policies tab', () => {
+    it('embeds the PolicyManager at tenant level on the global /policies endpoints', async () => {
+      api.me.mockResolvedValue({ username: 'admin', email: 'admin@example.com', role: 'Admin', tenant_id: 'tenant-acme' });
+      const { container } = render(TenantSettings);
+      await fireEvent.click(container.querySelector('[data-testid="tenant-settings-tab-policies"]'));
+      await waitFor(() => {
+        expect(container.querySelector('[data-testid="policy-manager"]')).toBeTruthy();
+      }, { timeout: 3000 });
+      await waitFor(() => {
+        expect(api.policies).toHaveBeenCalledWith({ scope: 'Tenant' });
+      }, { timeout: 3000 });
+      // The tab resolves the admin's own tenant to prefill the scope filter
+      // once me() returns.
+      await waitFor(() => {
+        expect(api.policies).toHaveBeenCalledWith({ scope: 'Tenant', scope_id: 'tenant-acme' });
       }, { timeout: 3000 });
     });
   });

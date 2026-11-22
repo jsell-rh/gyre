@@ -18,12 +18,14 @@
 
   const openDetailPanel = getContext('openDetailPanel') ?? null;
   const goToEntityDetail = getContext('goToEntityDetail') ?? null;
+  const goToUserProfile = getContext('goToUserProfile') ?? null;
   function nav(type, id, data) {
     if (goToEntityDetail) goToEntityDetail(type, id, data ?? {});
     else if (openDetailPanel) openDetailPanel({ type, id, data: data ?? {} });
   }
   import { toast as showToast } from '../lib/toast.svelte.js';
   import SecretsPanel from './SecretsPanel.svelte';
+  import PolicyManager from './abac/PolicyManager.svelte';
 
   let {
     onBack = undefined,
@@ -31,6 +33,7 @@
 
   const TABS = [
     { id: 'users',      labelKey: 'tenant_settings.tabs.users' },
+    { id: 'invitations', labelKey: 'tenant_settings.tabs.invitations' },
     { id: 'compute',    labelKey: 'tenant_settings.tabs.compute' },
     { id: 'workspaces', labelKey: 'tenant_settings.tabs.workspaces' },
     { id: 'budget',     labelKey: 'tenant_settings.tabs.budget' },
@@ -46,10 +49,57 @@
 
   let activeTab = $state('users');
 
-  // ── Users ─────────────────────────────────────────────────────────────
+  // ── Users ─────────────────────────────────────────────────────────
   let currentUser = $state(null);
   let usersLoading = $state(false);
   let usersError = $state(null);
+  // Tenant user management (user-management.md §UI Pages > Tenant User
+  // Management; task-124 endpoints: GET /users TenantAdmin listing +
+  // PUT /users/:id/deactivate + POST /users provisioning).
+  let tenantUsers = $state([]);
+  let tenantUsersTotal = $state(0);
+  let usersSearch = $state('');
+  let usersNotAdmin = $state(false); // listing is TenantAdmin-gated
+  let deactivateSavingId = $state(null);
+  let provisionModalOpen = $state(false);
+  let provisionForm = $state({ username: '', role: 'Developer' });
+  let provisionSaving = $state(false);
+  let provisionError = $state(null);
+  let provisionedApiKey = $state(null); // raw key shown once after creation
+  let roleSavingId = $state(null); // inline global-role change in flight
+
+  // ── Invitations (user-management.md §UI Pages > Tenant Invitation
+  // Management; task-110 endpoints: GET /tenant/invitations,
+  // POST /tenant/invite, POST /tenant/invite/bulk,
+  // DELETE /tenant/invitations/{id}) ──────────────────────────────
+  let invitations = $state([]);
+  let invitationsLoading = $state(false);
+  let invitationsError = $state(null);
+  let invitationsNotAdmin = $state(false); // listing is TenantAdmin-gated
+  let invitationsStatusFilter = $state(''); // '' = all statuses
+  let inviteModalOpen = $state(false);
+  let inviteForm = $state({ email: '', role: 'Member', expiresInDays: '' });
+  let inviteSaving = $state(false);
+  let inviteError = $state(null);
+  // Created invitation's one-time magic link (shown with a copy action —
+  // the link is the delivery channel; the server has no mailer).
+  let inviteResultUrl = $state(null);
+  let inviteResultEmail = $state(null);
+  let revokingInvitationId = $state(null);
+  let bulkModalOpen = $state(false);
+  let bulkForm = $state({ emails: '', role: 'Member', expiresInDays: '' });
+  let bulkSaving = $state(false);
+  let bulkError = $state(null);
+  let bulkResult = $state(null); // { created, errors, created_count, error_count }
+
+  let filteredTenantUsers = $derived.by(() => {
+    const q = usersSearch.trim().toLowerCase();
+    if (!q) return tenantUsers;
+    return tenantUsers.filter(u =>
+      (u.username ?? '').toLowerCase().includes(q) ||
+      (u.display_name ?? '').toLowerCase().includes(q) ||
+      (u.email ?? '').toLowerCase().includes(q));
+  });
 
   // ── Compute Targets ───────────────────────────────────────────────────
   let computeTargets = $state([]);
@@ -98,48 +148,20 @@
   let computeDeleting = $state(null);
 
   // ── Policies (ABAC) ──────────────────────────────────────────────────
-  let policies = $state([]);
-  let policiesLoading = $state(false);
-  let policiesError = $state(null);
-  let policyDecisions = $state([]);
-  let policyDecisionsLoading = $state(false);
-  let showPolicyForm = $state(false);
-  let policyFormSaving = $state(false);
-  let policyForm = $state({ name: '', scope: 'tenant', effect: 'allow', actions: 'push', resource_types: 'repo', priority: 100, condition_attr: 'subject.type', condition_op: 'equals', condition_val: 'agent' });
-  let deletingPolicyId = $state(null);
-
-  async function createPolicy() {
-    if (!policyForm.name.trim()) return;
-    policyFormSaving = true;
+  // Full policy management surface (abac-policy-engine.md §UI) lives in
+  // the PolicyManager component; this tab only anchors it at tenant level
+  // and resolves the admin's tenant id so the scope filter defaults to
+  // the caller's own tenant.
+  async function ensureCurrentUser() {
+    if (currentUser || usersLoading) return;
+    usersLoading = true;
     try {
-      await api.createPolicy({
-        name: policyForm.name.trim(),
-        scope: policyForm.scope,
-        effect: policyForm.effect,
-        conditions: [{ attribute: policyForm.condition_attr, operator: policyForm.condition_op, value: policyForm.condition_val }],
-        actions: policyForm.actions.split(',').map(s => s.trim()).filter(Boolean),
-        resource_types: policyForm.resource_types.split(',').map(s => s.trim()).filter(Boolean),
-        priority: parseInt(policyForm.priority) || 100,
-      });
-      showPolicyForm = false;
-      policyForm = { name: '', scope: 'tenant', effect: 'allow', actions: 'push', resource_types: 'repo', priority: 100, condition_attr: 'subject.type', condition_op: 'equals', condition_val: 'agent' };
-      loadPolicies();
-    } catch (e) {
-      policiesError = 'Create failed: ' + (e?.message ?? e);
+      currentUser = await api.me();
+    } catch {
+      // Non-fatal: the policy manager's scope-id field stays blank and
+      // lists tenant-unscoped policies until an id is typed.
     } finally {
-      policyFormSaving = false;
-    }
-  }
-
-  async function deletePolicy(id) {
-    deletingPolicyId = id;
-    try {
-      await api.deletePolicy(id);
-      policies = policies.filter(p => p.id !== id);
-    } catch (e) {
-      policiesError = 'Delete failed: ' + (e?.message ?? e);
-    } finally {
-      deletingPolicyId = null;
+      usersLoading = false;
     }
   }
 
@@ -220,6 +242,9 @@
     if (tab === 'users') {
       if (untrack(() => !currentUser && !usersLoading)) loadUsers();
     }
+    if (tab === 'invitations') {
+      if (untrack(() => invitations.length === 0 && !invitationsLoading)) loadInvitations();
+    }
     if (tab === 'compute') {
       if (untrack(() => computeTargets.length === 0 && !computeLoading)) loadCompute();
     }
@@ -239,7 +264,7 @@
       if (untrack(() => jobs.length === 0 && !jobsLoading)) loadJobs();
     }
     if (tab === 'policies') {
-      if (untrack(() => policies.length === 0 && !policiesLoading)) loadPolicies();
+      if (untrack(() => !currentUser && !usersLoading)) ensureCurrentUser();
     }
     if (tab === 'llm') {
       if (untrack(() => Object.keys(adminLlmConfigs).length === 0 && !adminLlmLoading)) loadAdminLlm();
@@ -265,9 +290,189 @@
       currentUser = await api.me();
     } catch (e) {
       usersError = e?.message ?? $t('tenant_settings.error_load_users');
+    }
+    try {
+      const raw = await api.listUsers({ limit: 200 });
+      tenantUsers = Array.isArray(raw?.users) ? raw.users : [];
+      tenantUsersTotal = raw?.total ?? tenantUsers.length;
+      usersNotAdmin = false;
+    } catch {
+      // GET /users is TenantAdmin-only — a forbidden listing is not an
+      // error state for a non-admin viewer, it just leaves the list empty.
+      tenantUsers = [];
+      tenantUsersTotal = 0;
+      usersNotAdmin = true;
     } finally {
       usersLoading = false;
     }
+  }
+
+  async function deactivateTenantUser(user) {
+    if (deactivateSavingId) return;
+    // Self-deactivation is rejected server-side; hide the action for self.
+    if (user.id === currentUser?.id) return;
+    const reason = window.prompt($t('tenant_settings.users.deactivate_reason_prompt', { values: { name: user.username ?? user.id } })) ?? '';
+    if (!window.confirm($t('tenant_settings.users.deactivate_confirm', { values: { name: user.username ?? user.id } }))) return;
+    deactivateSavingId = user.id;
+    try {
+      await api.deactivateUser(user.id, reason || undefined);
+      await loadUsers();
+    } catch (e) {
+      usersError = e?.message ?? String(e);
+    } finally {
+      deactivateSavingId = null;
+    }
+  }
+
+  async function submitProvisionUser() {
+    const username = provisionForm.username.trim();
+    if (provisionSaving || !username) return;
+    const tenantId = currentUser?.tenant_id;
+    if (!tenantId) {
+      provisionError = $t('tenant_settings.users.provision_no_tenant');
+      return;
+    }
+    provisionSaving = true;
+    provisionError = null;
+    try {
+      const result = await api.provisionUser({
+        username,
+        tenant_id: tenantId,
+        roles: [provisionForm.role],
+      });
+      provisionedApiKey = result?.api_key?.key ?? null;
+      provisionModalOpen = false;
+      provisionForm = { username: '', role: 'Developer' };
+      await loadUsers();
+    } catch (e) {
+      provisionError = e?.message ?? String(e);
+    } finally {
+      provisionSaving = false;
+    }
+  }
+
+  // Inline global-role change (user-management.md §UI Pages > Tenant
+  // User Management: "role management (TenantAdmin only)"). PUT
+  // /users/{id}/role is TenantAdmin-gated server-side; the UI hides the
+  // control for self and deactivated accounts (both rejected with 409).
+  async function changeUserRole(user, newRole) {
+    if (roleSavingId || !newRole || newRole === user.global_role) return;
+    const name = user.username ?? user.id;
+    const ok = window.confirm($t('tenant_settings.users.role_change_confirm', {
+      values: { name, from: user.global_role ?? '—', to: newRole },
+    }));
+    if (!ok) return;
+    roleSavingId = user.id;
+    try {
+      await api.updateUserGlobalRole(user.id, { role: newRole });
+      await loadUsers();
+    } catch (e) {
+      showToast($t('tenant_settings.users.role_change_failed') + ': ' + (e?.message ?? e), { type: 'error' });
+      await loadUsers(); // re-sync the select with the stored role
+    } finally {
+      roleSavingId = null;
+    }
+  }
+
+  // ── Tenant Invitation Management (task-110 endpoints) ────────────
+  async function loadInvitations() {
+    invitationsLoading = true;
+    invitationsError = null;
+    try {
+      const raw = await api.tenantInvitations(invitationsStatusFilter || undefined);
+      invitations = Array.isArray(raw?.invitations) ? raw.invitations : [];
+      invitationsNotAdmin = false;
+    } catch {
+      // GET /tenant/invitations is TenantAdmin-only — a forbidden listing
+      // is not an error state for a non-admin viewer.
+      invitations = [];
+      invitationsNotAdmin = true;
+    } finally {
+      invitationsLoading = false;
+    }
+  }
+
+  async function submitInvite() {
+    const email = inviteForm.email.trim();
+    if (inviteSaving || !email) return;
+    inviteSaving = true;
+    inviteError = null;
+    try {
+      const data = { email, role: inviteForm.role };
+      const days = parseInt(inviteForm.expiresInDays, 10);
+      if (Number.isFinite(days) && days > 0) data.expires_in_days = days;
+      const result = await api.inviteToTenant(data);
+      inviteResultUrl = result?.invite_url ?? null;
+      inviteResultEmail = result?.email ?? email;
+      inviteModalOpen = false;
+      inviteForm = { email: '', role: 'Member', expiresInDays: '' };
+      await loadInvitations();
+    } catch (e) {
+      inviteError = e?.message ?? String(e);
+    } finally {
+      inviteSaving = false;
+    }
+  }
+
+  async function submitBulkInvite() {
+    if (bulkSaving || !bulkForm.emails.trim()) return;
+    bulkSaving = true;
+    bulkError = null;
+    try {
+      const emails = bulkForm.emails
+        .split(/[\n,;]+/)
+        .map(s => s.trim())
+        .filter(Boolean);
+      const invitationsPayload = emails.map(email => ({ email }));
+      const data = { invitations: invitationsPayload };
+      const days = parseInt(bulkForm.expiresInDays, 10);
+      if (Number.isFinite(days) && days > 0) data.expires_in_days = days;
+      bulkResult = await api.bulkInviteToTenant(data);
+      bulkModalOpen = false;
+      bulkForm = { emails: '', role: 'Member', expiresInDays: '' };
+      await loadInvitations();
+    } catch (e) {
+      bulkError = e?.message ?? String(e);
+    } finally {
+      bulkSaving = false;
+    }
+  }
+
+  async function revokeInvitation(inv) {
+    if (revokingInvitationId) return;
+    const ok = window.confirm($t('tenant_settings.invitations.revoke_confirm', {
+      values: { email: inv.email },
+    }));
+    if (!ok) return;
+    revokingInvitationId = inv.id;
+    try {
+      await api.revokeTenantInvitation(inv.id);
+      await loadInvitations();
+    } catch (e) {
+      invitationsError = e?.message ?? String(e);
+    } finally {
+      revokingInvitationId = null;
+    }
+  }
+
+  let inviteLinkCopied = $state(false);
+  async function copyInviteLink() {
+    if (!inviteResultUrl) return;
+    try {
+      await navigator.clipboard.writeText(inviteResultUrl);
+      inviteLinkCopied = true;
+    } catch { /* clipboard unavailable — the link stays displayed */ }
+  }
+
+  function invitationExpiryLabel(inv) {
+    if (!inv?.expires_at) return '—';
+    const secs = inv.expires_at - Math.floor(Date.now() / 1000);
+    if (secs <= 0) return $t('tenant_settings.invitations.expired_label');
+    const days = Math.floor(secs / 86400);
+    if (days >= 1) return `${days}d`;
+    const hours = Math.floor(secs / 3600);
+    if (hours >= 1) return `${hours}h`;
+    return `${Math.max(1, Math.floor(secs / 60))}m`;
   }
 
   async function loadCompute() {
@@ -422,23 +627,9 @@
     }
   }
 
-  // ── Policies ──────────────────────────────────────────────────────────
-  async function loadPolicies() {
-    policiesLoading = true;
-    policiesError = null;
-    try {
-      const [pols, decs] = await Promise.all([
-        api.policies().catch(() => []),
-        api.policyDecisions({ limit: 20 }).catch(() => []),
-      ]);
-      policies = Array.isArray(pols) ? pols : (pols?.items ?? []);
-      policyDecisions = Array.isArray(decs) ? decs : (decs?.items ?? []);
-    } catch (e) {
-      policiesError = e?.message ?? 'Failed to load policies';
-    } finally {
-      policiesLoading = false;
-    }
-  }
+  // ── Policies (ABAC) ──────────────────────────────────────────────────
+  // PolicyManager loads its own data from the global
+  // GET /api/v1/policies?scope=…&scope_id=… endpoints.
 
   // ── LLM Defaults ─────────────────────────────────────────────────────
   async function loadAdminLlm() {
@@ -704,7 +895,9 @@
           <div class="panel-loading" aria-live="polite">{$t('tenant_settings.users.loading')}</div>
         {:else if usersError}
           <div class="panel-error" role="alert">{usersError}</div>
-        {:else if currentUser}
+        {/if}
+
+        {#if currentUser}
           <div class="info-card">
             <div class="info-row">
               <span class="info-label">{$t('tenant_settings.users.current_user')}</span>
@@ -729,13 +922,295 @@
               </div>
             {/if}
           </div>
-          <div class="panel-note">
-            <p>{$t('tenant_settings.users.provisioning_note')}</p>
-          </div>
         {:else}
           <div class="panel-empty">{$t('tenant_settings.users.no_user_info')}</div>
         {/if}
+
+        <!-- Tenant user management (user-management.md §UI Pages > Tenant
+             User Management): list, search, deactivate, provision. The
+             listing is TenantAdmin-only (task-124). -->
+        {#if usersNotAdmin}
+          <div class="panel-note">
+            <p>{$t('tenant_settings.users.not_admin_note')}</p>
+          </div>
+        {:else}
+          <div class="users-toolbar">
+            <input
+              class="users-search"
+              type="search"
+              placeholder={$t('tenant_settings.users.search_placeholder')}
+              bind:value={usersSearch}
+              aria-label={$t('tenant_settings.users.search_placeholder')}
+              data-testid="tenant-users-search"
+            />
+            <button class="btn-primary" onclick={() => { provisionError = null; provisionModalOpen = true; }} data-testid="provision-user-btn">
+              {$t('tenant_settings.users.provision')}
+            </button>
+          </div>
+
+          {#if provisionedApiKey}
+            <div class="info-card api-key-banner" data-testid="provisioned-key-banner">
+              <p>{$t('tenant_settings.users.provisioned_key_note')}</p>
+              <code class="mono">{provisionedApiKey}</code>
+              <button class="btn-primary" onclick={() => (provisionedApiKey = null)}>{$t('common.close')}</button>
+            </div>
+          {/if}
+
+          {#if tenantUsers.length === 0}
+            <div class="panel-empty">{$t('tenant_settings.users.no_users')}</div>
+          {:else}
+            <table class="users-table" data-testid="tenant-users-table">
+              <thead>
+                <tr>
+                  <th scope="col">{$t('tenant_settings.users.col_user')}</th>
+                  <th scope="col">{$t('tenant_settings.users.col_role')}</th>
+                  <th scope="col">{$t('tenant_settings.users.col_status')}</th>
+                  <th scope="col">{$t('tenant_settings.users.col_created')}</th>
+                  <th scope="col"><span class="sr-only">{$t('common.actions')}</span></th>
+                </tr>
+              </thead>
+              <tbody>
+                {#each filteredTenantUsers as user (user.id)}
+                  <tr data-testid="tenant-user-row" class:user-deactivated={!!user.deactivated_at}>
+                    <td>
+                      {#if goToUserProfile && user.username}
+                        <button class="user-link" onclick={() => goToUserProfile(user.username)} title={$t('tenant_settings.users.view_profile')} data-testid={`user-profile-link-${user.id}`}>@{user.username}</button>
+                      {:else}
+                        <span>@{user.username ?? shortId(user.id)}</span>
+                      {/if}
+                      {#if user.display_name && user.display_name !== user.username}
+                        <span class="user-display-name">{user.display_name}</span>
+                      {/if}
+                    </td>
+                    <td>
+                      <!-- Inline global-role management (spec §UI Pages >
+                           Tenant User Management). Hidden for self and
+                           deactivated accounts (server rejects both with
+                           409); a plain badge is shown instead. -->
+                      {#if user.id !== currentUser?.id && !user.deactivated_at}
+                        <select
+                          class="role-select"
+                          value={user.global_role ?? 'Member'}
+                          onchange={(e) => changeUserRole(user, e.target.value)}
+                          disabled={roleSavingId === user.id}
+                          aria-label={$t('tenant_settings.users.role')}
+                          data-testid={`user-role-select-${user.id}`}
+                        >
+                          <option value="Member">Member</option>
+                          <option value="TenantAdmin">TenantAdmin</option>
+                        </select>
+                      {:else}
+                        {user.global_role ?? '—'}
+                      {/if}
+                    </td>
+                    <td>
+                      {#if user.deactivated_at}
+                        <span class="role-badge status-deactivated">{$t('tenant_settings.users.status_deactivated')}</span>
+                      {:else}
+                        <span class="role-badge status-active">{$t('tenant_settings.users.status_active')}</span>
+                      {/if}
+                    </td>
+                    <td>{user.created_at ? absoluteTime(user.created_at) : '—'}</td>
+                    <td>
+                      {#if user.id !== currentUser?.id && !user.deactivated_at}
+                        <button
+                          class="btn-danger"
+                          onclick={() => deactivateTenantUser(user)}
+                          disabled={deactivateSavingId === user.id}
+                          data-testid={`deactivate-user-${user.id}`}
+                        >{deactivateSavingId === user.id ? '…' : $t('tenant_settings.users.deactivate')}</button>
+                      {/if}
+                    </td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+            <p class="panel-note-text">{$t('tenant_settings.users.count_note', { values: { shown: filteredTenantUsers.length, total: tenantUsersTotal } })}</p>
+          {/if}
+        {/if}
       </div>
+
+    <!-- ── Invitations (user-management.md §UI Pages > Tenant Invitation
+         Management: pending/expired/accepted invitations, bulk invite,
+         revoke — TenantAdmin only, task-110 endpoints) ────────── -->
+    {:else if activeTab === 'invitations'}
+      <div id="tab-panel-invitations" role="tabpanel" aria-label="Invitations" class="tab-panel" data-testid="tenant-tab-invitations">
+        <div class="panel-header">
+          <h2 class="panel-title">{$t('tenant_settings.invitations.title')}</h2>
+          <p class="panel-desc">{$t('tenant_settings.invitations.desc')}</p>
+        </div>
+
+        {#if invitationsLoading}
+          <div class="panel-loading" aria-live="polite">{$t('tenant_settings.invitations.loading')}</div>
+        {:else if invitationsError}
+          <div class="panel-error" role="alert">{invitationsError}</div>
+        {/if}
+
+        {#if invitationsNotAdmin}
+          <div class="panel-note">
+            <p>{$t('tenant_settings.invitations.not_admin_note')}</p>
+          </div>
+        {:else}
+          <div class="users-toolbar">
+            <select
+              class="users-search"
+              value={invitationsStatusFilter}
+              onchange={(e) => { invitationsStatusFilter = e.target.value; loadInvitations(); }}
+              aria-label={$t('tenant_settings.invitations.col_status')}
+              data-testid="invitations-status-filter"
+            >
+              <option value="">{$t('tenant_settings.invitations.status_filter_all')}</option>
+              <option value="Pending">Pending</option>
+              <option value="Accepted">Accepted</option>
+              <option value="Declined">Declined</option>
+              <option value="Expired">Expired</option>
+              <option value="Revoked">Revoked</option>
+            </select>
+            <button class="btn-primary" onclick={() => { inviteError = null; inviteResultUrl = null; inviteModalOpen = true; }} data-testid="invite-to-tenant-btn">
+              {$t('tenant_settings.invitations.invite')}
+            </button>
+            <button class="btn-secondary" onclick={() => { bulkError = null; bulkResult = null; bulkModalOpen = true; }} data-testid="bulk-invite-btn">
+              {$t('tenant_settings.invitations.bulk_invite')}
+            </button>
+          </div>
+
+          {#if inviteResultUrl}
+            <div class="info-card api-key-banner" data-testid="invite-link-banner">
+              <p>{$t('tenant_settings.invitations.invite_success')}</p>
+              <code class="mono">{inviteResultEmail} — {inviteResultUrl}</code>
+              <div class="users-toolbar">
+                <button class="btn-primary" onclick={copyInviteLink} data-testid="copy-invite-link-btn">
+                  {inviteLinkCopied ? $t('tenant_settings.invitations.link_copied') : $t('tenant_settings.invitations.copy_link')}
+                </button>
+                <button class="btn-secondary" onclick={() => { inviteResultUrl = null; inviteLinkCopied = false; }}>{$t('common.close')}</button>
+              </div>
+            </div>
+          {/if}
+
+          {#if bulkResult}
+            <div class="info-card api-key-banner" data-testid="bulk-invite-result">
+              <p>{$t('tenant_settings.invitations.bulk_success', { values: { created: bulkResult.created_count ?? 0, errors: bulkResult.error_count ?? 0 } })}</p>
+              {#if (bulkResult.created ?? []).length > 0}
+                <ul class="invite-list">
+                  {#each bulkResult.created as c (c.email)}
+                    <li class="mono invite-list-item">{c.email}: {c.invite_url}</li>
+                  {/each}
+                </ul>
+              {/if}
+              {#if (bulkResult.errors ?? []).length > 0}
+                <ul class="invite-list">
+                  {#each bulkResult.errors as err (err.index)}
+                    <li class="mono invite-list-item">{err.error}</li>
+                  {/each}
+                </ul>
+              {/if}
+              <button class="btn-secondary" onclick={() => (bulkResult = null)}>{$t('common.close')}</button>
+            </div>
+          {/if}
+
+          {#if invitations.length === 0}
+            <div class="panel-empty">{$t('tenant_settings.invitations.no_invitations')}</div>
+          {:else}
+            <table class="users-table" data-testid="tenant-invitations-table">
+              <thead>
+                <tr>
+                  <th scope="col">{$t('tenant_settings.invitations.col_email')}</th>
+                  <th scope="col">{$t('tenant_settings.invitations.col_role')}</th>
+                  <th scope="col">{$t('tenant_settings.invitations.col_workspaces')}</th>
+                  <th scope="col">{$t('tenant_settings.invitations.col_status')}</th>
+                  <th scope="col">{$t('tenant_settings.invitations.col_expires')}</th>
+                  <th scope="col">{$t('tenant_settings.invitations.col_created')}</th>
+                  <th scope="col"><span class="sr-only">{$t('common.actions')}</span></th>
+                </tr>
+              </thead>
+              <tbody>
+                {#each invitations as inv (inv.id)}
+                  <tr data-testid="tenant-invitation-row">
+                    <td>{inv.email}</td>
+                    <td>{inv.role}</td>
+                    <td>{(inv.workspace_ids ?? []).length}</td>
+                    <td>
+                      <span class="role-badge" class:status-deactivated={inv.status !== 'Pending'}>{inv.status}</span>
+                    </td>
+                    <td>{invitationExpiryLabel(inv)}</td>
+                    <td>{inv.created_at ? absoluteTime(inv.created_at) : '—'}</td>
+                    <td>
+                      {#if inv.status === 'Pending'}
+                        <button
+                          class="btn-danger"
+                          onclick={() => revokeInvitation(inv)}
+                          disabled={revokingInvitationId === inv.id}
+                          data-testid={`revoke-invitation-${inv.id}`}
+                        >{revokingInvitationId === inv.id ? '…' : $t('tenant_settings.invitations.revoke')}</button>
+                      {/if}
+                    </td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+          {/if}
+        {/if}
+      </div>
+
+      <!-- Invite modal (single) -->
+      {#if inviteModalOpen}
+        <!-- svelte-ignore a11y_click_events_have_key_events -->
+        <div class="modal-backdrop" role="presentation" onclick={() => (inviteModalOpen = false)}>
+          <div class="modal-card" role="dialog" aria-modal="true" tabindex="-1" aria-label={$t('tenant_settings.invitations.invite')} onclick={(e) => e.stopPropagation()} data-testid="invite-modal">
+            <h3>{$t('tenant_settings.invitations.invite')}</h3>
+            <form onsubmit={(e) => { e.preventDefault(); submitInvite(); }}>
+              <label class="info-label">{$t('tenant_settings.invitations.invite_email_label')}
+                <input class="users-search" type="email" bind:value={inviteForm.email} placeholder="user@example.com" data-testid="invite-email-input" required autocomplete="off" />
+              </label>
+              <label class="info-label">{$t('tenant_settings.invitations.invite_role_label')}
+                <select class="users-search" bind:value={inviteForm.role} data-testid="invite-role-select">
+                  <option value="Member">Member</option>
+                  <option value="TenantAdmin">TenantAdmin</option>
+                </select>
+              </label>
+              <label class="info-label">{$t('tenant_settings.invitations.invite_expiry_label')}
+                <input class="users-search" type="number" min="1" bind:value={inviteForm.expiresInDays} placeholder="14" data-testid="invite-expiry-input" />
+              </label>
+              {#if inviteError}
+                <p class="panel-error" role="alert" data-testid="invite-error">{inviteError}</p>
+              {/if}
+              <div class="modal-actions">
+                <button type="button" class="btn-primary" onclick={() => (inviteModalOpen = false)}>{$t('common.cancel')}</button>
+                <button type="submit" class="btn-primary" disabled={inviteSaving || !inviteForm.email.trim()} data-testid="invite-submit-btn">
+                  {inviteSaving ? $t('tenant_settings.invitations.invite_saving') : $t('tenant_settings.invitations.invite_submit')}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      {/if}
+
+      <!-- Bulk invite modal -->
+      {#if bulkModalOpen}
+        <!-- svelte-ignore a11y_click_events_have_key_events -->
+        <div class="modal-backdrop" role="presentation" onclick={() => (bulkModalOpen = false)}>
+          <div class="modal-card" role="dialog" aria-modal="true" tabindex="-1" aria-label={$t('tenant_settings.invitations.bulk_invite')} onclick={(e) => e.stopPropagation()} data-testid="bulk-invite-modal">
+            <h3>{$t('tenant_settings.invitations.bulk_invite')}</h3>
+            <form onsubmit={(e) => { e.preventDefault(); submitBulkInvite(); }}>
+              <label class="info-label">{$t('tenant_settings.invitations.bulk_label')}
+                <textarea class="users-search" rows="6" bind:value={bulkForm.emails} data-testid="bulk-emails-input" placeholder="alice@example.com&#10;bob@example.com"></textarea>
+              </label>
+              <label class="info-label">{$t('tenant_settings.invitations.invite_expiry_label')}
+                <input class="users-search" type="number" min="1" bind:value={bulkForm.expiresInDays} placeholder="14" data-testid="bulk-expiry-input" />
+              </label>
+              {#if bulkError}
+                <p class="panel-error" role="alert" data-testid="bulk-invite-error">{bulkError}</p>
+              {/if}
+              <div class="modal-actions">
+                <button type="button" class="btn-primary" onclick={() => (bulkModalOpen = false)}>{$t('common.cancel')}</button>
+                <button type="submit" class="btn-primary" disabled={bulkSaving || !bulkForm.emails.trim()} data-testid="bulk-submit-btn">
+                  {bulkSaving ? $t('tenant_settings.invitations.invite_saving') : $t('tenant_settings.invitations.bulk_submit')}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      {/if}
 
     <!-- ── Compute Targets ────────────────────────────────────────────── -->
     {:else if activeTab === 'compute'}
@@ -1206,141 +1681,15 @@
           <h2 class="panel-title">Access Policies (ABAC)</h2>
           <p class="panel-desc">Attribute-based access control policies governing agent actions, git push, and resource access across the tenant.</p>
         </div>
-
-        <!-- Create Policy button -->
-        <div class="panel-actions" style="margin-bottom: var(--space-4)">
-          <button class="action-btn" onclick={() => (showPolicyForm = !showPolicyForm)}>
-            {showPolicyForm ? 'Cancel' : '+ Create Policy'}
-          </button>
-        </div>
-
-        {#if showPolicyForm}
-          <div class="create-form" style="margin-bottom: var(--space-6)">
-            <div class="form-row">
-              <label class="form-label">Name <input class="form-input" bind:value={policyForm.name} placeholder="e.g. allow-agent-push" /></label>
-              <label class="form-label">Effect
-                <select class="form-input" bind:value={policyForm.effect}>
-                  <option value="allow">Allow</option>
-                  <option value="deny">Deny</option>
-                </select>
-              </label>
-              <label class="form-label">Priority <input class="form-input" type="number" bind:value={policyForm.priority} /></label>
-            </div>
-            <div class="form-row">
-              <label class="form-label">Actions <input class="form-input" bind:value={policyForm.actions} placeholder="push, read, spawn" /></label>
-              <label class="form-label">Resource Types <input class="form-input" bind:value={policyForm.resource_types} placeholder="repo, agent" /></label>
-              <label class="form-label">Scope
-                <select class="form-input" bind:value={policyForm.scope}>
-                  <option value="tenant">Tenant</option>
-                  <option value="workspace">Workspace</option>
-                </select>
-              </label>
-            </div>
-            <div class="form-row">
-              <label class="form-label">Condition Attribute <input class="form-input" bind:value={policyForm.condition_attr} placeholder="subject.type" /></label>
-              <label class="form-label">Operator
-                <select class="form-input" bind:value={policyForm.condition_op}>
-                  <option value="equals">equals</option>
-                  <option value="not_equals">not_equals</option>
-                  <option value="contains">contains</option>
-                  <option value="in">in</option>
-                </select>
-              </label>
-              <label class="form-label">Value <input class="form-input" bind:value={policyForm.condition_val} placeholder="agent" /></label>
-            </div>
-            <button class="action-btn action-btn-primary" onclick={createPolicy} disabled={policyFormSaving || !policyForm.name.trim()}>
-              {policyFormSaving ? 'Creating...' : 'Create Policy'}
-            </button>
-          </div>
-        {/if}
-
-        {#if policiesLoading}
-          <div class="panel-loading" aria-live="polite">Loading policies…</div>
-        {:else if policiesError}
-          <div class="panel-error" role="alert">{policiesError}</div>
-        {:else}
-          {#if policies.length > 0}
-            <h3 class="sub-heading">Active Policies ({policies.length})</h3>
-            <table class="data-table">
-              <thead>
-                <tr>
-                  <th scope="col"><button class="sort-btn">Name</button></th>
-                  <th scope="col"><button class="sort-btn">Scope</button></th>
-                  <th scope="col"><button class="sort-btn">Effect</button></th>
-                  <th scope="col"><button class="sort-btn">Actions</button></th>
-                  <th scope="col"><button class="sort-btn">Resources</button></th>
-                  <th scope="col"><button class="sort-btn">Priority</button></th>
-                  <th scope="col"></th>
-                </tr>
-              </thead>
-              <tbody>
-                {#each policies as policy (policy.id ?? policy.name)}
-                  <tr>
-                    <td class="td-name">{policy.name ?? '—'}</td>
-                    <td>{policy.scope ?? '—'}</td>
-                    <td>
-                      <span class="status-pill" class:status-ok={policy.effect === 'allow'} class:status-err={policy.effect === 'deny'}>
-                        {policy.effect ?? '—'}
-                      </span>
-                    </td>
-                    <td class="mono">{(policy.actions ?? []).join(', ') || '—'}</td>
-                    <td class="mono">{(policy.resource_types ?? []).join(', ') || '—'}</td>
-                    <td>{policy.priority ?? '—'}</td>
-                    <td>
-                      {#if policy.id}
-                        <button class="delete-btn" onclick={() => deletePolicy(policy.id)} disabled={deletingPolicyId === policy.id} title="Delete policy">
-                          {deletingPolicyId === policy.id ? '...' : '✕'}
-                        </button>
-                      {/if}
-                    </td>
-                  </tr>
-                {/each}
-              </tbody>
-            </table>
-          {:else}
-            <div class="panel-empty">No ABAC policies configured. Create one above to control agent access.</div>
-          {/if}
-
-          {#if policyDecisions.length > 0}
-            <h3 class="sub-heading" style="margin-top: var(--space-6)">Recent Decisions ({policyDecisions.length})</h3>
-            <table class="data-table">
-              <thead>
-                <tr>
-                  <th scope="col"><button class="sort-btn">Time</button></th>
-                  <th scope="col"><button class="sort-btn">Decision</button></th>
-                  <th scope="col"><button class="sort-btn">Subject</button></th>
-                  <th scope="col"><button class="sort-btn">Action</button></th>
-                  <th scope="col"><button class="sort-btn">Resource</button></th>
-                  <th scope="col"><button class="sort-btn">Policy</button></th>
-                </tr>
-              </thead>
-              <tbody>
-                {#each policyDecisions as dec (dec.id ?? dec.timestamp)}
-                  <tr>
-                    <td class="td-mono">{fmtTimestamp(dec.timestamp ?? dec.evaluated_at)}</td>
-                    <td>
-                      <span class="status-pill" class:status-ok={dec.decision === 'allow'} class:status-err={dec.decision === 'deny'}>
-                        {dec.decision ?? '—'}
-                      </span>
-                    </td>
-                    <td class="mono" title={dec.subject?.id ?? dec.subject_id ?? ''}>
-                      {#if dec.subject?.type && dec.subject?.id}
-                        {dec.subject.type}: <button class="audit-entity-btn" onclick={() => nav(dec.subject.type, dec.subject.id, {})}>{resolveEntityName(dec.subject.type, dec.subject.id)}</button>
-                      {:else if dec.subject_id}
-                        <button class="audit-entity-btn" onclick={() => nav('agent', dec.subject_id, {})}>{resolveEntityName('agent', dec.subject_id)}</button>
-                      {:else}
-                        —
-                      {/if}
-                    </td>
-                    <td>{dec.action ?? '—'}</td>
-                    <td>{dec.resource?.type ?? dec.resource_type ?? '—'}</td>
-                    <td class="mono">{dec.matched_policy ?? dec.policy_name ?? '—'}</td>
-                  </tr>
-                {/each}
-              </tbody>
-            </table>
-          {/if}
-        {/if}
+        <!-- Full §UI surface: CRUD + condition-builder editor, dry-run
+             simulator, decision audit log, effective permissions, conflict
+             detector — all on the global /api/v1/policies endpoints with
+             ?scope= query filters. -->
+        <PolicyManager
+          heading="Tenant Policies"
+          initialScope="tenant"
+          initialScopeId={currentUser?.tenant_id ?? null}
+        />
       </div>
 
     <!-- ── LLM Defaults ─────────────────────────────────────────────── -->
@@ -1597,6 +1946,38 @@
     {/if}
 
   </div>
+
+  <!-- Provision user modal (tenant user management “invite”: admin
+       user provisioning, POST /users). Tenant invitation emails are a
+       separate flow (task-110) — this is the tenant onboarding surface
+       the current API exposes. -->
+  {#if provisionModalOpen}
+    <!-- svelte-ignore a11y_click_events_have_key_events -->
+    <div class="modal-backdrop" role="presentation" onclick={() => (provisionModalOpen = false)}>
+      <div class="modal-card" role="dialog" aria-modal="true" tabindex="-1" aria-label={$t('tenant_settings.users.provision')} onclick={(e) => e.stopPropagation()}>
+        <h3>{$t('tenant_settings.users.provision')}</h3>
+        <form onsubmit={(e) => { e.preventDefault(); submitProvisionUser(); }}>
+          <label class="info-label">{$t('tenant_settings.users.col_user')}
+            <input class="users-search" bind:value={provisionForm.username} placeholder="username" data-testid="provision-username-input" required autocomplete="off" />
+          </label>
+          <label class="info-label">{$t('tenant_settings.users.col_role')}
+            <select class="users-search" bind:value={provisionForm.role} data-testid="provision-role-select">
+              {#each ['Developer', 'Admin', 'ReadOnly'] as role}<option value={role}>{role}</option>{/each}
+            </select>
+          </label>
+          {#if provisionError}
+            <p class="panel-error" role="alert" data-testid="provision-error">{provisionError}</p>
+          {/if}
+          <div class="modal-actions">
+            <button type="button" class="btn-primary" onclick={() => (provisionModalOpen = false)}>{$t('common.cancel')}</button>
+            <button type="submit" class="btn-primary" disabled={provisionSaving || !provisionForm.username.trim()} data-testid="provision-submit">
+              {provisionSaving ? '…' : $t('tenant_settings.users.provision')}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  {/if}
 </div>
 
 <style>
@@ -2525,6 +2906,91 @@
   .btn:disabled { opacity: 0.5; cursor: not-allowed; }
   .btn-primary { background: var(--color-primary); color: white; }
   .btn-primary:hover:not(:disabled) { opacity: 0.85; }
+
+  /* ── Tenant user management ───────────────────────────────────── */
+  .users-toolbar { display: flex; gap: var(--space-2); align-items: center; margin: var(--space-3) 0; }
+  .users-search {
+    font-family: var(--font-body);
+    font-size: var(--text-sm);
+    padding: var(--space-2);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+    background: var(--color-surface);
+    color: var(--color-text);
+    flex: 1;
+    max-width: 320px;
+  }
+  .users-table { width: 100%; border-collapse: collapse; font-size: var(--text-sm); }
+  .users-table th {
+    text-align: left;
+    font-size: var(--text-xs);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--color-text-muted);
+    padding: var(--space-2);
+    border-bottom: 1px solid var(--color-border);
+  }
+  .users-table td { padding: var(--space-2); border-bottom: 1px solid var(--color-border); }
+  .users-table tr.user-deactivated td { opacity: 0.55; }
+  .user-link {
+    background: none;
+    border: none;
+    padding: 0;
+    font: inherit;
+    color: var(--color-primary);
+    cursor: pointer;
+  }
+  .user-link:hover { text-decoration: underline; }
+  .user-display-name { display: block; font-size: var(--text-xs); color: var(--color-text-muted); }
+  .status-deactivated { background: var(--color-danger, #c33); color: #fff; }
+  .status-active { background: var(--color-success, #2a2); color: #fff; }
+  .btn-danger {
+    background: transparent;
+    border: 1px solid var(--color-danger, #c33);
+    color: var(--color-danger, #c33);
+    border-radius: var(--radius-sm);
+    font-size: var(--text-xs);
+    padding: var(--space-1) var(--space-2);
+    cursor: pointer;
+  }
+  .btn-danger:disabled { opacity: 0.6; cursor: not-allowed; }
+  .panel-note-text { font-size: var(--text-xs); color: var(--color-text-muted); margin: var(--space-2) 0 0; }
+  .api-key-banner { display: flex; flex-direction: column; gap: var(--space-2); align-items: flex-start; }
+  .modal-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.4);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 100;
+  }
+  .modal-card {
+    background: var(--color-surface);
+    border-radius: var(--radius);
+    padding: var(--space-4);
+    width: min(420px, 90vw);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+  }
+  .modal-card form { display: flex; flex-direction: column; gap: var(--space-3); }
+  .modal-card .info-label { display: flex; flex-direction: column; gap: var(--space-1); font-size: var(--text-sm); }
+  .modal-card .users-search { max-width: none; }
+  .modal-actions { display: flex; justify-content: flex-end; gap: var(--space-2); }
+  /* Inline global-role select in the Users table (task-127). */
+  .role-select {
+    padding: var(--space-1) var(--space-2);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm, 6px);
+    background: var(--color-surface);
+    color: var(--color-text);
+    font-size: var(--text-sm);
+  }
+  .role-select:disabled { opacity: 0.6; }
+  /* Created-invitation link / bulk-result lists (task-127). */
+  .invite-list { margin: var(--space-1) 0 0; padding-left: 18px; }
+  .invite-list-item { font-size: var(--text-sm); word-break: break-all; }
   .btn-secondary { background: var(--color-surface-elevated); color: var(--color-text); border: 1px solid var(--color-border); }
   .btn-secondary:hover:not(:disabled) { border-color: var(--color-border-strong); }
   .btn-danger-sm {

@@ -7,6 +7,7 @@ members = [
     "crates/gyre-ports",
     "crates/gyre-adapters",
     "crates/gyre-common",
+    "crates/gyre-spiffe",
 ]
 
 [workspace.package]
@@ -119,6 +120,7 @@ gyre-common = { path = "crates/gyre-common" }
 gyre-ports = { path = "crates/gyre-ports" }
 gyre-domain = { path = "crates/gyre-domain" }
 gyre-adapters = { path = "crates/gyre-adapters" }
+gyre-spiffe = { path = "crates/gyre-spiffe" }
 
 [profile.release]
 lto = true

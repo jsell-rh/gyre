@@ -195,14 +195,14 @@ export async function setSlots(paths, value) {
 }
 
 export async function retryTask(paths, task) {
-  if (!/^task-\d+$/.test(task)) throw new Error("invalid task");
+  if (!/^(?:task-\d+|spec-[a-f0-9]{24})$/.test(task)) throw new Error("invalid task");
   const { stdout } = await execFileP("python3", [paths.command, "--state", paths.state, "retry", task],
     { cwd: paths.root, timeout: 5000, maxBuffer: 1024 * 1024 });
   return stdout.trim();
 }
 
 export async function setPriority(paths, task, priority) {
-  if (!/^task-\d+$/.test(task) || (priority !== null && (typeof priority !== "string" || !/^[a-z][a-z0-9-]{0,62}$/.test(priority))))
+  if (!/^(?:task-\d+|spec-[a-f0-9]{24})$/.test(task) || (priority !== null && (typeof priority !== "string" || !/^[a-z][a-z0-9-]{0,62}$/.test(priority))))
     throw new Error("invalid task or priority class");
   await stat(paths.db);
   const args = [paths.command, "--state", paths.state, "priority", task, ...(priority === null ? ["--clear"] : [priority])];
@@ -234,4 +234,16 @@ export function attemptLogPath(paths, id) {
   const match = /^([a-f0-9]{32})-([1-9]\d*)$/.exec(id);
   if (!match) throw new Error("invalid attempt id");
   return join(paths.attempts, match[1], match[2], "output.log");
+}
+
+export async function chooseDecision(paths, id, option) {
+  try {
+    const { stdout } = await execFileP("python3", [paths.command, "--state", paths.state, "decide", id, option, "--source", "local cockpit"],
+      { cwd: paths.root, timeout: 15000, maxBuffer: 1024 * 1024 });
+    return JSON.parse(stdout);
+  } catch (error) {
+    const failure = new Error(String(error.stderr || error.message).trim().split("\n").at(-1).replace(/^ValueError:\s*/, ""));
+    failure.status = 409;
+    throw failure;
+  }
 }

@@ -119,6 +119,10 @@
     BudgetWarning: 'budget_warning',
     SpecChanged: 'spec_changed',
     MetaSpecDrift: 'meta_spec_drift',
+    PersonaApprovalRequested: 'persona_approval_requested',
+    MergeQueuePaused: 'merge_queue_paused',
+    BudgetExhausted: 'budget_exhausted',
+    SecurityFinding: 'security_finding',
     SpecAssertionFailure: 'spec_assertion_failure',
   };
 
@@ -686,7 +690,7 @@
   async function handleDismiss(n) {
     actionStates = { ...actionStates, [n.id]: { loading: true } };
     try {
-      await api.markNotificationRead(n.id);
+      await api.dismissNotification(n.id);
       actionStates = { ...actionStates, [n.id]: { loading: false, success: true, message: $t('decisions.dismissed') } };
       setTimeout(() => { notifications = notifications.filter(item => item.id !== n.id); }, 600);
     } catch {
@@ -1047,6 +1051,7 @@
             'gate_failure': 'gate_failed',
             'agent_clarification': 'agent_clarification',
             'budget_warning': 'budget_warning',
+            'SecurityFinding': 'security_finding',
           };
           // Build a human-readable description — never show raw JSON
           const rawDesc = n.message ?? n.description ?? body.description ?? '';
@@ -1170,6 +1175,11 @@
     'GateFailure': 'Gate failed',
     'TaskCreated': 'Task created',
     'BudgetWarning': 'Budget warning',
+    'SecurityFinding': 'Security finding',
+    'PersonaApprovalRequested': 'Persona approval requested',
+    'MergeQueuePaused': 'Merge queue paused',
+    'BudgetExhausted': 'Budget exhausted',
+    'MrReverted': 'MR reverted',
     'MetaSpecDrift': 'Agent rules drifted',
     'spec_created': 'Spec created',
     'spec_updated': 'Spec updated',
@@ -1179,6 +1189,11 @@
     'SuggestedSpecLink': 'Spec link suggested',
     'merged': 'MR merged',
     'budget_warning': 'Budget warning',
+    'security_finding': 'Security finding',
+    'persona_approval_requested': 'Persona approval requested',
+    'merge_queue_paused': 'Merge queue paused',
+    'budget_exhausted': 'Budget exhausted',
+    'mr_reverted': 'MR reverted',
     'agent_clarification': 'Agent needs input',
   };
 
@@ -1561,6 +1576,7 @@
                   edges={depGraphEdges}
                   scope={depGraphScope}
                   onScopeChange={handleDepScopeChange}
+                  onRefresh={() => handleDepScopeChange(depGraphScope)}
                   onNodeClick={(node) => {
                     const repo = repos.find(r => r.id === node.repo_id);
                     if (repo) {

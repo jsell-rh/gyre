@@ -15,86 +15,24 @@
 //!   PUT  /api/v1/repos/:id/stack-policy   — set repo policy (Admin only)
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     Json,
 };
 use gyre_common::Id;
+use gyre_domain::stack::StackDriftEvent;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
 use crate::{auth::AuthenticatedAgent, AppState};
 
 use super::error::ApiError;
 
-// ---------------------------------------------------------------------------
-// AgentStack domain type
-// ---------------------------------------------------------------------------
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct HookEntry {
-    pub id: String,
-    pub hash: String,
-    pub enabled: bool,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct McpServerEntry {
-    pub name: String,
-    pub version: String,
-    pub config_hash: String,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct AgentStack {
-    /// SHA-256 hash of the AGENTS.md / CLAUDE.md file at agent startup.
-    pub agents_md_hash: String,
-    /// Pre-commit / pre-push hooks with their content hashes.
-    pub hooks: Vec<HookEntry>,
-    /// MCP servers the agent has configured.
-    pub mcp_servers: Vec<McpServerEntry>,
-    /// Model identifier (e.g. "claude-sonnet-4-6").
-    pub model: String,
-    /// CLI version string (e.g. "1.2.3").
-    pub cli_version: String,
-    /// SHA-256 hash of settings.json / settings.local.json.
-    pub settings_hash: String,
-    /// Optional SHA-256 hash of the persona / system-prompt file.
-    pub persona_hash: Option<String>,
-}
-
-impl AgentStack {
-    /// Compute a SHA-256 fingerprint of the stack by hashing canonical JSON
-    /// with keys sorted alphabetically.  The resulting hex string uniquely
-    /// identifies a particular agent configuration.
-    pub fn fingerprint(&self) -> String {
-        // Build a canonical JSON representation with sorted keys.
-        let canonical = serde_json::json!({
-            "agents_md_hash": self.agents_md_hash,
-            "cli_version": self.cli_version,
-            "hooks": self.hooks.iter().map(|h| serde_json::json!({
-                "enabled": h.enabled,
-                "hash": h.hash,
-                "id": h.id,
-            })).collect::<Vec<_>>(),
-            "mcp_servers": self.mcp_servers.iter().map(|m| serde_json::json!({
-                "config_hash": m.config_hash,
-                "name": m.name,
-                "version": m.version,
-            })).collect::<Vec<_>>(),
-            "model": self.model,
-            "persona_hash": self.persona_hash,
-            "settings_hash": self.settings_hash,
-        });
-
-        let bytes = serde_json::to_vec(&canonical).unwrap_or_default();
-        let mut hasher = Sha256::new();
-        hasher.update(&bytes);
-        let result = hasher.finalize();
-        result.iter().map(|b| format!("{b:02x}")).collect()
-    }
-}
+// AgentStack / HookEntry / McpServerEntry live in gyre-domain so the CLI can
+// compute and verify the SAME fingerprint over the SAME schema (the server
+// no longer owns a private copy). Re-exported here to keep existing import
+// paths (git_http.rs, spawn.rs, pre_accept.rs) working.
+pub use gyre_domain::stack::{AgentStack, HookEntry, McpServerEntry, StackLockfile};
 
 // ---------------------------------------------------------------------------
 // Repo stack policy type
@@ -102,27 +40,87 @@ impl AgentStack {
 
 /// Structured repo stack policy stored in KV (`repo_stack_policies`).
 ///
-/// Contains both the required fingerprint and the minimum attestation level.
-/// Level 2 = stack-attested (fingerprint match), Level 3 = container-verified
-/// (supply-chain.md §2, Policy per Level).
-#[derive(Clone, Debug, Serialize, Deserialize)]
+/// Contains the required fingerprint, the minimum attestation level
+/// (supply-chain.md §Attestation Levels), and the enforcement mode applied
+/// when a push arrives from an agent below the minimum:
+/// - `Block` (default): reject the push,
+/// - `Warn`: accept the push and emit a `constraint_violation` event.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct RepoStackPolicy {
     pub fingerprint: String,
     pub required_level: i64,
+    /// Minimum attestation level (1..=3). Kept in sync with `required_level`:
+    /// the legacy field continues to drive merge-constraint evaluation
+    /// (constraint_check.rs) and provenance, while `min_attestation_level`
+    /// drives push-time enforcement (git_http.rs).
+    #[serde(default = "default_min_attestation_level")]
+    pub min_attestation_level: u8,
+    /// How below-minimum pushes are handled (supply-chain.md §Policy per
+    /// Level: "rejected or flagged based on policy").
+    #[serde(default = "default_enforcement")]
+    pub enforcement: StackEnforcement,
+}
+
+/// Enforcement mode for below-minimum attestation pushes.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum StackEnforcement {
+    /// Reject the push (default — security by default).
+    Block,
+    /// Accept the push but flag it (ConstraintViolation event + log).
+    Warn,
+}
+
+fn default_min_attestation_level() -> u8 {
+    2
+}
+
+fn default_enforcement() -> StackEnforcement {
+    StackEnforcement::Block
+}
+
+impl StackEnforcement {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            StackEnforcement::Block => "block",
+            StackEnforcement::Warn => "warn",
+        }
+    }
 }
 
 /// Parse a `repo_stack_policies` KV entry value.
 ///
-/// Handles both the structured JSON format (`{"fingerprint": "...", "required_level": N}`)
-/// and the legacy plain-string format (just a fingerprint string, defaulting to Level 2).
+/// Handles the structured JSON format
+/// (`{"fingerprint": "...", "required_level": N, "min_attestation_level": M,
+///    "enforcement": "block"|"warn"}`)
+/// and the legacy plain-string format (just a fingerprint string, defaulting
+/// to Level 2 / block). Legacy JSON entries without the new fields get them
+/// derived: `min_attestation_level = required_level.clamp(1, 3)` — a legacy
+/// level-3 policy carried exactly the "container-verified only" intent.
 pub fn parse_stack_policy(value: &str) -> RepoStackPolicy {
-    serde_json::from_str::<RepoStackPolicy>(value).unwrap_or_else(|_| {
-        // Backward compat: legacy entries store just the fingerprint string.
-        RepoStackPolicy {
-            fingerprint: value.to_string(),
-            required_level: 2,
+    match serde_json::from_str::<RepoStackPolicy>(value) {
+        Ok(mut policy) => {
+            // Keep the two level fields consistent regardless of which one
+            // the stored JSON carried.
+            let min = policy.required_level.clamp(1, 3) as u8;
+            if policy.min_attestation_level == default_min_attestation_level()
+                && min != default_min_attestation_level()
+            {
+                policy.min_attestation_level = min;
+            }
+            policy.required_level = policy.min_attestation_level as i64;
+            policy
         }
-    })
+        Err(_) => {
+            // Backward compat: legacy entries store just the fingerprint string.
+            RepoStackPolicy {
+                fingerprint: value.to_string(),
+                required_level: 2,
+                min_attestation_level: 2,
+                enforcement: StackEnforcement::Block,
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -146,6 +144,11 @@ pub struct SetStackPolicyRequest {
     /// Minimum attestation level required (2 = stack-attested, 3 = container-verified).
     /// Defaults to 2 if omitted (supply-chain.md §2).
     pub required_level: Option<i64>,
+    /// Minimum attestation level (1..=3) enforced at push time
+    /// (supply-chain.md §Policy per Level). Defaults to `required_level`.
+    pub min_attestation_level: Option<u8>,
+    /// Enforcement mode for below-minimum pushes: "block" (default) or "warn".
+    pub enforcement: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -154,6 +157,10 @@ pub struct StackPolicyResponse {
     pub required_fingerprint: Option<String>,
     /// Minimum attestation level required by this policy. `None` when no policy is set.
     pub required_level: Option<i64>,
+    /// Minimum attestation level (1..=3) enforced at push time.
+    pub min_attestation_level: Option<u8>,
+    /// Enforcement mode for below-minimum pushes.
+    pub enforcement: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -250,12 +257,16 @@ pub async fn get_stack_policy(
                 repo_id,
                 required_fingerprint: Some(policy.fingerprint),
                 required_level: Some(policy.required_level),
+                min_attestation_level: Some(policy.min_attestation_level),
+                enforcement: Some(policy.enforcement.as_str().to_string()),
             }))
         }
         None => Ok(Json(StackPolicyResponse {
             repo_id,
             required_fingerprint: None,
             required_level: None,
+            min_attestation_level: None,
+            enforcement: None,
         })),
     }
 }
@@ -293,9 +304,32 @@ pub async fn set_stack_policy(
     match &req.required_fingerprint {
         Some(fp) => {
             let level = req.required_level.unwrap_or(2);
+            if !(1..=3).contains(&level) {
+                return Err(ApiError::InvalidInput(format!(
+                    "required_level must be 1..=3, got {level}"
+                )));
+            }
+            let min_level = req.min_attestation_level.unwrap_or(level.clamp(1, 3) as u8);
+            if !(1..=3).contains(&min_level) {
+                return Err(ApiError::InvalidInput(format!(
+                    "min_attestation_level must be 1..=3, got {min_level}"
+                )));
+            }
+            let enforcement = match req.enforcement.as_deref() {
+                None => StackEnforcement::Block,
+                Some("block") => StackEnforcement::Block,
+                Some("warn") => StackEnforcement::Warn,
+                Some(other) => {
+                    return Err(ApiError::InvalidInput(format!(
+                        "enforcement must be \"block\" or \"warn\", got \"{other}\""
+                    )));
+                }
+            };
             let policy = RepoStackPolicy {
                 fingerprint: fp.clone(),
-                required_level: level,
+                required_level: min_level as i64,
+                min_attestation_level: min_level,
+                enforcement,
             };
             let json = serde_json::to_string(&policy).map_err(|e| ApiError::Internal(e.into()))?;
             state
@@ -306,7 +340,9 @@ pub async fn set_stack_policy(
             Ok(Json(StackPolicyResponse {
                 repo_id,
                 required_fingerprint: Some(fp.clone()),
-                required_level: Some(level),
+                required_level: Some(min_level as i64),
+                min_attestation_level: Some(min_level),
+                enforcement: Some(policy.enforcement.as_str().to_string()),
             }))
         }
         None => {
@@ -318,9 +354,108 @@ pub async fn set_stack_policy(
                 repo_id,
                 required_fingerprint: None,
                 required_level: None,
+                min_attestation_level: None,
+                enforcement: None,
             }))
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Handlers — Stack drift history (supply-chain.md §The Laptop Problem)
+// ---------------------------------------------------------------------------
+
+/// Query the repo's `stack_drift_detected` audit events, newest-first.
+/// Shared by `GET /repos/:id/stack-drift` and the AIBOM release artifact's
+/// `stack_policy.policy_violations` block.
+pub(crate) async fn stack_drift_events_for_repo(
+    state: &AppState,
+    repo: &gyre_domain::Repository,
+) -> Result<Vec<StackDriftEvent>, ApiError> {
+    let filter = gyre_ports::AuditQueryFilter {
+        event_type: Some("stack_drift_detected".to_string()),
+        workspace_id: Some(repo.workspace_id.to_string()),
+        resource_type: Some("repo".to_string()),
+        repo_id: Some(repo.id.to_string()),
+        limit: 1000,
+        ..Default::default()
+    };
+    let events = state
+        .audit
+        .query(&filter)
+        .await
+        .map_err(ApiError::Internal)?;
+    Ok(events
+        .into_iter()
+        .filter_map(|e| serde_json::from_value(e.detail).ok())
+        .collect())
+}
+
+#[derive(Deserialize)]
+pub struct StackDriftQuery {
+    /// Maximum number of events to return (default 100, cap 500).
+    pub limit: Option<usize>,
+}
+
+#[derive(Serialize)]
+pub struct StackDriftListResponse {
+    pub repo_id: String,
+    /// Total drift events on record for the repo (before `limit`
+    /// truncation) — computed by a storage-level count query, so it is
+    /// never bounded by the list query's internal cap.
+    pub total: usize,
+    /// Newest-first drift events with full override context.
+    pub events: Vec<StackDriftEvent>,
+}
+
+/// GET /api/v1/repos/:id/stack-drift — query the repo's gyre-stack.lock
+/// drift history (supply-chain.md §The Laptop Problem: "detect this drift
+/// and maintain an audit trail of overrides").
+///
+/// Events are recorded at push time by `enforce_stack_policy` (git_http.rs):
+/// every drift finding — blocked rejections and accepted warn-mode
+/// overrides alike — becomes a `stack_drift_detected` audit event whose
+/// detail is the full `StackDriftEvent` (lockfile vs attested fingerprints,
+/// enforcement mode, override reason, outcome).
+pub async fn get_stack_drift(
+    State(state): State<Arc<AppState>>,
+    Path(repo_id): Path<String>,
+    Query(params): Query<StackDriftQuery>,
+) -> Result<Json<StackDriftListResponse>, ApiError> {
+    let repo = state
+        .repos
+        .find_by_id(&Id::new(&repo_id))
+        .await?
+        .ok_or_else(|| ApiError::NotFound(format!("repo {repo_id} not found")))?;
+
+    // Honest total: a storage-level count of the repo's drift events, not
+    // the length of the (capped) list query — a repo with more drift
+    // events than the internal query cap must not report a truncated
+    // total (task-166 review round 3).
+    let total = state
+        .audit
+        .count_filtered(&gyre_ports::AuditQueryFilter {
+            event_type: Some("stack_drift_detected".to_string()),
+            workspace_id: Some(repo.workspace_id.to_string()),
+            resource_type: Some("repo".to_string()),
+            repo_id: Some(repo.id.to_string()),
+            ..Default::default()
+        })
+        .await
+        .map_err(ApiError::Internal)? as usize;
+
+    let mut events = stack_drift_events_for_repo(&state, &repo).await?;
+    // Default 100, cap 500 — matches the documented bounds of the endpoint
+    // (docs/api-reference.md): omitting `?limit` must not silently return
+    // the internal 1000-event query cap.
+    let limit = params.limit.unwrap_or(100).min(500);
+    events.truncate(limit);
+
+    Ok(Json(StackDriftListResponse {
+        repo_id,
+        total,
+        events,
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -406,6 +541,7 @@ mod tests {
 
         // GET stack
         let resp = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/agents/agent-1/stack")
@@ -424,6 +560,7 @@ mod tests {
     async fn get_stack_not_found() {
         let (app, _state) = app_with_agent_and_repo();
         let resp = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/agents/agent-1/stack")
@@ -464,6 +601,7 @@ mod tests {
 
         // GET returns same policy
         let resp = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/repos/repo-1/stack-policy")
@@ -510,6 +648,7 @@ mod tests {
 
         // GET returns Level 3 policy
         let resp = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/repos/repo-1/stack-policy")
@@ -568,6 +707,7 @@ mod tests {
 
         // GET returns null
         let resp = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/repos/repo-1/stack-policy")
@@ -691,5 +831,323 @@ mod tests {
             ..stack1.clone()
         };
         assert_ne!(stack1.fingerprint(), stack2.fingerprint());
+    }
+
+    #[test]
+    fn parse_stack_policy_legacy_level3_gets_min_level_3() {
+        // Legacy JSON entries without the new fields derive them:
+        // required_level 3 carried the "container-verified only" intent.
+        let json = r#"{"fingerprint":"sha256:abc","required_level":3}"#;
+        let policy = parse_stack_policy(json);
+        assert_eq!(policy.min_attestation_level, 3);
+        assert_eq!(policy.required_level, 3);
+        assert_eq!(policy.enforcement, StackEnforcement::Block);
+    }
+
+    #[test]
+    fn parse_stack_policy_new_fields_roundtrip() {
+        let policy = RepoStackPolicy {
+            fingerprint: "sha256:abc".to_string(),
+            required_level: 2,
+            min_attestation_level: 2,
+            enforcement: StackEnforcement::Warn,
+        };
+        let json = serde_json::to_string(&policy).unwrap();
+        let parsed = parse_stack_policy(&json);
+        assert_eq!(parsed, policy);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn set_stack_policy_min_level_and_warn_mode() {
+        let (app, _state) = app_with_agent_and_repo();
+
+        let body = serde_json::json!({
+            "required_fingerprint": "fp-warn",
+            "required_level": 2,
+            "min_attestation_level": 3,
+            "enforcement": "warn"
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/repos/repo-1/stack-policy")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["min_attestation_level"].as_u64().unwrap(), 3);
+        assert_eq!(json["enforcement"].as_str().unwrap(), "warn");
+
+        // GET returns the same policy.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/repos/repo-1/stack-policy")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["min_attestation_level"].as_u64().unwrap(), 3);
+        assert_eq!(json["enforcement"].as_str().unwrap(), "warn");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn set_stack_policy_rejects_bad_level_and_mode() {
+        let (app, _state) = app_with_agent_and_repo();
+
+        // Out-of-range min level → 400.
+        let body = serde_json::json!({
+            "required_fingerprint": "fp-x",
+            "min_attestation_level": 4
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/repos/repo-1/stack-policy")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // Unknown enforcement mode → 400.
+        let body = serde_json::json!({
+            "required_fingerprint": "fp-x",
+            "enforcement": "ignore"
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/repos/repo-1/stack-policy")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    // ── Stack drift history endpoint (supply-chain.md §The Laptop Problem) ─
+
+    use gyre_domain::stack::StackDriftEvent;
+
+    /// Record a `stack_drift_detected` audit event the way
+    /// `enforce_stack_policy` does at push time.
+    async fn record_drift_audit_event(
+        state: &std::sync::Arc<AppState>,
+        id: &str,
+        repo_id: &str,
+        workspace_id: &str,
+        agent_id: &str,
+        outcome: &str,
+        override_reason: Option<&str>,
+    ) {
+        let event = gyre_domain::AuditEvent::new(
+            Id::new(id),
+            gyre_domain::AuditEventType::StackDriftDetected,
+            Some(Id::new(agent_id)),
+            None,
+            None,
+            Some(Id::new(workspace_id)),
+            Some(Id::new(repo_id)),
+            "repo".to_string(),
+            Some(repo_id.to_string()),
+            if outcome == "blocked" {
+                gyre_domain::AuditOutcome::Blocked
+            } else {
+                gyre_domain::AuditOutcome::Success
+            },
+            serde_json::to_value(&StackDriftEvent {
+                id: id.to_string(),
+                repo_id: repo_id.to_string(),
+                workspace_id: workspace_id.to_string(),
+                agent_id: agent_id.to_string(),
+                branch: "main".to_string(),
+                lockfile_fingerprint: Some("lock-fp".to_string()),
+                attested_stack_fingerprint: "stack-fp".to_string(),
+                integrity_verified: true,
+                reason: "stack drift: model differs".to_string(),
+                mode: "warn".to_string(),
+                outcome: outcome.to_string(),
+                override_reason: override_reason.map(str::to_string),
+                timestamp: 1_700_000_000,
+            })
+            .unwrap(),
+            None,
+            None,
+            1_700_000_000,
+        );
+        state.audit.record(&event).await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn stack_drift_endpoint_lists_repo_events_only() {
+        let (app, state) = app_with_agent_and_repo();
+
+        // Two drift events for repo-1 (one accepted with an override
+        // reason, one blocked) and one for a different repo in the same
+        // workspace — the endpoint must scope to the path repo.
+        record_drift_audit_event(
+            &state,
+            "drift-a",
+            "repo-1",
+            "proj-1",
+            "agent-1",
+            "accepted",
+            Some("approved hotfix"),
+        )
+        .await;
+        record_drift_audit_event(
+            &state, "drift-b", "repo-1", "proj-1", "agent-1", "blocked", None,
+        )
+        .await;
+        record_drift_audit_event(
+            &state,
+            "drift-other",
+            "repo-other",
+            "proj-1",
+            "agent-1",
+            "accepted",
+            None,
+        )
+        .await;
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/repos/repo-1/stack-drift")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["repo_id"], "repo-1");
+        assert_eq!(json["total"], 2);
+        let events = json["events"].as_array().unwrap();
+        assert_eq!(events.len(), 2);
+        let ids: Vec<&str> = events.iter().map(|e| e["id"].as_str().unwrap()).collect();
+        assert!(ids.contains(&"drift-a") && ids.contains(&"drift-b"));
+        assert!(!ids.contains(&"drift-other"), "cross-repo leak");
+
+        // Full override context is present for compliance review.
+        let accepted = events.iter().find(|e| e["id"] == "drift-a").unwrap();
+        assert_eq!(accepted["outcome"], "accepted");
+        assert_eq!(accepted["override_reason"], "approved hotfix");
+        assert_eq!(accepted["lockfile_fingerprint"], "lock-fp");
+        assert_eq!(accepted["attested_stack_fingerprint"], "stack-fp");
+        assert_eq!(accepted["agent_id"], "agent-1");
+
+        // `?limit=1` truncates the list but keeps the honest total.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/repos/repo-1/stack-drift?limit=1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["total"], 2);
+        assert_eq!(json["events"].as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn stack_drift_total_exceeds_list_query_cap() {
+        // task-166 review round 3: `total` used to be the length of the
+        // (internally capped at 1000) list query, so a repo with more
+        // drift events than that reported a truncated total. The total is
+        // now a storage-level count — this test fails with total == 1000
+        // against the old implementation.
+        let (app, state) = app_with_agent_and_repo();
+        for i in 0..=1000 {
+            record_drift_audit_event(
+                &state,
+                &format!("drift-{i}"),
+                "repo-1",
+                "proj-1",
+                "agent-1",
+                "accepted",
+                Some("approved"),
+            )
+            .await;
+        }
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/repos/repo-1/stack-drift")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(
+            json["total"], 1001,
+            "total must not be bounded by the list query cap"
+        );
+        // Default limit 100 still bounds the returned page.
+        assert_eq!(json["events"].as_array().unwrap().len(), 100);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn stack_drift_endpoint_empty_and_not_found() {
+        let (app, _state) = app_with_agent_and_repo();
+
+        // No drift events → empty list, not an error.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/repos/repo-1/stack-drift")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["total"], 0);
+        assert!(json["events"].as_array().unwrap().is_empty());
+
+        // Unknown repo → 404.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/repos/no-such-repo/stack-drift")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 }

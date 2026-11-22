@@ -1,6 +1,19 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, fireEvent } from '@testing-library/svelte';
 import ExplorerCanvas from '../lib/ExplorerCanvas.svelte';
+import { detectRiskAnomalies } from '../lib/risk-map.js';
+import { computeTimelineGhostOverlays } from '../lib/timeline-utils.js';
+
+// The SHA/ref-based diff scope resolves its matched set from the server
+// query-dryrun endpoint (shared two-commit graph-diff core) — the client no
+// longer computes a local SHA heuristic. Mock the API module so component
+// tests can control the server-returned change set.
+vi.mock('../lib/api.js', () => ({
+  api: {
+    graphQueryDiffScope: vi.fn().mockResolvedValue({ matchedIds: [], warnings: [], matchedNodes: 0 }),
+  },
+}));
+import { api } from '../lib/api.js';
 
 // Mock canvas context
 let mockCtx;
@@ -103,16 +116,24 @@ describe('ExplorerCanvas', () => {
     expect(stats?.textContent).toContain('7 nodes');
   });
 
-  it('renders toolbar with lens toggle and all five filter presets', () => {
+  it('renders toolbar with lens checkbox group and all five filter presets', () => {
     const { container } = render(ExplorerCanvas, {
       props: { nodes: NODES, edges: EDGES },
     });
-    const lensButtons = container.querySelectorAll('.lens-group .tb-btn');
-    expect(lensButtons.length).toBe(3);
-    const lensLabels = Array.from(lensButtons).map(b => b.textContent.trim());
+    // Lens selector is a checkbox group (ui-navigation.md §3): Structural
+    // (always on, locked) + Evaluative (toggle) + Observable (future, locked).
+    const lensChecks = container.querySelectorAll('.lens-group input[type="checkbox"]');
+    expect(lensChecks.length).toBe(3);
+    // Structural/Evaluative wrap in <label>; Observable is a div[role=checkbox]
+    // (keyboard-operable wrapper around the disabled visual input).
+    const lensLabels = Array.from(lensChecks).map((i) => i.closest('.lens-check').textContent.trim());
     expect(lensLabels[0]).toContain('Structural');
     expect(lensLabels[1]).toContain('Evaluative');
     expect(lensLabels[2]).toContain('Observable');
+    expect(lensChecks[0].checked).toBe(true);
+    expect(lensChecks[0].disabled).toBe(true);
+    expect(lensChecks[1].checked).toBe(false);
+    expect(lensChecks[2].disabled).toBe(true);
     // Filter presets (explorer-implementation.md §25 Phase 1)
     const filterButtons = container.querySelectorAll('.filter-preset-group .tb-btn-filter');
     const filterLabels = Array.from(filterButtons).map(b => b.textContent.trim());
@@ -121,13 +142,13 @@ describe('ExplorerCanvas', () => {
     expect(filterButtons[0].classList.contains('active')).toBe(true);
   });
 
-  it('renders lens toggle with structural active', () => {
+  it('renders lens checkbox group with structural checked and locked', () => {
     const { container } = render(ExplorerCanvas, {
       props: { nodes: NODES, edges: EDGES },
     });
-    const lensButtons = container.querySelectorAll('.lens-group .tb-btn, .tb-btn');
-    const structural = Array.from(lensButtons).find(b => b.textContent === 'Structural');
-    expect(structural?.classList.contains('active')).toBe(true);
+    const structural = container.querySelector('[data-testid="lens-checkbox-structural"] input');
+    expect(structural?.checked).toBe(true);
+    expect(structural?.disabled).toBe(true);
   });
 
   it('renders minimap', () => {
@@ -376,27 +397,76 @@ describe('ExplorerCanvas — view queries', () => {
     expect(container.querySelector('.annotation-title')?.textContent).toContain('Hot paths');
   });
 
-  it('diff scope: {{count}} resolves against real commit fields in the component', () => {
-    // Behavioral test of the component's own diff resolution (not the mirror
-    // helper): reads created_sha/last_modified_sha — the fields
-    // GraphNodeResponse actually serializes. If the component reverts to the
-    // old dead field (last_commit_sha), the result set is null and the count
-    // renders as '?'.
+  it('diff scope (SHA): matched set and {{count}} come from the server query-dryrun response', async () => {
+    // Contract: a SHA/ref-based diff scope highlights exactly the ids the
+    // server's commit-range change set returned (query-dryrun endpoint,
+    // shared two-commit graph-diff core) and {{count}} resolves to that
+    // set's size. The fixture is the mid-range case the old local heuristic
+    // could not produce: fn2 and test1 were changed only by an intermediate
+    // commit (their snapshot provenance matches NEITHER boundary), while
+    // fn1's last_modified_sha WOULD prefix-match to_commit under the removed
+    // local heuristic. If the component reverted to local resolution from
+    // created_sha/last_modified_sha, it would highlight {fn1} (count 1)
+    // instead of the server set {fn2, test1} (count 2) — this test fails.
     const nodesWithSha = NODES.map(n => {
       if (n.id === 'fn1') return { ...n, created_sha: '1111111111111111', last_modified_sha: 'abcdef1234567890' };
-      if (n.id === 'fn2') return { ...n, created_sha: 'abcdef1234567890', last_modified_sha: 'abcdef1999999999' };
+      if (n.id === 'fn2') return { ...n, created_sha: '1111111111111111', last_modified_sha: '9999999999999999' };
+      if (n.id === 'test1') return { ...n, created_sha: '1111111111111111', last_modified_sha: '9999999999999999' };
       return { ...n, created_sha: '0000000aaaaaaaa', last_modified_sha: '0000000bbbbbbbb' };
+    });
+    api.graphQueryDiffScope.mockResolvedValue({
+      matchedIds: ['fn2', 'test1'], warnings: [], matchedNodes: 2,
     });
     const query = {
       scope: { type: 'diff', from_commit: 'abcdef1', to_commit: 'abcdef12' },
       annotation: { title: '{{count}} changed' },
     };
     const { container } = render(ExplorerCanvas, {
-      props: { nodes: nodesWithSha, edges: EDGES, activeQuery: query },
+      props: { repoId: 'repo-1', nodes: nodesWithSha, edges: EDGES, activeQuery: query },
     });
-    // fn1 matches to_commit via last_modified_sha and is not unchanged at
-    // from_commit; fn2 is unchanged at from_commit (both shas prefix-match);
-    // every other node never matches to_commit.
+    await vi.waitFor(() => {
+      expect(container.querySelector('.annotation-title')?.textContent).toContain('2 changed');
+    });
+    // The server set resolved without warnings: no status banner.
+    expect(container.querySelector('[data-diff-scope-status]')).toBeNull();
+    // The server was actually asked (repo + query passed through).
+    expect(api.graphQueryDiffScope).toHaveBeenCalledWith('repo-1', query, null);
+  });
+
+  it('diff scope (SHA): fetch error shows an explicit warning instead of an incorrect set', async () => {
+    api.graphQueryDiffScope.mockRejectedValue(new Error('network down'));
+    const query = {
+      scope: { type: 'diff', from_commit: 'abcdef1', to_commit: 'abcdef12' },
+      annotation: { title: '{{count}} changed' },
+    };
+    const { container } = render(ExplorerCanvas, {
+      props: { repoId: 'repo-1', nodes: NODES, edges: EDGES, activeQuery: query },
+    });
+    await vi.waitFor(() => {
+      const status = container.querySelector('[data-diff-scope-status="error"]');
+      expect(status?.textContent).toContain('could not be resolved server-side');
+    });
+    // No incorrect set: the count is unknown ('?'), never a local guess.
+    expect(container.querySelector('.annotation-title')?.textContent).toContain('? changed');
+  });
+
+  it('diff scope (SHA): server warnings (removed nodes) are surfaced', async () => {
+    api.graphQueryDiffScope.mockResolvedValue({
+      matchedIds: ['fn2'],
+      warnings: ['Diff removed 1 node(s) present at from_commit but absent at to_commit (cannot be rendered): lib::h'],
+      matchedNodes: 1,
+    });
+    const query = {
+      scope: { type: 'diff', from_commit: 'abcdef1', to_commit: 'abcdef12' },
+      annotation: { title: '{{count}} changed' },
+    };
+    const { container } = render(ExplorerCanvas, {
+      props: { repoId: 'repo-1', nodes: NODES, edges: EDGES, activeQuery: query },
+    });
+    await vi.waitFor(() => {
+      const status = container.querySelector('[data-diff-scope-status="warning"]');
+      expect(status?.textContent).toContain('lib::h');
+    });
     expect(container.querySelector('.annotation-title')?.textContent).toContain('1 changed');
   });
 
@@ -415,7 +485,7 @@ describe('ExplorerCanvas — view queries', () => {
 
 describe('ExplorerCanvas — view query opacity resolution', () => {
   // Unit test the queryNodeOpacity logic from ExplorerCanvas.svelte
-  function resolveQueryMatch(nodes, edges, scope) {
+  function resolveQueryMatch(nodes, edges, scope, serverDiffIds = null) {
     const nodeById = new Map();
     for (const n of nodes) nodeById.set(n.id, n);
 
@@ -525,11 +595,14 @@ describe('ExplorerCanvas — view query opacity resolution', () => {
     }
 
     if (scope.type === 'diff') {
-      // Mirrors ExplorerCanvas.svelte diff scope, which mirrors the server
-      // resolver (gyre-domain view_query_resolver.rs Scope::Diff). Reads the
-      // fields GraphNodeResponse actually serializes: created_sha,
-      // last_modified_sha, created_at, last_modified_at. There is no
-      // last_commit_sha field in production data.
+      // Mirrors ExplorerCanvas.svelte diff scope. Two query forms:
+      // - Temporal ("~<epoch>" on both boundaries): resolved locally against
+      //   created_at/last_modified_at.
+      // - SHA/ref-based: the matched set is exactly the server-returned id
+      //   set (query-dryrun endpoint, shared two-commit graph-diff core).
+      //   There is NO local SHA-prefix heuristic over
+      //   created_sha/last_modified_sha — single-snapshot provenance cannot
+      //   express a commit range.
       const fromCommit = (scope.from_commit ?? '').toLowerCase();
       const toCommit = (scope.to_commit ?? '').toLowerCase();
       if (!fromCommit || !toCommit) return new Set();
@@ -550,17 +623,12 @@ describe('ExplorerCanvas — view query opacity resolution', () => {
           }
         }
       } else {
-        // SHA diff: to_commit must be a >=7-char prefix of created_sha or
-        // last_modified_sha; nodes unchanged at from_commit (BOTH shas match
-        // from) are excluded.
-        const shaMatches = (sha, target) => {
-          if (!sha || target.length < 7) return false;
-          return String(sha).toLowerCase().startsWith(target);
-        };
-        for (const n of nodes) {
-          const matchesTo = shaMatches(n.created_sha, toCommit) || shaMatches(n.last_modified_sha, toCommit);
-          const unchangedAtFrom = shaMatches(n.created_sha, fromCommit) && shaMatches(n.last_modified_sha, fromCommit);
-          if (matchesTo && !unchangedAtFrom) matched.add(n.id);
+        // SHA/ref-based diff: consume the server-returned change-set ids —
+        // only ids present in the current graph are renderable. `null` means
+        // the server set has not arrived (loading/error): no matched set,
+        // never a local guess.
+        for (const id of serverDiffIds ?? []) {
+          if (nodes.some(n => n.id === id)) matched.add(id);
         }
       }
       return matched;
@@ -668,31 +736,75 @@ describe('ExplorerCanvas — view query opacity resolution', () => {
     expect(matched.has('fn2')).toBe(false); // no call connection to User
   });
 
-  it('diff scope (SHA): nodes modified at to_commit, excluding unchanged at from_commit', () => {
-    // Fields GraphNodeResponse actually serializes: created_sha/last_modified_sha
+  it('diff scope (SHA): matched set is exactly the server-returned change-set ids', () => {
+    // The mid-range case: fn2 and test1 were changed only by an intermediate
+    // commit — their snapshot provenance (created_sha/last_modified_sha)
+    // matches NEITHER boundary commit, so no local heuristic over those
+    // fields can produce them. fn1's last_modified_sha WOULD prefix-match
+    // to_commit under the removed local heuristic, but the server did not
+    // return it, so it must not be matched. If local SHA resolution were
+    // restored, this test fails: it would match {fn1} instead of
+    // {fn2, test1}.
     const nodesWithSha = NODES.map(n => {
-      // fn1: modified at to_commit, created elsewhere -> included
       if (n.id === 'fn1') return { ...n, created_sha: '1111111111111111', last_modified_sha: 'abcdef1234567890' };
-      // fn2: created AND last-modified at from_commit (both shas prefix-match
-      // from) -> excluded even though created_sha also matches to_commit
-      if (n.id === 'fn2') return { ...n, created_sha: 'abcdef1234567890', last_modified_sha: 'abcdef1999999999' };
+      if (n.id === 'fn2') return { ...n, created_sha: '1111111111111111', last_modified_sha: '9999999999999999' };
+      if (n.id === 'test1') return { ...n, created_sha: '1111111111111111', last_modified_sha: '9999999999999999' };
       return { ...n, created_sha: '0000000aaaaaaaa', last_modified_sha: '0000000bbbbbbbb' };
     });
-    const matched = resolveQueryMatch(nodesWithSha, EDGES, { type: 'diff', from_commit: 'abcdef1', to_commit: 'abcdef12' });
+    const matched = resolveQueryMatch(
+      nodesWithSha, EDGES,
+      { type: 'diff', from_commit: 'abcdef1', to_commit: 'abcdef12' },
+      ['fn2', 'test1'], // server query-dryrun response (commit-range change set)
+    );
 
-    expect(matched.has('fn1')).toBe(true); // last_modified_sha matches to_commit prefix
-    expect(matched.has('fn2')).toBe(false); // unchanged at from_commit -> excluded
-    expect(matched.has('type1')).toBe(false); // never matched to_commit
+    expect(matched.has('fn2')).toBe(true); // mid-range-changed node, server-returned
+    expect(matched.has('test1')).toBe(true); // second server-returned id
+    expect(matched.has('fn1')).toBe(false); // locally SHA-matchable but NOT server-returned
+    expect(matched.has('type1')).toBe(false); // never returned
+    expect(matched.size).toBe(2);
   });
 
-  it('diff scope (SHA): requires >=7-char to_commit prefix', () => {
-    // 'c0ffee' is only 6 chars: below the false-positive guard, so no match
+  it('diff scope (SHA): the client applies no SHA-prefix or length filtering — the server decides', () => {
+    // The >=7-hex-prefix rule and ref resolution live in the server's shared
+    // two-commit graph-diff core now. Whatever ids it returns are matched,
+    // even when the node's own sha fields bear no relation to the query
+    // refs (a 6-char to_commit, shas that prefix-match nothing).
     const nodesWithSha = NODES.map(n => ({
       ...n,
       created_sha: 'aaaaaa1aaaaaa',
       last_modified_sha: 'c0ffee000000',
     }));
-    const matched = resolveQueryMatch(nodesWithSha, EDGES, { type: 'diff', from_commit: 'aaaaaa1aaaaaa', to_commit: 'c0ffee' });
+    const matched = resolveQueryMatch(
+      nodesWithSha, EDGES,
+      { type: 'diff', from_commit: 'aaaaaa1aaaaaa', to_commit: 'c0ffee' },
+      ['fn2'],
+    );
+    expect(matched.size).toBe(1);
+    expect(matched.has('fn2')).toBe(true);
+  });
+
+  it('diff scope (SHA): server ids absent from the current graph are not rendered', () => {
+    // Removed nodes cannot be rendered — the server surfaces them by name in
+    // warnings instead; an id with no current node is dropped, not guessed.
+    const matched = resolveQueryMatch(
+      NODES, EDGES,
+      { type: 'diff', from_commit: 'abcdef1', to_commit: 'abcdef12' },
+      ['fn2', 'ghost-node-id'],
+    );
+    expect(matched.has('fn2')).toBe(true);
+    expect(matched.has('ghost-node-id')).toBe(false);
+    expect(matched.size).toBe(1);
+  });
+
+  it('diff scope (SHA): no server set yet (loading/error) matches nothing', () => {
+    // While the query-dryrun fetch is in flight or has failed, there is no
+    // matched set — never an incorrect local guess. The component surfaces
+    // an explicit warning banner instead.
+    const matched = resolveQueryMatch(
+      NODES, EDGES,
+      { type: 'diff', from_commit: 'abcdef1', to_commit: 'abcdef12' },
+      null,
+    );
     expect(matched.size).toBe(0);
   });
 
@@ -712,15 +824,10 @@ describe('ExplorerCanvas — view query opacity resolution', () => {
   });
 
   it('diff scope: missing to_commit resolves to no nodes', () => {
-    // The old client implementation read a nonexistent field (last_commit_sha)
-    // and ignored to_commit; with real data it matched nothing. The component
-    // requires both commits, mirroring the server resolver.
-    const nodesWithSha = NODES.map(n => ({
-      ...n,
-      created_sha: 'aaaaaa1aaaaaa',
-      last_modified_sha: 'c0ffee000000',
-    }));
-    const matched = resolveQueryMatch(nodesWithSha, EDGES, { type: 'diff', from_commit: 'aaaaaa1aaaaaa' });
+    // Both boundary refs are required (mirroring the server resolver); with
+    // to_commit missing the scope is not a resolvable diff — no fetch, no
+    // local guessing.
+    const matched = resolveQueryMatch(NODES, EDGES, { type: 'diff', from_commit: 'aaaaaa1aaaaaa' });
     expect(matched.size).toBe(0);
   });
 
@@ -939,9 +1046,9 @@ describe('ExplorerCanvas — lens switching', () => {
     const { container } = render(ExplorerCanvas, {
       props: { nodes: NODES, edges: EDGES },
     });
-    const btns = Array.from(container.querySelectorAll('.tb-btn'));
-    const structural = btns.find(b => b.textContent === 'Structural');
-    expect(structural?.classList.contains('active')).toBe(true);
+    const structural = container.querySelector('[data-testid="lens-checkbox-structural"] input');
+    expect(structural?.checked).toBe(true);
+    expect(structural?.disabled).toBe(true);
   });
 
   it('evaluative lens renders metric selector when trace data exists', () => {
@@ -1137,6 +1244,132 @@ describe('ExplorerCanvas — timeline scrubber', () => {
   });
 });
 
+describe('ExplorerCanvas — timeline ghost rendering (system-explorer.md §6)', () => {
+  // Historical graph as the server ?at= reconstruction returns it: the
+  // soft-deleted node (removed since the scrub time) is present with its
+  // REAL id — the client-side filter cannot contain it because it is derived
+  // from the current graph.
+  const HIST_NODES = [
+    { id: 'pkg1', node_type: 'package', name: 'api', qualified_name: 'api', file_path: '', line_start: 0, line_end: 0, visibility: 'public', spec_confidence: 'none', test_node: false },
+    { id: 'fn1', node_type: 'function', name: 'create_user', qualified_name: 'api.create_user', file_path: 'api/handlers.py', line_start: 10, line_end: 30, visibility: 'public', spec_confidence: 'high', test_node: false },
+    { id: 'gs1', node_type: 'type', name: 'OldService', qualified_name: 'api.OldService', file_path: 'api/old_service.py', line_start: 1, line_end: 40, visibility: 'public', spec_confidence: 'none', test_node: false },
+  ];
+  const HIST_EDGES = [
+    { id: 'e1', source_id: 'pkg1', target_id: 'fn1', edge_type: 'contains' },
+    { id: 'e2', source_id: 'pkg1', target_id: 'gs1', edge_type: 'contains' },
+  ];
+  // Current graph: OldService is gone, get_user is new (forward ghost).
+  const CURRENT_NODES = [
+    HIST_NODES[0],
+    HIST_NODES[1],
+    { id: 'fn2', node_type: 'function', name: 'get_user', qualified_name: 'api.get_user', file_path: 'api/handlers.py', line_start: 32, line_end: 45, visibility: 'public', spec_confidence: 'medium', test_node: false },
+  ];
+  const CURRENT_EDGES = [
+    { id: 'e1', source_id: 'pkg1', target_id: 'fn1', edge_type: 'contains' },
+    { id: 'e3', source_id: 'pkg1', target_id: 'fn2', edge_type: 'contains' },
+  ];
+  const TIMELINE = [
+    { id: 'd0', timestamp: 500, delta_json: JSON.stringify({ nodes_added: [
+      { name: 'api', node_type: 'package', qualified_name: 'api' },
+      { name: 'create_user', node_type: 'function', qualified_name: 'api.create_user' },
+      { name: 'OldService', node_type: 'type', qualified_name: 'api.OldService' },
+    ] }) },
+    { id: 'd1', timestamp: 1000, delta_json: JSON.stringify({ nodes_added: [], nodes_removed: [] }) },
+    { id: 'd2', timestamp: 1500, delta_json: JSON.stringify({ nodes_added: [
+      { name: 'get_user', node_type: 'function', qualified_name: 'api.get_user' },
+    ], nodes_removed: ['api.OldService'] }) },
+  ];
+
+  it('draws the red-dotted strikethrough for backward ghosts (F1 regression)', () => {
+    // The exact overlay set computeTimelineGhostOverlays produces for the
+    // historical scrub position (scrubIndex 1; OldService removed in d2).
+    const overlays = computeTimelineGhostOverlays({
+      graph: { nodes: CURRENT_NODES, edges: CURRENT_EDGES },
+      timelineFilteredGraph: { nodes: HIST_NODES, edges: HIST_EDGES },
+      timeline: TIMELINE,
+      scrubIndex: 1,
+    });
+    const removeGhost = overlays.find(o => o.action === 'remove');
+    expect(removeGhost).toBeTruthy();
+    // The ghost must carry the historical node's real id so the canvas's
+    // layoutNodeMap.get(ghost.id) resolves — the pre-fix synthetic
+    // `removed:<qn>` key never matched and the strikethrough never drew.
+    expect(removeGhost.id).toBe('gs1');
+
+    // The canvas draws the scrubbed-time graph (ExplorerView passes the
+    // timeline-filtered graph as `nodes` during time travel).
+    render(ExplorerCanvas, { // dead-test-code:ok — render triggers canvas draw, container not needed
+      props: {
+        nodes: HIST_NODES,
+        edges: HIST_EDGES,
+        ghostOverlays: overlays,
+        timelineActive: true,
+      },
+    });
+    // drawGhostRemoveNode is the ONLY code path that dashes [4, 4] (red
+    // dotted border) — its guard is layoutNodeMap.get(ghost.id) resolving.
+    expect(mockCtx.setLineDash).toHaveBeenCalledWith([4, 4]);
+  });
+
+  it('draws the backward ghost as a red-dotted outline followed by the red strikethrough', () => {
+    const overlays = computeTimelineGhostOverlays({
+      graph: { nodes: CURRENT_NODES, edges: CURRENT_EDGES },
+      timelineFilteredGraph: { nodes: HIST_NODES, edges: HIST_EDGES },
+      timeline: TIMELINE,
+      scrubIndex: 1,
+    });
+    // Track the dash pattern at each stroke() — drawGhostRemoveNode draws
+    // the red dotted border ([4,4]) and then the solid-red strikethrough
+    // ([]) in that order. Asserting strokeStyle after render would only see
+    // the LAST assignment (tautological), and '#ef4444' alone is not unique
+    // to this path.
+    let dash = [];
+    const strokes = [];
+    mockCtx.setLineDash.mockImplementation((d) => { dash = d; });
+    mockCtx.stroke.mockImplementation(() => {
+      strokes.push({ style: mockCtx.strokeStyle, dash: [...dash] });
+    });
+    render(ExplorerCanvas, { // dead-test-code:ok — render triggers canvas draw, container not needed
+      props: {
+        nodes: HIST_NODES,
+        edges: HIST_EDGES,
+        ghostOverlays: overlays,
+        timelineActive: true,
+      },
+    });
+    const dottedIdx = strokes.findIndex((s) => s.style === '#ef4444' && s.dash[0] === 4 && s.dash[1] === 4);
+    expect(dottedIdx).toBeGreaterThanOrEqual(0); // red dotted outline
+    // The strikethrough: a solid-red stroke right after the dotted border
+    // (same drawGhostRemoveNode body, no early return between them).
+    const strike = strokes
+      .slice(dottedIdx + 1)
+      .find((s) => s.style === '#ef4444' && s.dash.length === 0);
+    expect(strike).toBeTruthy();
+  });
+
+  it('shows the ghost-mode banner counting the historical changes', () => {
+    const overlays = computeTimelineGhostOverlays({
+      graph: { nodes: CURRENT_NODES, edges: CURRENT_EDGES },
+      timelineFilteredGraph: { nodes: HIST_NODES, edges: HIST_EDGES },
+      timeline: TIMELINE,
+      scrubIndex: 1,
+    });
+    const { container } = render(ExplorerCanvas, {
+      props: {
+        nodes: HIST_NODES,
+        edges: HIST_EDGES,
+        ghostOverlays: overlays,
+        timelineActive: true,
+      },
+    });
+    const banner = container.querySelector('.preview-mode-count');
+    expect(banner?.textContent).toContain('2 historical changes');
+    // The − Removed chip reflects the backward ghost
+    const chip = container.querySelector('.ghost-chip-remove');
+    expect(chip?.textContent).toContain('− Removed (1)');
+  });
+});
+
 describe('ExplorerCanvas — canvas search', () => {
   it('does not show search by default', () => {
     const { container } = render(ExplorerCanvas, {
@@ -1294,62 +1527,72 @@ describe('ExplorerCanvas — evaluative lens', () => {
 });
 
 describe('ExplorerCanvas — anomaly detection (evaluative)', () => {
+  // task-181: the patterns live in risk-map.js detectRiskAnomalies — the
+  // production function the canvas renders. These call it directly so a
+  // regression in the real detection logic fails the test (the previous
+  // mirror-logic versions re-implemented the check beside it and proved
+  // nothing about the shipped code).
   it('detects high complexity + low test coverage anomaly', () => {
-    const nodesWithMetrics = [
-      { id: 'fn1', node_type: 'function', name: 'complex_fn', complexity: 20, test_coverage: 0.1, test_node: false },
-    ];
-    const anomalies = [];
-    for (const n of nodesWithMetrics) {
-      if ((n.complexity ?? 0) > 15 && (n.test_coverage ?? 0) < 0.3) {
-        anomalies.push({ nodeId: n.id, severity: 'high' });
-      }
+    // 11 filler functions pin the distribution thresholds: p90(complexity)=10
+    // and p10(coverage)=0.4, so the target (42 / 0.23) is far outside both.
+    const nodes = [];
+    for (let i = 1; i <= 10; i++) {
+      nodes.push({ id: `filler${i}`, node_type: 'function', name: `filler${i}`, file_path: `src/f${i}.rs`, complexity: i, test_coverage: 0.9, test_node: false });
     }
-    expect(anomalies).toHaveLength(1);
-    expect(anomalies[0].severity).toBe('high');
+    nodes.push({ id: 'covhelper', node_type: 'function', name: 'covhelper', file_path: 'src/ch.rs', complexity: 3, test_coverage: 0.4, test_node: false });
+    nodes.push({ id: 'fn1', node_type: 'function', name: 'complex_fn', complexity: 42, test_coverage: 0.23, test_node: false });
+
+    const anomalies = detectRiskAnomalies({ nodes, edges: [] });
+    const hit = anomalies.find((a) => a.nodeId === 'fn1');
+    expect(hit).toBeTruthy();
+    expect(hit.severity).toBe('high');
+    expect(hit.message).toContain('High complexity (42');
+    expect(hit.message).toContain('23%');
   });
 
   it('detects orphan function (no callers) anomaly', () => {
-    const callCounts = new Map();
-    for (const e of EDGES) {
-      const et = (e.edge_type ?? '').toLowerCase();
-      if (et === 'calls') {
-        callCounts.set(e.target_id, (callCounts.get(e.target_id) ?? 0) + 1);
-      }
-    }
-
-    const orphans = [];
-    for (const n of NODES) {
-      if (n.node_type === 'function' && !n.test_node && (callCounts.get(n.id) ?? 0) === 0) {
-        orphans.push(n.id);
-      }
-    }
+    const anomalies = detectRiskAnomalies({ nodes: NODES, edges: EDGES });
+    const orphanIds = anomalies
+      .filter((a) => a.message.includes('possible dead code'))
+      .map((a) => a.nodeId);
 
     // fn2 (get_user) has no callers
-    expect(orphans).toContain('fn2');
+    expect(orphanIds).toContain('fn2');
     // fn1 is called by test1
-    expect(orphans).not.toContain('fn1');
+    expect(orphanIds).not.toContain('fn1');
   });
 
   it('detects heavily depended on node with no spec', () => {
-    const callCounts = new Map([['fn1', 8]]); // 8 callers
-    const node = { id: 'fn1', spec_path: undefined };
+    // 10 callers → hub has 10 calls, far above the p90-based call
+    // threshold; hub has no spec.
+    const nodes = [
+      { id: 'hub', node_type: 'function', name: 'hub', file_path: 'src/hub.rs', test_node: false },
+      ...[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((i) => ({ id: `caller${i}`, node_type: 'function', name: `caller${i}`, file_path: `src/c${i}.rs`, test_node: false })),
+    ];
+    const edges = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((i) => ({ id: `c${i}`, source_id: `caller${i}`, target_id: 'hub', edge_type: 'calls' }));
 
-    const isHeavilyDepended = (callCounts.get(node.id) ?? 0) > 5 && !node.spec_path;
-    expect(isHeavilyDepended).toBe(true);
+    const anomalies = detectRiskAnomalies({ nodes, edges });
+    const hit = anomalies.find((a) => a.nodeId === 'hub');
+    expect(hit).toBeTruthy();
+    expect(hit.message).toContain('with no spec');
   });
 
   it('sorts anomalies by severity (high first)', () => {
-    const anomalies = [
-      { severity: 'low' },
-      { severity: 'high' },
-      { severity: 'medium' },
-    ];
-    const order = { high: 0, medium: 1, low: 2 };
-    anomalies.sort((a, b) => (order[a.severity] ?? 3) - (order[b.severity] ?? 3));
-
+    // The high-severity target plus the low-severity orphans the same
+    // fixture produces — the real sort must order high before low.
+    const nodes = [];
+    for (let i = 1; i <= 10; i++) {
+      nodes.push({ id: `filler${i}`, node_type: 'function', name: `filler${i}`, file_path: `src/f${i}.rs`, complexity: i, test_coverage: 0.9, test_node: false });
+    }
+    nodes.push({ id: 'covhelper', node_type: 'function', name: 'covhelper', file_path: 'src/ch.rs', complexity: 3, test_coverage: 0.4, test_node: false });
+    nodes.push({ id: 'fn1', node_type: 'function', name: 'complex_fn', file_path: 'src/a.rs', complexity: 42, test_coverage: 0.23, test_node: false });
+    const anomalies = detectRiskAnomalies({ nodes, edges: [] });
+    expect(anomalies.length).toBeGreaterThan(1);
     expect(anomalies[0].severity).toBe('high');
-    expect(anomalies[1].severity).toBe('medium');
-    expect(anomalies[2].severity).toBe('low');
+    const order = { high: 0, medium: 1, low: 2 };
+    for (let i = 1; i < anomalies.length; i++) {
+      expect(order[anomalies[i - 1].severity]).toBeLessThanOrEqual(order[anomalies[i].severity]);
+    }
   });
 });
 
@@ -1600,10 +1843,12 @@ describe('ExplorerCanvas — semantic zoom levels', () => {
     const { container } = render(ExplorerCanvas, {
       props: { nodes: NODES, edges: EDGES, lens: 'structural' },
     });
-    // Both "All" filter and "Structural" lens buttons are active by default
-    const activeButtons = container.querySelectorAll('.tb-btn.active');
-    const texts = [...activeButtons].map(b => b.textContent);
-    expect(texts).toContain('Structural');
+    // Both "All" filter is active and "Structural" lens checkbox is
+    // checked+locked by default
+    expect(container.querySelector('.filter-preset-group .tb-btn-filter.active')?.textContent).toBe('All');
+    const structural = container.querySelector('[data-testid="lens-checkbox-structural"] input');
+    expect(structural?.checked).toBe(true);
+    expect(structural?.disabled).toBe(true);
   });
 
   it('renders evaluative lens with metric buttons', () => {
@@ -1614,17 +1859,19 @@ describe('ExplorerCanvas — semantic zoom levels', () => {
     expect(metricGroup).toBeTruthy();
   });
 
-  it('observable button is aria-disabled with spec label, click shows banner', async () => {
+  it('observable checkbox is disabled with spec label, click shows banner', async () => {
     const { container } = render(ExplorerCanvas, {
       props: { nodes: NODES, edges: EDGES },
     });
-    const obsBtn = container.querySelector('.tb-btn-observable');
-    expect(obsBtn).toBeTruthy();
+    const obsLabel = container.querySelector('[data-testid="lens-checkbox-observable"]');
+    expect(obsLabel).toBeTruthy();
     // Lens stays disabled (spec: grayed out until production telemetry integration)
-    expect(obsBtn.getAttribute('aria-disabled')).toBe('true');
-    expect(obsBtn.textContent).toContain('requires production telemetry integration');
-    // Click is reachable (not a native disabled button) and shows the notice banner
-    await fireEvent.click(obsBtn);
+    const obsInput = obsLabel.querySelector('input');
+    expect(obsInput.disabled).toBe(true);
+    expect(obsInput.checked).toBe(false);
+    expect(obsLabel.textContent).toContain('requires production telemetry integration');
+    // Click is reachable (the label intercepts it) and shows the notice banner
+    await fireEvent.click(obsLabel);
     const banner = container.querySelector('.observable-banner');
     expect(banner).toBeTruthy();
     expect(banner.textContent).toContain('OpenTelemetry collector');
@@ -1655,8 +1902,8 @@ describe('ExplorerCanvas — accessibility', () => {
     const { container } = render(ExplorerCanvas, {
       props: { nodes: NODES, edges: EDGES },
     });
-    // Filter presets removed per spec — only lens toggle group remains
-    const lensGroup = container.querySelector('[role="group"][aria-label="Lens toggle"]');
+    // Filter presets removed per spec — only lens checkbox group remains
+    const lensGroup = container.querySelector('[role="group"][aria-label="Lens selector"]');
     expect(lensGroup).toBeTruthy();
   });
 
@@ -2427,10 +2674,9 @@ describe('ExplorerCanvas — HSI §3 Three Lenses (evaluative overlay)', () => {
     expect(structuralPos).not.toBeNull(); // fixture guard: the node is drawn
 
     drawn.length = 0;
-    const evaluativeBtn = Array.from(container.querySelectorAll('.lens-group .tb-btn'))
-      .find(b => b.textContent.trim() === 'Evaluative');
-    expect(evaluativeBtn).toBeTruthy();
-    await fireEvent.click(evaluativeBtn);
+    const evaluativeCheck = container.querySelector('[data-testid="lens-checkbox-evaluative"] input');
+    expect(evaluativeCheck).toBeTruthy();
+    await fireEvent.click(evaluativeCheck);
     flush();
 
     const evaluativePos = positionOf('create_user');

@@ -57,6 +57,14 @@ pub trait GitOpsPort: Send + Sync {
     /// Remove a git worktree at `worktree_path`.
     async fn remove_worktree(&self, repo_path: &str, worktree_path: &str) -> Result<()>;
 
+    /// Remove a git worktree at `worktree_path`, discarding uncommitted
+    /// changes (the `--force` variant of `remove_worktree`).
+    ///
+    /// Used for throwaway workspaces — preview worktrees (meta-spec
+    /// reconciliation §5) are expected to be dirty when deleted. An absent
+    /// worktree path is not an error: the caller asked for it to be gone.
+    async fn force_remove_worktree(&self, repo_path: &str, worktree_path: &str) -> Result<()>;
+
     /// List paths of all registered worktrees for the repository.
     async fn list_worktrees(&self, repo_path: &str) -> Result<Vec<String>>;
 
@@ -78,6 +86,12 @@ pub trait GitOpsPort: Send + Sync {
     /// Create a new branch from `from_ref` (a branch name, tag, or commit SHA).
     async fn create_branch(&self, repo_path: &str, branch_name: &str, from_ref: &str)
         -> Result<()>;
+
+    /// Delete the local branch `branch_name`.
+    ///
+    /// An unknown branch is not an error (deletion is idempotent). The branch
+    /// must not be checked out in a worktree — remove the worktree first.
+    async fn delete_branch(&self, repo_path: &str, branch_name: &str) -> Result<()>;
 
     /// Write (or overwrite) a file at `file_path` on `branch`, creating a commit
     /// with the given `message`. Returns the new commit SHA.
@@ -119,6 +133,13 @@ pub trait GitOpsPort: Send + Sync {
     /// the spec content at the exact SHA pinned in the MR's `spec_ref`
     /// (`path@sha`), so the reviewer judges the change against the spec the
     /// MR was authored under, not whatever the branch tip holds now.
+    ///
+    /// The SHA may also name a **blob** directly — the production spec_ref
+    /// shape: MR spec_refs carry the spec ledger's blob SHA
+    /// (`spec_ledger.current_sha`), whose ledger path (`system/foo.md`) is
+    /// not a repo tree path. A blob pin resolves to the blob's own content;
+    /// the path is informational for that shape. A SHA that is neither a
+    /// commit nor a blob is an error (fail-closed pin resolution).
     async fn read_file_at_commit(
         &self,
         repo_path: &str,

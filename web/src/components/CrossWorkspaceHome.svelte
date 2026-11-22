@@ -152,7 +152,7 @@
   async function handleDismiss(n) {
     actionStates = { ...actionStates, [n.id]: { loading: true } };
     try {
-      await api.markNotificationRead(n.id);
+      await api.dismissNotification(n.id);
       notifications = notifications.filter(item => item.id !== n.id);
       actionStates = { ...actionStates, [n.id]: { loading: false } };
     } catch {

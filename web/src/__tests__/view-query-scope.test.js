@@ -108,6 +108,48 @@ describe('resolveScopeNodes', () => {
       resolveScopeNodes({ type: 'concept', seed_nodes: ['Nope'] }, NODES, EDGES)
     ).toBeNull();
   });
+
+  it("concept scope seed_match 'substring' seeds every node whose name/qualified_name contains the seed (ViewSpec data.concept mechanism)", () => {
+    // 'auth' is no node's name — exact matching resolves nothing. As a
+    // substring it matches AuthService (fn1) and specs/auth.md (sp1) by
+    // name, case-insensitively. depth 0: the concept is exactly the
+    // matched set.
+    const out = resolveScopeNodes(
+      { type: 'concept', seed_nodes: ['auth'], seed_match: 'substring', expand_depth: 0 },
+      NODES,
+      EDGES
+    );
+    expect(out.map((n) => n.id).sort()).toEqual(['fn1', 'sp1']);
+  });
+
+  it("concept scope seed_match 'substring' seeds expand along edges like exact seeds", () => {
+    // Seeds fn1 + sp1 (substring 'AUTH', case-insensitive), then the
+    // default calls expansion: fn1 → fn2 (depth 1) → ty1 (depth 2).
+    const out = resolveScopeNodes(
+      { type: 'concept', seed_nodes: ['AUTH'], seed_match: 'substring' },
+      NODES,
+      EDGES
+    );
+    expect(out.map((n) => n.id).sort()).toEqual(['fn1', 'fn2', 'sp1', 'ty1']);
+  });
+
+  it("concept scope seed_match 'substring' with no match returns null (full graph, canvas parity)", () => {
+    expect(
+      resolveScopeNodes(
+        { type: 'concept', seed_nodes: ['zzz'], seed_match: 'substring' },
+        NODES,
+        EDGES
+      )
+    ).toBeNull();
+  });
+
+  it("concept scope defaults to exact seed matching (seed_match absent)", () => {
+    // A seed that is a substring of a node name but not a node name must
+    // NOT seed that node without seed_match 'substring'.
+    expect(
+      resolveScopeNodes({ type: 'concept', seed_nodes: ['auth'] }, NODES, EDGES)
+    ).toBeNull();
+  });
 });
 
 describe('edge endpoint accessors', () => {

@@ -110,6 +110,15 @@ class CrashTest(unittest.TestCase):
         execution.log.unlink()
         self.assertEqual(execution.log_tail(),'')
 
+    def test_consumed_partial_receipt_seeds_a_fresh_repair_instead_of_replaying_itself(self):
+        from pipeline.fullsend import adopt
+        prior=self.store.directory/'attempts'/self.work/'0';(prior/'bundle').mkdir(parents=True)
+        (prior/'bundle/job.json').write_text(json.dumps({'stage':'implement','task':'task-001','branch':'private'}))
+        (prior/'outcome.json').write_text(json.dumps({'published':True,'head':'saved','valid':True,'agent_exit':0,'stream_exit':0}))
+        self.store.put_task('task-001','g','body',{'candidate':'saved','repair':{'category':'implementation','source':'saved'}})
+        self.assertIsNone(adopt(Execution(self.store,self.claim),self.store.task('task-001')))
+        self.assertEqual(self.store.task('task-001')['data']['candidate'],'saved')
+
     def test_terminal_readiness_does_not_hold_dead_compute(self):
         from pipeline.execution import Retry
         execution = Execution(self.store, self.claim)
@@ -124,6 +133,23 @@ class CrashTest(unittest.TestCase):
         with patch('pipeline.execution.gateway.inventory', side_effect=inventory), patch.object(execution.cancelled, 'wait', return_value=False) as wait:
             execution.wait_ready('pod')
         self.assertEqual([call.args[0] for call in wait.call_args_list], [5, 10])
+
+    def test_pending_allocation_survives_old_thirty_minute_window(self):
+        execution=Execution(self.store,self.claim)
+        inventory=[[{'name':'pod','phase':'Pending'}],[{'name':'pod','phase':'Ready'}]]
+        with patch('pipeline.execution.time.monotonic',side_effect=[0,1801]),patch('pipeline.execution.gateway.inventory',side_effect=inventory),patch.object(execution.cancelled,'wait',return_value=False) as wait:
+            execution.wait_ready('pod')
+        self.assertEqual(wait.call_count,1)
+
+    def test_readiness_inventory_outage_keeps_the_same_allocation(self):
+        execution=Execution(self.store,self.claim)
+        responses=[RuntimeError('temporary gateway outage'),[{'name':'pod','phase':'Pending'}],[{'name':'pod','phase':'Ready'}]]
+        with patch('pipeline.execution.gateway.inventory',side_effect=responses),patch.object(execution.cancelled,'wait',return_value=False) as wait:
+            execution.wait_ready('pod')
+        self.assertEqual([c.args[0] for c in wait.call_args_list],[5,10])
+        phases=[json.loads(r['detail']) for r in self.store.db.execute("SELECT detail FROM events WHERE kind='phase'")]
+        self.assertEqual([p['phase'] for p in phases],['WaitingForGateway','WaitingForInfrastructure'])
+        self.assertTrue(all(p['sandbox']=='pod' for p in phases))
 
     def test_failed_capture_still_purges_expensive_compute(self):
         self.store.reserve('pod', self.work, self.claim['token'], 'sandbox', 1)
@@ -234,7 +260,11 @@ class CrashTest(unittest.TestCase):
         execution.log.write_text('agent completed')
         weakened = body.replace('not-started', 'ready-for-review').replace('Reject foreign tenants.', 'Allow every tenant.')
         receipt = {'task_body': weakened, 'valid': True, 'head': 'candidate', 'base': 'base', 'branch': 'private', 'agent_exit': 0}
-        with patch('pipeline.stages.prompt', return_value='assignment'), patch.object(execution, 'cloud_step', return_value=receipt):
+        # This unit isolates contract rejection; source-progress and Git
+        # ancestry are exercised against real repositories in efficiency tests.
+        with patch('pipeline.stages.prompt', return_value='assignment'), patch.object(execution, 'cloud_step', return_value=receipt), \
+                patch('pipeline.stages.checkout',return_value=self.store.directory), \
+                patch.object(execution,'command',return_value=subprocess.CompletedProcess([],0,'source.rs\n','')):
             result, updates, _ = implement(execution, self.store.task('task-001'))
         self.assertEqual(result['task_body'], body)
         self.assertEqual(updates['repair']['category'], 'contract')

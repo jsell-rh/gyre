@@ -18,8 +18,30 @@ pub trait NotificationRepository: Send + Sync {
     /// or if user_id does not match, preventing cross-user UUID guessing).
     async fn get(&self, id: &Id, user_id: &Id) -> Result<Option<Notification>>;
 
-    /// List notifications for a user. Optionally filtered by workspace and priority range.
-    /// When `workspace_id` is None, returns notifications across all workspaces (tenant Inbox).
+    /// List notifications for a user. Optionally filtered by workspace, repo,
+    /// numeric priority range, and a notification-type set. When
+    /// `workspace_id` is None, returns notifications across all workspaces
+    /// (tenant Inbox).
+    ///
+    /// `notification_types` is an exact-match set filter on the persisted
+    /// `notification_type` column: a notification is returned when its
+    /// stored type string is one of the given values. An EMPTY set matches
+    /// nothing (it is a filter, not a no-op). Serves both the `?type=`
+    /// filter and the four-level `?priority=` filter, which expands to the
+    /// set of type strings whose band is that level
+    /// (`NotificationPriority::notification_type_strings`) — the band
+    /// derives from the notification type per the amended §Notification
+    /// Entity membership table, never from the numeric rank, so a level
+    /// filter cannot be expressed as a rank-range query. Callers filtering
+    /// by a level must include the legacy DB names of renamed variants
+    /// (they are part of the expansion) so pre-unification rows keep
+    /// filtering by their band.
+    ///
+    /// `exclude_types` names canonical `NotificationType` strings whose notifications MUST NOT
+    /// be returned — this carries the HSI §12 disabled notification preferences. The exclusion
+    /// is applied by the query, before `limit`/`offset`, so a page never comes back short
+    /// because rows were dropped after fetching. Pass `&[]` on surfaces that must see every
+    /// notification regardless of the recipient's toggles (background de-duplication jobs).
     #[allow(clippy::too_many_arguments)] // filter + pagination parameters; pre-existing signature
     async fn list_for_user(
         &self,
@@ -27,7 +49,34 @@ pub trait NotificationRepository: Send + Sync {
         workspace_id: Option<&Id>,
         min_priority: Option<u8>,
         max_priority: Option<u8>,
-        notification_type: Option<&str>,
+        notification_types: Option<&[&str]>,
+        repo_id: Option<&Id>,
+        exclude_types: &[&str],
+        limit: u32,
+        offset: u32,
+    ) -> Result<Vec<Notification>>;
+
+    /// List **active** (not resolved, not dismissed) notifications for a
+    /// user — the notification drawer's "recent notifications" surface
+    /// (user-management.md §In-App Notification UI). Same filters and
+    /// pagination as `list_for_user`, but rows the user has already acted on
+    /// (resolved in the Inbox/Decisions surface) or dismissed are excluded in
+    /// the query itself, so pagination windows contain only renderable items
+    /// and the drawer can never re-list a card the user dismissed elsewhere.
+    /// `notification_types` follows the semantics of
+    /// [`NotificationRepository::list_for_user`] — a type-string set (the
+    /// four-level `?priority=` band expansion), with an empty set matching
+    /// nothing — so the drawer and the Inbox share one filter derivation
+    /// and can never disagree on a band.
+    #[allow(clippy::too_many_arguments)] // same filter + pagination surface as list_for_user
+    async fn list_active_for_user(
+        &self,
+        user_id: &Id,
+        workspace_id: Option<&Id>,
+        min_priority: Option<u8>,
+        max_priority: Option<u8>,
+        notification_types: Option<&[&str]>,
+        repo_id: Option<&Id>,
         limit: u32,
         offset: u32,
     ) -> Result<Vec<Notification>>;
@@ -59,11 +108,46 @@ pub trait NotificationRepository: Send + Sync {
 
     /// Count active (not resolved, not dismissed) notifications.
     /// When `workspace_id` is None, counts across all workspaces (badge count).
-    async fn count_unresolved(&self, user_id: &Id, workspace_id: Option<&Id>) -> Result<u64>;
+    /// `exclude_types` follows the semantics of
+    /// [`NotificationRepository::list_for_user`]: the badge MUST NOT count a notification the
+    /// inbox itself would hide.
+    async fn count_unresolved(
+        &self,
+        user_id: &Id,
+        workspace_id: Option<&Id>,
+        exclude_types: &[&str],
+    ) -> Result<u64>;
+
+    /// Count active (not resolved, not dismissed) notifications that the user
+    /// has not read (user-management.md §API > Notifications: unread count for
+    /// the bell badge). When `workspace_id` is None, counts across all
+    /// workspaces.
+    async fn count_unread(&self, user_id: &Id, workspace_id: Option<&Id>) -> Result<u64>;
+
+    /// Mark every unread notification owned by `user_id` as read, stamping
+    /// `read_at` (user-management.md §API > Notifications: mark-all-read).
+    /// Dismissed cards are included so the unread count deterministically
+    /// reaches zero. When `workspace_id` is Some, only that workspace's
+    /// notifications are marked. Returns the number of rows updated.
+    async fn mark_all_read(&self, user_id: &Id, workspace_id: Option<&Id>) -> Result<u64>;
 
     /// List most recent notifications across all users (for activity feed).
     /// Ordered by created_at descending.
     async fn list_recent(&self, limit: usize) -> Result<Vec<Notification>>;
+
+    /// List notifications of a given type within a workspace created at or
+    /// after `since` (epoch seconds), across ALL users — the SpecAssertionFailure
+    /// fan-out creates one row per notified member, so a user-scoped query
+    /// cannot serve workspace-level consumers. Unbounded by design: callers
+    /// (HSI §9 briefing exceptions) must see every qualifying row, not a
+    /// globally-truncated recency window like `list_recent`'s. Ordered by
+    /// created_at descending.
+    async fn list_by_workspace_type_since(
+        &self,
+        workspace_id: &Id,
+        notification_type: &str,
+        since: i64,
+    ) -> Result<Vec<Notification>>;
 
     /// Returns true if there is a recent dismissal for the given (workspace, user, type)
     /// within `days` days. Used by the trust-suggestion job to suppress re-creation.

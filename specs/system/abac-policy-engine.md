@@ -261,7 +261,7 @@ Log decision to audit trail
 Policies at different scopes compose with these rules:
 
 1. **More specific scope takes precedence** when priorities are equal (repo > workspace > tenant)
-2. **Higher priority always wins** regardless of scope
+2. **Higher priority always wins** regardless of scope — *precondition (amended by `human-system-interface.md` §2 Mechanical Implementation): immutable Deny policies are evaluated before all others and cannot be overridden by any Allow policy regardless of priority*
 3. **Deny overrides Allow** at the same priority and scope
 4. **Default deny** at tenant level catches everything not explicitly allowed
 
@@ -269,6 +269,7 @@ This means:
 - A tenant policy can set a baseline that workspaces can't override (by using high priority)
 - A workspace policy can set defaults that repos can customize (by using moderate priority)
 - A repo policy can grant or restrict access within its scope (by using repo-level scope)
+- Immutable Deny policies (e.g. `builtin:require-human-spec-approval`, priority 999) trump even the `system-full-access` Allow at priority 1000: the engine's first evaluation pass scans for immutable Deny matches before any priority-based evaluation (see Evaluation Engine step 1 and `human-system-interface.md` §2)
 
 ### Built-In Policies
 
@@ -285,6 +286,8 @@ Gyre ships with a set of built-in tenant-level policies that enforce fundamental
 | `default-deny` | Deny | Everything not explicitly allowed is denied |
 
 Built-in policies cannot be deleted. Non-immutable built-in policies can be overridden by higher-priority custom policies (with audit logging). Immutable built-in policies (where `immutable: true`) cannot be overridden regardless of priority — immutable Deny policies are evaluated before all priority-based evaluation (see `human-system-interface.md` §2).
+
+The `gyre-system-token` subject identity is **reserved**: only the genuine global `GYRE_AUTH_TOKEN` principal (no backing user row) may carry it. Every `display_name` write path (profile update, admin user creation, SSO provisioning) rejects the string — a user's display name is the ABAC subject identity under API-key/JWT auth — and any non-system principal that still presents it (pre-existing row, direct DB edit) is denied before policy evaluation. The global token itself is allowed *by* `system-full-access` through the normal evaluation flow (there is no separate middleware bypass for it).
 
 ### Performance
 

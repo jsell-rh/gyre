@@ -30,6 +30,163 @@ use subtle::ConstantTimeEq;
 
 use crate::AppState;
 
+// -- User session tracking (user-management.md §Session Management) -----------
+
+/// Session lifetime: 30 days (user-management.md §Session Management).
+pub(crate) const SESSION_TTL_SECS: u64 = 30 * 24 * 3600;
+/// Minimum seconds between `last_active_at` writes for one session
+/// (task-111 plan §4: throttled to avoid write amplification).
+pub(crate) const SESSION_TOUCH_THROTTLE_SECS: u64 = 60;
+
+/// Record or refresh the session for an API-key-authenticated user, and
+/// decide whether the request may proceed.
+///
+/// Returns `false` when the session for this credential+device has been
+/// revoked — the caller must reject auth (task-111 plan §4: "check session
+/// revocation status in auth middleware (reject revoked sessions)"). A
+/// revoked row is never resurrected or replaced, so revoking a session
+/// signs that device out until the user mints a new credential.
+/// `credential_revoked` covers the complementary case: every session for
+/// the credential revoked ("sign out everywhere", including devices never
+/// seen before).
+///
+/// One session row per (credential, device): the same key re-presented from
+/// the same IP + User-Agent is the same session (auth path avoids creating
+/// a row per request); a different device is a new session row, so revoking
+/// one device does not sign out every device (SessionRepository port doc).
+///
+/// A session found expired-but-not-revoked is re-minted (same device, new
+/// row with a fresh TTL) rather than silently kept: expiry is not a logout
+/// gesture for the credential, and the row must not linger in a state where
+/// auth succeeds but `GET /users/me/sessions` filters the device out
+/// forever. Re-minting keeps exactly one live row per device.
+///
+/// `credential_hash` is the SHA-256 of the raw API key (`hash_api_key`) —
+/// the same value stored in the session's `token_hash` column.
+///
+/// Fails soft: a session-store error must not lock the user out of the
+/// platform (the credential itself already authenticated); it is logged.
+pub(crate) async fn track_session(
+    state: &AppState,
+    user_id: &Id,
+    credential_hash: &str,
+    ip_address: &str,
+    user_agent: &str,
+) -> bool {
+    let now = now_epoch_secs();
+    let existing = state
+        .sessions
+        .find_by_credential_and_device(user_id, credential_hash, ip_address, user_agent)
+        .await;
+
+    match existing {
+        Ok(Some(session)) if session.revoked => {
+            // A revoked session for this device is a logout gesture for
+            // that device: reject the request instead of touching or
+            // replacing the row.
+            false
+        }
+        Ok(Some(session)) => {
+            // Sliding expiry: the found session's TTL restarts on use, so
+            // a live device never crosses its expiry wall while still
+            // authenticating. A found-but-expired row (device returned
+            // after > TTL idle) is re-minted as a new session.
+            if session.expires_at > now {
+                // Throttled activity write; also slides `expires_at`.
+                if now.saturating_sub(session.last_active_at) >= SESSION_TOUCH_THROTTLE_SECS {
+                    if let Err(e) = state
+                        .sessions
+                        .touch(&session.id, now, now + SESSION_TTL_SECS)
+                        .await
+                    {
+                        tracing::warn!(session_id = %session.id, "session touch failed: {e}");
+                    }
+                }
+                true
+            } else {
+                // Expired row: the credential is still valid (expiry is
+                // not revocation), so re-mint the session for this device
+                // with a fresh TTL. The stale row remains (revoked=false,
+                // expired) until retention cleanup removes it.
+                mint_session(state, user_id, credential_hash, ip_address, user_agent, now).await;
+                true
+            }
+        }
+        Ok(None) => {
+            // First presentation of this credential from this device:
+            // create the session row.
+            mint_session(state, user_id, credential_hash, ip_address, user_agent, now).await;
+            true
+        }
+        Err(e) => {
+            tracing::warn!(user_id = %user_id, "session lookup failed: {e}");
+            true
+        }
+    }
+}
+
+/// Create a new session row for (credential, device), logging (not
+/// propagating) storage failures — session tracking must not lock an
+/// already-authenticated credential out.
+async fn mint_session(
+    state: &AppState,
+    user_id: &Id,
+    credential_hash: &str,
+    ip_address: &str,
+    user_agent: &str,
+    now: u64,
+) {
+    let session = gyre_domain::UserSession::new(
+        Id::new(uuid::Uuid::new_v4().to_string()),
+        user_id.clone(),
+        credential_hash,
+        ip_address,
+        user_agent,
+        now,
+        now + SESSION_TTL_SECS,
+    );
+    if let Err(e) = state.sessions.create(&session).await {
+        tracing::warn!(user_id = %user_id, "session create failed: {e}");
+    }
+}
+
+/// Reject API-key auth when every session for that credential is revoked
+/// ("sign out everywhere"). Sessions for the credential that are merely
+/// expired still allow auth (the key itself is long-lived; only revocation
+/// is a logout gesture).
+///
+/// Returns `true` when auth must be rejected (all sessions revoked).
+pub(crate) async fn credential_revoked(
+    state: &AppState,
+    user_id: &Id,
+    credential_hash: &str,
+) -> bool {
+    match state.sessions.list_for_user(user_id).await {
+        Ok(sessions) => {
+            let credential_sessions: Vec<_> = sessions
+                .iter()
+                .filter(|s| s.token_hash == credential_hash)
+                .collect();
+            // No session rows yet → nothing has been revoked; allow.
+            !credential_sessions.is_empty() && credential_sessions.iter().all(|s| s.revoked)
+        }
+        Err(e) => {
+            // Storage failure must not become an authentication bypass in
+            // either direction: log and allow (the key itself was validated
+            // against api_keys; revocation state is unavailable, not "no").
+            tracing::warn!(user_id = %user_id, "session revocation check failed: {e}");
+            false
+        }
+    }
+}
+
+fn now_epoch_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
 // -- Federation JWKS cache (G11) ----------------------------------------------
 
 /// Cached JWKS entry for a trusted remote Gyre instance.
@@ -40,6 +197,11 @@ pub struct RemoteJwksEntry {
 
 /// TTL for cached remote JWKS (5 minutes).
 const REMOTE_JWKS_TTL_SECS: u64 = 300;
+
+/// Minimum interval between `last_login_at` writes per user (HSI §12).
+/// Bounding auth-bookkeeping writes to ≤1/minute/user keeps the JWT hot path
+/// cheap while keeping "last seen" fresh enough for the profile surface.
+const LOGIN_RECORD_DEBOUNCE_SECS: u64 = 60;
 
 // -- Gate-agent capability scopes (task-134, agent-gates.md) -------------------
 
@@ -58,18 +220,34 @@ pub const VALIDATION_REPORT_SCOPE: &str = "validation:report";
 // -- Agent JWT signing (Gyre as OIDC provider) --------------------------------
 
 /// Claims embedded in agent JWTs minted by Gyre's built-in OIDC provider.
+///
+/// Hierarchy claims (platform-model.md §1 Token Scoping): every agent token
+/// carries its tenant/workspace scope, an optional repo binding, and a
+/// fine-grained `scope` list (e.g. `["repo:gyre-server:write"]`). The MCP
+/// server validates these on every tool call.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct AgentJwtClaims {
-    /// Subject — the agent's UUID.
+    /// Subject — `agent:<uuid>` (identity-security.md §Task-Scoped JWT
+    /// Claims). Downstream identity strings that need the bare UUID strip
+    /// the `agent:` prefix; the claim itself always carries it so external
+    /// OIDC verifiers see the specced subject form.
     pub sub: String,
     /// Issuer — the server's base URL.
     pub iss: String,
+    /// Audience — `gyre` (or `GYRE_OIDC_AUDIENCE` when configured).
+    /// Validated on every self-minted agent-token validation
+    /// (identity-security.md §Task-Scoped JWT Claims: `aud` is part of the
+    /// Layer-2 token contract, not an optional decoration).
+    #[serde(default)]
+    pub aud: String,
     /// Issued-at (Unix epoch seconds).
     pub iat: u64,
     /// Expiry (Unix epoch seconds).
     pub exp: u64,
-    /// Always "agent" for agent tokens.
-    pub scope: String,
+    /// Fine-grained permission scopes, e.g. `["repo:gyre-server:write"]`.
+    /// Workers carry repo write; orchestrators carry read+spawn for their tier.
+    #[serde(default)]
+    pub scope: Vec<String>,
     /// JWT ID — unique identifier for this token. Recorded in
     /// `AgentTokenRevoked` audit events when the token is revoked
     /// (observability.md §Audit Event Types). Empty on tokens minted
@@ -80,6 +258,9 @@ pub struct AgentJwtClaims {
     pub task_id: String,
     /// Identity that called POST /api/v1/agents/spawn.
     pub spawned_by: String,
+    /// Tenant the agent's workspace belongs to (hierarchy claim, §1).
+    #[serde(default)]
+    pub tenant_id: String,
 
     // -- TASK-093: Orchestrator scope claims (platform-model.md §3) -----------
     /// Workspace the orchestrator governs. Present on orchestrator JWTs only.
@@ -94,6 +275,18 @@ pub struct AgentJwtClaims {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub orchestrator_type: Option<String>,
 
+    /// Persona slug the agent was spawned under (e.g. "security")
+    /// (platform-model.md §1 Token Scoping; identity-security.md
+    /// §Task-Scoped JWT Claims). Absent when the agent was spawned
+    /// without a persona assignment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub persona: Option<String>,
+    /// Workload attestation confidence level (platform-model.md §1;
+    /// identity-security.md): 1=raw subprocess, 2=CLI-managed,
+    /// 3=Gyre-managed container with attestation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attestation_level: Option<u32>,
+
     // -- G10: Workload attestation claims -------------------------------------
     /// OS PID of the agent process (workload identity, G10).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -104,9 +297,15 @@ pub struct AgentJwtClaims {
     /// Compute target identifier: "local", docker container ID, SSH host (G10).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wl_compute_target: Option<String>,
-    /// Stack fingerprint hash at spawn time (G10).
+    /// Stack fingerprint hash at spawn time (G10). The spec's `stack_hash`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wl_stack_hash: Option<String>,
+    /// Alias for `wl_stack_hash` — the identity-security.md §Task-Scoped
+    /// JWT Claims reference table carries both spellings; both are
+    /// populated from the same stored workload-attestation stack
+    /// fingerprint by the mint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stack_hash: Option<String>,
     // -- M19.4: Container workload claims -------------------------------------
     /// Container ID when the agent was spawned via ContainerTarget (M19.4).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -124,6 +323,7 @@ pub struct AgentJwtClaims {
 /// local-mode record would report `valid:false` (false integrity alarm). The
 /// public key is exposed via `GET /.well-known/jwks.json` so external
 /// verifiers can validate tokens.
+#[derive(Clone)]
 pub struct AgentSigningKey {
     pub encoding_key: jsonwebtoken::EncodingKey,
     pub decoding_key: jsonwebtoken::DecodingKey,
@@ -133,9 +333,18 @@ pub struct AgentSigningKey {
     pub kid: String,
     /// Raw PKCS#8 bytes retained for signing arbitrary data (attestation bundles).
     pkcs8_bytes: Vec<u8>,
+    /// Audience minted into every agent JWT and required at validation
+    /// (identity-security.md §Task-Scoped JWT Claims: `gyre`, or
+    /// `GYRE_OIDC_AUDIENCE` when configured). Carried on the key so mint
+    /// and validation cannot drift apart.
+    audience: String,
     /// Raw 32-byte public key for external verification.
     pub public_key_bytes: Vec<u8>,
 }
+
+/// Default audience for self-minted agent JWTs (identity-security.md
+/// §Task-Scoped JWT Claims: `gyre`, overridable via `GYRE_OIDC_AUDIENCE`).
+pub const DEFAULT_AGENT_JWT_AUDIENCE: &str = "gyre";
 
 /// Derive a stable key id from the public key bytes. The kid must be a pure
 /// function of the key material (not a random UUID) so that a key loaded
@@ -152,6 +361,63 @@ fn derive_kid(public_key_bytes: &[u8]) -> String {
         .collect()
 }
 
+/// A historical signing key's retained public material
+/// (message-bus.md §Edge Cases "Signature key rotation").
+///
+/// When the active forge signing key changes (operator rotation via
+/// `GYRE_AGENT_SIGNING_KEY`, or a regenerated key), the previous key's
+/// public material is retained in durable storage so `GET
+/// /.well-known/jwks.json` keeps serving its JWK: messages signed before
+/// the rotation carry the old `key_id` and must remain verifiable by
+/// third parties that resolve kids through JWKS.
+#[derive(Clone)]
+pub struct HistoricalSigningKey {
+    /// Key id — same derivation as the active key (`derive_kid`), so a kid
+    /// stored in a message's `key_id` field resolves to this entry.
+    pub kid: String,
+    /// Raw 32-byte Ed25519 public key (JWK `x`, base64url-unpadded).
+    pub public_key_bytes: Vec<u8>,
+}
+
+impl HistoricalSigningKey {
+    /// Retain a key's public material. The kid is derived from the public
+    /// key bytes with the same function the active key uses, so a
+    /// rotation can never introduce a kid mismatch.
+    pub fn from_public_key_bytes(public_key_bytes: Vec<u8>) -> Self {
+        Self {
+            kid: derive_kid(&public_key_bytes),
+            public_key_bytes,
+        }
+    }
+
+    /// The JWK representation served in the JWKS `keys` array — same field
+    /// set as the active key's entry.
+    pub fn jwk(&self) -> serde_json::Value {
+        let x = URL_SAFE_NO_PAD.encode(&self.public_key_bytes);
+        serde_json::json!({
+            "kty": "OKP",
+            "crv": "Ed25519",
+            "use": "sig",
+            "alg": "EdDSA",
+            "kid": self.kid,
+            "x": x
+        })
+    }
+}
+
+/// The JWT subject for an agent session (identity-security.md
+/// §Task-Scoped JWT Claims): `agent:<uuid>`.
+///
+/// Single source of truth for the subject form: every Layer-2 mint embeds
+/// it as `sub`, and Layer-1 SVID issuance (spiffe.rs
+/// `issue_session_svid`) uses it as the SPIFFE ID session segment, so the
+/// documented binding invariant `/agent/{role}/session/{jwt sub}`
+/// (spiffe_federation.rs) holds by direct string comparison — a federated
+/// verifier never normalizes either side.
+pub fn agent_subject(agent_id: &str) -> String {
+    format!("agent:{agent_id}")
+}
+
 impl AgentSigningKey {
     /// Generate a fresh Ed25519 key pair.
     pub fn generate() -> Self {
@@ -162,6 +428,18 @@ impl AgentSigningKey {
         let pkcs8 =
             Ed25519KeyPair::generate_pkcs8(&rng).expect("Ed25519 key generation must succeed");
         Self::from_pkcs8(pkcs8.as_ref()).expect("freshly generated PKCS#8 must be valid")
+    }
+
+    /// The configured JWT audience (`gyre` unless `GYRE_OIDC_AUDIENCE`
+    /// overrides it). Applied to every subsequent mint and validation.
+    pub fn with_audience(mut self, audience: impl Into<String>) -> Self {
+        self.audience = audience.into();
+        self
+    }
+
+    /// The audience this key mints and validates.
+    pub fn audience(&self) -> &str {
+        &self.audience
     }
 
     /// Reconstruct the key pair from PKCS#8 DER bytes (e.g. loaded from the
@@ -214,6 +492,7 @@ impl AgentSigningKey {
             kid,
             pkcs8_bytes: pkcs8.to_vec(),
             public_key_bytes: pub_key_bytes.to_vec(),
+            audience: DEFAULT_AGENT_JWT_AUDIENCE.to_string(),
         })
     }
 
@@ -223,6 +502,21 @@ impl AgentSigningKey {
     /// secret material.
     pub fn pkcs8_der(&self) -> &[u8] {
         &self.pkcs8_bytes
+    }
+
+    /// The public half of this key as a PEM-encoded SubjectPublicKeyInfo
+    /// (SPKI) block — the form Rekor's hashedrekord `publicKey.content`
+    /// carries (task-264). Ed25519 SPKI is the fixed 12-byte RFC 8410
+    /// prefix followed by the raw 32-byte key.
+    pub fn public_key_pem(&self) -> String {
+        const ED25519_SPKI_PREFIX: [u8; 12] = [
+            0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
+        ];
+        let mut spki = Vec::with_capacity(ED25519_SPKI_PREFIX.len() + self.public_key_bytes.len());
+        spki.extend_from_slice(&ED25519_SPKI_PREFIX);
+        spki.extend_from_slice(&self.public_key_bytes);
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&spki);
+        format!("-----BEGIN PUBLIC KEY-----\n{b64}\n-----END PUBLIC KEY-----\n")
     }
 
     /// Sign arbitrary bytes with the Ed25519 private key.
@@ -239,9 +533,9 @@ impl AgentSigningKey {
 
     /// Mint a signed EdDSA JWT for an agent.
     ///
-    /// `workload` carries optional G10 workload attestation claims embedded
-    /// directly in the JWT so external verifiers can reconstruct workload
-    /// identity from the token alone.
+    /// Scope: fine-grained `repo:{name}:write` (platform-model.md §1 Token
+    /// Scoping — a worker agent's token is scoped to its repo).
+    #[allow(clippy::too_many_arguments)]
     pub fn mint(
         &self,
         agent_id: &str,
@@ -249,14 +543,53 @@ impl AgentSigningKey {
         spawned_by: &str,
         issuer: &str,
         ttl_secs: u64,
+        tenant_id: &str,
+        workspace_id: &str,
+        repo_id: &str,
+        repo_name: &str,
     ) -> Result<String, String> {
         self.mint_with_workload(
-            agent_id, task_id, spawned_by, issuer, ttl_secs, None, None, None, None, None, None,
+            agent_id,
+            task_id,
+            spawned_by,
+            issuer,
+            ttl_secs,
+            tenant_id,
+            workspace_id,
+            repo_id,
+            repo_name,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
         )
+    }
+
+    /// Validate a self-issued agent JWT, returning its claims on success.
+    ///
+    /// Audience validation is live (identity-security.md §Task-Scoped JWT
+    /// Claims): the token must carry the audience this key mints. A token
+    /// with a wrong or absent `aud` fails validation even when its
+    /// signature is valid.
+    pub fn validate(&self, token: &str, expected_issuer: &str) -> Result<AgentJwtClaims, String> {
+        let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::EdDSA);
+        validation.set_issuer(&[expected_issuer]);
+        validation.set_audience(&[&self.audience]);
+        jsonwebtoken::decode::<AgentJwtClaims>(token, &self.decoding_key, &validation)
+            .map(|td| td.claims)
+            .map_err(|e| format!("agent JWT validation: {e}"))
     }
 
     /// Mint a signed EdDSA JWT with embedded G10 workload attestation claims.
     /// Optionally includes M19.4 container identity claims.
+    ///
+    /// §1 Token Scoping: populates the hierarchy claims (tenant_id,
+    /// workspace_id, repo_id) and the fine-grained scope list
+    /// (`repo:{repo_name}:write` for workers) from spawn context.
     #[allow(clippy::too_many_arguments)]
     pub fn mint_with_workload(
         &self,
@@ -265,6 +598,12 @@ impl AgentSigningKey {
         spawned_by: &str,
         issuer: &str,
         ttl_secs: u64,
+        tenant_id: &str,
+        workspace_id: &str,
+        repo_id: &str,
+        repo_name: &str,
+        persona: Option<&str>,
+        attestation_level: Option<u32>,
         wl_pid: Option<u32>,
         wl_hostname: Option<String>,
         wl_compute_target: Option<String>,
@@ -277,38 +616,31 @@ impl AgentSigningKey {
             .unwrap_or_default()
             .as_secs();
         let claims = AgentJwtClaims {
-            sub: agent_id.to_string(),
+            sub: agent_subject(agent_id),
             iss: issuer.to_string(),
+            aud: self.audience.clone(),
             iat: now,
             exp: now + ttl_secs,
-            scope: "agent".to_string(),
+            scope: vec![format!("repo:{repo_name}:write")],
             jti: uuid::Uuid::new_v4().to_string(),
             task_id: task_id.to_string(),
             spawned_by: spawned_by.to_string(),
-            workspace_id: None,
-            repo_id: None,
+            tenant_id: tenant_id.to_string(),
+            workspace_id: Some(workspace_id.to_string()),
+            repo_id: Some(repo_id.to_string()),
             orchestrator_type: None,
+            persona: persona.map(|p| p.to_string()),
+            attestation_level,
             wl_pid,
             wl_hostname,
             wl_compute_target,
+            // Both specced spellings carry the same stored fingerprint.
+            stack_hash: wl_stack_hash.clone(),
             wl_stack_hash,
             wl_container_id,
             wl_image_hash,
         };
-        let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::EdDSA);
-        header.kid = Some(self.kid.clone());
-        jsonwebtoken::encode(&header, &claims, &self.encoding_key)
-            .map_err(|e| format!("JWT mint error: {e}"))
-    }
-
-    /// Validate a self-issued agent JWT, returning its claims on success.
-    pub fn validate(&self, token: &str, expected_issuer: &str) -> Result<AgentJwtClaims, String> {
-        let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::EdDSA);
-        validation.set_issuer(&[expected_issuer]);
-        validation.validate_aud = false;
-        jsonwebtoken::decode::<AgentJwtClaims>(token, &self.decoding_key, &validation)
-            .map(|td| td.claims)
-            .map_err(|e| format!("agent JWT validation: {e}"))
+        self.encode(claims)
     }
 
     /// Extract the `jti` (JWT ID) claim from an agent token without verifying
@@ -339,43 +671,136 @@ impl AgentSigningKey {
     /// `repo_id`. `task_id` carries the orchestrator's own agent id.
     /// Orchestrators are not bound to a task, but the claim is required on
     /// all agent JWTs for `gyre_agent_complete` compatibility.
+    ///
+    /// §1 Token Scoping: workspace orchestrators are scoped to their
+    /// workspace (`workspace:{id}:read` + `workspace:{id}:spawn`); repo
+    /// orchestrators to their repo (`repo:{name}:write` + `repo:{name}:spawn`).
+    #[allow(clippy::too_many_arguments)]
     pub fn mint_orchestrator(
         &self,
         agent_id: &str,
         spawned_by: &str,
         issuer: &str,
         ttl_secs: u64,
+        tenant_id: &str,
         workspace_id: &str,
         repo_id: Option<&str>,
+        repo_name: Option<&str>,
         orchestrator_type: &str,
+        persona: &str,
     ) -> Result<String, String> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
+        let scope = if orchestrator_type == "workspace_orchestrator" {
+            vec![
+                format!("workspace:{workspace_id}:read"),
+                format!("workspace:{workspace_id}:spawn"),
+            ]
+        } else {
+            // Repo orchestrator — repo_name is required to mint its scope.
+            let name = repo_name.ok_or_else(|| {
+                "repo orchestrator JWT requires repo_name for repo:... scope".to_string()
+            })?;
+            vec![format!("repo:{name}:write"), format!("repo:{name}:spawn")]
+        };
         let claims = AgentJwtClaims {
-            sub: agent_id.to_string(),
+            sub: agent_subject(agent_id),
             iss: issuer.to_string(),
+            aud: self.audience.clone(),
             iat: now,
             exp: now + ttl_secs,
-            scope: "agent".to_string(),
+            scope,
             jti: uuid::Uuid::new_v4().to_string(),
             task_id: agent_id.to_string(),
             spawned_by: spawned_by.to_string(),
+            tenant_id: tenant_id.to_string(),
             workspace_id: Some(workspace_id.to_string()),
             repo_id: repo_id.map(|r| r.to_string()),
             orchestrator_type: Some(orchestrator_type.to_string()),
+            persona: Some(persona.to_string()),
+            attestation_level: None,
             wl_pid: None,
             wl_hostname: None,
             wl_compute_target: None,
+            stack_hash: None,
             wl_stack_hash: None,
             wl_container_id: None,
             wl_image_hash: None,
         };
+        self.encode(claims)
+    }
+
+    /// Encode claims into a signed EdDSA JWT.
+    fn encode(&self, claims: AgentJwtClaims) -> Result<String, String> {
         let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::EdDSA);
         header.kid = Some(self.kid.clone());
         jsonwebtoken::encode(&header, &claims, &self.encoding_key)
             .map_err(|e| format!("JWT mint error: {e}"))
+    }
+
+    /// Mint a worker JWT scoped to the repo it was spawned against.
+    ///
+    /// Workers always carry `workspace_id` + `repo_id` claims so ABAC subject
+    /// attributes (`subject.repo_scope`, §Attributes "Agent OIDC claim") are
+    /// real for every request the agent makes. Unlike orchestrator JWTs there
+    /// is no `orchestrator_type` claim. Workload claims are populated from
+    /// the real spawn-time facts whenever they exist at mint time:
+    /// `wl_compute_target` (the request's compute target id), `wl_hostname`
+    /// (remote compute-target host), `wl_stack_hash` (the stored
+    /// workload-attestation stack fingerprint, when the agent already has
+    /// one — e.g. a Ralph-loop re-spawn), and `wl_image_hash` (the resolved
+    /// image digest, agent-runtime.md §3, best-effort: `None` when the image
+    /// runtime could not resolve it). `wl_pid`/`wl_container_id` exist only
+    /// after the process launch — the token must pre-exist the process it
+    /// authenticates — so they are minted `None` and recorded in the
+    /// workload-attestation record instead.
+    ///
+    /// §1 Token Scoping: the worker's fine-grained scope list
+    /// (`["repo:{repo_name}:write"]`), `tenant_id`, and the hierarchy claims
+    /// are minted from spawn context via [`AgentSigningKey::mint_with_workload`]
+    /// — a worker agent's token is scoped to its repo.
+    #[allow(clippy::too_many_arguments)]
+    pub fn mint_worker_scoped(
+        &self,
+        agent_id: &str,
+        task_id: &str,
+        spawned_by: &str,
+        issuer: &str,
+        ttl_secs: u64,
+        tenant_id: &str,
+        workspace_id: &str,
+        repo_id: &str,
+        repo_name: &str,
+        persona: Option<&str>,
+        attestation_level: Option<u8>,
+        wl_hostname: Option<String>,
+        wl_compute_target: Option<String>,
+        wl_stack_hash: Option<String>,
+        wl_image_hash: Option<String>,
+    ) -> Result<String, String> {
+        self.mint_with_workload(
+            agent_id,
+            task_id,
+            spawned_by,
+            issuer,
+            ttl_secs,
+            tenant_id,
+            workspace_id,
+            repo_id,
+            repo_name,
+            persona,
+            // identity-security.md attestation levels are 1-3; the §1 claim
+            // is the widened `u32` form (platform-model.md §1 Token Scoping).
+            attestation_level.map(|level| level as u32),
+            None,
+            wl_hostname,
+            wl_compute_target,
+            wl_stack_hash,
+            None,
+            wl_image_hash,
+        )
     }
 
     /// Mint a scoped agent JWT (task-134 gate-agent protocol).
@@ -389,6 +814,13 @@ impl AgentSigningKey {
     /// middleware (route allow-list), and `submit_review` (reviewer identity
     /// binding). `task_id` carries the gate id so the token is traceable to
     /// the gate run that minted it.
+    ///
+    /// §1 Token Scoping: the capability string is stored as the token's
+    /// fine-grained scope list (`scope: Vec<String>`), so every downstream
+    /// scope check reads the array form. `tenant_id` is the tenant of the
+    /// gated MR's workspace, resolved fail-closed by the caller — never a
+    /// fabricated literal. `persona` is the gate persona's slug.
+    #[allow(clippy::too_many_arguments)]
     pub fn mint_scoped(
         &self,
         agent_id: &str,
@@ -397,26 +829,33 @@ impl AgentSigningKey {
         issuer: &str,
         ttl_secs: u64,
         scope: &str,
+        tenant_id: &str,
+        persona: Option<&str>,
     ) -> Result<String, String> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
         let claims = AgentJwtClaims {
-            sub: agent_id.to_string(),
+            sub: agent_subject(agent_id),
             iss: issuer.to_string(),
+            aud: self.audience.clone(),
             iat: now,
             exp: now + ttl_secs,
-            scope: scope.to_string(),
+            scope: vec![scope.to_string()],
             jti: uuid::Uuid::new_v4().to_string(),
             task_id: task_id.to_string(),
             spawned_by: spawned_by.to_string(),
+            tenant_id: tenant_id.to_string(),
             workspace_id: None,
             repo_id: None,
             orchestrator_type: None,
+            persona: persona.map(|p| p.to_string()),
+            attestation_level: None,
             wl_pid: None,
             wl_hostname: None,
             wl_compute_target: None,
+            stack_hash: None,
             wl_stack_hash: None,
             wl_container_id: None,
             wl_image_hash: None,
@@ -426,7 +865,6 @@ impl AgentSigningKey {
         jsonwebtoken::encode(&header, &claims, &self.encoding_key)
             .map_err(|e| format!("JWT mint error: {e}"))
     }
-
     /// Mint an impersonation JWT (identity-security.md §Impersonation).
     ///
     /// `sub` is the **target** user (so permissions match theirs) while
@@ -535,6 +973,40 @@ pub struct ImpersonationJwtClaims {
 
 // -- Security helpers ---------------------------------------------------------
 
+/// Durable jti-revocation check for an agent JWT
+/// (identity-security.md §Task-Scoped JWT Claims — Revocation).
+///
+/// The `revoked_tokens` SQL table (keyed by the token's `jti`) is the
+/// durable record written when an agent's run ends
+/// (`agent_audit::revoke_agent_token`); the `agent_tokens` KV entry is the
+/// live gate. This lookup runs BEFORE signature/expiry validation so a
+/// revoked jti rejects the request even while `exp` is still in the future.
+///
+/// The unverified `jti` extraction is fail-closed in the security-relevant
+/// direction: a forged non-revoked `jti` still has to pass full EdDSA
+/// validation afterward — the extraction can only add a rejection, never
+/// remove one. A table lookup error warns and falls through to the KV +
+/// signature gates (the KV removal is the immediate enforcement; the table
+/// is the cross-restart record).
+async fn jti_revocation_denial(state: &Arc<AppState>, token: &str) -> Option<&'static str> {
+    if !token.starts_with("ey") {
+        return None; // legacy UUID token — no jti, KV-gated only
+    }
+    let jti = state.agent_signing_key.extract_jti_unverified(token)?;
+    match state.spawn_log.is_token_revoked(&jti).await {
+        Ok(true) => Some("Agent token has been revoked"),
+        Ok(false) => None,
+        Err(e) => {
+            tracing::warn!(
+                jti = %jti,
+                error = %e,
+                "revoked_tokens lookup failed; the agent_tokens KV entry remains the live gate"
+            );
+            None
+        }
+    }
+}
+
 /// Compare two tokens in constant time to prevent timing attacks.
 pub(crate) fn tokens_equal(a: &str, b: &str) -> bool {
     a.len() == b.len() && a.as_bytes().ct_eq(b.as_bytes()).into()
@@ -583,22 +1055,76 @@ pub(crate) fn system_principal_tenant() -> String {
     "default".to_string()
 }
 
+/// How the caller authenticated — set by the authentication extractor at
+/// token-validation time (message-bus.md §Origin and tenant resolution
+/// from auth context).
+///
+/// The mechanism, NOT role membership or identity strings, decides
+/// `MessageOrigin` on the message send path: only the global
+/// `GYRE_AUTH_TOKEN` resolves to `MessageOrigin::Server` (full forge
+/// authority over server-only kinds), while API-key and Keycloak/OIDC
+/// callers resolve to their verified user even when they hold the Admin
+/// role. Role membership is a separate axis (e.g. scoping rule 6 allows
+/// Admin-role API-key callers to target Broadcast via an explicit role
+/// check in the send handler, independent of origin).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AuthMechanism {
+    /// The global `GYRE_AUTH_TOKEN` (dev/system usage) — the only Server-origin
+    /// principal. Server-internal principals built with the same shape and
+    /// authority (the scheduler's system auth) use this variant too.
+    GlobalToken,
+    /// A per-agent token issued at spawn (UUID legacy or agent JWT).
+    AgentToken,
+    /// A `gyre_*` API key bound to a user record (user_id from key lookup).
+    ApiKey,
+    /// A Keycloak/OIDC user JWT (user_id from the verified token).
+    UserJwt,
+    /// A federation JWT from a trusted remote Gyre instance (agent principal).
+    FederatedJwt,
+    /// An impersonation JWT resolving to the target user.
+    Impersonation,
+}
+
 /// Resolved principal injected by the auth extractor.
 #[derive(Clone)]
 pub struct AuthenticatedAgent {
     pub agent_id: String,
+    /// How this principal authenticated. Set at token-validation time by the
+    /// extractor — the reliable discriminator for origin-sensitive paths
+    /// (`origin_from_auth`); never derived from spoofable strings or roles.
+    pub auth_mechanism: AuthMechanism,
     /// Present when auth was performed via JWT or API key.
     pub user_id: Option<Id>,
     pub roles: Vec<UserRole>,
     /// Tenant scope for this request.
     /// - JWT auth: extracted from the validated `tenant_id` claim.
+    /// - Agent/federated JWT with §1 hierarchy claims: mirrored from the
+    ///   signature-verified claims by `with_hierarchy_from_claims`.
     /// - API-key auth: the user's stored tenant binding (fail-closed when
     ///   the user has none — task-099 F1).
     /// - Global token, agent tokens, federated JWTs: the server-originated
     ///   default tenant (`system_principal_tenant`).
     pub tenant_id: String,
+    /// Workspace scope derived from the validated `workspace_id` claim
+    /// (platform-model.md §1 Token Scoping). `None` for callers whose token
+    /// carries no hierarchy claims (global token, API key, legacy UUID agent
+    /// token) — available to all downstream handlers.
+    pub workspace_id: Option<String>,
+    /// Repo scope derived from the validated `repo_id` claim. `None` for
+    /// workspace orchestrators (scoped to the whole workspace) and for
+    /// callers without hierarchy claims.
+    pub repo_id: Option<String>,
+    /// Fine-grained scopes from the validated `scope` claim, e.g.
+    /// `["repo:gyre-server:write"]`. Empty for callers without hierarchy
+    /// claims (they are gated by ABAC/RBAC instead of token scope).
+    pub scope: Vec<String>,
     /// Raw JWT claims for ABAC evaluation (G6).
-    /// - Global token or API key: `None` — ABAC checks are bypassed for these.
+    /// - Global token or API key: `None` — these auth methods carry no JWT
+    ///   claims object. They are NOT exempt from ABAC: both flow through
+    ///   the normal policy evaluation (API-key principals evaluate with
+    ///   `subject.id` = the user's display_name; the global token is
+    ///   allowed by the seeded `system-full-access` policy, not by a
+    ///   middleware bypass).
     /// - JWT auth (Keycloak or agent JWT): populated with the full claims object.
     pub jwt_claims: Option<serde_json::Value>,
     /// The raw bearer token presented by the caller, when auth came from the
@@ -725,6 +1251,44 @@ pub(crate) async fn record_auth_failure_for_middleware(
 }
 
 impl AuthenticatedAgent {
+    /// Derive the §1 Token Scoping hierarchy fields from validated JWT
+    /// claims. Called on every path that populates `jwt_claims` so
+    /// `tenant_id`/`workspace_id`/`repo_id`/`scope` always mirror the claims
+    /// the signature actually verified.
+    ///
+    /// `tenant_id` is mirrored too (task-130 review 29e132008c6748508f2c52ec982d78d6):
+    /// tenant-containment handlers (spawn_repo_orchestrator_core,
+    /// spawn_workspace_orchestrator_core, explorer/git_http scope checks)
+    /// compare the caller's tenant against the target entity's real tenant,
+    /// and a fabricated extractor "default" identity denied correctly
+    /// minted scoped tokens their own happy path. The claim is only honored
+    /// when present — tokens without a tenant claim keep the
+    /// extractor-resolved identity.
+    fn with_hierarchy_from_claims(mut self, claims: &serde_json::Value) -> Self {
+        if let Some(tenant) = claims.get("tenant_id").and_then(|v| v.as_str()) {
+            self.tenant_id = tenant.to_string();
+        }
+        self.workspace_id = claims
+            .get("workspace_id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        self.repo_id = claims
+            .get("repo_id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        self.scope = claims
+            .get("scope")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str())
+                    .map(|s| s.to_string())
+                    .collect()
+            })
+            .unwrap_or_default();
+        self
+    }
+
     /// True only for the genuine system principal: the global dev/system
     /// token. NOT a plain `agent_id == "system"` string match — API-key and
     /// Keycloak-JWT paths set `agent_id` from `user.display_name` /
@@ -735,6 +1299,51 @@ impl AuthenticatedAgent {
     /// attacker cannot forge (their key/JWT resolves to their own user id).
     pub fn is_system_principal(&self) -> bool {
         self.agent_id == "system" && self.user_id.is_none()
+    }
+
+    /// True when the caller authenticated via a Gyre-minted agent JWT —
+    /// the verified claims carry a non-empty fine-grained `scope` list
+    /// (platform-model.md §1 Token Scoping). Global tokens, API keys,
+    /// Keycloak JWTs, and legacy UUID agent tokens do not.
+    pub fn is_gyre_agent_jwt(&self) -> bool {
+        self.jwt_claims
+            .as_ref()
+            .and_then(|c| c.get("scope"))
+            .and_then(|s| s.as_array())
+            .is_some_and(|arr| !arr.is_empty())
+    }
+
+    /// The caller's `task_id` JWT claim when the caller is a worker-tier
+    /// Gyre agent JWT — the task-scoped principal class the
+    /// identity-security.md §Task-Scoped JWT Claims hard boundary applies
+    /// to.
+    ///
+    /// Orchestrator JWTs are exempt: their `task_id` claim carries the
+    /// orchestrator's own agent id (they are not bound to a task — see
+    /// `mint_orchestrator`), so they would never match a target task and
+    /// the check would lock orchestrators out of surfaces they own.
+    /// Orchestrator tier containment is enforced by their
+    /// `workspace:{id}`/`repo:{name}` scope claims instead
+    /// (`validate_tool_scope`, `authorize_repo_access`). Gate-agent
+    /// capability tokens are not exempt: their `task_id` carries the gate
+    /// id, which matches no task, so they cannot mutate task-owned
+    /// resources — exactly the read-only contract task-134 gives them.
+    pub fn agent_task_claim(&self) -> Option<&str> {
+        let claims = self.jwt_claims.as_ref()?;
+        if !self.is_gyre_agent_jwt() {
+            return None;
+        }
+        if claims
+            .get("orchestrator_type")
+            .and_then(|v| v.as_str())
+            .is_some()
+        {
+            return None;
+        }
+        claims
+            .get("task_id")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
     }
 }
 
@@ -756,6 +1365,10 @@ struct JwtClaims {
     /// use-site fallback.
     #[serde(default = "default_tenant_claim")]
     tenant_id: String,
+    /// Email verification flag (OIDC standard). Required to claim an
+    /// invitation-created account by email — see find_or_create_user_tenant.
+    #[serde(default)]
+    email_verified: Option<bool>,
 }
 
 /// Serde default for [`JwtClaims::tenant_id`]: an absent tenant claim maps
@@ -999,10 +1612,14 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedAgent {
                 .await;
             }
             return Ok(AuthenticatedAgent {
+                auth_mechanism: AuthMechanism::GlobalToken,
                 agent_id: "system".to_string(),
                 user_id: None,
                 roles: vec![UserRole::Admin],
                 tenant_id: system_principal_tenant(),
+                workspace_id: None,
+                repo_id: None,
+                scope: Vec::new(),
                 jwt_claims: None, // Admin bypass — no ABAC evaluation.
                 bearer_token,
                 deprecated_token_auth,
@@ -1048,6 +1665,20 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedAgent {
                 .find(|(_, t)| t.as_str() == token)
                 .map(|(id, _)| id.clone())
             {
+                // identity-security.md §Revocation: durable jti lookup runs
+                // BEFORE signature/expiry validation — a revoked jti rejects
+                // the request even while exp is still in the future.
+                if let Some(reason) = jti_revocation_denial(state, token).await {
+                    record_auth_failure(
+                        state,
+                        "agent_jwt",
+                        "agent token has been revoked",
+                        forensic_ip,
+                        forensic_ua,
+                    )
+                    .await;
+                    return Err((StatusCode::UNAUTHORIZED, reason).into_response());
+                }
                 // JWT tokens: additionally validate signature and expiry.
                 let jwt_claims = if token.starts_with("ey") {
                     match state.agent_signing_key.validate(token, &state.base_url) {
@@ -1088,16 +1719,27 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedAgent {
                     )
                     .await;
                 }
-                return Ok(AuthenticatedAgent {
+                let auth = AuthenticatedAgent {
+                    auth_mechanism: AuthMechanism::AgentToken,
                     agent_id,
                     user_id: None,
                     roles: vec![UserRole::Agent],
                     tenant_id: system_principal_tenant(),
-                    jwt_claims,
+                    workspace_id: None,
+                    repo_id: None,
+                    scope: Vec::new(),
+                    jwt_claims: jwt_claims.clone(),
                     bearer_token,
                     deprecated_token_auth,
                     impersonation: None,
-                });
+                };
+                // §1 Token Scoping: mirror the hierarchy claims the signature
+                // verified onto the resolved principal.
+                let auth = match jwt_claims.as_ref() {
+                    Some(claims) => auth.with_hierarchy_from_claims(claims),
+                    None => auth,
+                };
+                return Ok(auth);
             }
         }
 
@@ -1131,6 +1773,55 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedAgent {
         // 3. API keys -- look up by SHA-256 hash of the raw token.
         if let Ok(Some(user_id)) = state.api_keys.find_user_id(&hash_api_key(token)).await {
             if let Ok(Some(user)) = state.users.find_by_id(&user_id).await {
+                let credential_hash = hash_api_key(token);
+                // "Sign out everywhere" enforcement: an API key whose every
+                // session is revoked is rejected here (user-management.md
+                // §Session Management — revoking all sessions signs the
+                // credential out). Checked BEFORE the deactivation branch
+                // so a lifecycle deactivation that revokes sessions
+                // (SCIM `active:false` / deprovision, task-265) reports the
+                // credential-level 401 ("Session has been revoked" —
+                // re-authenticate) rather than the account-level 403: the
+                // credential was signed out, which is the precise reason
+                // the replay fails. An account deactivated WITHOUT session
+                // revocation (the admin deactivate path) has no revoked
+                // sessions and still falls through to the 403 below, so
+                // both deactivation flavors keep their accurate reason.
+                if credential_revoked(state, &user.id, &credential_hash).await {
+                    record_auth_failure(
+                        state,
+                        "api_key",
+                        "session has been revoked",
+                        forensic_ip,
+                        forensic_ua,
+                    )
+                    .await;
+                    return Err(
+                        (StatusCode::UNAUTHORIZED, "Session has been revoked").into_response()
+                    );
+                }
+                // Deactivated accounts fail authentication (user-management.md
+                // §API > User Management: deactivation cascades to access).
+                // Checked before the tenant binding so a deactivation takes
+                // effect even for legacy unbound users.
+                if user.is_deactivated() {
+                    tracing::warn!(
+                        user_id = %user.id,
+                        username = %user.username,
+                        "API-key auth for deactivated user; rejecting"
+                    );
+                    record_auth_failure(
+                        state,
+                        "api_key",
+                        "user account is deactivated",
+                        forensic_ip,
+                        forensic_ua,
+                    )
+                    .await;
+                    return Err(
+                        (StatusCode::FORBIDDEN, "user account is deactivated").into_response()
+                    );
+                }
                 // F1: the tenant scope comes from the user's stored binding.
                 // Fail closed when it is absent: fabricating a tenant here
                 // made API-key admins global superusers across tenants.
@@ -1160,6 +1851,40 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedAgent {
                             .into_response());
                     }
                 };
+                // Session tracking (user-management.md §Session Management:
+                // one session row per credential+device; throttled
+                // last-active updates). The IP is the socket peer address
+                // from the ConnectInfo extension (main.rs serves with
+                // into_make_service_with_connect_info). Forwarded headers
+                // are NOT consulted — they are caller-controlled without a
+                // trusted-proxy gate (CWE-348).
+                let ip_address = parts
+                    .extensions
+                    .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+                    .map(|ci| ci.0.ip().to_string())
+                    .unwrap_or_default();
+                let user_agent = parts
+                    .headers
+                    .get(axum::http::header::USER_AGENT)
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("")
+                    .to_string();
+                // A revoked session for this device rejects auth; a new or
+                // still-active session is recorded/refreshed.
+                if !track_session(state, &user.id, &credential_hash, &ip_address, &user_agent).await
+                {
+                    record_auth_failure(
+                        state,
+                        "api_key",
+                        "session has been revoked",
+                        forensic_ip,
+                        forensic_ua,
+                    )
+                    .await;
+                    return Err(
+                        (StatusCode::UNAUTHORIZED, "Session has been revoked").into_response()
+                    );
+                }
                 if !auth_already_audited {
                     record_auth_success(
                         state,
@@ -1172,10 +1897,14 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedAgent {
                     .await;
                 }
                 return Ok(AuthenticatedAgent {
+                    auth_mechanism: AuthMechanism::ApiKey,
                     agent_id: user.display_name.clone(),
                     user_id: Some(user.id),
                     roles: user.roles,
                     tenant_id,
+                    workspace_id: None,
+                    repo_id: None,
+                    scope: Vec::new(),
                     jwt_claims: None, // API key — no ABAC evaluation.
                     bearer_token,
                     deprecated_token_auth,
@@ -1249,10 +1978,14 @@ pub async fn authenticate_token(
     if tokens_equal(token, &state.auth_token) {
         record_auth_success(state, "global", Some("system"), None, None, None).await;
         return Ok(AuthenticatedAgent {
+            auth_mechanism: AuthMechanism::GlobalToken,
             agent_id: "system".to_string(),
             user_id: None,
             roles: vec![UserRole::Admin],
             tenant_id: system_principal_tenant(),
+            workspace_id: None,
+            repo_id: None,
+            scope: Vec::new(),
             jwt_claims: None,
             bearer_token: Some(token.to_string()),
             deprecated_token_auth: false,
@@ -1285,6 +2018,19 @@ pub async fn authenticate_token(
             .find(|(_, t)| t.as_str() == token)
             .map(|(id, _)| id.clone())
         {
+            // identity-security.md §Revocation: durable jti lookup runs
+            // BEFORE signature/expiry validation.
+            if let Some(reason) = jti_revocation_denial(state, token).await {
+                record_auth_failure(
+                    state,
+                    "agent_jwt",
+                    "agent token has been revoked",
+                    None,
+                    None,
+                )
+                .await;
+                return Err(reason);
+            }
             let jwt_claims = if token.starts_with("ey") {
                 match state.agent_signing_key.validate(token, &state.base_url) {
                     Ok(agent_claims) => serde_json::to_value(&agent_claims).ok(),
@@ -1309,16 +2055,25 @@ pub async fn authenticate_token(
                 "uuid_token"
             };
             record_auth_success(state, token_kind, Some(agent_id.as_str()), None, None, None).await;
-            return Ok(AuthenticatedAgent {
+            let auth = AuthenticatedAgent {
+                auth_mechanism: AuthMechanism::AgentToken,
                 agent_id,
                 user_id: None,
                 roles: vec![UserRole::Agent],
                 tenant_id: system_principal_tenant(),
-                jwt_claims,
+                workspace_id: None,
+                repo_id: None,
+                scope: Vec::new(),
+                jwt_claims: jwt_claims.clone(),
                 bearer_token: Some(token.to_string()),
                 deprecated_token_auth: false,
                 impersonation: None,
-            });
+            };
+            let auth = match jwt_claims.as_ref() {
+                Some(claims) => auth.with_hierarchy_from_claims(claims),
+                None => auth,
+            };
+            return Ok(auth);
         }
     }
 
@@ -1343,6 +2098,18 @@ pub async fn authenticate_token(
     // 3. API keys.
     if let Ok(Some(user_id)) = state.api_keys.find_user_id(&hash_api_key(token)).await {
         if let Ok(Some(user)) = state.users.find_by_id(&user_id).await {
+            // Deactivated accounts fail authentication (see the extractor's
+            // API-key path for the rationale).
+            if user.is_deactivated() {
+                tracing::warn!(
+                    user_id = %user.id,
+                    username = %user.username,
+                    "API-key auth for deactivated user; rejecting"
+                );
+                record_auth_failure(state, "api_key", "user account is deactivated", None, None)
+                    .await;
+                return Err("user account is deactivated");
+            }
             // F1: fail closed when the user has no tenant binding (see the
             // extractor's API-key path for the rationale).
             let tenant_id = match user.tenant_id.clone() {
@@ -1366,6 +2133,19 @@ pub async fn authenticate_token(
                     return Err("user has no tenant binding; re-provision via POST /api/v1/users");
                 }
             };
+            let credential_hash = hash_api_key(token);
+            // "Sign out everywhere" enforcement (same rule as the HTTP
+            // extractor path). The WebSocket authenticate path has no
+            // request headers, so the session is tracked with empty
+            // device attributes.
+            if credential_revoked(state, &user.id, &credential_hash).await {
+                return Err("Session has been revoked");
+            }
+            // A revoked session for the (credential, empty device) pair
+            // rejects auth — same per-device rule as the HTTP path.
+            if !track_session(state, &user.id, &credential_hash, "", "").await {
+                return Err("Session has been revoked");
+            }
             record_auth_success(
                 state,
                 "api_key",
@@ -1376,10 +2156,14 @@ pub async fn authenticate_token(
             )
             .await;
             return Ok(AuthenticatedAgent {
+                auth_mechanism: AuthMechanism::ApiKey,
                 agent_id: user.display_name.clone(),
                 user_id: Some(user.id),
                 roles: user.roles,
                 tenant_id,
+                workspace_id: None,
+                repo_id: None,
+                scope: Vec::new(),
                 jwt_claims: None,
                 bearer_token: Some(token.to_string()),
                 deprecated_token_auth: false,
@@ -1507,47 +2291,101 @@ async fn validate_jwt(
     let tenant_id = claims.tenant_id;
     validate_tenant_id(&tenant_id, &roles).map_err(|e| format!("invalid tenant_id in JWT: {e}"))?;
 
-    // Find or auto-create user. The validated tenant claim binds the user
-    // at creation (F1): an OIDC user must not exist as tenant-less.
-    let user = find_or_create_user(
+    // Find or auto-create user. The tenant scope enables the invitation
+    // email-link (an invitation accepted in local mode is claimed by the
+    // SSO subject on first login when the emails match in the same
+    // tenant and the IdP has verified the email).
+    let user = find_or_create_user_tenant(
         state,
         &claims.sub,
+        Some(&tenant_id),
         &preferred_username,
         claims.email.as_deref(),
+        claims.email_verified.unwrap_or(false),
         &roles,
-        &tenant_id,
     )
     .await
     .map_err(|e| format!("user resolution: {e}"))?;
 
-    Ok(AuthenticatedAgent {
+    // HSI §12: record auth-provider provenance (verified issuer + last login).
+    // Debounced adapter-side so high-frequency auth doesn't write per-request;
+    // a recording failure is a warning — authentication must not depend on
+    // bookkeeping.
+    let user_id = user.id.clone();
+    if let Err(e) = state
+        .users
+        .record_login(
+            &user_id,
+            &jwt_cfg.issuer,
+            crate::api::now_secs(),
+            LOGIN_RECORD_DEBOUNCE_SECS,
+        )
+        .await
+    {
+        tracing::warn!("failed to record login for user {user_id}: {e}");
+    }
+
+    let auth = AuthenticatedAgent {
+        auth_mechanism: AuthMechanism::UserJwt,
         agent_id: user.display_name.clone(),
-        user_id: Some(user.id),
+        user_id: Some(user_id),
         roles: user.roles,
         tenant_id,
-        jwt_claims: raw_claims,
+        workspace_id: None,
+        repo_id: None,
+        scope: Vec::new(),
+        jwt_claims: raw_claims.clone(),
         bearer_token: Some(token.to_string()),
         deprecated_token_auth: false,
         impersonation: None,
+    };
+    // Keycloak tokens carry no §1 hierarchy claims (they are user tokens);
+    // if a deployment ever embeds them, mirror them onto the principal.
+    Ok(match raw_claims.as_ref() {
+        Some(claims) => auth.with_hierarchy_from_claims(claims),
+        None => auth,
     })
 }
 
-/// Find or auto-provision a user from a verified SSO identity.
+/// Find or auto-provision the user for a verified JWT, linking a
+/// previously accepted invitation (user-management.md §Tenant-Level
+/// User Onboarding, task-110 F2).
 ///
-/// - First login: the username is derived from the SSO `preferred_username`
-///   claim (sanitized to the URL-safe handle contract; falls back to the
-///   subject when sanitization yields nothing), display name starts as the
-///   raw preferred_username (user-management.md §Username vs Display Name).
-/// - Every authentication: `last_login_at` is stamped and persisted.
-/// - The username is immutable after creation: later logins never rewrite
-///   it, even if the IdP later changes `preferred_username`.
-async fn find_or_create_user(
+/// Resolution order:
+/// 1. `external_id` — the Keycloak subject. `last_login_at` is stamped
+///    on every authentication (Spec §User Entity); the username is
+///    immutable after creation, so later logins never rewrite it even
+///    if the IdP later changes `preferred_username`.
+/// 2. Email link within the tenant: an invitation accepted in local
+///    mode has external_id `tenant:{tenant}:email:{email}`. When the
+///    SSO subject's email matches that account in the same tenant, the
+///    account is CLAIMED: its external_id is re-pointed to the SSO
+///    subject via the port's sanctioned claim transition
+///    (`claim_external_id`; plain `update()` rejects external_id
+///    changes per §Username vs Display Name) so the pre-assigned
+///    memberships and invited GlobalRole attach to the SSO identity
+///    instead of a duplicate account. Requires `email_verified=true` on
+///    the token — an attacker who controls an unverified email in the
+///    IdP must not gain a tenant account by choosing the invitee's
+///    address. The namespace lookup is tenant/email-scoped (review
+///    f36e46e1 F1): a record on the namespace whose stored tenant or
+///    email does not match the claim is foreign (e.g. a planted SCIM
+///    externalId) and is never claimed.
+/// 3. Otherwise auto-provision a new user (tenant-scoped when the JWT
+///    carries a tenant claim): the username is derived from the SSO
+///    `preferred_username` claim (sanitized to the URL-safe handle
+///    contract, with a generated unique handle when sanitization
+///    yields nothing), display name starts as the raw
+///    preferred_username (user-management.md §Username vs Display
+///    Name).
+async fn find_or_create_user_tenant(
     state: &Arc<AppState>,
     external_id: &str,
+    tenant_id: Option<&str>,
     preferred_username: &str,
     email: Option<&str>,
+    email_verified: bool,
     roles: &[UserRole],
-    tenant_id: &str,
 ) -> anyhow::Result<User> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1555,11 +2393,125 @@ async fn find_or_create_user(
         .as_secs();
 
     if let Some(mut existing) = state.users.find_by_external_id(external_id).await? {
+        // Deactivated accounts cannot log back in via SSO
+        // (user-management.md §API > User Management: deactivation is
+        // TenantAdmin-initiated and outlives the user's IdP session — a
+        // fresh OIDC login for a deactivated subject is still that
+        // deactivated account, not a new one).
+        if existing.is_deactivated() {
+            anyhow::bail!("user account is deactivated; contact a tenant administrator");
+        }
+        // Task-129 review round 3 (privilege escalation): a user whose
+        // stored display_name is the reserved system ABAC identity (a row
+        // no supported write path can produce anymore — pre-existing or
+        // DB-tampered) would authenticate as that identity and match
+        // `system-full-access` (priority 1000). The ABAC middleware denies
+        // such a principal at evaluation time; fail the login here too so
+        // the reserved identity is never handed out as an auth result.
+        // Rename the user (direct DB fix) to re-enable login.
+        if existing.display_name == gyre_domain::SYSTEM_ABAC_IDENTITY {
+            tracing::warn!(
+                user_id = %existing.id,
+                "SSO login for user whose display_name is the reserved system ABAC identity; \
+                 rejecting (rename the user to re-enable login)"
+            );
+            anyhow::bail!("user display_name is the reserved system ABAC identity");
+        }
         // Spec §User Entity: last_login_at is set on each authentication.
         // username/external_id stay untouched (immutable after creation).
         existing.record_login(now);
         state.users.update(&existing).await?;
         return Ok(existing);
+    }
+
+    // Task-129 review round 3 (privilege escalation): the SSO
+    // preferred_username becomes the provisioned user's display_name,
+    // which API-key/JWT auth resolves as the ABAC subject.id — and
+    // `system-full-access` (priority 1000) matches the reserved system
+    // identity. The claim content is caller-chosen, so provisioning under
+    // the reserved handle must fail closed (401) rather than create a
+    // user that can spoof the system principal. Checked before the
+    // invitation email-link so a spoofed reserved handle can never drive
+    // any account linkage either.
+    if preferred_username == gyre_domain::SYSTEM_ABAC_IDENTITY {
+        tracing::warn!(
+            external_id,
+            "SSO provisioning with the reserved system ABAC identity as \
+             preferred_username; rejecting"
+        );
+        anyhow::bail!("preferred_username is the reserved system ABAC identity");
+    }
+
+    // Email link (only meaningful with a tenant scope, a verified email,
+    // and a matching invitation-created account).
+    if let (Some(tenant), Some(email), true) = (tenant_id, email, email_verified) {
+        let local_ns = format!("tenant:{tenant}:email:{}", email.to_lowercase());
+        // F1 sibling (review f36e46e1): find_by_external_id is a GLOBAL
+        // lookup, and the SCIM surface persists caller-chosen externalId
+        // verbatim — so a namespace hit is only the invitation-created
+        // account when the record's tenant and email match this claim.
+        // A foreign record planted on the namespace (e.g. a SCIM user
+        // with externalId "tenant:acme:email:bob@acme.com") must not be
+        // claimed and re-pointed at this SSO subject; fall through to
+        // provisioning instead.
+        let ns_hit = state.users.find_by_external_id(&local_ns).await?;
+        let invited = match ns_hit {
+            Some(u)
+                if u.tenant_id.as_ref().is_some_and(|t| t.as_str() == tenant)
+                    && u.email
+                        .as_deref()
+                        .is_some_and(|e| e.eq_ignore_ascii_case(email)) =>
+            {
+                Some(u)
+            }
+            Some(foreign) => {
+                tracing::warn!(
+                    user_id = %foreign.id,
+                    claim_tenant = tenant,
+                    external_id = %local_ns,
+                    "invitation identity namespace held by a record outside the \
+                     claim scope; not linking"
+                );
+                None
+            }
+            None => None,
+        };
+        if let Some(mut invited) = invited {
+            // Deactivated accounts cannot be claimed back into service
+            // via the SSO email link (same contract as the direct
+            // external_id branch above: deactivation is
+            // TenantAdmin-initiated and outlives the user's IdP session —
+            // a verified-email match for a deactivated invitation
+            // account is still that deactivated account, not a fresh
+            // one to link).
+            if invited.is_deactivated() {
+                anyhow::bail!("user account is deactivated; contact a tenant administrator");
+            }
+            // Claim: same email in the same tenant. Re-point the
+            // external_id at the SSO subject via the port's sanctioned
+            // claim transition — update() rejects external_id changes
+            // (user-management.md §Username vs Display Name) — so the
+            // pre-assigned memberships and invited GlobalRole resolve to
+            // this one account instead of a duplicate.
+            state
+                .users
+                .claim_external_id(&invited.id, external_id)
+                .await?;
+            invited.external_id = external_id.to_string();
+            if !roles.is_empty() {
+                invited.roles = roles.to_vec();
+            }
+            // The claim is the invited account's first SSO authentication:
+            // stamp it like any other login.
+            invited.record_login(now);
+            state.users.update(&invited).await?;
+            tracing::info!(
+                user_id = %invited.id,
+                tenant_id = %tenant,
+                "linked invitation-created account to SSO subject"
+            );
+            return Ok(invited);
+        }
     }
 
     // Derive the URL-safe username from the SSO preferred_username. When
@@ -1610,12 +2562,16 @@ async fn find_or_create_user(
         now,
     );
     user.email = email.map(|e| e.to_string());
+    // F1: bind the user to the validated tenant claim so later API-key or
+    // JWT auth for this user resolves a real scope. The JWT path always
+    // supplies the claim (the serde schema default maps an absent claim
+    // to the bootstrapped tenant), so the Option is Some on every call.
+    if let Some(t) = tenant_id {
+        user.tenant_id = Some(Id::new(t.to_string()));
+    }
     if !roles.is_empty() {
         user.roles = roles.to_vec();
     }
-    // F1: bind the user to the validated tenant claim so later API-key or
-    // JWT auth for this user resolves a real scope.
-    user.tenant_id = Some(Id::new(tenant_id));
     user.last_login_at = Some(now);
 
     // create() can still fail on the unique index if another user was
@@ -1632,7 +2588,10 @@ async fn find_or_create_user(
 /// handle, later colliding users get deterministic numeric suffixes
 /// (base-2, base-3, ...). An exhausted suffix space bails and the caller
 /// assigns a generated `u-<id>` handle (unique by the fresh primary key).
-async fn resolve_unique_username(state: &Arc<AppState>, base: &str) -> anyhow::Result<String> {
+pub(crate) async fn resolve_unique_username(
+    state: &Arc<AppState>,
+    base: &str,
+) -> anyhow::Result<String> {
     let mut candidate = base.to_string();
     // Bounded at 2..=10_000 so a pathological store cannot pin this loop
     // open; an exhausted space bails to the generated-handle fallback.
@@ -1854,15 +2813,25 @@ async fn validate_federated_jwt(token: &str, state: &Arc<AppState>) -> Option<Au
         .trim_start_matches("https://")
         .trim_start_matches("http://");
     let fed_claims_json = serde_json::to_value(&claims).ok();
-    Some(AuthenticatedAgent {
+    let auth = AuthenticatedAgent {
+        auth_mechanism: AuthMechanism::FederatedJwt,
         agent_id: format!("{remote_host}/{}", claims.sub),
         user_id: None,
         roles: vec![UserRole::Agent],
         tenant_id: system_principal_tenant(),
-        jwt_claims: fed_claims_json,
+        workspace_id: None,
+        repo_id: None,
+        scope: Vec::new(),
+        jwt_claims: fed_claims_json.clone(),
         bearer_token: Some(token.to_string()),
         deprecated_token_auth: false,
         impersonation: None,
+    };
+    // A federated instance's agent JWTs carry §1 hierarchy claims; mirror
+    // them onto the resolved principal like local agent JWTs.
+    Some(match fed_claims_json.as_ref() {
+        Some(c) => auth.with_hierarchy_from_claims(c),
+        None => auth,
     })
 }
 
@@ -2055,11 +3024,16 @@ mod tests {
     use super::AgentSigningKey;
     use crate::mem::test_state;
     use axum::{body::Body, routing::get, Router};
+    use gyre_common::Id;
     use http::{Request, StatusCode};
     use std::sync::Arc;
     use tower::ServiceExt;
 
-    use super::{system_principal_tenant, test_helpers::*, AuthenticatedAgent, WsTicketStore};
+    use super::{
+        authenticate_token, credential_revoked, system_principal_tenant, test_helpers::*,
+        track_session, AuthenticatedAgent, WsTicketStore, SESSION_TOUCH_THROTTLE_SECS,
+        SESSION_TTL_SECS,
+    };
     use gyre_domain::UserRole;
 
     #[test]
@@ -2117,7 +3091,9 @@ mod tests {
         // claim) — validate_impersonation_opt must return None so the auth
         // chain falls through to the agent-token path.
         let agent_jwt = key
-            .mint("agent-1", "task-1", "system", issuer, 3600)
+            .mint(
+                "agent-1", "task-1", "system", issuer, 3600, "t1", "ws-1", "repo-1", "repo-1",
+            )
             .unwrap();
         assert!(key.validate_impersonation_opt(&agent_jwt, issuer).is_none());
     }
@@ -2138,6 +3114,12 @@ mod tests {
     #[allow(dead_code)]
     fn app_with_jwt() -> Router {
         let state = make_test_state_with_jwt();
+        Router::new()
+            .route("/protected", get(authenticated_handler))
+            .with_state(state)
+    }
+
+    fn app_with_jwt_state(state: Arc<crate::AppState>) -> Router {
         Router::new()
             .route("/protected", get(authenticated_handler))
             .with_state(state)
@@ -2285,6 +3267,207 @@ mod tests {
         assert!(e.agent_id.is_none(), "rejected caller has no identity");
     }
 
+    /// identity-security.md §Task-Scoped JWT Claims: the spawn mint
+    /// (mint_worker_scoped) must produce the specced claim set — sub
+    /// `agent:<uuid>`, aud `gyre`, jti, task_id, spawned_by, persona,
+    /// attestation_level, and both stack-hash spellings carrying the same
+    /// stored fingerprint — with the specced default TTL of 3600 s.
+    #[test]
+    fn agent_jwt_mints_specced_task_scoped_claims() {
+        let key = AgentSigningKey::generate();
+        let issuer = "http://localhost:3000";
+        let token = key
+            .mint_worker_scoped(
+                "worker-42",
+                "TASK-007",
+                "user:jsell",
+                issuer,
+                3600,
+                "t1",
+                "ws-1",
+                "repo-1",
+                "gyre",
+                Some("security"),
+                Some(2),
+                // Argument order matches the mint signature:
+                // wl_hostname (remote compute-target host) then
+                // wl_compute_target (the request's compute target id).
+                Some("ssh-host-1".to_string()),
+                Some("ct-docker-1".to_string()),
+                Some("sha256:abc123def456".to_string()),
+                Some("sha256:image".to_string()),
+            )
+            .expect("mint must succeed");
+        let claims = key
+            .validate(&token, issuer)
+            .expect("fresh minted token must validate");
+        assert_eq!(claims.sub, "agent:worker-42", "sub is agent:<uuid>");
+        assert_eq!(claims.aud, "gyre", "aud is the specced default");
+        assert!(!claims.jti.is_empty(), "jti is minted");
+        assert_eq!(claims.task_id, "TASK-007");
+        assert_eq!(claims.spawned_by, "user:jsell");
+        assert_eq!(claims.persona.as_deref(), Some("security"));
+        assert_eq!(claims.attestation_level, Some(2));
+        assert_eq!(
+            claims.wl_compute_target.as_deref(),
+            Some("ct-docker-1"),
+            "wl_compute_target carries the request's compute target id"
+        );
+        assert_eq!(claims.wl_hostname.as_deref(), Some("ssh-host-1"));
+        assert_eq!(
+            claims.stack_hash.as_deref(),
+            Some("sha256:abc123def456"),
+            "stack_hash carries the stored fingerprint"
+        );
+        assert_eq!(
+            claims.wl_stack_hash, claims.stack_hash,
+            "both specced spellings carry the same fingerprint"
+        );
+        assert_eq!(claims.wl_image_hash.as_deref(), Some("sha256:image"));
+        assert_eq!(
+            claims.exp - claims.iat,
+            3600,
+            "TTL is the specced default (3600 s)"
+        );
+    }
+
+    /// AC: "A token minted with a wrong/absent aud fails agent-token
+    /// validation (audience validation is live, not disabled)."
+    #[test]
+    fn agent_jwt_audience_validation_is_live() {
+        let key = AgentSigningKey::generate();
+        let issuer = "http://localhost:3000";
+        let token = key
+            .mint(
+                "agent-1", "task-1", "system", issuer, 3600, "t1", "ws-1", "repo-1", "repo-1",
+            )
+            .expect("mint must succeed");
+        assert!(key.validate(&token, issuer).is_ok());
+
+        // Hand-encoded claims signed by the SAME key — only the audience
+        // differs — must be rejected.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let mint_raw = |aud: Option<String>| {
+            let claims = super::AgentJwtClaims {
+                sub: "agent:agent-1".to_string(),
+                iss: issuer.to_string(),
+                aud: aud.unwrap_or_default(),
+                iat: now,
+                exp: now + 3600,
+                scope: vec!["repo:repo-1:write".to_string()],
+                jti: "jti-aud-probe".to_string(),
+                task_id: "task-1".to_string(),
+                spawned_by: "system".to_string(),
+                tenant_id: "t1".to_string(),
+                workspace_id: Some("ws-1".to_string()),
+                repo_id: Some("repo-1".to_string()),
+                orchestrator_type: None,
+                persona: None,
+                attestation_level: Some(1),
+                wl_pid: None,
+                wl_hostname: None,
+                wl_compute_target: None,
+                stack_hash: None,
+                wl_stack_hash: None,
+                wl_container_id: None,
+                wl_image_hash: None,
+            };
+            let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::EdDSA);
+            header.kid = Some(key.kid.clone());
+            jsonwebtoken::encode(&header, &claims, &key.encoding_key).unwrap()
+        };
+        let wrong_aud = mint_raw(Some("someone-else".to_string()));
+        let err = key
+            .validate(&wrong_aud, issuer)
+            .expect_err("wrong aud must fail validation");
+        assert!(err.contains("InvalidAudience"), "got: {err}");
+        let no_aud = mint_raw(None);
+        let err = key
+            .validate(&no_aud, issuer)
+            .expect_err("absent aud must fail validation");
+        assert!(err.contains("InvalidAudience"), "got: {err}");
+    }
+
+    /// AC: after the jti is written to the durable revoked_tokens table,
+    /// replaying the token gets 401 even though exp is in the future and
+    /// the KV entry is still present — the table lookup precedes expiry
+    /// validation.
+    #[tokio::test]
+    async fn revoked_jti_rejects_token_before_expiry() {
+        let state = test_state();
+        let token = state
+            .agent_signing_key
+            .mint(
+                "agent-jti-1",
+                "task-1",
+                "system",
+                &state.base_url,
+                3600,
+                "t1",
+                "ws-1",
+                "repo-1",
+                "repo-1",
+            )
+            .expect("mint must succeed");
+        state
+            .kv_store
+            .kv_set("agent_tokens", "agent-jti-1", token.clone())
+            .await
+            .unwrap();
+        let app = Router::new()
+            .route("/protected", get(authenticated_handler))
+            .with_state(state.clone());
+        // Before revocation the token authenticates.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/protected")
+                    .header("Authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Write the jti to the durable revocation table (what
+        // agent_audit::revoke_agent_token does on completion/stop).
+        let jti = state
+            .agent_signing_key
+            .extract_jti_unverified(&token)
+            .expect("minted token carries a jti");
+        state
+            .spawn_log
+            .revoke_token(&jti, "agent-jti-1", 1)
+            .await
+            .unwrap();
+        assert!(state.spawn_log.is_token_revoked(&jti).await.unwrap());
+
+        // Replay: 401 even though the KV entry is intact and exp is an
+        // hour out — the jti table lookup runs before expiry validation.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/protected")
+                    .header("Authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        let events = audit_events_of(&state, "auth_failure").await;
+        let e = events
+            .iter()
+            .find(|e| e.detail["rejection_reason"] == "agent token has been revoked")
+            .expect("revocation rejection recorded");
+        assert_eq!(e.detail["token_kind"], "agent_jwt");
+    }
+
     #[tokio::test]
     async fn auth_failure_audit_event_recorded_for_revoked_agent_jwt() {
         // A cryptographically valid agent JWT that is no longer in
@@ -2292,7 +3475,17 @@ mod tests {
         let state = test_state();
         let token = state
             .agent_signing_key
-            .mint("agent-gone", "task-1", "system", &state.base_url, 3600)
+            .mint(
+                "agent-gone",
+                "task-1",
+                "system",
+                &state.base_url,
+                3600,
+                "t1",
+                "ws-1",
+                "repo-1",
+                "repo-1",
+            )
             .expect("mint must succeed");
         let app = Router::new()
             .route("/protected", get(authenticated_handler))
@@ -2344,6 +3537,79 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(bytes.as_ref(), b"agent-42");
+    }
+
+    #[tokio::test]
+    async fn agent_jwt_tenant_mirrored_from_verified_claims() {
+        // task-130 review 29e132008c6748508f2c52ec982d78d6: the extractor must
+        // derive the caller's tenant from the signature-verified claims, not
+        // fabricate "default" — tenant-containment handlers
+        // (spawn_repo_orchestrator_core et al.) compare this value against
+        // the target entity's real tenant, and a fabricated identity denied
+        // correctly minted scoped tokens their own happy path.
+        async fn scope_handler(
+            crate::auth::AuthenticatedAgent {
+                tenant_id,
+                workspace_id,
+                repo_id,
+                scope,
+                ..
+            }: crate::auth::AuthenticatedAgent,
+        ) -> String {
+            format!(
+                "{tenant_id}|{}|{}|{}",
+                workspace_id.unwrap_or_default(),
+                repo_id.unwrap_or_default(),
+                scope.join(",")
+            )
+        }
+
+        let state = test_state();
+        // Workspace orchestrator scoped to tenant t1 / ws-1 (no repo).
+        let ws_token = state
+            .agent_signing_key
+            .mint_orchestrator(
+                "orch-tenant-mirror",
+                "system",
+                &state.base_url,
+                state.agent_jwt_ttl_secs,
+                "t1",
+                "ws-1",
+                None,
+                None,
+                "workspace_orchestrator",
+                "workspace-orchestrator",
+            )
+            .unwrap();
+        state
+            .kv_store
+            .kv_set("agent_tokens", "orch-tenant-mirror", ws_token.clone())
+            .await
+            .unwrap();
+
+        let app = Router::new()
+            .route("/protected", get(scope_handler))
+            .with_state(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/protected")
+                    .header("Authorization", format!("Bearer {ws_token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = std::str::from_utf8(&bytes).unwrap();
+        assert_eq!(
+            body, "t1|ws-1||workspace:ws-1:read,workspace:ws-1:spawn",
+            "tenant/workspace/scope must mirror the signature-verified claims, got: {body}"
+        );
     }
 
     #[tokio::test]
@@ -2465,6 +3731,56 @@ mod tests {
         let user = after.unwrap();
         assert_eq!(user.display_name, "dave");
         assert_eq!(user.email.as_deref(), Some("dave@example.com"));
+    }
+
+    /// Task-129 review round 3 (privilege escalation): the SSO
+    /// preferred_username claim is caller-chosen and becomes the
+    /// provisioned user's display_name — the ABAC subject.id under
+    /// API-key/JWT auth. `system-full-access` (priority 1000) matches the
+    /// reserved system identity, so provisioning under that handle must
+    /// fail closed (401) and create no user.
+    #[tokio::test]
+    async fn jwt_rejects_reserved_system_identity_provisioning() {
+        let state = make_test_state_with_jwt();
+
+        let claims = serde_json::json!({
+            "tenant_id": "default",
+            "sub": "spoof-sub-1",
+            "preferred_username": "gyre-system-token",
+            "realm_access": { "roles": ["developer"] }
+        });
+        let token = sign_test_jwt(&claims, 3600);
+
+        let app: Router = Router::new()
+            .route("/protected", get(authenticated_handler))
+            .with_state(state.clone());
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/protected")
+                    .header("Authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "SSO provisioning under the reserved system ABAC identity must fail closed"
+        );
+
+        // And no user row was created for the spoofed handle.
+        let after = state
+            .users
+            .find_by_external_id("spoof-sub-1")
+            .await
+            .unwrap();
+        assert!(
+            after.is_none(),
+            "rejected reserved-identity SSO login must not provision a user"
+        );
     }
 
     #[tokio::test]
@@ -3099,6 +4415,12 @@ mod tests {
                 "orchestrator-1",
                 issuer,
                 3600,
+                "tenant-acme",
+                "ws-1",
+                "repo-1",
+                "repo-name",
+                None,
+                None,
                 Some(4242),
                 Some("worker-host".to_string()),
                 Some("container".to_string()),
@@ -3118,7 +4440,17 @@ mod tests {
 
         // The no-workload mint must leave the claim absent, not defaulted.
         let bare = key
-            .mint("agt-img-2", "task-9", "orchestrator-1", issuer, 3600)
+            .mint(
+                "agt-img-2",
+                "task-9",
+                "orchestrator-1",
+                issuer,
+                3600,
+                "tenant-acme",
+                "ws-1",
+                "repo-1",
+                "repo-name",
+            )
             .expect("mint must succeed");
         let bare_claims = key
             .validate(&bare, issuer)
@@ -3286,7 +4618,17 @@ mod tests {
         ttl_secs: u64,
     ) -> String {
         signing_key
-            .mint(sub, "task-1", "system", issuer, ttl_secs)
+            .mint(
+                sub,
+                "task-1",
+                "system",
+                issuer,
+                ttl_secs,
+                "t1",
+                "ws-remote",
+                "repo-remote",
+                "remote-repo",
+            )
             .expect("mint must succeed")
     }
 
@@ -3396,18 +4738,23 @@ mod tests {
         let claims = crate::auth::AgentJwtClaims {
             sub: "agent-xyz".to_string(),
             iss: remote_url.to_string(),
+            aud: "gyre".to_string(),
             iat: now - 7200,
             exp: now - 3600,
-            scope: "agent".to_string(),
+            scope: vec!["repo:remote-repo:write".to_string()],
             jti: "test-jti".to_string(),
             task_id: "task-1".to_string(),
             spawned_by: "system".to_string(),
+            tenant_id: "t1".to_string(),
             workspace_id: None,
             repo_id: None,
             orchestrator_type: None,
+            persona: None,
+            attestation_level: None,
             wl_pid: None,
             wl_hostname: None,
             wl_compute_target: None,
+            stack_hash: None,
             wl_stack_hash: None,
             wl_container_id: None,
             wl_image_hash: None,
@@ -3507,6 +4854,257 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
+    // -- task-110 F2: invitation → SSO email link --------------------------------
+
+    /// A JWT login with a verified email matching an invitation-created
+    /// account (tenant-namespaced external_id) claims that account: the
+    /// external_id is re-pointed at the Keycloak subject, so the
+    /// pre-assigned memberships and invited GlobalRole ride the SSO
+    /// identity instead of a duplicate account.
+    #[tokio::test]
+    async fn jwt_email_link_claims_invitation_account() {
+        let state = make_test_state_with_jwt();
+
+        // Invitation-created local account (as accept_tenant_invitation
+        // would create it).
+        let mut invited = gyre_domain::User::new(
+            gyre_common::Id::new("invited-user-1"),
+            "tenant:acme:email:alice@example.com",
+            "alice",
+            1000,
+        );
+        invited.email = Some("alice@example.com".to_string());
+        invited.tenant_id = Some(gyre_common::Id::new("acme"));
+        state.users.create(&invited).await.unwrap();
+
+        // First SSO login: sub differs, email matches, verified.
+        let claims = serde_json::json!({
+            "sub": "keycloak-sub-alice",
+            "preferred_username": "alice",
+            "email": "alice@example.com",
+            "email_verified": true,
+            "tenant_id": "acme"
+        });
+        let token = sign_test_jwt(&claims, 3600);
+        let resp = app_with_jwt_state(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri("/protected")
+                    .header("Authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // The account was claimed: resolved by the SSO subject, no
+        // duplicate user created, and the tenant scope is preserved.
+        let claimed = state
+            .users
+            .find_by_external_id("keycloak-sub-alice")
+            .await
+            .unwrap()
+            .expect("account re-pointed to SSO subject");
+        assert_eq!(claimed.id, invited.id, "same account, not a duplicate");
+        assert_eq!(claimed.tenant_id, Some(gyre_common::Id::new("acme")));
+
+        // The old namespaced id no longer resolves (single account).
+        assert!(state
+            .users
+            .find_by_external_id("tenant:acme:email:alice@example.com")
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    /// Review 4cf9e027 F1 (deactivation contract): the SSO email-link
+    /// claim branch must not claim a DEACTIVATED invitation-created
+    /// account. Deactivation is TenantAdmin-initiated and outlives the
+    /// user's IdP session (the contract enforced by the API-key, WS, and
+    /// direct external_id paths) — a verified-email match for a
+    /// deactivated account must not mint a live session for it.
+    #[tokio::test]
+    async fn jwt_email_link_does_not_claim_deactivated_account() {
+        let state = make_test_state_with_jwt();
+
+        // Invitation-created local account, then deactivated by a
+        // TenantAdmin (PUT /api/v1/users/{id}/deactivate cascade).
+        let mut invited = gyre_domain::User::new(
+            gyre_common::Id::new("invited-user-deact"),
+            "tenant:acme:email:dave@example.com",
+            "dave",
+            1000,
+        );
+        invited.email = Some("dave@example.com".to_string());
+        invited.tenant_id = Some(gyre_common::Id::new("acme"));
+        state.users.create(&invited).await.unwrap();
+        let mut stored = state
+            .users
+            .find_by_id(&gyre_common::Id::new("invited-user-deact"))
+            .await
+            .unwrap()
+            .unwrap();
+        stored.deactivate(2000);
+        state.users.update(&stored).await.unwrap();
+
+        // SSO login with matching verified email in the same tenant.
+        let claims = serde_json::json!({
+            "sub": "keycloak-sub-dave",
+            "preferred_username": "dave",
+            "email": "dave@example.com",
+            "email_verified": true,
+            "tenant_id": "acme"
+        });
+        let token = sign_test_jwt(&claims, 3600);
+        let resp = app_with_jwt_state(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri("/protected")
+                    .header("Authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "a deactivated account must not re-authenticate via the email-link claim"
+        );
+
+        // The deactivated account was NOT claimed: it keeps its
+        // namespaced external_id, and no session-bearing account was
+        // created for the SSO subject.
+        let untouched = state
+            .users
+            .find_by_external_id("tenant:acme:email:dave@example.com")
+            .await
+            .unwrap()
+            .expect("deactivated invitation account was not claimed");
+        assert_eq!(untouched.id, gyre_common::Id::new("invited-user-deact"));
+        assert!(untouched.is_deactivated());
+        assert!(
+            state
+                .users
+                .find_by_external_id("keycloak-sub-dave")
+                .await
+                .unwrap()
+                .is_none(),
+            "no account exists under the SSO subject — the login failed closed"
+        );
+    }
+
+    /// An UNVERIFIED email must not claim the invitation account — an
+    /// attacker who can set an arbitrary unverified email in the IdP
+    /// must not inherit the invitee's tenant memberships.
+    #[tokio::test]
+    async fn jwt_unverified_email_does_not_claim_invitation_account() {
+        let state = make_test_state_with_jwt();
+        let mut invited = gyre_domain::User::new(
+            gyre_common::Id::new("invited-user-2"),
+            "tenant:acme:email:bob@example.com",
+            "bob",
+            1000,
+        );
+        invited.email = Some("bob@example.com".to_string());
+        invited.tenant_id = Some(gyre_common::Id::new("acme"));
+        state.users.create(&invited).await.unwrap();
+
+        let claims = serde_json::json!({
+            "sub": "attacker-sub",
+            "preferred_username": "mallory",
+            "email": "bob@example.com",
+            "email_verified": false,
+            "tenant_id": "acme"
+        });
+        let token = sign_test_jwt(&claims, 3600);
+        let resp = app_with_jwt_state(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri("/protected")
+                    .header("Authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // A new account was provisioned; the invitation account is
+        // untouched (still resolvable by its namespaced id).
+        let fresh = state
+            .users
+            .find_by_external_id("attacker-sub")
+            .await
+            .unwrap()
+            .expect("auto-provisioned new account");
+        assert_ne!(fresh.id, invited.id);
+        let still_there = state
+            .users
+            .find_by_external_id("tenant:acme:email:bob@example.com")
+            .await
+            .unwrap()
+            .expect("invitation account was NOT claimed");
+        assert_eq!(still_there.id, invited.id);
+    }
+
+    /// Cross-tenant emails do not link: same email in a different
+    /// tenant must not claim the account (tenants are isolation
+    /// boundaries).
+    #[tokio::test]
+    async fn jwt_email_link_does_not_cross_tenants() {
+        let state = make_test_state_with_jwt();
+        let mut invited = gyre_domain::User::new(
+            gyre_common::Id::new("invited-user-3"),
+            "tenant:acme:email:carol@example.com",
+            "carol",
+            1000,
+        );
+        invited.email = Some("carol@example.com".to_string());
+        invited.tenant_id = Some(gyre_common::Id::new("acme"));
+        state.users.create(&invited).await.unwrap();
+
+        // Same email, but the JWT tenant is "other".
+        let claims = serde_json::json!({
+            "sub": "other-tenant-sub",
+            "preferred_username": "carol",
+            "email": "carol@example.com",
+            "email_verified": true,
+            "tenant_id": "other"
+        });
+        let token = sign_test_jwt(&claims, 3600);
+        let resp = app_with_jwt_state(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri("/protected")
+                    .header("Authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // New account in the other tenant; acme account untouched.
+        let fresh = state
+            .users
+            .find_by_external_id("other-tenant-sub")
+            .await
+            .unwrap()
+            .expect("auto-provisioned new account");
+        assert_ne!(fresh.id, invited.id);
+        assert!(
+            state
+                .users
+                .find_by_external_id("tenant:acme:email:carol@example.com")
+                .await
+                .unwrap()
+                .is_some(),
+            "acme account was NOT claimed by another tenant's login"
+        );
+    }
+
     // -- G11-A SSRF guard tests -----------------------------------------------
 
     #[test]
@@ -3517,10 +5115,30 @@ mod tests {
         let key = super::AgentSigningKey::generate();
         let issuer = "http://localhost:3000";
         let t1 = key
-            .mint("agent-1", "task-1", "system", issuer, 3600)
+            .mint(
+                "agent-1",
+                "task-1",
+                "system",
+                issuer,
+                3600,
+                "t1",
+                "ws-1",
+                "repo-1",
+                "repo-1-name",
+            )
             .expect("mint");
         let t2 = key
-            .mint("agent-1", "task-1", "system", issuer, 3600)
+            .mint(
+                "agent-1",
+                "task-1",
+                "system",
+                issuer,
+                3600,
+                "t1",
+                "ws-1",
+                "repo-1",
+                "repo-1-name",
+            )
             .expect("mint");
 
         let j1 = key
@@ -3710,10 +5328,14 @@ mod tests {
     fn test_ws_ticket_issue_and_consume() {
         let store = WsTicketStore::new();
         let auth = AuthenticatedAgent {
+            auth_mechanism: crate::auth::AuthMechanism::GlobalToken,
             agent_id: "test-user".to_string(),
             user_id: None,
             roles: vec![UserRole::Admin],
             tenant_id: "default".to_string(),
+            workspace_id: None,
+            repo_id: None,
+            scope: Vec::new(),
             jwt_claims: None,
             bearer_token: None,
             deprecated_token_auth: false,
@@ -3741,10 +5363,14 @@ mod tests {
     fn test_ws_ticket_does_not_expose_real_token() {
         let store = WsTicketStore::new();
         let auth = AuthenticatedAgent {
+            auth_mechanism: crate::auth::AuthMechanism::GlobalToken,
             agent_id: "test-user".to_string(),
             user_id: None,
             roles: vec![UserRole::Admin],
             tenant_id: "default".to_string(),
+            workspace_id: None,
+            repo_id: None,
+            scope: Vec::new(),
             jwt_claims: None,
             bearer_token: None,
             deprecated_token_auth: false,
@@ -3754,6 +5380,382 @@ mod tests {
         // Ticket is a UUID, not a Bearer token or API key
         assert!(ticket.len() == 36, "Ticket should be a UUID format");
         assert!(!ticket.starts_with("ey"), "Ticket must not be a JWT");
+    }
+
+    // ── Session tracking (user-management.md §Session Management) ─────────
+
+    /// `track_session` throttles `last_active_at` writes: a session whose
+    /// last activity is older than SESSION_TOUCH_THROTTLE_SECS is touched;
+    /// one inside the window is left alone (no write amplification).
+    #[tokio::test]
+    async fn session_last_active_touch_is_throttled() {
+        let state = test_state();
+        let user_id = Id::new("throttle-user");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        // Stale session: last active 2 throttle windows ago → must be touched.
+        let stale = gyre_domain::UserSession::new(
+            Id::new("sess-stale"),
+            user_id.clone(),
+            "cred-stale",
+            "127.0.0.1",
+            "gyre-test/1.0",
+            now - 2 * SESSION_TOUCH_THROTTLE_SECS,
+            now + 3600,
+        );
+        state.sessions.create(&stale).await.unwrap();
+        assert!(
+            track_session(&state, &user_id, "cred-stale", "127.0.0.1", "gyre-test/1.0").await,
+            "active session must allow auth"
+        );
+        let touched = state
+            .sessions
+            .find_by_id(&stale.id)
+            .await
+            .unwrap()
+            .expect("session must survive tracking");
+        assert!(
+            touched.last_active_at >= now,
+            "session idle beyond the throttle window must have last_active_at \
+             refreshed to ~now, got {} (seeded {})",
+            touched.last_active_at,
+            stale.last_active_at
+        );
+        // Sliding expiry: the same throttled write must restart the TTL —
+        // a daily-active device never crosses its expiry wall.
+        assert!(
+            touched.expires_at >= now + SESSION_TTL_SECS,
+            "touch must slide expires_at to now + TTL (got {}, seeded {})",
+            touched.expires_at,
+            stale.expires_at
+        );
+
+        // Fresh session: last active seconds ago (inside the window) → must
+        // NOT be re-written.
+        let fresh = gyre_domain::UserSession::new(
+            Id::new("sess-fresh"),
+            user_id.clone(),
+            "cred-fresh",
+            "127.0.0.1",
+            "gyre-test/1.0",
+            now - 5,
+            now + 3600,
+        );
+        state.sessions.create(&fresh).await.unwrap();
+        let seeded_active = fresh.last_active_at;
+        let seeded_expiry = fresh.expires_at;
+        assert!(
+            track_session(&state, &user_id, "cred-fresh", "127.0.0.1", "gyre-test/1.0").await,
+            "active session must allow auth"
+        );
+        let after = state
+            .sessions
+            .find_by_id(&fresh.id)
+            .await
+            .unwrap()
+            .expect("session must survive tracking");
+        assert_eq!(
+            after.last_active_at, seeded_active,
+            "session inside the throttle window must not get a last_active_at \
+             write (write amplification)"
+        );
+        assert_eq!(
+            after.expires_at, seeded_expiry,
+            "session inside the throttle window must not get an expires_at \
+             write (write amplification)"
+        );
+    }
+
+    /// A device returning after an idle expiry (session found but
+    /// `expires_at` in the past) keeps authenticating and gets exactly one
+    /// fresh session row — the auth path must re-mint, not return to a row
+    /// that `GET /users/me/sessions` would filter out forever.
+    #[tokio::test]
+    async fn expired_session_is_reminted_not_zombified() {
+        let state = test_state();
+        let user_id = Id::new("remint-user");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        // Expired-but-not-revoked row for this device.
+        let expired = gyre_domain::UserSession::new(
+            Id::new("sess-expired"),
+            user_id.clone(),
+            "cred-remint",
+            "10.1.1.1",
+            "gyre-old/1.0",
+            now - SESSION_TTL_SECS - 100,
+            now - 50,
+        );
+        state.sessions.create(&expired).await.unwrap();
+
+        assert!(
+            track_session(&state, &user_id, "cred-remint", "10.1.1.1", "gyre-old/1.0").await,
+            "an expired-but-not-revoked session must not reject auth \
+             (expiry is not revocation)"
+        );
+
+        // Exactly one live row for the device now exists.
+        let all = state.sessions.list_for_user(&user_id).await.unwrap();
+        let live: Vec<_> = all
+            .iter()
+            .filter(|s| s.ip_address == "10.1.1.1" && s.user_agent == "gyre-old/1.0")
+            .filter(|s| !s.revoked && s.expires_at > now)
+            .collect();
+        assert_eq!(
+            live.len(),
+            1,
+            "expired session must be re-minted as exactly one live row, got {live:?}"
+        );
+        assert_ne!(
+            live[0].id, expired.id,
+            "the re-minted row must be a new row (fresh TTL), not the expired one"
+        );
+        assert!(
+            live[0].expires_at > now,
+            "re-minted session must be live (expires_at in the future)"
+        );
+
+        // Second request on the same device must find the new row (no
+        // re-mint-per-request explosion).
+        assert!(track_session(&state, &user_id, "cred-remint", "10.1.1.1", "gyre-old/1.0").await);
+        let all = state.sessions.list_for_user(&user_id).await.unwrap();
+        let live: Vec<_> = all
+            .iter()
+            .filter(|s| s.ip_address == "10.1.1.1" && s.user_agent == "gyre-old/1.0")
+            .filter(|s| !s.revoked && s.expires_at > now)
+            .collect();
+        assert_eq!(
+            live.len(),
+            1,
+            "re-presenting the same device must not mint a second live row"
+        );
+    }
+
+    /// "Sign out everywhere" must survive retention cleanup: revoked rows
+    /// are never deleted, so a credential whose every session was revoked
+    /// stays rejected forever — the cleanup job must not re-authorize it.
+    #[tokio::test]
+    async fn signout_everywhere_survives_retention_cleanup() {
+        let state = test_state();
+        let user_id = Id::new("retention-user");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        // Two long-expired sessions for this credential, both revoked.
+        for i in 0..2 {
+            let s = gyre_domain::UserSession::new(
+                Id::new(format!("sess-ret-{i}")),
+                user_id.clone(),
+                "cred-ret",
+                "10.2.2.2",
+                "gyre-ret/1.0",
+                now - 2 * SESSION_TTL_SECS,
+                now - SESSION_TTL_SECS,
+            );
+            state.sessions.create(&s).await.unwrap();
+            state.sessions.revoke(&s.id, &user_id).await.unwrap();
+        }
+        // An unrevoked long-expired row for another credential: this one
+        // MUST be deleted by retention cleanup.
+        let garbage = gyre_domain::UserSession::new(
+            Id::new("sess-ret-garbage"),
+            user_id.clone(),
+            "cred-other",
+            "10.2.2.2",
+            "gyre-ret/1.0",
+            now - 2 * SESSION_TTL_SECS,
+            now - SESSION_TTL_SECS,
+        );
+        state.sessions.create(&garbage).await.unwrap();
+
+        assert!(
+            credential_revoked(&state, &user_id, "cred-ret").await,
+            "all-revoked credential must be rejected (sign out everywhere)"
+        );
+
+        // Retention cleanup with a cutoff past everything.
+        let deleted = state
+            .sessions
+            .delete_expired_before(now - 100)
+            .await
+            .unwrap();
+        assert_eq!(deleted, 1, "only the unrevoked expired row is deleted");
+
+        // The signed-out credential is STILL rejected.
+        assert!(
+            credential_revoked(&state, &user_id, "cred-ret").await,
+            "retention cleanup must not re-authorize a signed-out credential"
+        );
+    }
+
+    /// The WebSocket/TTY auth path (`authenticate_token` — ws.rs and tty.rs
+    /// present a raw token from the client's Auth message, with no HTTP
+    /// headers) must enforce "sign out everywhere": a credential whose
+    /// every session has been revoked is rejected there too, not only on
+    /// the HTTP extractor path.
+    ///
+    /// The signed-out credential never authenticated over WS before the
+    /// revoke-all (its only session row is an HTTP device), so the WS
+    /// path's ("", "") device pair has no revoked row of its own — only
+    /// the credential-wide `credential_revoked` check can reject it.
+    /// Removing that check (or both session checks) from
+    /// `authenticate_token` makes this test fail: the stolen key would
+    /// mint a fresh WS session and authenticate.
+    #[tokio::test]
+    async fn ws_auth_rejects_signed_out_everywhere_credential() {
+        use gyre_domain::User;
+
+        let state = test_state();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        // Control: a live credential authenticates on the WS path (proves
+        // the Err below comes from revocation, not from broken setup).
+        // The user must carry a tenant binding (task-099 F1): API-key auth
+        // resolves the tenant scope from user.tenant_id and fail-closes
+        // when it is absent, so an unbound user would be rejected here.
+        let mut live_user = User::new(Id::new("ws-live-user"), "ext-ws-live", "ws-live", 1000);
+        live_user.tenant_id = Some(Id::new("t1"));
+        state.users.create(&live_user).await.unwrap();
+        let live_key = "gyre_ws_live_key";
+        state
+            .api_keys
+            .create(&super::hash_api_key(live_key), &live_user.id, "ws-live-key")
+            .await
+            .unwrap();
+        assert!(
+            authenticate_token(live_key, &state).await.is_ok(),
+            "control: a live credential must authenticate on the WS path"
+        );
+
+        // Victim: authenticated only from an HTTP device, then signed out
+        // everywhere. The WS device pair ("", "") has no session row, so
+        // the per-device check alone would mint a fresh one.
+        let mut victim = User::new(
+            Id::new("ws-victim-user"),
+            "ext-ws-victim",
+            "ws-victim",
+            1000,
+        );
+        victim.tenant_id = Some(Id::new("t1"));
+        state.users.create(&victim).await.unwrap();
+        let victim_key = "gyre_ws_victim_key";
+        state
+            .api_keys
+            .create(
+                &super::hash_api_key(victim_key),
+                &victim.id,
+                "ws-victim-key",
+            )
+            .await
+            .unwrap();
+        let http_session = gyre_domain::UserSession::new(
+            Id::new("sess-ws-victim-http"),
+            victim.id.clone(),
+            super::hash_api_key(victim_key),
+            "127.0.0.1",
+            "gyre-cli/1.0",
+            now,
+            now + SESSION_TTL_SECS,
+        );
+        state.sessions.create(&http_session).await.unwrap();
+        state
+            .sessions
+            .revoke_all_for_user(&victim.id)
+            .await
+            .unwrap();
+
+        // "Sign out everywhere" must hold on the WS path as well: the key
+        // cannot open a WebSocket even from a device (the WS ("", "")
+        // pair) that never presented it before.
+        assert!(
+            authenticate_token(victim_key, &state).await.is_err(),
+            "a signed-out-everywhere credential must be rejected by the WS auth path"
+        );
+    }
+
+    /// Per-device revocation on the WS path: a WS session that has been
+    /// revoked rejects `authenticate_token` even though the credential
+    /// still has other live sessions (so the credential-wide check alone
+    /// would allow it). Removing the `track_session` rejection from
+    /// `authenticate_token` (or both checks) makes this test fail.
+    #[tokio::test]
+    async fn ws_auth_rejects_revoked_ws_device_session() {
+        use gyre_domain::User;
+
+        let state = test_state();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        let mut victim = User::new(
+            Id::new("ws-device-user"),
+            "ext-ws-device",
+            "ws-device",
+            1000,
+        );
+        victim.tenant_id = Some(Id::new("t1"));
+        state.users.create(&victim).await.unwrap();
+        let raw_key = "gyre_ws_device_key";
+        let credential_hash = super::hash_api_key(raw_key);
+        state
+            .api_keys
+            .create(&credential_hash, &victim.id, "ws-device-key")
+            .await
+            .unwrap();
+
+        // First WS presentation mints the ("", "") session row.
+        assert!(
+            authenticate_token(raw_key, &state).await.is_ok(),
+            "live credential must authenticate on the WS path"
+        );
+        let ws_session = state
+            .sessions
+            .list_for_user(&victim.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|s| s.ip_address.is_empty() && s.user_agent.is_empty())
+            .expect("WS presentation must mint a ('', '') session row");
+
+        // A sibling HTTP session stays live, so the credential as a whole
+        // is NOT signed out everywhere (the credential-wide check passes).
+        let http_session = gyre_domain::UserSession::new(
+            Id::new("sess-ws-device-http"),
+            victim.id.clone(),
+            &credential_hash,
+            "127.0.0.1",
+            "gyre-cli/1.0",
+            now,
+            now + SESSION_TTL_SECS,
+        );
+        state.sessions.create(&http_session).await.unwrap();
+
+        // Revoke only the WS device's session.
+        state
+            .sessions
+            .revoke(&ws_session.id, &victim.id)
+            .await
+            .unwrap();
+
+        // The WS path must reject: this device's session is revoked, even
+        // though the credential still has a live HTTP session.
+        assert!(
+            authenticate_token(raw_key, &state).await.is_err(),
+            "a revoked WS device session must be rejected even while \
+             sibling sessions stay live"
+        );
     }
 
     // ── task-107 F12: key persistence across restarts ─────────────────────
@@ -3818,10 +5820,14 @@ mod tests {
         // spoofing user cannot forge: their key/JWT resolves to their own
         // user id.
         let global_token = AuthenticatedAgent {
+            auth_mechanism: crate::auth::AuthMechanism::GlobalToken,
             agent_id: "system".to_string(),
             user_id: None,
             roles: vec![UserRole::Admin],
             tenant_id: system_principal_tenant(),
+            workspace_id: None,
+            repo_id: None,
+            scope: Vec::new(),
             jwt_claims: None,
             bearer_token: None,
             deprecated_token_auth: false,
@@ -3831,10 +5837,14 @@ mod tests {
 
         // API-key user named "system": agent_id matches, user_id doesn't.
         let spoofed = AuthenticatedAgent {
+            auth_mechanism: crate::auth::AuthMechanism::ApiKey,
             agent_id: "system".to_string(),
             user_id: Some(gyre_common::Id::new("u-sys")),
             roles: vec![UserRole::Admin],
             tenant_id: "t-2".to_string(),
+            workspace_id: None,
+            repo_id: None,
+            scope: Vec::new(),
             jwt_claims: None,
             bearer_token: None,
             deprecated_token_auth: false,
@@ -3844,10 +5854,14 @@ mod tests {
 
         // Ordinary user: neither field matches.
         let ordinary = AuthenticatedAgent {
+            auth_mechanism: crate::auth::AuthMechanism::ApiKey,
             agent_id: "jsell".to_string(),
             user_id: Some(gyre_common::Id::new("u-1")),
             roles: vec![UserRole::Admin],
             tenant_id: "t-1".to_string(),
+            workspace_id: None,
+            repo_id: None,
+            scope: Vec::new(),
             jwt_claims: None,
             bearer_token: None,
             deprecated_token_auth: false,

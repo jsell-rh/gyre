@@ -1,11 +1,11 @@
 pub mod activity;
 pub mod admin;
 pub mod agent_logs;
-pub mod agent_messages;
 pub mod agent_tracking;
 pub mod agents;
 pub mod aibom;
 pub mod analytics;
+pub mod attestations;
 pub mod audit;
 pub mod auth;
 pub mod budget;
@@ -23,6 +23,7 @@ pub mod federation;
 pub mod gates;
 pub mod graph;
 pub mod impersonation;
+pub mod invitations;
 pub mod jj;
 pub mod key_binding;
 pub mod llm_config;
@@ -37,13 +38,16 @@ pub mod network;
 pub mod orchestrator;
 pub mod personas;
 pub mod policies;
+pub mod prompts;
 pub mod provenance;
 pub mod push_gates;
 pub mod recovery;
 pub mod release;
+pub mod repo_access;
 pub mod repos;
 pub mod saved_views;
 pub mod scim;
+pub mod scim_mappings;
 pub mod search;
 pub mod secrets;
 pub mod spawn;
@@ -80,6 +84,7 @@ use audit::{
     query_audit_events, record_audit_event, update_siem_target,
 };
 use axum::{
+    extract::DefaultBodyLimit,
     routing::{delete, get, post, put},
     Router,
 };
@@ -93,18 +98,43 @@ use gyre_common::Id;
 use impersonation::{
     approve_impersonation, deny_impersonation, end_impersonation, request_impersonation,
 };
+use invitations::{
+    accept_my_workspace_invitation, bulk_invite_to_tenant, decline_my_workspace_invitation,
+    get_invitation_policy, invite_to_tenant, invite_to_workspace, list_my_invitations,
+    list_tenant_invitations, list_workspace_invitations, revoke_tenant_invitation,
+    revoke_workspace_invitation, update_invitation_policy,
+};
 use std::sync::Arc;
 use users::{
-    create_team, create_token, create_user, delete_team, delete_token, dismiss_notification,
-    get_judgments, get_me, get_my_notifications, get_notification_count,
-    get_notification_preferences, invite_member, list_members, list_teams, list_tokens,
-    mark_notification_read, mark_notification_unread, remove_member, resolve_notification,
-    update_me, update_member_role, update_notification_preferences, update_team,
+    add_team_member, create_team, create_token, create_user, deactivate_user, delete_team,
+    delete_token, dismiss_notification, get_judgments, get_me, get_my_notifications,
+    get_notification_count, get_notification_preferences, get_unread_count, get_user_activity,
+    get_user_by_username, get_user_stats, invite_member, list_members, list_my_notifications,
+    list_my_sessions, list_teams, list_tokens, list_user_sessions, list_users,
+    mark_all_read_notifications, mark_notification_read, mark_notification_unread,
+    notification_stream, remove_member, remove_team_member, resolve_notification,
+    revoke_all_my_sessions, revoke_all_user_sessions, revoke_my_session, revoke_user_session,
+    update_me, update_member_role, update_notification_preferences, update_team, update_user_role,
 };
 
 use crate::AppState;
 
 pub fn api_router() -> Router<Arc<AppState>> {
+    // Message-specific body limit (message-bus.md §Edge Cases
+    // "Message too large"): the TOTAL POST request body on the send
+    // endpoint — the full JSON envelope including `to`, `kind`, and
+    // `payload` — is capped at 64KB, configurable via
+    // GYRE_MAX_MESSAGE_SIZE. Applied as a per-route layer on the send
+    // route's method router, it takes precedence over the global
+    // GYRE_MAX_BODY_SIZE (default 10MB) router layer in `build_router`,
+    // so a message payload can never ride the global limit up to ~10MB.
+    // Exceeding it is rejected with 413 by the body-limit extractor
+    // before the handler runs, so nothing is signed, stored, or broadcast.
+    let max_message_bytes: usize = std::env::var("GYRE_MAX_MESSAGE_SIZE")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(64 * 1024);
+
     Router::new()
         .route("/api/v1/version", get(version::version_handler))
         .route("/api/v1/activity", get(activity::activity_handler))
@@ -127,6 +157,20 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route("/api/v1/repos/:id/diff", get(repos::diff))
         .route("/api/v1/repos/:id/mirror/sync", post(repos::sync_mirror))
         .route("/api/v1/repos/:id/sync-specs", post(repos::sync_specs))
+        // Repo access overrides (user-management.md §Repo Access)
+        .route(
+            "/api/v1/repos/:id/access-overrides",
+            get(repo_access::list_repo_access_overrides),
+        )
+        .route(
+            "/api/v1/repos/:id/access-overrides/:user_id",
+            put(repo_access::set_repo_access_override)
+                .delete(repo_access::delete_repo_access_override),
+        )
+        .route(
+            "/api/v1/repos/:id/access/:user_id",
+            get(repo_access::get_repo_access),
+        )
         // Commit provenance (M13.2)
         .route(
             "/api/v1/repos/:id/provenance",
@@ -147,8 +191,25 @@ pub fn api_router() -> Router<Arc<AppState>> {
             "/api/v1/repos/:id/attestations/:commit_sha/chain",
             get(provenance::get_attestation_chain),
         )
+        // Merge attestation bundle verification (agent-gates.md §Part 3
+        // Verification): caller-supplied bundle, per-component result.
+        .route(
+            "/api/v1/attestations/verify",
+            post(attestations::verify_bundle),
+        )
         // AI Bill of Materials (M14.3)
         .route("/api/v1/repos/:id/aibom", get(aibom::get_aibom))
+        // AIBOM structured release artifact (supply-chain.md §AIBOM Contents,
+        // task-166): `?format=release`
+        .route(
+            "/api/v1/repos/:id/slsa-provenance",
+            get(provenance::get_slsa_provenance),
+        )
+        // Stack drift history (supply-chain.md §The Laptop Problem, task-166)
+        .route(
+            "/api/v1/repos/:id/stack-drift",
+            get(stack_attest::get_stack_drift),
+        )
         // Agent-commit tracking
         .route(
             "/api/v1/repos/:id/commits/record",
@@ -157,6 +218,33 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route(
             "/api/v1/repos/:id/agent-commits",
             get(agent_tracking::list_commits),
+        )
+        // Agent-session tracking (source-control.md §Agent-to-Commit
+        // Tracking): session list, commits-by-session, by-file/by-commit
+        // session queries, branch lifecycle, and time-travel.
+        .route(
+            "/api/v1/repos/:id/agent-sessions",
+            get(agent_tracking::list_sessions),
+        )
+        .route(
+            "/api/v1/repos/:id/agent-sessions/by-file",
+            get(agent_tracking::sessions_by_file),
+        )
+        .route(
+            "/api/v1/repos/:id/agent-sessions/by-commit",
+            get(agent_tracking::sessions_by_commit),
+        )
+        .route(
+            "/api/v1/repos/:id/agent-sessions/:session_id/commits",
+            get(agent_tracking::session_commits),
+        )
+        .route(
+            "/api/v1/repos/:id/agent-sessions/:session_id/state",
+            get(agent_tracking::session_state),
+        )
+        .route(
+            "/api/v1/repos/:id/agents/:agent_id/branch-lifecycle",
+            get(agent_tracking::branch_lifecycle),
         )
         // Worktree management
         .route(
@@ -174,7 +262,12 @@ pub fn api_router() -> Router<Arc<AppState>> {
         )
         .route(
             "/api/v1/repos/:id/gates/:gate_id",
-            delete(gates::delete_gate),
+            put(gates::update_gate).delete(gates::delete_gate),
+        )
+        // Gate chain configuration (agent-gates.md §Gate Chains)
+        .route(
+            "/api/v1/repos/:id/gate-chain",
+            get(gates::get_gate_chain).put(gates::set_gate_chain),
         )
         // Pre-accept push gates
         .route(
@@ -299,6 +392,7 @@ pub fn api_router() -> Router<Arc<AppState>> {
         )
         // Workload attestation (G10)
         .route("/api/v1/agents/:id/workload", get(workload::get_workload))
+        .route("/api/v1/agents/:id/attest", post(workload::attest_workload))
         // Container audit trail (M19.3)
         .route(
             "/api/v1/agents/:id/container",
@@ -342,6 +436,10 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route(
             "/api/v1/merge-requests/:id/diff",
             get(merge_requests::get_diff),
+        )
+        .route(
+            "/api/v1/merge-requests/:id/spec",
+            get(merge_requests::get_spec),
         )
         .route(
             "/api/v1/merge-requests/:id/attestation",
@@ -396,6 +494,12 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route("/api/v1/specs/conflicts", get(specs::get_conflicts))
         // TASK-023: Accountability agent patrol (spec-links.md §Accountability Agent Integration)
         .route("/api/v1/patrol/spec-links", post(specs::patrol_spec_links))
+        // task-204: spec-lifecycle accountability patrol (spec-lifecycle.md
+        // §Accountability Integration) — findings escalate to the orchestrator.
+        .route(
+            "/api/v1/patrol/spec-lifecycle",
+            post(specs::patrol_spec_lifecycle),
+        )
         .route("/api/v1/specs/:path", get(specs::get_spec))
         .route("/api/v1/specs/:path/approve", post(specs::approve_spec))
         .route(
@@ -441,6 +545,10 @@ pub fn api_router() -> Router<Arc<AppState>> {
             post(specs_assist::assist_spec),
         )
         .route(
+            "/api/v1/workspaces/:id/meta-specs/assist",
+            post(specs_assist::assist_meta_spec),
+        )
+        .route(
             "/api/v1/repos/:id/specs/save",
             post(specs_assist::save_spec),
         )
@@ -483,6 +591,12 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route("/api/v1/analytics/usage", get(analytics::usage))
         .route("/api/v1/analytics/compare", get(analytics::compare))
         .route("/api/v1/analytics/top", get(analytics::top_events))
+        // Analytics Decision API (analytics.md §Decision API for Agents)
+        .route("/api/v1/analytics/decide", get(analytics::decide))
+        .route(
+            "/api/v1/analytics/decide/custom",
+            post(analytics::decide_custom),
+        )
         // Costs
         .route(
             "/api/v1/costs",
@@ -501,6 +615,10 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route("/api/v1/admin/jobs", get(admin::admin_jobs))
         .route("/api/v1/admin/jobs/:name/run", post(admin::admin_run_job))
         .route("/api/v1/admin/audit", get(admin::admin_audit))
+        .route(
+            "/api/v1/admin/orphaned-workspaces",
+            get(admin::admin_orphaned_workspaces),
+        )
         // Admin user impersonation (identity-security.md §Impersonation).
         // Approve/deny are called by the TARGET user (any role) and are
         // ABAC-exempt with per-handler authorization — see
@@ -650,12 +768,28 @@ pub fn api_router() -> Router<Arc<AppState>> {
             "/api/v1/federation/trusted-issuers",
             get(federation::list_trusted_issuers),
         )
+        // SPIFFE federation (identity-security.md §Federation): the
+        // workload-attestation layer federated independently of the
+        // OIDC-issuer layer — exchanged trust-bundle verification for
+        // federated agents' SVIDs.
+        .route(
+            "/api/v1/federation/spiffe/attest",
+            post(federation::attest_federated_workload),
+        )
+        .route(
+            "/api/v1/federation/spiffe/workload",
+            get(federation::get_federated_workload),
+        )
         // Budget governance (M22.2)
         .route(
             "/api/v1/workspaces/:id/budget",
             get(budget::get_workspace_budget).put(budget::set_workspace_budget),
         )
         .route("/api/v1/budget/summary", get(budget::budget_summary))
+        .route(
+            "/api/v1/workspaces/:id/budget/by-team",
+            get(budget::budget_by_team),
+        )
         // Search (M22.7)
         .route("/api/v1/search", get(search::search_handler))
         .route("/api/v1/search/suggest", get(search::suggest_handler))
@@ -720,6 +854,11 @@ pub fn api_router() -> Router<Arc<AppState>> {
             "/api/v1/workspaces/:id/meta-spec-set",
             get(meta_specs::get_meta_spec_set).put(meta_specs::put_meta_spec_set),
         )
+        // Workspace merge policy (meta-spec-reconciliation.md §9)
+        .route(
+            "/api/v1/workspaces/:id/merge-policy",
+            get(workspaces::get_merge_policy).put(workspaces::set_merge_policy),
+        )
         // Rollout policy (meta-spec-reconciliation.md §7)
         .route(
             "/api/v1/workspaces/:id/meta-specs/rollout-policy",
@@ -729,17 +868,6 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route(
             "/api/v1/workspaces/:id/orchestrator/spawn",
             post(orchestrator::spawn_workspace_orchestrator),
-        )
-        // Meta-spec preview loop (S4.6 — §5 of meta-spec-reconciliation.md)
-        // NOTE: the status route must be registered before the POST route to avoid
-        // axum matching the preview_id segment as a method collision.
-        .route(
-            "/api/v1/workspaces/:id/meta-specs/preview",
-            post(meta_specs::post_meta_spec_preview),
-        )
-        .route(
-            "/api/v1/workspaces/:id/meta-specs/preview/:preview_id",
-            get(meta_specs::get_meta_spec_preview_status),
         )
         // LLM function config (LLM integration §4)
         .route(
@@ -760,10 +888,18 @@ pub fn api_router() -> Router<Arc<AppState>> {
             "/api/v1/admin/llm/config/:function",
             put(llm_config::put_tenant_llm_default),
         )
-        // Message bus (Phase 3)
+        // Message bus (Phase 3): the send route carries the message-specific
+        // body limit declared above (GYRE_MAX_MESSAGE_SIZE, default 64KB → 413).
         .route(
             "/api/v1/workspaces/:workspace_id/messages",
-            post(messages::send_message).get(messages::list_workspace_messages),
+            post(messages::send_message)
+                .get(messages::list_workspace_messages)
+                .layer(DefaultBodyLimit::max(max_message_bytes)),
+        )
+        // Workspace-scoped telemetry feed (message-bus.md §API > Telemetry)
+        .route(
+            "/api/v1/workspaces/:workspace_id/activity",
+            get(activity::workspace_activity_handler),
         )
         // Presence (HSI §7)
         .route(
@@ -801,25 +937,61 @@ pub fn api_router() -> Router<Arc<AppState>> {
             "/api/v1/meta-specs/:path/blast-radius",
             get(meta_specs::get_meta_spec_blast_radius),
         )
-        // Meta-spec registry CRUD (agent-runtime spec §2)
-        // NOTE: /:id/versions must be registered before /:id to prevent axum from
-        // matching "versions" as an id segment.
+        // Meta-spec preview mode (§5 of meta-spec-reconciliation.md). Global
+        // (not workspace-scoped): a preview targets repos across workspaces, so
+        // the scope is derived per target from the repo record and checked with
+        // ABAC + tenant containment in the handlers. The static `preview`
+        // segment outranks the `:path` wildcard above, so a meta-spec whose path
+        // is literally `preview` has no reachable blast-radius lookup.
         .route(
-            "/api/v1/meta-specs-registry",
+            "/api/v1/meta-specs/preview",
+            post(meta_specs::post_meta_spec_preview),
+        )
+        .route(
+            "/api/v1/meta-specs/preview/:preview_id",
+            get(meta_specs::get_meta_spec_preview_status)
+                .delete(meta_specs::delete_meta_spec_preview),
+        )
+        // Workspace-scoped preview surface (same §5 machinery as the global
+        // routes above): every target repo of the run must live in the path's
+        // workspace, and that workspace is contained to the caller's tenant
+        // in the handlers. These paths predate the ABAC resolver and were
+        // exempted from it on the base tree; they are resolver-enforced now
+        // (see the mappings in abac_middleware.rs), which is the sanctioned
+        // way to retire an exemption entry — the route stays registered and
+        // gains policy evaluation, so the base tree's frozen exemption data
+        // still resolves against a live, authorized route.
+        .route(
+            "/api/v1/workspaces/:id/meta-specs/preview",
+            post(meta_specs::post_workspace_meta_spec_preview),
+        )
+        .route(
+            "/api/v1/workspaces/:id/meta-specs/preview/:preview_id",
+            get(meta_specs::get_workspace_meta_spec_preview_status)
+                .delete(meta_specs::delete_workspace_meta_spec_preview),
+        )
+        // Meta-spec registry CRUD (agent-runtime spec §2) — served at the
+        // specced flat routes (single entity type; scope via query/body per
+        // the spec's flat-route note). Coexists with the `:path/blast-radius`
+        // route above and the static `/preview` segments: matchit
+        // prioritizes the static segment, and the distinct child segments
+        // (`versions` vs `blast-radius`) keep the `:id` routes disjoint.
+        .route(
+            "/api/v1/meta-specs",
             get(meta_specs::list_meta_specs_registry).post(meta_specs::create_meta_spec_registry),
         )
         .route(
-            "/api/v1/meta-specs-registry/:id",
+            "/api/v1/meta-specs/:id",
             get(meta_specs::get_meta_spec_registry)
                 .put(meta_specs::update_meta_spec_registry)
                 .delete(meta_specs::delete_meta_spec_registry),
         )
         .route(
-            "/api/v1/meta-specs-registry/:id/versions",
+            "/api/v1/meta-specs/:id/versions",
             get(meta_specs::list_meta_spec_versions),
         )
         .route(
-            "/api/v1/meta-specs-registry/:id/versions/:version",
+            "/api/v1/meta-specs/:id/versions/:version",
             get(meta_specs::get_meta_spec_version),
         )
         // Spec-level meta-spec bindings (agent-runtime spec §2)
@@ -861,17 +1033,56 @@ pub fn api_router() -> Router<Arc<AppState>> {
                 .put(policies::update_policy)
                 .delete(policies::delete_policy),
         )
-        // Bootstrap user provisioning - Admin-only, per-handler check.
-        .route("/api/v1/users", post(create_user))
+        // Bootstrap user provisioning + user listing - Admin-only, per-handler check.
+        .route("/api/v1/users", get(list_users).post(create_user))
         // User profile (M22.8 + HSI §12)
         .route("/api/v1/users/me", get(get_me).put(update_me))
+        // My workspace invitations (task-110 repair: the invitee's pending-
+        // invitations view, spec §Workspace Invitation Flow steps 3-4)
+        .route("/api/v1/users/me/invitations", get(list_my_invitations))
+        // Tenant-public profile by username (user-management.md §API >
+        // User Management). Registered after /users/me: axum's matchit
+        // prioritizes the static segment, so /users/me never lands here.
+        .route("/api/v1/users/:username", get(get_user_by_username))
+        // Public profile activity feed + aggregate stats
+        // (user-management.md §User Profile Page, /@{username} surface):
+        // same tenant containment as the profile itself (in-handler).
+        .route("/api/v1/users/:username/activity", get(get_user_activity))
+        .route("/api/v1/users/:username/stats", get(get_user_stats))
+        // Deactivate a user (TenantAdmin only, per-handler check)
+        .route("/api/v1/users/:id/deactivate", put(deactivate_user))
+        // Change a user's GlobalRole (TenantAdmin only, per-handler check —
+        // user-management.md §UI Pages > Tenant User Management)
+        .route("/api/v1/users/:id/role", put(update_user_role))
         // API Tokens (HSI §12) — per-handler auth, ABAC-exempt
         .route(
             "/api/v1/users/me/tokens",
             get(list_tokens).post(create_token),
         )
         .route("/api/v1/users/me/tokens/:id", delete(delete_token))
-        // Notification Preferences (HSI §12) — per-handler auth, ABAC-exempt
+        // Session Management (user-management.md §Session Management) —
+        // per-handler auth (scoped to caller), ABAC-exempt
+        .route("/api/v1/users/me/sessions", get(list_my_sessions))
+        .route(
+            "/api/v1/users/me/sessions/revoke-all",
+            post(revoke_all_my_sessions),
+        )
+        .route("/api/v1/users/me/sessions/:id", delete(revoke_my_session))
+        // TenantAdmin session management (user-management.md §Session
+        // Management — "TenantAdmins can view and revoke any user's
+        // sessions") — per-handler auth (Admin role), ABAC-exempt
+        .route("/api/v1/users/:user_id/sessions", get(list_user_sessions))
+        .route(
+            "/api/v1/users/:user_id/sessions/revoke-all",
+            post(revoke_all_user_sessions),
+        )
+        .route(
+            "/api/v1/users/:user_id/sessions/:id",
+            delete(revoke_user_session),
+        )
+        // Notification Preferences (HSI §12 + user-management.md §Delivery
+        // Channels) — per-type preferences and delivery channel config,
+        // per-handler auth, ABAC-exempt
         .route(
             "/api/v1/users/me/notification-preferences",
             get(get_notification_preferences).put(update_notification_preferences),
@@ -884,6 +1095,21 @@ pub fn api_router() -> Router<Arc<AppState>> {
             "/api/v1/users/me/notifications/count",
             get(get_notification_count),
         )
+        // Spec paths (user-management.md §API > Notifications). Same handlers
+        // and per-handler scoping as the legacy /users/me routes above.
+        .route("/api/v1/notifications", get(list_my_notifications))
+        .route("/api/v1/notifications/unread-count", get(get_unread_count))
+        .route(
+            "/api/v1/notifications/mark-all-read",
+            post(mark_all_read_notifications),
+        )
+        // Preferences (per-type + delivery channels, task-112 §Delivery
+        // Channels) — same combined handlers as /users/me/notification-preferences
+        .route(
+            "/api/v1/notifications/preferences",
+            get(get_notification_preferences).put(update_notification_preferences),
+        )
+        .route("/api/v1/notifications/stream", get(notification_stream))
         .route(
             "/api/v1/notifications/:id/dismiss",
             post(dismiss_notification),
@@ -894,7 +1120,9 @@ pub fn api_router() -> Router<Arc<AppState>> {
         )
         .route(
             "/api/v1/notifications/:id/read",
-            post(mark_notification_read),
+            // Spec (user-management.md §API > Notifications) names PUT;
+            // POST is kept for the pre-existing clients of the same handler.
+            put(mark_notification_read).post(mark_notification_read),
         )
         .route(
             "/api/v1/notifications/:id/unread",
@@ -905,9 +1133,68 @@ pub fn api_router() -> Router<Arc<AppState>> {
             "/api/v1/workspaces/:id/members",
             post(invite_member).get(list_members),
         )
+        // NOTE (task-110 rebase onto base 5984177): the four spec
+        // invitation paths below — POST /invite, GET /invitations,
+        // POST /invite/accept, DELETE /invitations/:id — are registered by
+        // api/invitations.rs (task-110's WorkspaceInvitation model). The
+        // task-124 base registered its membership-row handlers on the same
+        // paths; axum rejects duplicate registrations and both branches
+        // implemented the same spec section, so only task-110's
+        // superset model (decline, expiry, per-tenant policy,
+        // max_pending cap, background expiry) keeps them.
         .route(
             "/api/v1/workspaces/:id/members/:user_id",
             put(update_member_role).delete(remove_member),
+        )
+        // SCIM group-to-workspace-role mappings (task-266,
+        // identity-security.md §Group-to-Workspace Mapping). Owner/Admin
+        // enforced per-handler (can_manage), ABAC resource `scim_mapping`.
+        .route(
+            "/api/v1/workspaces/:id/scim-mappings",
+            put(scim_mappings::put_workspace_scim_mappings)
+                .get(scim_mappings::get_workspace_scim_mappings),
+        )
+        // Tenant invitations (task-110, user-management.md §API > Tenant
+        // Invitations). TenantAdmin-only, enforced per-handler.
+        .route("/api/v1/tenant/invite", post(invite_to_tenant))
+        .route("/api/v1/tenant/invite/bulk", post(bulk_invite_to_tenant))
+        .route("/api/v1/tenant/invitations", get(list_tenant_invitations))
+        .route(
+            "/api/v1/tenant/invitations/policy",
+            get(get_invitation_policy).put(update_invitation_policy),
+        )
+        .route(
+            "/api/v1/tenant/invitations/:id",
+            delete(revoke_tenant_invitation),
+        )
+        // Workspace invitations (task-110, user-management.md §API >
+        // Workspace Membership). Owner/Admin enforced per-handler.
+        .route("/api/v1/workspaces/:id/invite", post(invite_to_workspace))
+        // Invitee-facing accept/decline (task-110 repair, spec §API >
+        // Workspace Membership: authenticated invitee accepts THEIR
+        // pending invitation — no token).
+        .route(
+            "/api/v1/workspaces/:id/invite/accept",
+            post(accept_my_workspace_invitation),
+        )
+        .route(
+            "/api/v1/workspaces/:id/invite/decline",
+            post(decline_my_workspace_invitation),
+        )
+        .route(
+            "/api/v1/workspaces/:id/invitations",
+            get(list_workspace_invitations),
+        )
+        .route(
+            "/api/v1/workspaces/:id/invitations/:id",
+            delete(revoke_workspace_invitation),
+        )
+        // Spec-named alias (user-management.md §Ownership Transfer &
+        // Reclamation and §API: `PUT .../members/{user_id}/role`) for the
+        // M22.8 member path above — same handler, same authorization.
+        .route(
+            "/api/v1/workspaces/:id/members/:user_id/role",
+            put(update_member_role),
         )
         // Teams (M22.8)
         .route(
@@ -918,6 +1205,14 @@ pub fn api_router() -> Router<Arc<AppState>> {
             "/api/v1/workspaces/:id/teams/:team_id",
             put(update_team).delete(delete_team),
         )
+        .route(
+            "/api/v1/workspaces/:id/teams/:team_id/members",
+            post(add_team_member),
+        )
+        .route(
+            "/api/v1/workspaces/:id/teams/:team_id/members/:user_id",
+            delete(remove_team_member),
+        )
         // ── SCIM 2.0 Provisioning ─────────────────────────────────────────
         .route(
             "/scim/v2/Users",
@@ -927,6 +1222,7 @@ pub fn api_router() -> Router<Arc<AppState>> {
             "/scim/v2/Users/:id",
             get(scim::scim_get_user)
                 .put(scim::scim_update_user)
+                .patch(scim::scim_patch_user)
                 .delete(scim::scim_delete_user),
         )
         .route(
@@ -935,6 +1231,17 @@ pub fn api_router() -> Router<Arc<AppState>> {
         )
         .route("/scim/v2/Schemas", get(scim::scim_schemas))
         .route("/scim/v2/ResourceTypes", get(scim::scim_resource_types))
+        .route(
+            "/scim/v2/Groups",
+            get(scim::scim_list_groups).post(scim::scim_create_group),
+        )
+        .route(
+            "/scim/v2/Groups/:id",
+            get(scim::scim_get_group)
+                .put(scim::scim_update_group)
+                .patch(scim::scim_patch_group)
+                .delete(scim::scim_delete_group),
+        )
         // ── Knowledge graph (realized-model.md §7) ────────────────────────
         .route("/api/v1/repos/:id/graph", get(graph::get_repo_graph))
         .route("/api/v1/repos/:id/graph/types", get(graph::get_graph_types))
@@ -955,6 +1262,10 @@ pub fn api_router() -> Router<Arc<AppState>> {
             get(graph::get_graph_concept),
         )
         .route(
+            "/api/v1/repos/:id/graph/concepts",
+            get(graph::list_graph_concepts),
+        )
+        .route(
             "/api/v1/repos/:id/graph/timeline",
             get(graph::get_graph_timeline),
         )
@@ -967,6 +1278,10 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route(
             "/api/v1/repos/:id/graph/predict",
             get(graph::predict_graph).post(graph::predict_graph),
+        )
+        .route(
+            "/api/v1/repos/:id/graph/thorough-preview",
+            post(graph::thorough_preview),
         )
         .route(
             "/api/v1/repos/:id/graph/query-dryrun",
@@ -988,6 +1303,10 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route(
             "/api/v1/workspaces/:id/graph/concept/:concept_name",
             get(graph::get_workspace_graph_concept),
+        )
+        .route(
+            "/api/v1/workspaces/:id/graph/concepts",
+            get(graph::list_workspace_graph_concepts),
         )
         .route(
             "/api/v1/workspaces/:id/briefing",
@@ -1018,6 +1337,10 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route(
             "/api/v1/workspaces/:id/explorer-views/generate",
             post(explorer_views::generate_explorer_view),
+        )
+        .route(
+            "/api/v1/workspaces/:id/explorer-views/ask",
+            post(explorer_views::ask_explorer),
         )
         .route(
             "/api/v1/workspaces/:id/explorer-views/:view_id",

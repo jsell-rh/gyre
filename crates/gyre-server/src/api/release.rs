@@ -204,6 +204,7 @@ pub async fn release_prepare(
         let mr = gyre_domain::MergeRequest::new(
             new_id(),
             Id::new(&req.repo_id),
+            repo.workspace_id.clone(),
             title,
             branch.clone(),
             repo.default_branch.clone(),
@@ -218,6 +219,14 @@ pub async fn release_prepare(
         None
     };
 
+    // Spec registry manifest state (spec-registry.md §Supply Chain): the
+    // release metadata carries the same spec_registry section the AIBOM
+    // embeds, so a release artifact and the standalone AIBOM can never
+    // disagree about spec provenance.
+    let spec_registry = crate::aibom_spec_registry::build_spec_registry_section(&state, &repo)
+        .await
+        .map_err(ApiError::Internal)?;
+
     Ok(Json(ReleasePrepareResponse {
         current_tag: tag,
         next_version,
@@ -228,6 +237,7 @@ pub async fn release_prepare(
         changelog,
         sections,
         mr_id,
+        spec_registry,
     }))
 }
 
@@ -438,5 +448,103 @@ mod tests {
             .unwrap();
         // Missing required field -> 422 Unprocessable Entity.
         assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn release_prepare_includes_spec_registry_metadata() {
+        let state = crate::mem::test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let repo_id = create_repo(&app).await;
+
+        // Seed the ledger for this repo: one approved spec with an approval
+        // event, one pending spec.
+        let sha = format!("{:040}", 3);
+        let entry =
+            |path: &str, status: gyre_domain::ApprovalStatus| gyre_domain::SpecLedgerEntry {
+                path: path.to_string(),
+                title: format!("Spec {path}"),
+                owner: "owner-1".to_string(),
+                kind: None,
+                current_sha: sha.clone(),
+                approval_mode: "human_only".to_string(),
+                approval_status: status,
+                linked_tasks: Vec::new(),
+                linked_mrs: Vec::new(),
+                drift_status: "clean".to_string(),
+                created_at: 100,
+                updated_at: 100,
+                repo_id: Some(repo_id.clone()),
+                workspace_id: None,
+            };
+        state
+            .spec_ledger
+            .save(&entry(
+                "system/auth.md",
+                gyre_domain::ApprovalStatus::Approved,
+            ))
+            .await
+            .unwrap();
+        state
+            .spec_ledger
+            .save(&entry(
+                "system/wip.md",
+                gyre_domain::ApprovalStatus::Pending,
+            ))
+            .await
+            .unwrap();
+        state
+            .spec_approval_history
+            .record(&gyre_domain::SpecApprovalEvent {
+                id: "evt-rel-1".to_string(),
+                spec_path: "system/auth.md".to_string(),
+                spec_sha: sha.clone(),
+                approver_type: "human".to_string(),
+                approver_id: "user:alice".to_string(),
+                persona: None,
+                attestation_level: None,
+                stack_hash: None,
+                approved_at: 1711324800,
+                revoked_at: None,
+                revoked_by: None,
+                revocation_reason: None,
+            })
+            .await
+            .unwrap();
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/release/prepare")
+                    .header("content-type", "application/json")
+                    .header("Authorization", AUTH)
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({"repo_id": repo_id})).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+
+        // Release metadata carries the spec registry manifest state.
+        let sr = &json["spec_registry"];
+        assert_eq!(sr["total_specs"], 2);
+        assert_eq!(sr["approved"], 1);
+        assert_eq!(sr["pending"], 1);
+        assert!(sr["manifest_version"].is_null());
+        let specs = sr["specs"].as_array().unwrap();
+        let auth = specs
+            .iter()
+            .find(|s| s["path"] == "system/auth.md")
+            .unwrap();
+        assert_eq!(auth["status"], "approved");
+        assert_eq!(auth["approved_by"], serde_json::json!(["user:alice"]));
+        assert_eq!(auth["approved_at"], 1711324800);
+        assert_eq!(auth["approval_mode"], "human_only");
+        // No MRs with spec_ref → empty bindings, truthfully reported.
+        assert_eq!(sr["spec_code_bindings"].as_array().unwrap().len(), 0);
+        assert_eq!(sr["bindings_summary"]["total"], 0);
     }
 }

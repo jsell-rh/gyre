@@ -4,11 +4,19 @@
   import { createWsStore } from './lib/ws.js';
   import { createPresenceHeartbeat } from './lib/presence.js';
   import { createLivenessTracker } from './lib/liveness.svelte.js';
+  import { attachNotificationStream } from './lib/notifications.svelte.js';
   import WorkspaceHome from './components/WorkspaceHome.svelte';
   import RepoMode from './components/RepoMode.svelte';
   import WorkspaceSettings from './components/WorkspaceSettings.svelte';
+  import AnalyticsView from './components/AnalyticsView.svelte';
   import MetaSpecs from './components/MetaSpecs.svelte';
   import UserProfile from './components/UserProfile.svelte';
+  import PublicUserProfile from './components/PublicUserProfile.svelte';
+  import InvitationAccept from './components/InvitationAccept.svelte';
+  import NotificationBell from './components/NotificationBell.svelte';
+  import NavRail from './components/NavRail.svelte';
+  import { REPO_TAB_IDS } from './lib/repoTabs.js';
+  import NotificationSettings from './components/NotificationSettings.svelte';
   import CrossWorkspaceHome from './components/CrossWorkspaceHome.svelte';
   import TenantSettings from './components/TenantSettings.svelte';
   import Toast from './lib/Toast.svelte';
@@ -22,8 +30,24 @@
   import { toast as showToast } from './lib/toast.svelte.js';
 
   // ── Navigation mode ──────────────────────────────────────────────────
-  // 'workspace_home' | 'workspace_settings' | 'repo' | 'profile'
+  // 'workspace_home' | 'workspace_settings' | 'analytics' | 'repo' | 'profile' |
+  // 'user_profile' (@username) | 'invite_accept' (/invite/:id) | 'notification_settings'
   let mode = $state('workspace_home');
+
+  // ── Public profile / invitation accept state ────────────────────────
+  // /@username — tenant-public profile (user-management.md §User Profile
+  // Page); the shared route state also serves the drawer's deep links.
+  // /invite/:workspaceId — the authenticated invitee's pending workspace
+  // invitation accept page (GET /users/me/invitations → POST
+  // /workspaces/{id}/invite/accept|decline).
+  // /invite/:token — the magic-link form (task-110): a 64-hex-char
+  // CSPRNG token is the auth factor (no session needed); the page
+  // previews via GET /invite/{token}/preview and accepts/declines via
+  // the token endpoints. The two shapes are disjoint — workspace ids
+  // are UUIDs (36 chars with dashes), invitation tokens are 64 hex
+  // chars — so the segment alone disambiguates.
+  let inviteWorkspaceId = $state(null);
+  let inviteToken = $state(null);
 
   // ── Workspace / repo state ───────────────────────────────────────────
   let workspaces = $state([]);
@@ -72,6 +96,11 @@
     const store = createWsStore();
     wsStore = store;
     const unsub = store.onStatus((s) => (wsStatus = s));
+    // Notification bell realtime (user-management.md §In-App Notification
+    // UI): NotificationPush messages on this connection bump the unread
+    // badge live. Rides the same socket as presence/liveness — the SPA
+    // holds one realtime channel per tab.
+    const detachNotifications = attachNotificationStream(store);
     // Presence heartbeat (HSI §1): send-on-connect, 30s timer, view-change
     // re-send (5s debounce), and disconnect on beforeunload. Without it the
     // server idle-evicts this tab after 60s and other users lose the
@@ -89,6 +118,7 @@
     });
     return () => {
       unsub();
+      detachNotifications();
       presenceHeartbeat.destroy();
       presenceHeartbeat = null;
       livenessTracker.destroy();
@@ -199,6 +229,13 @@
     } catch { /* ignore */ }
   }
 
+  // ── Notification bell (user-management.md §In-App Notification UI) ─────
+  // The bell + drawer are the NotificationBell component (single top-bar
+  // notification surface per the amended ui-navigation.md §1): its badge is
+  // the UNREAD notification count (GET /notifications/unread-count), kept
+  // live by the NotificationPush realtime stream wired above and a 60s
+  // resync — see components/NotificationBell.svelte.
+
   // ── Slug helpers ──────────────────────────────────────────────────────
   /** Get URL slug for a workspace. Uses ws.slug if present, else ws.id. */
   function wsSlug(ws) {
@@ -221,9 +258,15 @@
   // /workspaces/:slug/r/:repo/tasks/:id        → task detail page
   // /workspaces/:slug/r/:repo/agents/:id       → agent detail page
   // /workspaces/:slug/r/:repo/specs/*path      → spec detail page
-  // /profile                                   → user profile
+  // /profile                                   → user profile (self)
+  // /@username                                 → tenant-public profile (user-management.md §UI Pages)
+  // /invite/:workspaceId                       → pending invitation accept page (§UI Pages)
+  // /invite/:token (64-hex magic link)         → token-form accept page (task-110)
 
-  const REPO_TABS = ['specs', 'tasks', 'mrs', 'agents', 'architecture', 'decisions', 'code', 'settings'];
+  // Repo tab ids for URL parsing — derived from the repo tab strip
+  // (web/src/lib/repoTabs.js, the single source of truth shared with
+  // RepoMode's tab bar, the navigation rail, and the mobile drawer), so a
+  // tab added to the strip is deep-linkable the moment it ships.
   const ENTITY_TABS = ['mrs', 'tasks', 'agents'];
 
   // ── Entity detail state ─────────────────────────────────────────────
@@ -246,6 +289,42 @@
     // /profile
     if (raw.length === 1 && raw[0] === 'profile') {
       return { mode: 'profile', slug: null, repoName: null, tab: null, entityType: null, entityId: null };
+    }
+
+    // /@{username} — tenant-scoped public user profile
+    // (user-management.md §User Profile Page). The handle is the URL-decoded
+    // first segment minus its leading '@'.
+    if (raw[0]?.startsWith('@') && raw[0].length > 1) {
+      return {
+        mode: 'user_profile',
+        slug: null,
+        repoName: null,
+        tab: null,
+        entityType: null,
+        entityId: null,
+        username: raw[0].slice(1),
+      };
+    }
+
+    // /invite/:workspaceId OR /invite/:token — pending invitation accept
+    // page (user-management.md §UI Pages > Pending Invitation Accept
+    // Page). A 64-char lowercase-hex segment is a task-110 magic-link
+    // token (CSPRNG, auth factor in the URL); anything else is the
+    // authenticated flow's workspace id (a UUID). The shapes are
+    // disjoint, so the segment alone disambiguates.
+    if (raw[0] === 'invite' && raw.length === 2) {
+      const isToken = /^[0-9a-f]{64}$/.test(raw[1]);
+      return {
+        mode: 'invite_accept', slug: null, repoName: null, tab: null, entityType: null, entityId: null,
+        inviteId: isToken ? null : raw[1],
+        inviteToken: isToken ? raw[1] : null,
+      };
+    }
+
+    // /settings/notifications (user-management.md §In-App Notification UI:
+    // notification preferences page in user settings)
+    if (raw[0] === 'settings' && raw[1] === 'notifications') {
+      return { mode: 'notification_settings', slug: null, repoName: null, tab: null, entityType: null, entityId: null };
     }
 
     // /all  or  /all/settings  or  /all/agent-rules  (cross-workspace view §10)
@@ -277,13 +356,18 @@
           return { mode: 'repo', slug, repoName, tab: 'specs', entityType: 'spec', entityId: specPath };
         }
 
-        const tab = tabOrType && REPO_TABS.includes(tabOrType) ? tabOrType : 'specs';
+        const tab = tabOrType && REPO_TAB_IDS.includes(tabOrType) ? tabOrType : 'specs';
         return { mode: 'repo', slug, repoName, tab, entityType: null, entityId: null };
       }
 
       // /workspaces/:slug/settings
       if (raw[2] === 'settings') {
         return { mode: 'workspace_settings', slug, repoName: null, tab: null, entityType: null, entityId: null };
+      }
+
+      // /workspaces/:slug/analytics (analytics.md §Analytics Dashboard)
+      if (raw[2] === 'analytics') {
+        return { mode: 'analytics', slug, repoName: null, tab: null, entityType: null, entityId: null };
       }
 
       // /workspaces/:slug/agent-rules
@@ -300,14 +384,23 @@
 
   export function urlFor(parsed) {
     if (!parsed) return '/';
-    const { mode: m, slug, repoName, tab, entityType, entityId } = parsed;
+    const { mode: m, slug, repoName, tab, entityType, entityId, username, inviteId, inviteToken } = parsed;
     if (m === 'profile') return '/profile';
+    if (m === 'user_profile') return `/@${encodeURIComponent(username ?? '')}`;
+    if (m === 'invite_accept') {
+      // Token form takes precedence: the magic-link URL must round-trip
+      // byte-for-byte through the canonical-URL rewrite on page load.
+      const seg = inviteToken ?? inviteId ?? '';
+      return `/invite/${encodeURIComponent(seg)}`;
+    }
+    if (m === 'notification_settings') return '/settings/notifications';
     if (m === 'cross_workspace') {
       return tab ? `/all/${encodeURIComponent(tab)}` : '/all';
     }
     if (!slug) return '/';
     if (m === 'workspace_home') return `/workspaces/${encodeURIComponent(slug)}`;
     if (m === 'workspace_settings') return `/workspaces/${encodeURIComponent(slug)}/settings`;
+    if (m === 'analytics') return `/workspaces/${encodeURIComponent(slug)}/analytics`;
     if (m === 'agent_rules') return `/workspaces/${encodeURIComponent(slug)}/agent-rules`;
     if (m === 'repo') {
       const base = `/workspaces/${encodeURIComponent(slug)}/r/${encodeURIComponent(repoName)}`;
@@ -333,6 +426,7 @@
       repoTab: parsed.tab ?? 'specs',
       entityType: parsed.entityType ?? null,
       entityId: parsed.entityId ?? null,
+      username: parsed.username ?? null,
     };
     window.history.pushState(stateObj, '', urlFor(parsed));
   }
@@ -541,6 +635,15 @@
     pushState({ mode: 'workspace_settings', slug: wsSlug(currentWorkspace), repoName: null, tab: null });
   }
 
+  function goToAnalytics() {
+    if (!currentWorkspace) return;
+    mode = 'analytics';
+    currentRepo = null;
+    repoTab = 'specs';
+    fadeContent();
+    pushState({ mode: 'analytics', slug: wsSlug(currentWorkspace), repoName: null, tab: null });
+  }
+
   function goToAgentRules() {
     if (!currentWorkspace) return;
     mode = 'agent_rules';
@@ -554,6 +657,101 @@
     mode = 'profile';
     fadeContent();
     pushState({ mode: 'profile', slug: null, repoName: null, tab: null });
+  }
+
+  // /@{username} — tenant-scoped public profile (user-management.md
+  // §User Profile Page). Exposed as a context so any surface rendering a
+  // user reference (@mentions, activity feeds, reviewer attribution) can
+  // link to the profile.
+  function goToUserProfile(username) {
+    if (!username) return;
+    mode = 'user_profile';
+    userProfileUsername = username;
+    currentRepo = null;
+    entityDetail = null;
+    fadeContent();
+    pushState({ mode: 'user_profile', slug: null, repoName: null, tab: null, username });
+  }
+
+  function goToInviteAccept(workspaceId) {
+    mode = 'invite_accept';
+    inviteWorkspaceId = workspaceId;
+    inviteToken = null;
+    currentRepo = null;
+    fadeContent();
+    window.history.pushState(
+      { mode: 'invite_accept', inviteId: workspaceId },
+      '',
+      `/invite/${encodeURIComponent(workspaceId)}`,
+    );
+  }
+
+  /** Apply a parsed URL to the app state. Used by drawer deep links
+   *  (action_url paths) — the same transitions the popstate handler
+   *  performs, without duplicating its history handling. */
+  function applyParsed(p) {
+    if (!p) return;
+    currentRepo = null;
+    entityDetail = null;
+    if (p.mode === 'user_profile') {
+      mode = 'user_profile';
+      userProfileUsername = p.username;
+    } else if (p.mode === 'invite_accept') {
+      mode = 'invite_accept';
+      inviteWorkspaceId = p.inviteId ?? null;
+      inviteToken = p.inviteToken ?? null;
+    } else if (p.mode === 'profile') {
+      mode = 'profile';
+    } else if (p.mode === 'notification_settings') {
+      mode = 'notification_settings';
+    } else if (p.mode === 'cross_workspace') {
+      mode = 'cross_workspace';
+      crossWorkspaceTab = (p.tab === 'settings' || p.tab === 'agent-rules') ? p.tab : null;
+    } else if (p.slug) {
+      const ws = findWorkspaceBySlug(p.slug);
+      if (ws) {
+        currentWorkspace = ws;
+        try { localStorage.setItem('gyre_workspace_id', ws.id); } catch { /* private browsing */ }
+        loadWorkspaceData(ws.id);
+        if (p.mode === 'workspace_settings') mode = 'workspace_settings';
+        else if (p.mode === 'agent_rules') mode = 'agent_rules';
+        else if (p.mode === 'repo' && p.repoName) {
+          mode = 'repo';
+          repoTab = p.tab ?? 'specs';
+          currentRepo = { id: null, name: p.repoName };
+          if (p.entityType && p.entityId) {
+            entityDetail = { type: p.entityType, id: p.entityId, data: {} };
+          }
+          api.repos({ workspaceId: ws.id }).then(repos => {
+            const found = (Array.isArray(repos) ? repos : []).find(r => r.name === p.repoName);
+            if (found && currentRepo?.name === p.repoName) {
+              currentRepo = { id: found.id, name: found.name };
+              repoIdCache.set(`${ws.id}:${found.name}`, found.id);
+            }
+          }).catch(() => { /* keep name-only ref */ });
+        } else mode = 'workspace_home';
+      } else {
+        mode = 'workspace_home';
+      }
+    } else {
+      mode = 'workspace_home';
+    }
+    loadDecisionsCount();
+  }
+
+  /** Navigate to an SPA path (notification action_url deep links). */
+  function navigateToPath(path) {
+    const parsed = parseUrl(path);
+    if (!parsed) return;
+    window.history.pushState({ ...window.history.state, path }, '', path);
+    applyParsed(parsed);
+    fadeContent();
+  }
+
+  function goToNotificationSettings() {
+    mode = 'notification_settings';
+    fadeContent();
+    pushState({ mode: 'notification_settings', slug: null, repoName: null, tab: null });
   }
   function goToCrossWorkspace() {
     mode = 'cross_workspace';
@@ -615,7 +813,7 @@
     // (HSI §1.5 Meta-specs row — meta-specs are workspace-scoped).
     if (view === 'meta-specs') { goToAgentRules(); return; }
     // In repo mode, tab names switch the active tab instead of navigating away
-    if (mode === 'repo' && REPO_TABS.includes(view)) { goToRepoTab(view); return; }
+    if (mode === 'repo' && REPO_TAB_IDS.includes(view)) { goToRepoTab(view); return; }
     // Everything else lands on workspace home
     goToWorkspaceHome(currentWorkspace);
   });
@@ -630,6 +828,12 @@
   setContext('goToAgentRules', () => goToAgentRules());
   setContext('goToWorkspaceSettings', () => goToWorkspaceSettings());
   setContext('goToWorkspaceHome', (ws) => goToWorkspaceHome(ws ?? currentWorkspace));
+  setContext('goToCrossWorkspace', () => goToCrossWorkspace());
+  setContext('goToUserProfile', (username) => goToUserProfile(username));
+  setContext('goToInviteAccept', (workspaceId) => goToInviteAccept(workspaceId));
+  setContext('navigateToPath', (path) => navigateToPath(path));
+  setContext('goToNotificationSettings', () => goToNotificationSettings());
+  setContext('goToRepo', (repo, tab) => goToRepo(repo, tab));
   setContext('goToRepoTab', (tab, params) => {
     if (mode !== 'repo') return;
     goToRepoTab(tab, params);
@@ -729,7 +933,7 @@
       if (detailPanel.open) { closeDetailPanel(); gKeyPending = false; return; }
       if (mode === 'repo' && entityDetail) { window.history.back(); gKeyPending = false; return; }
       if (mode === 'repo') { goToWorkspaceHome(currentWorkspace); gKeyPending = false; return; }
-      if (mode === 'workspace_settings' || mode === 'agent_rules') { window.history.back(); gKeyPending = false; return; }
+      if (mode === 'workspace_settings' || mode === 'agent_rules' || mode === 'analytics') { window.history.back(); gKeyPending = false; return; }
       if (mode === 'cross_workspace' && crossWorkspaceTab) { window.history.back(); gKeyPending = false; return; }
       gKeyPending = false;
       return;
@@ -822,6 +1026,11 @@
   // Current user id — threaded into presence-aware components (ConcurrentEditBanner)
   // so a user's own other tabs are excluded from the concurrent-edit warning (HSI §7).
   let selfUserId = $state(null);
+  // Own handle for the top-nav avatar's public-profile link
+  // (user-management.md §User Profile Page navigation integration).
+  let selfUsername = $state(null);
+  // Routed /@{username} public-profile subject.
+  let userProfileUsername = $state(null);
 
   // ── Token modal ───────────────────────────────────────────────────────
   const TOKEN_KIND_LABELS = {
@@ -903,7 +1112,7 @@
       if (repoTab === 'architecture' || repoTab === 'dependencies' || repoTab === 'code' || repoTab === 'mrs' || repoTab === 'agents') return 'repos';
       if (repoTab === 'decisions') return 'decisions';
       if (repoTab === 'settings') return 'settings';
-      return 'repos'; // exhaustive-state:ok — all REPO_TABS enumerated above; defensive fallback
+      return 'repos'; // exhaustive-state:ok — all REPO_TAB_IDS enumerated above; defensive fallback
     }
     return 'decisions';
   });
@@ -972,7 +1181,22 @@
           scrollWorkspaceSection(sectionId);
           return;
         case 'agent-rules':
-          goToAgentRules();
+          // §1a: section items scroll to their dashboard section on the
+          // workspace home (Settings is the only navigation exception);
+          // section-agent-rules is a real §2 dashboard section. The
+          // section's own "Manage rules" action still navigates to the
+          // full agent-rules page.
+          goToWorkspaceHome(currentWorkspace);
+          workspaceActiveSection = 'agent-rules';
+          scrollWorkspaceSection('agent-rules');
+          return;
+        case 'architecture':
+          // §1a rail item: scroll to AND expand the Architecture section
+          // (collapsed by default on the dashboard, §2).
+          goToWorkspaceHome(currentWorkspace);
+          workspaceActiveSection = 'architecture';
+          archExpandSignal++;
+          scrollWorkspaceSection('architecture');
           return;
         case 'settings':
           goToWorkspaceSettings();
@@ -981,6 +1205,100 @@
     }
   }
 
+  // ── Navigation rail (ui-navigation.md §1a, task-082) ─────────────────
+  // Optional, collapsible, scope-labelled left panel on navigation-heavy
+  // screens only: workspace home and repo mode. Focused editor/canvas
+  // surfaces (Editor Split, popped-out detail panels, full-screen modals)
+  // keep full content width — the rail is simply not rendered there. It is
+  // never load-bearing: every destination below stays reachable via the
+  // dashboard sections, the repo tab strip, ⌘K search, and the g-shortcuts.
+
+  // Workspace-home rail item set: the §2 dashboard sections in canonical
+  // order, then workspace Settings (§1a "Item set per mode").
+  const WORKSPACE_RAIL_SECTION_IDS = [
+    'decisions', 'specs', 'architecture', 'repos', 'briefing', 'agent-rules', 'settings',
+  ];
+  // Repo-mode rail item set: the repo tab strip exactly (§3), in canonical
+  // tab order. The tab strip is the source of truth, so this is a
+  // derivation from web/src/lib/repoTabs.js (the same list RepoMode
+  // renders its tab bar from) — never a hand-maintained copy that could
+  // drift from the strip.
+  const REPO_RAIL_TAB_IDS = REPO_TAB_IDS;
+
+  function workspaceRailLabel(id) {
+    switch (id) {
+      case 'agent-rules': return $t('topbar.agent_rules_label');
+      case 'settings':    return $t('common.settings');
+      default:            return $t(`workspace_home.sections.${id}`);
+    }
+  }
+
+  function repoRailLabel(id) {
+    return id === 'settings' ? $t('common.settings') : $t(`repo_mode.tabs.${id}`);
+  }
+
+  // The rail (and, below, the narrow-viewport drawer) renders only on the
+  // navigation-heavy screens: workspace home and repo mode without an open
+  // entity detail (the full-page entity detail is a focused surface).
+  let showNavRail = $derived(
+    (mode === 'workspace_home' && currentWorkspace) ||
+    (mode === 'repo' && currentRepo && !entityDetail)
+  );
+  let railMode = $derived(mode === 'repo' ? 'repo' : 'workspace-home');
+  let railScopeLabel = $derived(
+    mode === 'repo'
+      ? `${currentWorkspace?.name ?? 'Workspace'} / ${currentRepo?.name ?? ''}`
+      : (currentWorkspace?.name ?? $t('topbar.select_workspace'))
+  );
+  let railItems = $derived(
+    railMode === 'repo'
+      ? REPO_RAIL_TAB_IDS.map((id) => ({ id, label: repoRailLabel(id) }))
+      : WORKSPACE_RAIL_SECTION_IDS.map((id) => ({ id, label: workspaceRailLabel(id) }))
+  );
+  let railActiveId = $derived.by(() => {
+    if (mode === 'repo') return repoTab;
+    const s = workspaceActiveSection;
+    if (s === 'inbox') return 'decisions'; // legacy section id for Decisions
+    return WORKSPACE_RAIL_SECTION_IDS.includes(s) ? s : 'decisions';
+  });
+
+  function handleRailSelect(itemId) {
+    if (mode === 'repo') {
+      // Same route as clicking the tab (§1a): the rail is a switcher, not a
+      // second source of truth.
+      goToRepoTab(itemId);
+      return;
+    }
+    handleSectionNavigate(itemId);
+  }
+
+  // §1a "Narrow viewports (<768px)": the hamburger drawer offers the
+  // rail's per-mode item set — workspace-home sections (canonical order +
+  // Settings) at workspace scope, the repo tab strip exactly in repo mode.
+  // At tenant scope (/all) there is no rail; the drawer keeps its §10
+  // cross-workspace section semantics.
+  let drawerItems = $derived.by(() => {
+    if (mode === 'repo') {
+      return REPO_RAIL_TAB_IDS.map((id) => ({ id, label: repoRailLabel(id) }));
+    }
+    if (mode === 'cross_workspace') {
+      return [
+        { id: 'decisions', label: $t('workspace_home.sections.decisions') },
+        { id: 'repos', label: $t('workspace_home.sections.repos') },
+        { id: 'briefing', label: $t('workspace_home.sections.briefing') },
+        { id: 'specs', label: $t('workspace_home.sections.specs') },
+        { id: 'agent-rules', label: $t('topbar.agent_rules_label') },
+      ];
+    }
+    return WORKSPACE_RAIL_SECTION_IDS.map((id) => ({ id, label: workspaceRailLabel(id) }));
+  });
+  let drawerActiveId = $derived(mode === 'repo' ? repoTab : activeSection);
+  let drawerScopeLabel = $derived(
+    mode === 'repo'
+      ? `${currentWorkspace?.name ?? 'Navigation'} / ${currentRepo?.name ?? ''}`
+      : (currentWorkspace?.name ?? 'Navigation')
+  );
+
 
   // ── Page title ────────────────────────────────────────────────────────
   $effect(() => {
@@ -988,6 +1306,12 @@
     const repoName = currentRepo?.name ?? '';
     if (mode === 'profile') {
       document.title = 'Profile | Gyre';
+    } else if (mode === 'user_profile') {
+      document.title = userProfileUsername ? `@${userProfileUsername} | Gyre` : 'User | Gyre';
+    } else if (mode === 'invite_accept') {
+      document.title = 'Workspace Invitation | Gyre';
+    } else if (mode === 'notification_settings') {
+      document.title = 'Notification Settings | Gyre';
     } else if (mode === 'cross_workspace') {
       document.title = 'All Workspaces | Gyre';
     } else if (mode === 'agent_rules') {
@@ -1045,6 +1369,15 @@
 
     if (parsed?.mode === 'profile') {
       mode = 'profile';
+    } else if (parsed?.mode === 'user_profile') {
+      mode = 'user_profile';
+      userProfileUsername = parsed.username ?? null;
+    } else if (parsed?.mode === 'invite_accept') {
+      mode = 'invite_accept';
+      inviteWorkspaceId = parsed.inviteId ?? null;
+      inviteToken = parsed.inviteToken ?? null;
+    } else if (parsed?.mode === 'notification_settings') {
+      mode = 'notification_settings';
     } else if (parsed?.mode === 'cross_workspace') {
       mode = 'cross_workspace';
       crossWorkspaceTab = (parsed.tab === 'settings' || parsed.tab === 'agent-rules') ? parsed.tab : null;
@@ -1079,6 +1412,8 @@
           } catch { /* keep name-only ref */ }
         } else if (parsed.mode === 'workspace_settings') {
           mode = 'workspace_settings';
+        } else if (parsed.mode === 'analytics') {
+          mode = 'analytics';
         } else if (parsed.mode === 'agent_rules') {
           mode = 'agent_rules';
         } else {
@@ -1131,6 +1466,12 @@
       tab: mode === 'cross_workspace' ? crossWorkspaceTab : repoTab,
       entityType: entityDetail?.type ?? null,
       entityId: entityDetail?.id ?? null,
+      // Path-parameterized modes: keep the route parameter in the canonical
+      // URL, or a page load at /invite/{ws} / /@{username} rewrites the URL
+      // to /invite/ / /@ and a later refresh loses the deep link entirely.
+      username: mode === 'user_profile' ? userProfileUsername : null,
+      inviteId: mode === 'invite_accept' ? inviteWorkspaceId : null,
+      inviteToken: mode === 'invite_accept' ? inviteToken : null,
     });
     window.history.replaceState(
       { mode, wsId: currentWorkspace?.id ?? null, repoName: currentRepo?.name ?? null, repoTab, crossWorkspaceTab, entityType: entityDetail?.type ?? null, entityId: entityDetail?.id ?? null },
@@ -1143,9 +1484,12 @@
       const me = await api.me();
       userIsAdmin = me?.global_role === 'Admin' || me?.role === 'Admin' || me?.is_admin === true;
       selfUserId = me?.id ?? null;
+      selfUsername = me?.username ?? null;
     } catch { /* fail closed — gear icon stays hidden */ }
     loadDecisionsCount();
-    const decisionsInterval = setInterval(loadDecisionsCount, 60_000);
+    const decisionsInterval = setInterval(() => {
+      loadDecisionsCount();
+    }, 60_000);
 
     // 4. Popstate (browser back/forward)
     function handlePopstate(e) {
@@ -1168,9 +1512,16 @@
         return;
       }
       if (e.state?.mode) {
-        const { mode: m, wsId, repoName, repoTab: rt, crossWorkspaceTab: cwt, entityType: et, entityId: eid, entityTitle: eTitle, entityRepoId: eRepoId } = e.state;
-        mode = (m === 'workspace_settings' || m === 'workspace_home' || m === 'repo' || m === 'profile' || m === 'cross_workspace' || m === 'agent_rules')
+        const { mode: m, wsId, repoName, repoTab: rt, crossWorkspaceTab: cwt, entityType: et, entityId: eid, entityTitle: eTitle, entityRepoId: eRepoId, username: histUsername, inviteId: pInviteId, inviteToken: pInviteToken } = e.state;
+        mode = (m === 'workspace_settings' || m === 'workspace_home' || m === 'repo' || m === 'profile' || m === 'user_profile' || m === 'invite_accept' || m === 'cross_workspace' || m === 'agent_rules' || m === 'notification_settings' || m === 'analytics')
           ? m : 'workspace_home';
+        if (m === 'user_profile') {
+          userProfileUsername = histUsername ?? parseUrl(window.location.pathname)?.username ?? null;
+        }
+        if (m === 'invite_accept') {
+          inviteWorkspaceId = pInviteId ?? parseUrl(window.location.pathname)?.inviteId ?? null;
+          inviteToken = pInviteToken ?? parseUrl(window.location.pathname)?.inviteToken ?? null;
+        }
         repoTab = rt ?? 'specs';
         crossWorkspaceTab = m === 'cross_workspace' ? (cwt ?? null) : null;
         // Restore entity detail state from history with repo_id for data loading
@@ -1180,7 +1531,7 @@
         }
         if (wsId) {
           currentWorkspace = workspaces.find(w => w.id === wsId) ?? currentWorkspace;
-        } else if (m !== 'cross_workspace' && m !== 'profile') {
+        } else if (m !== 'cross_workspace' && m !== 'profile' && m !== 'user_profile' && m !== 'invite_accept' && m !== 'notification_settings') {
           // Try to recover workspace from URL slug if state doesn't have wsId
           const p2 = parseUrl(window.location.pathname);
           if (p2?.slug) {
@@ -1216,13 +1567,22 @@
       if (p) {
         if (p.mode === 'profile') {
           mode = 'profile';
+        } else if (p.mode === 'user_profile') {
+          mode = 'user_profile';
+          userProfileUsername = p.username ?? null;
+        } else if (p.mode === 'invite_accept') {
+          mode = 'invite_accept';
+          inviteWorkspaceId = p.inviteId ?? null;
+          inviteToken = p.inviteToken ?? null;
+        } else if (p.mode === 'notification_settings') {
+          mode = 'notification_settings';
         } else if (p.mode === 'cross_workspace') {
           mode = 'cross_workspace';
           crossWorkspaceTab = (p.tab === 'settings' || p.tab === 'agent-rules') ? p.tab : null;
         } else if (p.slug) {
           const ws = findWorkspaceBySlug(p.slug);
           if (ws) currentWorkspace = ws;
-          mode = (p.mode === 'workspace_settings' || p.mode === 'workspace_home' || p.mode === 'repo' || p.mode === 'agent_rules')
+          mode = (p.mode === 'workspace_settings' || p.mode === 'workspace_home' || p.mode === 'repo' || p.mode === 'agent_rules' || p.mode === 'user_profile' || p.mode === 'invite_accept' || p.mode === 'analytics')
             ? p.mode
             : 'workspace_home';
           if (p.repoName && p.mode === 'repo') {
@@ -1273,9 +1633,12 @@
 
 {#if !$isLoading}
 <div class="app">
-  <!-- No persistent sidebar (ui-navigation.md Principle 5): the shell is
-      topbar + content + status bar; navigation is workspace-home sections
-      and repo-mode tabs. Mobile drawer (§8) links to home sections. -->
+  <!-- No persistent sidebar (ui-navigation.md Principle 5: "no permanent
+      sidebar"): the shell is topbar + content + status bar; navigation is
+      workspace-home sections and repo-mode tabs. The optional collapsible
+      navigation rail (§1a, task-082) renders per-mode on navigation-heavy
+      screens only - collapsed icon-only by default, never a global fixed
+      menu. Mobile drawer (§8) offers the rail's per-mode item set. -->
   <div class="main">
 
     <!-- ── Topbar (always visible) ──────────────────────────────────── -->
@@ -1300,7 +1663,7 @@
       </button>
 
       <!-- Left side: workspace selector or back arrow + breadcrumb -->
-      {#if mode === 'agent_rules' || mode === 'workspace_settings'}
+      {#if mode === 'agent_rules' || mode === 'workspace_settings' || mode === 'analytics'}
         <!-- Sub-page mode: back arrow + WorkspaceName / Page Name -->
         <div class="topbar-left repo-context">
           <button
@@ -1322,7 +1685,7 @@
               {currentWorkspace?.name ?? 'Workspace'}
             </button>
             <span class="breadcrumb-sep" aria-hidden="true">/</span>
-            <span class="breadcrumb-repo" aria-current="page">{mode === 'workspace_settings' ? $t('topbar.workspace_settings') : $t('topbar.agent_rules_label')}</span>
+            <span class="breadcrumb-repo" aria-current="page">{mode === 'workspace_settings' ? $t('topbar.workspace_settings') : mode === 'analytics' ? 'Analytics' : $t('topbar.agent_rules_label')}</span>
           </nav>
         </div>
       {:else if mode === 'repo'}
@@ -1417,6 +1780,18 @@
               </button>
               <button
                 class="ws-gear-btn"
+                onclick={() => goToAnalytics()}
+                aria-label="Analytics"
+                title="Analytics"
+                data-testid="ws-analytics-btn"
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="14" height="14" aria-hidden="true">
+                  <path d="M3 3v18h18"/>
+                  <path d="M7 15l4-6 3 4 5-8"/>
+                </svg>
+              </button>
+              <button
+                class="ws-gear-btn"
                 onclick={() => goToWorkspaceSettings()}
                 aria-label={$t('topbar.workspace_settings')}
                 title={$t('topbar.workspace_settings') + ' (g s)'}
@@ -1476,6 +1851,24 @@
                   </svg>
                 </button>
               {/if}
+            </div>
+          {:else if mode === 'user_profile'}
+            <!-- Public profile page: back arrow + @username breadcrumb
+                (user-management.md §User Profile Page). -->
+            <div class="ws-name-wrap">
+              <button
+                class="back-btn"
+                onclick={() => window.history.back()}
+                aria-label={$t('topbar.back_to_workspace')}
+                data-testid="back-btn"
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16" aria-hidden="true">
+                  <path d="M19 12H5M12 5l-7 7 7 7"/>
+                </svg>
+              </button>
+              <nav class="breadcrumb" aria-label={$t('topbar.location')}>
+                <span class="breadcrumb-repo" aria-current="page" data-testid="user-profile-breadcrumb">&#64;{userProfileUsername}</span>
+              </nav>
             </div>
           {:else}
             <button
@@ -1569,38 +1962,14 @@
         </button>
       </div>
 
-      <!-- Right: decisions badge + user avatar -->
+      <!-- Right: notification bell + user avatar -->
       <div class="topbar-right">
-        <!-- Decisions badge (🔔) -->
-        <button
-          class="decisions-badge-btn"
-          onclick={async () => {
-            if (mode === 'repo') {
-              goToRepoTab('decisions');
-            } else {
-              // Ensure workspace home is rendered before attempting scroll
-              if (mode !== 'workspace_home') {
-                goToWorkspaceHome(currentWorkspace);
-                await tick();
-              }
-              document.querySelector('[data-testid="section-decisions"]')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-            }
-          }}
-          aria-label={decisionsCount > 0 ? $t('topbar.decisions_pending', { values: { count: decisionsCount } }) : $t('topbar.no_decisions')}
-          title={$t('workspace_home.sections.decisions')}
-          data-testid="decisions-badge"
-        >
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="16" height="16" aria-hidden="true">
-            <path d="M18 8A6 6 0 006 8c0 7-3 9-3 9h18s-3-2-3-9"/>
-            <path d="M13.73 21a2 2 0 01-3.46 0"/>
-          </svg>
-          {#if decisionsCount > 0}
-            <span class="decisions-count" aria-hidden="true">{decisionsCount > 99 ? '99+' : decisionsCount}</span>
-          {/if}
-        </button>
-        <span class="sr-only" aria-live="polite" aria-atomic="true">
-          {decisionsCount > 0 ? $t('topbar.decisions_pending', { values: { count: decisionsCount } }) : ''}
-        </span>
+        <!-- Notification bell (user-management.md §In-App Notification UI;
+            amended ui-navigation.md §1 — the single top-bar notification
+            surface, superseding the old decisions-count badge click):
+            unread count badge + slide-out drawer (§UI Pages > Notification
+            Drawer — active-only, grouped by priority). -->
+        <NotificationBell {workspaces} currentWorkspaceId={currentWorkspace?.id ?? null} />
 
         <!-- User avatar dropdown -->
         <div class="user-menu-wrap">
@@ -1634,6 +2003,22 @@
               <button class="user-dropdown-item" role="menuitem" tabindex="-1" onclick={() => { goToProfile(); userMenuOpen = false; }}>
                 {$t('topbar.profile')}
               </button>
+              <!-- Own public profile (user-management.md §User Profile Page
+                  navigation integration: the avatar menu links to /@{username}). -->
+              {#if selfUsername}
+                <button
+                  class="user-dropdown-item"
+                  role="menuitem"
+                  tabindex="-1"
+                  data-testid="user-menu-public-profile"
+                  onclick={() => { goToUserProfile(selfUsername); userMenuOpen = false; }}
+                >
+                  {$t('topbar.public_profile')}
+                </button>
+              {/if}
+              <button class="user-dropdown-item" role="menuitem" tabindex="-1" onclick={() => { goToNotificationSettings(); userMenuOpen = false; }} data-testid="user-menu-notification-settings">
+                {$t('topbar.notification_settings')}
+              </button>
               <button class="user-dropdown-item" role="menuitem" tabindex="-1" onclick={() => { openTokenModal(); userMenuOpen = false; }}>
                 {$t('topbar.api_token')}
               </button>
@@ -1662,26 +2047,27 @@
         data-testid="mobile-drawer"
       >
         <div class="drawer-header">
-          <span class="drawer-title">{currentWorkspace?.name ?? 'Navigation'}</span>
+          <span class="drawer-title">{drawerScopeLabel}</span>
           <button
             class="drawer-close"
             onclick={() => (mobileDrawerOpen = false)}
             aria-label={$t('topbar.close_drawer')}
           >✕</button>
         </div>
+        <!-- §1a narrow viewports: the drawer offers the rail's per-mode item
+            set (workspace-home sections / repo tab strip); at tenant scope
+            (/all) it keeps the §10 cross-workspace sections. -->
         <ul class="drawer-links" role="list">
-          {#each [
-            { id: 'decisions', label: 'Decisions' },
-            { id: 'repos', label: 'Repos' },
-            { id: 'briefing', label: 'Briefing' },
-            { id: 'specs', label: 'Specs' },
-            { id: 'agent-rules', label: 'Agent Rules' },
-          ] as item (item.id)}
+          {#each drawerItems as item (item.id)}
             <li>
               <button
                 class="drawer-link"
-                class:active={activeSection === item.id}
-                onclick={() => { mobileDrawerOpen = false; handleSectionNavigate(item.id); }}
+                class:active={drawerActiveId === item.id}
+                onclick={() => {
+                  mobileDrawerOpen = false;
+                  if (mode === 'repo') goToRepoTab(item.id);
+                  else handleSectionNavigate(item.id);
+                }}
                 data-testid={`drawer-item-${item.id}`}
               >{item.label}</button>
             </li>
@@ -1693,6 +2079,22 @@
     <!-- ── Content area + detail panel ──────────────────────────────── -->
     <div class="content-split">
     <main class="content" id="main-content" tabindex="-1">
+      <!-- ui-navigation.md §1a: optional collapsible navigation rail on
+          navigation-heavy screens (workspace home, repo mode without an
+          open entity detail). Collapsed icon-only 48px by default; toggle
+          expands to 240px; preference persisted per user per mode. Never
+          rendered on focused editor/canvas surfaces. -->
+      <div class="content-row">
+      {#if showNavRail}
+        <NavRail
+          mode={railMode}
+          scopeLabel={railScopeLabel}
+          items={railItems}
+          activeId={railActiveId}
+          onSelect={handleRailSelect}
+          userKey={selfUserId ?? 'anonymous'}
+        />
+      {/if}
       <div class="content-inner" class:faded={!contentVisible}>
         {#if mode === 'workspace_home'}
           <WorkspaceHome
@@ -1717,6 +2119,11 @@
           />
         {:else if mode === 'workspace_settings'}
           <WorkspaceSettings
+            workspace={currentWorkspace}
+            onBack={() => goToWorkspaceHome(currentWorkspace)}
+          />
+        {:else if mode === 'analytics'}
+          <AnalyticsView
             workspace={currentWorkspace}
             onBack={() => goToWorkspaceHome(currentWorkspace)}
           />
@@ -1763,7 +2170,14 @@
           {/if}
         {:else if mode === 'profile'}
           <UserProfile workspaceId={currentWorkspace?.id ?? null} repoId={null} scope="tenant" />
+        {:else if mode === 'user_profile'}
+          <PublicUserProfile username={userProfileUsername} workspaces={workspaces} />
+        {:else if mode === 'invite_accept'}
+          <InvitationAccept inviteId={inviteWorkspaceId} token={inviteToken} />
+        {:else if mode === 'notification_settings'}
+          <NotificationSettings />
         {/if}
+      </div>
       </div>
     </main>
 
@@ -1859,6 +2273,8 @@
   else if (v === 'specs') { workspaceActiveSection = 'specs'; tick().then(() => document.querySelector('[data-testid="section-specs"]')?.scrollIntoView({ behavior: 'smooth', block: 'start' })); }
   else goToWorkspaceHome(currentWorkspace);
 }} />
+<!-- Notification drawer (user-management.md §UI Pages): slide-out panel
+    from the bell with priority grouping, deep links, and read/unread. -->
 <Toast />
 
 <!-- Keyboard shortcut overlay -->
@@ -2312,49 +2728,6 @@
     flex-shrink: 0;
   }
 
-  .decisions-badge-btn {
-    position: relative;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 32px;
-    height: 32px;
-    background: transparent;
-    border: none;
-    color: var(--color-text-secondary);
-    cursor: pointer;
-    border-radius: var(--radius);
-    transition: color var(--transition-fast), background var(--transition-fast);
-  }
-
-  .decisions-badge-btn:hover {
-    color: var(--color-text);
-    background: var(--color-surface-elevated);
-  }
-
-  .decisions-badge-btn:focus-visible {
-    outline: 2px solid var(--color-focus);
-    outline-offset: 2px;
-  }
-
-  .decisions-count {
-    position: absolute;
-    top: 2px;
-    right: 2px;
-    min-width: 14px;
-    height: 14px;
-    padding: 0 3px;
-    background: var(--color-danger);
-    color: var(--color-text-inverse);
-    border-radius: var(--radius-full);
-    font-size: var(--text-xs);
-    font-weight: 700;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    line-height: 1;
-  }
-
   .user-btn {
     position: relative;
     display: flex;
@@ -2450,6 +2823,15 @@
     display: flex;
     overflow: hidden;
     min-height: 0;
+  }
+
+  /* §1a rail row: optional nav rail beside the mode content. The row only
+     exists to host the rail; without it the content keeps full width. */
+  .content-row {
+    flex: 1;
+    display: flex;
+    min-height: 0;
+    min-width: 0;
   }
 
   .content {
@@ -2815,7 +3197,6 @@
   @media (prefers-reduced-motion: reduce) {
     .content-inner,
     .search-trigger,
-    .decisions-badge-btn,
     .user-btn,
     .auth-dot,
     .user-dropdown-item,

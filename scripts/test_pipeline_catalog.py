@@ -51,12 +51,12 @@ class DiscoveryTests(unittest.TestCase):
         self.assertEqual(self.count('verify'), 1)
         self.assertEqual(self.count('publish'), 0)
 
-    def test_main_advancement_invalidates_verification(self):
+    def test_main_advancement_keeps_receipt_until_publisher_checks_final_tree(self):
         self.task('task-001', candidate='a', candidate_base='main',
                   review={'candidate': 'a', 'approved': True},
-                  verified={'candidate': 'a', 'base': 'main'})
-        self.assertEqual(self.count('publish', 'newmain'), 0)
-        self.assertEqual(self.count('verify', 'newmain'), 1)
+                  verified={'candidate': 'a', 'base': 'main','passed':True})
+        self.assertEqual(self.count('publish', 'newmain'), 1)
+        self.assertEqual(self.count('verify', 'newmain'), 0)
 
     def test_failure_is_repair_work_and_blocks_promotion(self):
         self.task('task-001', triaged='g', candidate='a', candidate_base='main',

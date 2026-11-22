@@ -14,10 +14,13 @@
 #
 # See: specs/reviews/task-087.md F1b/F1c (the finding that created this check)
 #
-# The task-093 revision round's orchestrator spawn entries
-# (spawn_workspace_orchestrator F2, spawn_repo_orchestrator F3) were fixed
-# and removed: both handlers now load the target workspace/repo and return
-# Forbidden on tenant mismatch (see api/orchestrator.rs).
+# --- task-093 revision round (orchestrator spawn routes) ---
+# Routes retro-exempted into abac-route-registry-exemptions.txt (F1); the
+# handlers originally shipped without per-handler tenant containment
+# (spawn_workspace_orchestrator F2, spawn_repo_orchestrator F3). Both now
+# enforce tenant containment in spawn_*_orchestrator_core (caller tenant
+# vs. the target workspace's tenant, Forbidden on mismatch) — the exemption
+# lines were deleted per this file's fix-and-delete contract (task-130).
 #
 # --- frozen-baseline legacy debt (routes in abac-route-registry-exemptions.txt
 # before the task-093 extension of this check; handlers never had per-handler

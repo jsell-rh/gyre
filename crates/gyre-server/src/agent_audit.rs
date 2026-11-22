@@ -178,6 +178,30 @@ pub async fn emit_heartbeat(
     .await;
 }
 
+/// `AgentHeartbeat` with a Failure outcome — emitted when a heartbeat is
+/// rejected because workload-identity (SVID) verification failed
+/// (identity-security.md Layer 1). `pid_alive` is false: the workload
+/// identity did not verify.
+pub async fn emit_heartbeat_rejected(
+    state: &AppState,
+    agent: &Agent,
+    pid: Option<u32>,
+    reason: &str,
+) {
+    emit(
+        state,
+        AuditEventType::AgentHeartbeat,
+        agent,
+        AuditOutcome::Failure,
+        serde_json::json!({
+            "pid": pid,
+            "pid_alive": false,
+            "reason": reason,
+        }),
+    )
+    .await;
+}
+
 /// `AgentTokenRevoked` — emitted whenever an agent's auth token is revoked
 /// (agent completion, operator stop, admin kill).
 ///
@@ -239,6 +263,15 @@ pub async fn emit_reassigned(
 /// longer authenticate) and emits an `AgentTokenRevoked` audit event carrying
 /// the token's `jti`. The token is read before deletion so its JWT ID can be
 /// attributed; tokens that were never JWTs (UUID fallback) record a null jti.
+///
+/// The `jti` is additionally written to the durable `revoked_tokens` SQL
+/// table via [`gyre_ports::SpawnLogRepository::revoke_token`]
+/// (identity-security.md §Task-Scoped JWT Claims — Revocation: "the `jti`
+/// is written to the revocation table ... Tokens cannot be un-revoked").
+/// The KV removal is the immediate live gate; the SQL row is the record
+/// that survives KV rebuilds and is checked before expiry validation on
+/// every agent-token authentication. The table has no delete path — a
+/// written row is permanent.
 pub async fn revoke_agent_token(state: &AppState, agent: &Agent, reason: &str) {
     let agent_id = agent.id.to_string();
     let token = state
@@ -251,14 +284,32 @@ pub async fn revoke_agent_token(state: &AppState, agent: &Agent, reason: &str) {
     let jti = token
         .as_deref()
         .and_then(|t| state.agent_signing_key.extract_jti_unverified(t));
+    if let Some(jti) = jti.as_deref() {
+        // Durability is a security requirement here, but the KV removal
+        // above has already taken effect — a failed table write is logged
+        // loudly rather than failing the caller's teardown, and the
+        // in-memory/SQL state converges on the next revocation.
+        if let Err(e) = state
+            .spawn_log
+            .revoke_token(jti, &agent_id, now_secs())
+            .await
+        {
+            tracing::error!(
+                agent_id = %agent_id,
+                jti = %jti,
+                error = %e,
+                "failed to write jti to the durable revoked_tokens table"
+            );
+        }
+    }
     emit_token_revoked(state, agent, jti, reason).await;
 }
 
-/// Best-effort PID liveness lookup for audit detail fields.
+/// Best-effort workload-identity status for audit detail fields.
 ///
-/// Reads the agent's workload attestation (if any) and checks whether the
-/// attested OS PID is still alive. Returns `None` when no PID was attested —
-/// liveness is unknown, not assumed.
+/// Reads the agent's workload attestation (if any) and reports whether the
+/// most recent SVID verification passed (`alive`). Returns `None` when no
+/// attestation exists — verification status is unknown, not assumed.
 pub async fn attested_pid_alive(state: &AppState, agent_id: &str) -> Option<bool> {
     let json = state
         .kv_store
@@ -267,7 +318,7 @@ pub async fn attested_pid_alive(state: &AppState, agent_id: &str) -> Option<bool
         .ok()
         .flatten()?;
     let att: crate::workload_attestation::WorkloadAttestation = serde_json::from_str(&json).ok()?;
-    att.pid.map(crate::workload_attestation::pid_is_alive)
+    Some(att.alive)
 }
 
 /// Best-effort attested PID lookup for audit detail fields.

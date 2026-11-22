@@ -150,6 +150,9 @@ fn parse_rfc3339_approx(s: &str) -> Option<u64> {
 pub struct AuditCtx<'a> {
     pub audit: &'a dyn gyre_ports::AuditRepository,
     pub broadcast_tx: &'a tokio::sync::broadcast::Sender<String>,
+    /// Search index — audit events are indexed on write (search.md §Searchable
+    /// Entities: audit_event).
+    pub search: &'a dyn gyre_ports::SearchPort,
 }
 
 /// Emit a container lifecycle `AuditEvent` and broadcast it to SSE subscribers.
@@ -181,6 +184,14 @@ async fn emit(
         now_secs(),
     );
     let _ = ctx.audit.record(&event).await;
+    // search.md §Searchable Entities: audit events are indexed on write.
+    if let Err(e) = ctx
+        .search
+        .index(crate::search_indexer::audit_event_document(&event))
+        .await
+    {
+        tracing::warn!(error = %e, "search-index: failed to index audit event");
+    }
     if let Ok(json) = serde_json::to_string(&event) {
         let _ = ctx.broadcast_tx.send(json);
     }

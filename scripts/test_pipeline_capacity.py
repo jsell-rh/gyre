@@ -10,6 +10,7 @@ from unittest.mock import patch
 from pipeline.store import Store
 from pipeline.runtime import observe
 from pipeline.cockpit import snapshot
+from pipeline.capacity import build_observation
 
 
 class CapacityTests(unittest.TestCase):
@@ -19,6 +20,9 @@ class CapacityTests(unittest.TestCase):
         self.store.set_setting('slots',1)
         self.store.set_setting('runtime_kube_context','gyre-context')
         self.store.set_setting('runtime_namespace','gyre-namespace')
+        self.quota_limits=[{'kind':'LimitRange','spec':{'limits':[{'type':'Container',
+            'default':{'cpu':'500m','memory':'1Gi'},'defaultRequest':{'cpu':'250m','memory':'512Mi'}}]}}]
+        self.store.set_setting('namespace_capacity',build_observation(self.store,[],[],self.quota_limits))
         self.store.put_task('old','g','spec',{})
         self.work=self.store.enqueue('implement','old','g',{})
         claim=self.store.claim('implement','first',capacity=1)
@@ -33,7 +37,8 @@ class CapacityTests(unittest.TestCase):
     def observe(self,pods=None,sandboxes=None):
         def kube(args,**kwargs):
             self.assertIn('gyre-context',args);self.assertIn('gyre-namespace',args)
-            values=sandboxes if 'sandboxes.agents.x-k8s.io' in args else pods
+            values=(self.quota_limits if 'resourcequotas,limitranges' in args else
+                    sandboxes if 'sandboxes.agents.x-k8s.io' in args else pods)
             return SimpleNamespace(stdout=json.dumps({'items':values or []}))
         with patch('pipeline.runtime.subprocess.run',side_effect=kube) as calls:
             observe(self.store,force=True)
@@ -133,3 +138,33 @@ class CapacityTests(unittest.TestCase):
 
 
 if __name__=='__main__':unittest.main()
+
+class CleanupDebtIsolationTests(unittest.TestCase):
+    def test_absent_read_only_runtime_does_not_block_a_new_attempt_but_live_or_unknown_does(self):
+        import json,time
+        from pipeline.store import Store
+        with tempfile.TemporaryDirectory() as directory:
+            s=Store(directory);self.addCleanup(s.close)
+            s.set_setting('runtime_kube_context','ctx');s.set_setting('runtime_namespace','ns')
+            limits=[{'spec':{'limits':[{'type':'Container','default':{'cpu':'500m','memory':'1Gi'},'defaultRequest':{'cpu':'250m','memory':'512Mi'}}]}}]
+            s.set_setting('namespace_capacity',build_observation(s,[],[],limits))
+            s.put_task('task-001','g','body',{})
+            work=s.enqueue('review','task-001','g',{});c=s.claim('review','old')
+            s.db.execute('INSERT INTO resources VALUES(?,?,?,?,?,?,?)',('old-sandbox',work,c['token'],'sandbox','deleting','{}',time.time()))
+            s.reserve('old-provider',work,c['token'],'provider',10,{})
+            s.retry(work,c['token'],{'category':'infrastructure'},delay=0)
+            proof={'absent':True,'context':'ctx','namespace':'ns','work':work,'token':c['token'],'at':time.time()}
+            for stage in ('implement','review'):
+                s.db.execute('UPDATE work SET stage=? WHERE id=?',(stage,work))
+                s.resource_state('old-sandbox','deleting',{'compute_observation':proof})
+                if stage=='implement':
+                    self.assertTrue(s.blocking_resources(task='task-001'))
+                    s.resource_state('old-sandbox','deleting',{'compute_observation':proof,'source_capture':{'state':'not_started','work':work,'token':c['token']}})
+                self.assertEqual(s.blocking_resources(task='task-001'),[])
+                for changed in ({'namespace':'foreign'},{'at':time.time()-181},{'token':999},{'absent':False}):
+                    s.resource_state('old-sandbox','deleting',{'compute_observation':proof|changed})
+                    self.assertTrue(s.blocking_resources(task='task-001'))
+            s.db.execute("UPDATE work SET stage='review' WHERE id=?",(work,))
+            s.resource_state('old-sandbox','deleting',{'compute_observation':proof})
+            self.assertIsNotNone(s.claim('review','new',capacity=10))
+            self.assertEqual(s.db.execute("SELECT state FROM resources WHERE name='old-sandbox'").fetchone()[0],'deleting')

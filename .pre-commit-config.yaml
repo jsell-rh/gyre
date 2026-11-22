@@ -64,6 +64,14 @@ repos:
         types: [rust]
         pass_filenames: false
 
+      - id: hierarchy
+        name: hierarchy field lint
+        description: Verify domain hierarchy fields are non-optional Id (spec hierarchy-enforcement §2)
+        entry: scripts/check-hierarchy.sh
+        language: script
+        types: [rust]
+        pass_filenames: false
+
       - id: abac-route-registry
         name: ABAC route registry lint
         description: Fail if a registered /api/v1/ route has no ABAC ResourceResolver entry
@@ -329,6 +337,13 @@ repos:
         entry: scripts/check-notification-test-coverage.sh
         language: script
         types: [rust]
+        pass_filenames: false
+
+      - id: notification-toggle-coverage
+        name: notification toggle coverage lint
+        description: Fail if a NotificationType variant has no profile toggle or no locale label (HSI §12)
+        entry: scripts/check-notification-toggle-coverage.sh
+        language: script
         pass_filenames: false
 
       - id: unnamed-tuple-carriers

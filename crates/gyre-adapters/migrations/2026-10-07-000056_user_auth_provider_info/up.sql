@@ -1,0 +1,22 @@
+-- TASK-209: HSI §12 "Auth provider info (OIDC issuer, last login — read-only)".
+--
+-- `oidc_issuer` is server-written during OIDC/JWT authentication
+-- (auth::find_or_create_user -> UserRepository::record_login). No handler accepts
+-- a client-supplied value for it, and PUT /api/v1/users/me has no field for it,
+-- so it cannot be self-reported. Nullable by necessity: a principal that only
+-- ever authenticated with an API key or the global operator token has no OIDC
+-- issuer.
+--
+-- `last_login_at` is NOT added here: mainline task-120's
+-- 2026-10-08-000058_user_entity_profile_fields (which sorts after this version
+-- and ships on both lineages) already adds that column. Adding it here as well
+-- would make the later migration fail with a duplicate-column error on every
+-- fresh database. The domain `User` struct carries `last_login_at` regardless;
+-- this migration's merge resolved the column to a single owner.
+--
+-- `last_login_at` previously existed on the domain `User` struct but was never
+-- persisted (every read decoded it as None — a field that looked implemented
+-- and always reported "never"); task-120's migration is now the column owner
+-- and UserRepository::record_login (task-209) is the writer.
+
+ALTER TABLE users ADD COLUMN oidc_issuer TEXT;

@@ -73,6 +73,11 @@ pub struct AgentPushContext {
     pub tenant_id: String,
 }
 
+/// Post-create delivery-channel fan-out callback (email/webhook/slack per
+/// user-management.md §Delivery Channels). `None` in port-level tests.
+pub type ChannelFanoutCallback =
+    Box<dyn Fn(&Notification) -> futures_util::future::BoxFuture<'static, ()> + Send + Sync>;
+
 /// Workspace/tenant identity for push-scoped notifications (system-explorer §9).
 ///
 /// Derived at each extraction call site from the repo's own workspace, so
@@ -89,9 +94,18 @@ pub struct PushNotificationScope {
 /// check (spec assertion failures use the notification + membership repos).
 ///
 /// Bundled into a single struct to stay within clippy's argument-count limit.
+///
+/// `notification_repo` must be the broadcasting wrapper
+/// (`AppState::broadcasting_notifications()`) in production: a bare
+/// repository handle persists fine but bypasses the `/notifications/stream`
+/// SSE fan-out, so connected clients never see the notification
+/// (task-125 review finding).
 pub struct DivergencePorts<'a> {
     pub notification_repo: &'a dyn NotificationRepository,
     pub membership_repo: &'a dyn WorkspaceMembershipRepository,
+    /// Post-create channel fan-out (email/webhook/slack per
+    /// user-management.md §Delivery Channels). `None` in port-level tests.
+    pub on_created: Option<ChannelFanoutCallback>,
 }
 
 /// Identity/scope parameters for a divergence check.
@@ -152,26 +166,23 @@ pub async fn extract_and_store_graph(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn do_extract(
+/// Snapshot a commit's tree into a fresh temp directory via `git archive`
+/// (shared by the push-triggered extraction pipeline and the two-commit
+/// graph-diff core — crates/gyre-server/src/graph_diff_core.rs).
+///
+/// `repo_path` may be a bare repository; `git archive --format=tar <sha>`
+/// works on bare repos. The returned TempDir owns the snapshot — dropping
+/// it cleans up.
+pub(crate) async fn snapshot_commit_tree(
     repo_path: &str,
-    repo_id: &str,
-    new_sha: &str,
-    graph_store: Arc<dyn GraphPort>,
+    sha: &str,
     git_bin: &str,
-    agent_ctx: Option<AgentPushContext>,
-    divergence_ports: Option<DivergencePorts<'_>>,
-    results_repo: Arc<dyn gyre_ports::SpecAssertionResultRepository>,
-    notification_scope: Option<PushNotificationScope>,
-    pass2_telemetry: Arc<CallGraphTelemetry>,
-) -> anyhow::Result<()> {
-    // --- Step 1: snapshot the commit tree into a temp directory ---------------
-
+) -> anyhow::Result<tempfile::TempDir> {
     let tmp = tempfile::TempDir::new()?;
 
     // `git archive --format=tar <sha>` on a bare repo outputs a tar stream.
     let archive = Command::new(git_bin)
-        .args(["-C", repo_path, "archive", "--format=tar", new_sha])
+        .args(["-C", repo_path, "archive", "--format=tar", sha])
         .output()
         .await?;
 
@@ -200,6 +211,26 @@ async fn do_extract(
     if !tar_status.success() {
         anyhow::bail!("tar extraction failed (exit code: {:?})", tar_status.code());
     }
+
+    Ok(tmp)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn do_extract(
+    repo_path: &str,
+    repo_id: &str,
+    new_sha: &str,
+    graph_store: Arc<dyn GraphPort>,
+    git_bin: &str,
+    agent_ctx: Option<AgentPushContext>,
+    divergence_ports: Option<DivergencePorts<'_>>,
+    results_repo: Arc<dyn gyre_ports::SpecAssertionResultRepository>,
+    notification_scope: Option<PushNotificationScope>,
+    pass2_telemetry: Arc<CallGraphTelemetry>,
+) -> anyhow::Result<()> {
+    // --- Step 1: snapshot the commit tree into a temp directory ---------------
+
+    let tmp = snapshot_commit_tree(repo_path, new_sha, git_bin).await?;
 
     // --- Step 2: run the Rust extractor (blocking, CPU-intensive) -------------
 
@@ -693,6 +724,8 @@ pub async fn check_divergence(
                 user_id = %member.user_id,
                 "failed to create divergence notification: {e}"
             );
+        } else if let Some(on_created) = ports.on_created.as_ref() {
+            on_created(&notif).await;
         }
     }
 
@@ -868,7 +901,7 @@ fn diff_nodes(old: &GraphNode, new: &GraphNode) -> Vec<FieldChange> {
 ///
 /// To add a new language extractor (S2/S3/S4), import it and push it onto the
 /// `extractors` vec — no other changes required.
-fn run_all_extractors(
+pub(crate) fn run_all_extractors(
     repo_root: &Path,
     commit_sha: &str,
     repo_id_str: &str,
@@ -1416,10 +1449,11 @@ async fn check_spec_assertions_on_push(
                     user_id = %member.user_id,
                     "failed to create spec assertion notification: {e}"
                 );
+            } else if let Some(on_created) = ports.on_created.as_ref() {
+                on_created(&notif).await;
             }
         }
     }
-
     Ok(())
 }
 
@@ -2309,6 +2343,7 @@ mod tests {
         let ports = DivergencePorts {
             notification_repo: &notif_repo,
             membership_repo: &membership_repo,
+            on_created: None,
         };
 
         check_spec_assertions_on_push(
@@ -2333,6 +2368,8 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
+                &[],
                 50,
                 0,
             )
@@ -2362,6 +2399,8 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
+                &[],
                 50,
                 0,
             )
@@ -2397,6 +2436,8 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
+                &[],
                 50,
                 0,
             )
@@ -2429,6 +2470,8 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
+                &[],
                 50,
                 0,
             )
@@ -2438,6 +2481,120 @@ mod tests {
             dev_notifs_new_commit.len(),
             2,
             "a new commit with a failing assertion must notify again"
+        );
+    }
+
+    /// Regression test for the task-125 review finding: push-scoped
+    /// persistence must fan out to the SSE broadcast channel, not only
+    /// store. When `DivergencePorts` is built with the broadcasting wrapper
+    /// (as every production feeder does since the repair), a spec-assertion
+    /// failure on push is both persisted AND delivered to a live
+    /// `/notifications/stream` subscriber. With the bare repository this
+    /// test fails at the first `try_recv` (persisted but never broadcast).
+    #[tokio::test]
+    async fn push_check_notifications_broadcast_to_stream_subscribers() {
+        use crate::mem::{
+            MemNotificationRepository, MemSpecAssertionResultRepository,
+            MemWorkspaceMembershipRepository,
+        };
+        use crate::notifications::BroadcastingNotificationRepo;
+        use gyre_common::NotificationType;
+        use gyre_domain::{WorkspaceMembership, WorkspaceRole};
+
+        // Same fixture shape as the test above: one failing assertion
+        // (subject node absent from the graph), one Developer in the notify
+        // set.
+        let dir = tempfile::TempDir::new().unwrap();
+        let specs_dir = dir.path().join("specs").join("system");
+        std::fs::create_dir_all(&specs_dir).unwrap();
+        std::fs::write(
+            specs_dir.join("architecture.md"),
+            "# Architecture\n\n<!-- gyre:assert type=\"implements\" subject=\"SearchService\" trait=\"FullTextPort\" -->\n",
+        )
+        .unwrap();
+
+        let repo_id = Id::new("repo-assert-broadcast");
+        let nodes: Vec<GraphNode> = vec![];
+        let results_repo = MemSpecAssertionResultRepository::default();
+        let notif_repo: Arc<dyn NotificationRepository> =
+            Arc::new(MemNotificationRepository::default());
+        let membership_repo = MemWorkspaceMembershipRepository::default();
+        membership_repo
+            .create(&WorkspaceMembership::new(
+                Id::new("m-dev-broadcast"),
+                Id::new("user-dev"),
+                Id::new("ws-1"),
+                WorkspaceRole::Developer,
+                Id::new("inviter"),
+                1_000,
+            ))
+            .await
+            .unwrap();
+
+        // The SSE subscriber, wired exactly like the /notifications/stream
+        // handler: a receiver on the broadcast channel.
+        let (tx, mut rx) = tokio::sync::broadcast::channel::<String>(64);
+        let broadcasting = BroadcastingNotificationRepo::new(Arc::clone(&notif_repo), tx);
+        let ports = DivergencePorts {
+            notification_repo: &broadcasting,
+            membership_repo: &membership_repo,
+            on_created: None,
+        };
+        let scope = PushNotificationScope {
+            workspace_id: "ws-1".to_string(),
+            tenant_id: "tenant-1".to_string(),
+        };
+
+        check_spec_assertions_on_push(
+            dir.path(),
+            &nodes,
+            &[],
+            &repo_id,
+            "deadbeef",
+            Some(&scope),
+            Some(&ports),
+            &results_repo,
+        )
+        .await
+        .unwrap();
+
+        // Persisted …
+        let dev_notifs = notif_repo
+            .list_for_user(
+                &Id::new("user-dev"),
+                Some(&Id::new("ws-1")),
+                None,
+                None,
+                None,
+                None,
+                &[],
+                50,
+                0,
+            )
+            .await
+            .unwrap();
+        assert_eq!(dev_notifs.len(), 1, "developer must be notified");
+
+        // … AND broadcast: exactly one event on the channel, carrying the
+        // same notification the stream handler would parse and deliver.
+        let msg = rx.try_recv().expect(
+            "push-check notification must be broadcast to the SSE channel, not only persisted",
+        );
+        let notif: gyre_common::Notification = serde_json::from_str(&msg)
+            .expect("broadcast payload must be serialized Notification JSON");
+        assert_eq!(
+            notif.notification_type,
+            NotificationType::SpecAssertionFailure
+        );
+        assert_eq!(notif.user_id.as_str(), "user-dev");
+        assert_eq!(notif.workspace_id.as_str(), "ws-1");
+        assert_eq!(
+            notif.source.repo_id.as_ref().map(|r| r.as_str()),
+            Some("repo-assert-broadcast")
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "exactly one broadcast event is expected (no viewer notification)"
         );
     }
 

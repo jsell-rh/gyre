@@ -80,6 +80,7 @@ pub struct ToolCall {
 /// - Lives in gyre-ports. gyre-domain MUST NOT depend on this.
 /// - All concrete implementations live in gyre-adapters.
 /// - gyre-server wires the implementation into AppState.
+#[allow(clippy::double_must_use)] // async_trait generates a must_use future for each method.
 #[async_trait]
 pub trait LlmPort: Send + Sync {
     /// Generate a single non-streaming completion.
@@ -96,11 +97,14 @@ pub trait LlmPort: Send + Sync {
     /// Structured prediction: returns the LLM response parsed as JSON.
     ///
     /// Implementations append "Respond with valid JSON only, no markdown
-    /// code fences." to the system prompt.
+    /// code fences." to the system prompt. `max_tokens` bounds the output
+    /// exactly like `complete` — structured endpoints (explorer generate)
+    /// are subject to the same token limits as free-text ones.
     async fn predict_json(
         &self,
         system_prompt: &str,
         user_prompt: &str,
+        max_tokens: Option<u32>,
     ) -> Result<serde_json::Value>;
 
     /// Token-level streaming completion.

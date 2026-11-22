@@ -1,6 +1,6 @@
 """Independent requirement-change assessment; models cannot approve themselves."""
 import json
-from .execution import Attention
+from .execution import Attention, Retry
 
 
 class AssessmentAttention(Attention):
@@ -51,10 +51,25 @@ def run(execution, task):
     try:
         report = validate(result.get('assessment'),inp)
     except ValueError as exc:
-        raise AssessmentAttention(str(exc)) from exc
+        # A malformed report is not evidence of a product gap. Give the model
+        # one fresh report attempt, then retain an explicit, input-bound hold.
+        import hashlib
+        identity = hashlib.sha256(json.dumps([inp.get('candidate') or inp['base'], inp['requirements']], sort_keys=True).encode()).hexdigest()
+        key = f"assessment_report_retry:{task['name']}:{task['generation']}:{identity}"
+        count = execution.store.setting(key, 0) + 1
+        execution.store.set_setting(key, count)
+        error = (Retry('Invalid assessment report: ' + str(exc) + '. Re-read the exact assignment and produce fresh requirement-to-source evidence.', fresh_model=True)
+                 if count < 2 else AssessmentAttention('Assessment report remains invalid: ' + str(exc) + '. Correct report generation or explicitly retry after diagnosis.'))
+        error.category = 'assessment_report'
+        error.diagnostic = {'candidate': inp.get('candidate') or inp['base'], 'requirements': inp['requirements'],
+                            'error': str(exc), 'attempts': count, 'report': str(execution.directory / 'outcome.json')}
+        raise error from exc
     receipt = report | {'artifact':str(execution.directory/'outcome.json'), 'generation':task['generation']}
     if report['decision'] == 'needs_triage':
-        raise NeedsTriage('Requirement assessment needs triage: ' + json.dumps(report['evidence']))
+        error = NeedsTriage('Requirement conflict needs a reviewed task/spec correction; implementation is blocked. ' + json.dumps(report['evidence']))
+        error.diagnostic = {'candidate': report['candidate'], 'requirements': report['requirements'],
+                            'evidence': report['evidence'], 'action': 'Correct the authoritative task/spec binding, then reassess the new requirements'}
+        raise error
     if report['decision'] == 'gap':
         finding = {'id':execution.claim['id'], 'category':'requirements_gap',
                    'source':inp.get('candidate') or inp['base'], 'details':report['gaps'],
@@ -83,8 +98,9 @@ def run(execution, task):
     previous = task['data'].get('previous_delivery')
     if previous:
         updates['delivered'] = previous | {'generation':task['generation'], 'assessment':receipt['artifact']}
-    elif source == inp['base']:
-        updates['resolved'] = {'reason':'Current requirements independently assessed and verified on main',
+    elif ((checked.get('publication') or {}).get('artifact_commit') is None and
+          execution.command('git','merge-base','--is-ancestor',source,inp['base'],cwd=path,check=False).returncode==0):
+        updates['resolved'] = {'reason':'Current requirements independently assessed and verified on upstream',
                                'source':source,'generation':task['generation'],'assessment':receipt['artifact']}
     else:
         # An unmerged candidate still needs normal independent review and publication.

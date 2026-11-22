@@ -393,8 +393,30 @@ async fn agent_heartbeat() {
     let ctx = Ctx::new().await;
     let agent_id = create_agent(&ctx).await;
 
+    // The heartbeat surface verifies the session's X.509-SVID
+    // (identity-security.md Layer 1, task-261) fail-closed before any
+    // liveness is recorded. This agent was created directly (no spawn),
+    // so seed its SVID-backed record through the issuance path and
+    // present the issued chain PEM + bound stack fingerprint, exactly
+    // as a spawned workload does via GYRE_SVID_PEM / GYRE_STACK_HASH.
+    let svid = gyre_server::spiffe::issue_session_svid(
+        &ctx.state,
+        &agent_id,
+        "worker",
+        "local",
+        "sha256:integration-hb-stack",
+    )
+    .await
+    .expect("test SVID issuance must succeed");
+
     let resp = ctx
-        .put(&format!("/api/v1/agents/{agent_id}/heartbeat"), json!({}))
+        .put(
+            &format!("/api/v1/agents/{agent_id}/heartbeat"),
+            json!({
+                "svid": svid.record.chain_pem,
+                "stack_fingerprint": svid.record.stack_fingerprint,
+            }),
+        )
         .await;
     assert!(resp.status().is_success());
 }
@@ -403,6 +425,20 @@ async fn agent_heartbeat() {
 async fn agent_messages_send_and_receive() {
     let ctx = Ctx::new().await;
     let agent_id = create_agent(&ctx).await;
+
+    // Scoping rule 1 (message-bus.md): the send path resolves the target
+    // agent's tenant from its workspace record and rejects sends whose
+    // scope cannot be resolved. Agents created via POST /api/v1/agents land
+    // in the bootstrap "default" workspace — seed the matching workspace
+    // row (tenant "default", the global token's system principal tenant).
+    let ws = gyre_domain::Workspace::new(
+        gyre_common::Id::new("default"),
+        gyre_common::Id::new("default"),
+        "Default",
+        "default",
+        0,
+    );
+    ctx.state.workspaces.create(&ws).await.unwrap();
 
     // Send via new unified send endpoint (workspace-scoped).
     // The agent was created with workspace_id="default", so use that.
@@ -1646,5 +1682,262 @@ async fn cors_includes_server_port() {
     assert_eq!(
         allow_origin, origin,
         "CORS allow-origin should include the server's own port (http://localhost:{port})"
+    );
+}
+
+// ── 34. Orchestrator spawn tenant containment (task-093 F2/F3, task-146 repair) ─
+
+#[tokio::test]
+async fn orchestrator_spawn_denied_across_tenants() {
+    // The spawn routes run without middleware ABAC (registry-exempt), so the
+    // handler's tenant containment is the only authorization surface: a
+    // caller whose tenant does not match the workspace's tenant must get 403,
+    // never a workspace-scoped orchestrator JWT.
+    let ctx = Ctx::new().await;
+
+    // Workspace in a foreign tenant. The integration token is a global token
+    // whose AuthenticatedAgent.tenant_id is "default", so this workspace is
+    // out of scope for the caller.
+    let ws = gyre_domain::Workspace::new(
+        gyre_common::Id::new("ws-foreign"),
+        gyre_common::Id::new("tenant-foreign"),
+        "Foreign",
+        "foreign",
+        0,
+    );
+    ctx.state.workspaces.create(&ws).await.unwrap();
+
+    // Seed the built-in personas in BOTH tenants (bootstrap step 5): the
+    // spawn path resolves the orchestrator persona fail-closed, so the
+    // own-tenant positive control below needs an approved persona in the
+    // caller's scope chain — and seeding the foreign tenant too proves the
+    // 403 below comes from tenant containment, not from a missing persona.
+    gyre_server::seed_builtin_personas_for_tenant(
+        &ctx.state,
+        &gyre_common::Id::new("tenant-foreign"),
+    )
+    .await;
+    gyre_server::seed_builtin_personas_for_tenant(&ctx.state, &gyre_common::Id::new("default"))
+        .await;
+    // Production parity (same repair class as the chain fixtures): startup
+    // seeds the built-in persona meta-specs (main.rs → seed_builtin_meta_specs)
+    // and the spawn core's persona meta-spec layer is fail-closed
+    // (validate_persona), so the own-tenant positive control also needs the
+    // approved "workspace-orchestrator" meta-spec in the spec ledger —
+    // without it the spawn 500s before the persona entity layer is ever
+    // consulted, and the test would only pass by leaning on state another
+    // test binary happened to leave behind.
+    gyre_server::seed_builtin_meta_specs(&ctx.state).await;
+
+    let resp = ctx
+        .post(
+            "/api/v1/workspaces/ws-foreign/orchestrator/spawn",
+            json!({ "name": "should-not-spawn" }),
+        )
+        .await;
+    assert_eq!(
+        resp.status(),
+        403,
+        "cross-tenant orchestrator spawn must be Forbidden, got {}",
+        resp.status()
+    );
+
+    // No orchestrator was created for the foreign workspace.
+    let agents = ctx
+        .state
+        .agents
+        .list_by_workspace(&gyre_common::Id::new("ws-foreign"))
+        .await
+        .unwrap();
+    assert!(
+        agents.is_empty(),
+        "no agent may be created for a cross-tenant spawn"
+    );
+
+    // Positive control: a workspace in the caller's own tenant ("default")
+    // still spawns successfully.
+    let ws = gyre_domain::Workspace::new(
+        gyre_common::Id::new("ws-own"),
+        gyre_common::Id::new("default"),
+        "Own",
+        "own",
+        0,
+    );
+    ctx.state.workspaces.create(&ws).await.unwrap();
+    let resp = ctx
+        .post(
+            "/api/v1/workspaces/ws-own/orchestrator/spawn",
+            json!({ "name": "own-orchestrator" }),
+        )
+        .await;
+    assert_eq!(
+        resp.status(),
+        201,
+        "same-tenant orchestrator spawn must succeed, got {}",
+        resp.status()
+    );
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert!(
+        body["agent"]["id"].as_str().is_some_and(|s| !s.is_empty()),
+        "spawn response must include the created agent"
+    );
+}
+
+// ── 34b. Orchestrator spawn: task-bound agent JWT boundary (task-263 review
+//         repair — by-effect sweep miss on a token-minting surface) ─────────
+
+#[tokio::test]
+async fn orchestrator_spawn_denied_for_task_bound_agent_jwt() {
+    // A valid, non-expired worker JWT minted for task A must not be able to
+    // mint an orchestrator JWT on either orchestrator-spawn REST route: the
+    // minted token carries `orchestrator_type`, so `agent_task_claim()` is
+    // None for it and it crosses every claims-based agent boundary this
+    // task enforces (task mutation, agent lifecycle, spawn, MR, git push).
+    // The probe uses the worker's OWN workspace and OWN repo (tenant- and
+    // repo-scope-contained) so every other guard on the routes passes and
+    // the 403 proves the handler's task-bound-agent gate; the operator
+    // positive control on the same fixture still spawns both orchestrators.
+    let ctx = Ctx::new().await;
+
+    // The worker's own workspace — same tenant as the global token's
+    // resolved principal, so the routes' tenant containment passes — and
+    // the worker's own repo.
+    let ws = gyre_domain::Workspace::new(
+        gyre_common::Id::new("ws-agent-bound"),
+        gyre_common::Id::new("default"),
+        "Bound",
+        "bound",
+        0,
+    );
+    ctx.state.workspaces.create(&ws).await.unwrap();
+    let repo = gyre_domain::Repository::new(
+        gyre_common::Id::new("repo-agent-bound"),
+        ws.id.clone(),
+        "bound-repo",
+        "/tmp/gyre-api-integration/bound-repo.git",
+        0,
+    );
+    ctx.state.repos.create(&repo).await.unwrap();
+
+    // Seed the persona layers the spawn path resolves fail-closed, so the
+    // operator positive controls below exercise the real spawn path rather
+    // than failing on a missing persona/meta-spec.
+    gyre_server::seed_builtin_personas_for_tenant(&ctx.state, &gyre_common::Id::new("default"))
+        .await;
+    gyre_server::seed_builtin_meta_specs(&ctx.state).await;
+
+    // A valid, non-expired worker JWT for task A, scoped to the worker's
+    // own tenant/workspace/repo.
+    let worker_token = ctx
+        .state
+        .agent_signing_key
+        .mint_worker_scoped(
+            "agent-bound-worker",
+            "task-a",
+            "system",
+            &ctx.state.base_url,
+            3600,
+            "default",
+            "ws-agent-bound",
+            "repo-agent-bound",
+            "bound-repo",
+            None,
+            Some(1),
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+    ctx.state
+        .kv_store
+        .kv_set("agent_tokens", "agent-bound-worker", worker_token.clone())
+        .await
+        .unwrap();
+
+    // Workspace-tier route: registry-exempt (no middleware ABAC) and the
+    // caller is tenant-contained (own tenant) → only the task-bound-agent
+    // gate can deny. Must be 403, with no orchestrator created.
+    let resp = ctx
+        .client
+        .post(format!(
+            "{}/api/v1/workspaces/ws-agent-bound/orchestrator/spawn",
+            ctx.base
+        ))
+        .header("Authorization", format!("Bearer {worker_token}"))
+        .json(&json!({ "name": "should-not-spawn" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        403,
+        "task-bound agent JWT must not spawn a workspace orchestrator, got {}",
+        resp.status()
+    );
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert!(
+        body.to_string().contains("orchestrator"),
+        "denial must name the orchestrator-mint boundary, got {body}"
+    );
+
+    // Repo-tier route on the worker's OWN repo: check_repo_abac passes (no
+    // per-repo policies stored) and tenant containment passes → only the
+    // task-bound-agent gate denies.
+    let resp = ctx
+        .client
+        .post(format!(
+            "{}/api/v1/repos/repo-agent-bound/orchestrator/spawn",
+            ctx.base
+        ))
+        .header("Authorization", format!("Bearer {worker_token}"))
+        .json(&json!({ "name": "should-not-spawn" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        403,
+        "task-bound agent JWT must not spawn a repo orchestrator, got {}",
+        resp.status()
+    );
+
+    // No orchestrator (no agent at all) was created by either attempt.
+    let agents = ctx
+        .state
+        .agents
+        .list_by_workspace(&gyre_common::Id::new("ws-agent-bound"))
+        .await
+        .unwrap();
+    assert!(
+        agents.is_empty(),
+        "no agent may be created by a task-bound agent JWT's spawn attempts"
+    );
+
+    // Operator positive control on the same fixture: the global token
+    // (non-agent principal) keeps both spawn rights.
+    let resp = ctx
+        .post(
+            "/api/v1/workspaces/ws-agent-bound/orchestrator/spawn",
+            json!({ "name": "operator-ws-orchestrator" }),
+        )
+        .await;
+    assert_eq!(
+        resp.status(),
+        201,
+        "operator must keep the workspace-orchestrator spawn right, got {}",
+        resp.status()
+    );
+    let resp = ctx
+        .post(
+            "/api/v1/repos/repo-agent-bound/orchestrator/spawn",
+            json!({ "name": "operator-repo-orchestrator" }),
+        )
+        .await;
+    assert_eq!(
+        resp.status(),
+        201,
+        "operator must keep the repo-orchestrator spawn right, got {}",
+        resp.status()
     );
 }

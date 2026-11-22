@@ -49,11 +49,41 @@ pub struct TeardownRequest {
 
 /// POST /api/v1/compose/apply
 /// Accepts AgentCompose as JSON or YAML. Creates all agents in topological order.
+///
+/// Authorization: the route is ABAC-mapped (`compose/write`, not
+/// repo-addressed), so the builtin agent-scoped-access policy's Agent-role
+/// `write`-on-`*` Allow grants for ANY agent JWT — a preview agent's
+/// included. Preview-agent callers are refused per-handler (meta-spec
+/// reconciliation §5): compose_apply creates task and agent rows, a direct
+/// bypass of the guarded `POST /api/v1/tasks` route that would leave durable
+/// ledger footprint from throwaway preview scratch.
+/// identity-security.md §Task-Scoped JWT Claims — by-effect task-scope
+/// surface: compose apply creates task rows and agents, and compose
+/// teardown kills the session's agents (revoking their Task-scoped
+/// secrets). A task-bound agent principal is denied on both — its token
+/// authorizes its own task, not the composition graph of other agents.
+/// Non-agent principals are unaffected.
 pub async fn compose_apply(
     State(state): State<Arc<AppState>>,
+    auth: crate::auth::AuthenticatedAgent,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Result<(StatusCode, Json<ComposeApplyResponse>), ApiError> {
+    if auth.agent_task_claim().is_some() {
+        return Err(ApiError::Forbidden(
+            "agent tokens cannot apply compose graphs".to_string(),
+        ));
+    }
+    // meta-spec reconciliation §5 (task-206 review F1): preview agents may
+    // not mint task/agent rows — the same ceremony the guarded
+    // POST /api/v1/tasks route already refuses for them.
+    if crate::api::meta_specs::caller_is_preview_agent(&state, &auth).await {
+        return Err(ApiError::Forbidden(
+            "preview agents may not apply compose specs — preview runs leave no \
+             production footprint"
+                .to_string(),
+        ));
+    }
     // non-atomic-create:ok - per-item task+agent creation with compensating
     // rollback: if the agent create fails, the already-created task for that
     // item is deleted (see the rollback below), so a failed item leaves no
@@ -196,10 +226,32 @@ pub async fn compose_status(
 }
 
 /// POST /api/v1/compose/teardown -- stop all agents in the compose session.
+///
+/// Authorization: same per-handler preview-agent refusal as compose_apply —
+/// the guard runs BEFORE the session lookup so a preview caller cannot
+/// teardown any compose session (killing its agents) nor probe session ids.
+/// See `compose_apply`'s doc comment: teardown kills the session's agents
+/// and revokes their Task-scoped secrets, so task-bound agent principals are
+/// denied; non-agent principals are unaffected.
 pub async fn compose_teardown(
     State(state): State<Arc<AppState>>,
+    auth: crate::auth::AuthenticatedAgent,
     Json(req): Json<TeardownRequest>,
 ) -> Result<StatusCode, ApiError> {
+    if auth.agent_task_claim().is_some() {
+        return Err(ApiError::Forbidden(
+            "agent tokens cannot tear down compose sessions".to_string(),
+        ));
+    }
+    // meta-spec reconciliation §5 (task-206 review F1): preview agents may
+    // not kill other runs' agents.
+    if crate::api::meta_specs::caller_is_preview_agent(&state, &auth).await {
+        return Err(ApiError::Forbidden(
+            "preview agents may not tear down compose sessions — preview runs leave \
+             no production footprint"
+                .to_string(),
+        ));
+    }
     let mut sessions = state.compose_sessions.lock().await;
     let agent_ids = sessions.remove(&req.compose_id).ok_or_else(|| {
         ApiError::NotFound(format!("compose session {} not found", req.compose_id))
@@ -213,6 +265,28 @@ pub async fn compose_teardown(
                 let _ = agent.transition_status(AgentStatus::Dead);
                 agent.last_heartbeat = Some(now);
                 let _ = state.agents.update(&agent).await;
+                // agent.failed analytics event (analytics.md §Auto-Emitted
+                // Events: "Agent fails or is killed") — tearing down a
+                // compose session kills its agents, same as the admin kill
+                // and stale-abort paths; same spec-required properties.
+                let ev = gyre_domain::AnalyticsEvent::new(
+                    Id::new(uuid::Uuid::new_v4().to_string()),
+                    "agent.failed",
+                    Some(agent.id.to_string()),
+                    serde_json::json!({
+                        "task_id": agent.current_task_id.as_ref().map(|id| id.to_string()),
+                        "reason": "compose session torn down",
+                        "duration_secs": now.saturating_sub(agent.spawned_at),
+                    }),
+                    now,
+                )
+                .with_scope(
+                    None,
+                    None,
+                    Some(&agent.workspace_id),
+                    agent.repo_id.as_ref(),
+                );
+                let _ = state.analytics.record(&ev).await;
 
                 // Platform Model §7: compose teardown kills the agent —
                 // revoke its task-scoped ephemeral secrets (teardown; logs
@@ -313,6 +387,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/api/v1/compose/apply")
+                    .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&compose).unwrap()))
                     .unwrap(),
@@ -363,6 +438,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/api/v1/compose/apply")
+                    .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&compose).unwrap()))
                     .unwrap(),
@@ -393,7 +469,8 @@ mod tests {
 
     #[tokio::test]
     async fn compose_teardown_stops_all_agents() {
-        let app = app();
+        let state = crate::mem::test_state();
+        let app = crate::api::api_router().with_state(state.clone());
         let (app, _workspace_id, repo_id) = create_project_and_repo(app).await;
 
         let compose = serde_json::json!({
@@ -427,6 +504,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/api/v1/compose/apply")
+                    .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&compose).unwrap()))
                     .unwrap(),
@@ -444,6 +522,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/api/v1/compose/teardown")
+                    .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&teardown_body).unwrap()))
                     .unwrap(),
@@ -463,6 +542,38 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        // analytics.md §Auto-Emitted Events: agent.failed ("Agent fails or
+        // is killed") — tearing down a compose session kills its agents.
+        // Regression: this path previously marked agents Dead with no
+        // analytics event.
+        let events = state
+            .analytics
+            .query(Some("agent.failed"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            events.len(),
+            2,
+            "teardown must record agent.failed for every killed session agent"
+        );
+        for ev in &events {
+            assert_eq!(ev.event_name, "agent.failed");
+            assert_eq!(ev.properties["reason"], "compose session torn down");
+            assert!(
+                ev.properties["duration_secs"].as_u64().is_some(),
+                "duration_secs must be present"
+            );
+            assert!(
+                ev.agent_id.is_some(),
+                "agent_id (spec-required) must be present"
+            );
+        }
+        let agent_ids: std::collections::HashSet<&str> = events
+            .iter()
+            .map(|ev| ev.agent_id.as_deref().unwrap())
+            .collect();
+        assert_eq!(agent_ids.len(), 2, "one event per distinct session agent");
     }
 
     #[tokio::test]
@@ -489,7 +600,9 @@ agents:
                 Request::builder()
                     .method("POST")
                     .uri("/api/v1/compose/apply")
+                    .header("authorization", "Bearer test-token")
                     .header("content-type", "application/yaml")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(yaml))
                     .unwrap(),
             )
@@ -526,6 +639,7 @@ agents:
                 Request::builder()
                     .method("POST")
                     .uri("/api/v1/compose/apply")
+                    .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&compose).unwrap()))
                     .unwrap(),
@@ -570,6 +684,7 @@ agents:
                 Request::builder()
                     .method("POST")
                     .uri("/api/v1/compose/apply")
+                    .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&compose).unwrap()))
                     .unwrap(),
@@ -601,6 +716,7 @@ agents:
                 Request::builder()
                     .method("POST")
                     .uri("/api/v1/compose/teardown")
+                    .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&teardown_body).unwrap()))
                     .unwrap(),

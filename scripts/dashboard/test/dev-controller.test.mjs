@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { associatePullRequests, controllerPaths, collectController, attemptLog, setSlots, setPriority, coverageHistory, coverageMetrics, taskTitles } from "../server/dev-controller.mjs";
+import { associatePullRequests, controllerPaths, collectController, attemptLog, setSlots, setPriority, retryTask, coverageHistory, coverageMetrics, taskTitles } from "../server/dev-controller.mjs";
 import { createDashboardServer } from "../server/dev-http.mjs";
 
 const execFileP = promisify(execFile);
@@ -51,16 +51,15 @@ test("cockpit reads pipeline stages and updates the durable sandbox budget", asy
   const root = await mkdtemp(join(tmpdir(), "gyre-cockpit-"));
   await mkdir(join(root, "scripts"));
   await mkdir(join(root, "specs", "tasks"), { recursive: true });
-  for (const name of ["dev-pipeline.py", "dev-contract.py", "dev-gateway-job.py"])
-    await copyFile(resolve("scripts", name), join(root, "scripts", name));
-  await cp(resolve("scripts/pipeline"), join(root, "scripts/pipeline"), { recursive: true });
+  // Exercise the installed harness, including dependencies of newly added stages.
+  await cp(resolve("scripts"), join(root, "scripts"), { recursive: true });
   await execFileP("python3", [join(root, "scripts", "dev-pipeline.py"), "status", "--json"], { cwd: root });
   const paths = controllerPaths(root);
   const state = await collectController(paths);
   assert.equal(state.present, true);
   assert.equal(state.online, false);
   assert.deepEqual(state.tasks, []);
-  assert.deepEqual(Object.keys(state.stages), ["triage", "assess", "implement", "review", "verify", "publish", "observe", "cleanup"]);
+  assert.deepEqual(Object.keys(state.stages), ["triage", "assess", "spec_audit", "decompose", "plan_review", "backlog", "implement", "review", "verify", "publish", "observe", "cleanup"]);
 
   await setSlots(paths, 7);
   assert.equal((await collectController(paths)).slots, 7);
@@ -71,6 +70,12 @@ test("cockpit reads pipeline stages and updates the durable sandbox budget", asy
   assert.equal((await setPriority(paths,"task-001",null)).class,"normal");
   await assert.rejects(setPriority(paths,"task-001","unknown"),/Unknown priority class/);
   await assert.rejects(setPriority(paths,"task-001","urgent; false"),/invalid/);
+
+  const planningName = "spec-" + "a".repeat(24);
+  await execFileP("python3", ["-c", "import sys;sys.path.insert(0,sys.argv[1]);from pipeline.store import Store;s=Store(sys.argv[2]);n=sys.argv[3];s.put_task(n,'g','body',{'title':'Audit spec','spec_planner':True,'document':'specs/system/example.md','status':'pending','sections':{}});w=s.enqueue('spec_audit',n,'g',{'base':'base','cycle':0});c=s.claim('spec_audit','fixture');s.retry(w,c['token'],{'category':'spec_report','message':'invalid report'},attention=True)", join(root,"scripts"),paths.state,planningName]);
+  assert.equal((await setPriority(paths,planningName,"background")).class,"background");
+  await retryTask(paths,planningName);
+  await assert.rejects(retryTask(paths,"spec-../../etc/passwd"),/invalid task/);
 
   const id = "abcdef0123456789abcdef0123456789-1";
   const log = join(paths.attempts, id.slice(0, 32), "1", "output.log");

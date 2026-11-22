@@ -39,20 +39,38 @@ fn new_id() -> String {
 
 /// Derive MessageOrigin from the authenticated caller.
 ///
-/// Uses role-based check (Admin → Server) rather than magic-string comparison
-/// on `agent_id`. The string "system" is NOT a reliable signal: API key and
-/// OIDC paths set agent_id from user.display_name / preferred_username, which
-/// an attacker could set to "system" without holding Admin role.
+/// Message-bus.md §Origin and tenant resolution from auth context: the
+/// origin follows the AUTH MECHANISM the extractor verified — never role
+/// membership or identity strings (a user named "system", or an Admin-role
+/// API-key user, must not receive Server origin):
+///   - global GYRE_AUTH_TOKEN            → Server (full forge authority)
+///   - API key (gyre_*)                  → User(user_id from key lookup)
+///   - Keycloak/OIDC JWT                 → User(user_id from token)
+///   - agent JWT / per-agent token       → Agent(sub)
+///   - impersonation JWT                 → User(target user)
+///   - federated instance JWT            → Agent(remote subject)
+///
+/// The Admin role is a SEPARATE axis: the Broadcast guard in the send
+/// handler still allows Admin-role API-key callers to target Broadcast
+/// (scoping rule 6) via its own role check — but they resolve to User
+/// origin, so server_only kinds and the rule-3 Directed-membership check
+/// apply to them like any other user.
 fn origin_from_auth(auth: &AuthenticatedAgent) -> MessageOrigin {
-    if auth.roles.contains(&gyre_domain::UserRole::Admin) {
-        // Admin callers (global token, Admin-role users) → Server origin.
-        MessageOrigin::Server
-    } else if let Some(user_id) = &auth.user_id {
-        // API key or Keycloak JWT with non-Admin role → User
-        MessageOrigin::User(user_id.clone())
-    } else {
-        // Per-agent token → Agent
-        MessageOrigin::Agent(Id::new(&auth.agent_id))
+    use crate::auth::AuthMechanism;
+    match auth.auth_mechanism {
+        AuthMechanism::GlobalToken => MessageOrigin::Server,
+        AuthMechanism::ApiKey | AuthMechanism::UserJwt | AuthMechanism::Impersonation => {
+            match &auth.user_id {
+                Some(user_id) => MessageOrigin::User(user_id.clone()),
+                // Defensive: these mechanisms always resolve a user row; if
+                // one ever reaches here without one, fall back to the
+                // non-Server agent shape rather than granting forge authority.
+                None => MessageOrigin::Agent(Id::new(&auth.agent_id)),
+            }
+        }
+        AuthMechanism::AgentToken | AuthMechanism::FederatedJwt => {
+            MessageOrigin::Agent(Id::new(&auth.agent_id))
+        }
     }
 }
 
@@ -84,6 +102,20 @@ pub async fn send_message(
     Json(req): Json<SendMessageRequest>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
     let ws_id = Id::new(&workspace_id);
+
+    // Preview agents (meta-spec reconciliation §5) are scratch work with no
+    // durable footprint: a Directed-tier message they send lands in a real
+    // production agent's inbox and stays there until acked — an influence
+    // channel and a durable trace that outlives the throwaway run. Same
+    // containment as the task/MR/complete refusals; the MCP twin
+    // gyre_message_send is denied in the mcp dispatch.
+    if crate::api::meta_specs::caller_is_preview_agent(&state, &auth).await {
+        return Err(ApiError::Forbidden(
+            "preview agents may not send messages — preview runs leave no durable \
+             footprint in production inboxes"
+                .to_string(),
+        ));
+    }
 
     // Parse destination from request body.
     let to = parse_destination(&req.to)?;
@@ -165,12 +197,59 @@ pub async fn send_message(
             .map_err(ApiError::Internal)?
             .ok_or_else(|| ApiError::NotFound(format!("agent {} not found", target_agent_id)))?;
 
-        // Target must be in this workspace (enforces tenant isolation since workspace IDs are
-        // globally unique and each workspace belongs to exactly one tenant).
+        // Target must be in this workspace (workspace IDs are globally unique
+        // and each workspace belongs to exactly one tenant).
         if target_agent.workspace_id != ws_id {
             return Err(ApiError::BadRequest(format!(
                 "target agent {} is not in workspace {}",
                 target_agent_id, workspace_id
+            )));
+        }
+
+        // Scoping rule 1 (message-bus.md §Scoping Rules): ALL Agent-directed
+        // messages validate tenant isolation — the target agent's tenant
+        // (resolved from its workspace record; an agent has no tenant field
+        // of its own) must match the message's tenant (the caller's verified
+        // tenant), REGARDLESS of origin, including Server-origin callers.
+        // This is exactly the server-bug cross-tenant leak class rule 1
+        // exists to prevent: a global-token caller whose tenant is T1 must
+        // not be able to store a T1-tenant message pointed at a T2 agent.
+        // If the target's workspace record cannot be resolved, the tenant
+        // scope is indeterminable — the send is REJECTED (fail-closed),
+        // never allowed through: workspace deletes do not cascade agents,
+        // so a dangling agent in a deleted workspace is a real
+        // inconsistent-state leak vector, not a theoretical one. There is
+        // no valid tenant to compare against, so allowing the send would be
+        // exactly the fail-open ref-resolution class this repo prohibits.
+        let target_ws = state
+            .workspaces
+            .find_by_id(&target_agent.workspace_id)
+            .await
+            .map_err(ApiError::Internal)?;
+        let target_ws = match target_ws {
+            Some(ws) => ws,
+            None => {
+                tracing::warn!(
+                    workspace_id = %target_agent.workspace_id,
+                    "send: target agent's workspace not found; tenant isolation cannot be verified"
+                );
+                return Err(ApiError::Forbidden(format!(
+                    "target agent {} workspace {} cannot be resolved; tenant isolation cannot be verified",
+                    target_agent_id, target_agent.workspace_id
+                )));
+            }
+        };
+        if target_ws.tenant_id.as_str() != auth.tenant_id {
+            crate::rbac::record_rbac_denied(
+                &state,
+                &auth,
+                "same-tenant target",
+                "POST /api/v1/workspaces/:workspace_id/messages",
+            )
+            .await;
+            return Err(ApiError::Forbidden(format!(
+                "target agent {} belongs to a different tenant",
+                target_agent_id
             )));
         }
 
@@ -297,8 +376,15 @@ pub async fn send_message(
         msg.key_id = Some(kid);
     }
 
-    // Persist Directed and Event tier only (Telemetry is in-memory, Broadcast is not stored).
-    if effective_tier != MessageTier::Telemetry && !matches!(msg.to, Destination::Broadcast) {
+    // Persist Directed and Event tier only (Telemetry is in-memory, Broadcast
+    // is not stored). Broadcast-only kinds (DataSeeded/QueueUpdated) are
+    // storage-exempt regardless of destination (message-bus.md
+    // §Broadcast-only kinds): they flow through the in-memory broadcast
+    // channel only, never hitting MessageRepository::store().
+    if effective_tier != MessageTier::Telemetry
+        && !matches!(msg.to, Destination::Broadcast)
+        && !msg.kind.broadcast_only()
+    {
         state
             .messages
             .store(&msg)
@@ -309,8 +395,20 @@ pub async fn send_message(
     // Broadcast to WebSocket clients for real-time delivery.
     let _ = state.message_broadcast_tx.send(msg.clone());
 
-    // Dispatch to consumers (best-effort, non-blocking).
-    let _ = state.message_dispatch_tx.try_send(msg.clone());
+    // Dispatch to consumers (notification bridge, etc.). Non-blocking and
+    // best-effort: consumer drops under backpressure are logged, never
+    // block the send path (message-bus.md §Relationship to Notifications).
+    match state.message_dispatch_tx.try_send(msg.clone()) {
+        Ok(()) => {}
+        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+            tracing::warn!(
+                "message dispatch channel full; consumer dropped a message (best-effort tier)"
+            );
+        }
+        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+            tracing::debug!("message dispatch channel closed; no consumers registered");
+        }
+    }
 
     Ok((StatusCode::CREATED, Json(send_response(msg))))
 }
@@ -522,8 +620,25 @@ mod tests {
         agent_id: &str,
         workspace_id: &str,
     ) {
+        // The send path resolves the target agent's tenant from its workspace
+        // record (scoping rule 1) and REJECTS Agent-directed sends whose
+        // scope cannot be resolved — so tests exercising the send path need
+        // a real workspace row. Tenant "default" matches the global test
+        // token's system principal tenant. Tests that seed a
+        // different-tenant workspace first keep it (idempotent).
+        let ws_id = Id::new(workspace_id);
+        if state.workspaces.find_by_id(&ws_id).await.unwrap().is_none() {
+            let ws = gyre_domain::Workspace::new(
+                ws_id.clone(),
+                Id::new("default"),
+                format!("Workspace {workspace_id}"),
+                workspace_id,
+                0,
+            );
+            state.workspaces.create(&ws).await.unwrap();
+        }
         let mut agent = Agent::new(Id::new(agent_id), agent_id, 0);
-        agent.workspace_id = Id::new(workspace_id);
+        agent.workspace_id = ws_id;
         state.agents.create(&agent).await.unwrap();
     }
 
@@ -1046,6 +1161,70 @@ mod tests {
         assert!(found.is_none(), "Telemetry message must not be persisted");
     }
 
+    /// message-bus.md §Broadcast-only kinds: `DataSeeded` and `QueueUpdated`
+    /// are storage-exempt — "never hitting `MessageRepository::store()`".
+    /// The send path must short-circuit storage for these kinds BY KIND, not
+    /// just by destination: a server-originated broadcast-only kind forced to
+    /// a Workspace destination must still not be stored, while the broadcast
+    /// channel delivers the message to subscribers. Against the prior
+    /// destination-only guard this test fails (the row is persisted).
+    #[tokio::test]
+    async fn broadcast_only_kinds_not_persisted_even_forced_to_workspace() {
+        let state = test_state();
+        let mut rx = state.message_broadcast_tx.subscribe();
+        let app = crate::api::api_router().with_state(state.clone());
+
+        for kind in ["data_seeded", "queue_updated"] {
+            let body = serde_json::json!({
+                "to": {"workspace": "ws-bo"},
+                "kind": kind,
+            });
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/workspaces/ws-bo/messages")
+                        .header("content-type", "application/json")
+                        .header(auth_header().0, auth_header().1) // global token = Server origin
+                        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::CREATED, "kind={kind}");
+            let json = body_json(resp).await;
+            let msg_id = json["id"].as_str().unwrap().to_string();
+
+            // Not stored: neither by id nor in the workspace listing.
+            assert!(
+                state
+                    .messages
+                    .find_by_id(&Id::new(&msg_id))
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "{kind} must never hit MessageRepository::store()"
+            );
+            let listed = state
+                .messages
+                .list_by_workspace(&Id::new("ws-bo"), None, None, None, None, Some(100))
+                .await
+                .unwrap();
+            assert!(
+                listed.is_empty(),
+                "{kind} must never hit MessageRepository::store() (list_by_workspace found rows)"
+            );
+
+            // The broadcast channel DID deliver the message to subscribers.
+            let msg = rx
+                .try_recv()
+                .unwrap_or_else(|e| panic!("{kind} must reach broadcast channel subscribers: {e}"));
+            assert_eq!(msg.kind.as_str(), kind);
+            assert!(matches!(msg.from, MessageOrigin::Server));
+        }
+    }
+
     #[tokio::test]
     async fn crash_recovery_acknowledged_false() {
         let state = test_state();
@@ -1081,5 +1260,560 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let json = body_json(resp).await;
         assert_eq!(json.as_array().unwrap().len(), 1);
+    }
+
+    // ── Origin table + scoping rules (message-bus.md §Origin and tenant
+    // resolution from auth context, §Scoping Rules 1/3/6) ─────────────────
+
+    /// Seed a user + API key so the caller authenticates through the real
+    /// API-key extractor path (mechanism → User origin even for Admin role).
+    async fn seed_api_key_user(
+        state: &std::sync::Arc<crate::AppState>,
+        user_id: &str,
+        raw_key: &str,
+        roles: Vec<gyre_domain::UserRole>,
+        tenant: &str,
+    ) {
+        let mut user = gyre_domain::User::new(
+            Id::new(user_id),
+            format!("ext-{user_id}"),
+            format!("user-{user_id}"),
+            1000,
+        );
+        user.roles = roles;
+        user.tenant_id = Some(Id::new(tenant));
+        state.users.create(&user).await.unwrap();
+        state
+            .api_keys
+            .create(
+                &crate::auth::hash_api_key(raw_key),
+                &user.id,
+                "messages-test",
+            )
+            .await
+            .unwrap();
+    }
+
+    async fn create_workspace(state: &std::sync::Arc<crate::AppState>, ws_id: &str, tenant: &str) {
+        let ws = gyre_domain::Workspace::new(
+            Id::new(ws_id),
+            Id::new(tenant),
+            format!("Workspace {ws_id}"),
+            ws_id,
+            0,
+        );
+        state.workspaces.create(&ws).await.unwrap();
+    }
+
+    async fn post_message(
+        app: Router,
+        token: &str,
+        workspace: &str,
+        body: serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/workspaces/{workspace}/messages"))
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        (status, body_json(resp).await)
+    }
+
+    /// Origin table, API-key row: an Admin-role API-key caller resolves to
+    /// User(<user_id>) origin — the server_only() 403 gate applies to it.
+    /// This is the origin-forging probe: with the old role-based
+    /// Admin→Server mapping this request returned 201.
+    #[tokio::test]
+    async fn admin_api_key_cannot_forge_server_only_kind() {
+        let state = test_state();
+        seed_api_key_user(
+            &state,
+            "u-admin-key",
+            "gyre-admin-key-1",
+            vec![gyre_domain::UserRole::Admin],
+            "default",
+        )
+        .await;
+        let app = crate::api::api_router().with_state(state.clone());
+
+        let (status, json) = post_message(
+            app,
+            "gyre-admin-key-1",
+            "ws-ot",
+            serde_json::json!({
+                "to": {"workspace": "ws-ot"},
+                "kind": "agent_created",
+                "payload": {"agent_id": "some-agent"}
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "body: {json}");
+        assert!(
+            json["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("only be sent by the server"),
+            "403 must come from the server_only origin gate, got: {json}"
+        );
+
+        // Nothing was stored.
+        let stored = state
+            .messages
+            .list_by_workspace(&Id::new("ws-ot"), None, None, None, None, None)
+            .await
+            .unwrap();
+        assert!(stored.is_empty(), "rejected forge must not be persisted");
+    }
+
+    /// Origin table, Keycloak/OIDC row: an Admin-role OIDC caller resolves
+    /// to User(<user_id>) origin — the server_only() 403 gate applies to it.
+    #[tokio::test]
+    async fn admin_oidc_user_cannot_forge_server_only_kind() {
+        let state = crate::auth::test_helpers::make_test_state_with_jwt();
+        let token = crate::auth::test_helpers::sign_test_jwt(
+            &serde_json::json!({
+                "sub": "admin-oidc-1",
+                "preferred_username": "admin-oidc-1",
+                "realm_access": {"roles": ["Admin"]}
+            }),
+            600,
+        );
+        let app = crate::api::api_router().with_state(state.clone());
+
+        let (status, json) = post_message(
+            app,
+            &token,
+            "ws-ot-oidc",
+            serde_json::json!({
+                "to": {"workspace": "ws-ot-oidc"},
+                "kind": "agent_created",
+                "payload": {"agent_id": "some-agent"}
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "body: {json}");
+        assert!(
+            json["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("only be sent by the server"),
+            "403 must come from the server_only origin gate, got: {json}"
+        );
+    }
+
+    /// Origin-table consequence (rule 3): Admin-role API-key callers now
+    /// resolve to User origin, so the User-origin workspace-membership check
+    /// on Directed sends applies to them — a Directed send to an agent in a
+    /// workspace the user is NOT a member of is rejected 403, and succeeds
+    /// once membership exists.
+    #[tokio::test]
+    async fn admin_api_key_directed_send_requires_workspace_membership() {
+        let state = test_state();
+        create_workspace(&state, "ws-r3", "default").await;
+        create_agent_in_workspace(state.clone(), "agent-r3", "ws-r3").await;
+        seed_api_key_user(
+            &state,
+            "u-admin-r3",
+            "gyre-admin-key-r3",
+            vec![gyre_domain::UserRole::Admin],
+            "default",
+        )
+        .await;
+
+        // Not a member → 403 via the rule-3 membership check (origin User).
+        let app = crate::api::api_router().with_state(state.clone());
+        let (status, json) = post_message(
+            app,
+            "gyre-admin-key-r3",
+            "ws-r3",
+            serde_json::json!({
+                "to": {"agent": "agent-r3"},
+                "kind": "task_assignment",
+                "payload": {"task_id": "TASK-R3"}
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "body: {json}");
+        assert!(
+            json["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("not a member"),
+            "403 must come from the rule-3 membership check, got: {json}"
+        );
+        assert!(
+            state
+                .messages
+                .list_unacked(&Id::new("agent-r3"), 10)
+                .await
+                .unwrap()
+                .is_empty(),
+            "rejected Directed send must not be persisted"
+        );
+
+        // Same caller, same workspace, membership added → 201 (the check is
+        // keyed on origin, not a blanket user denial).
+        let membership = gyre_domain::WorkspaceMembership::new(
+            Id::new("m-r3"),
+            Id::new("u-admin-r3"),
+            Id::new("ws-r3"),
+            gyre_domain::WorkspaceRole::Developer,
+            Id::new("u-admin-r3"),
+            0,
+        );
+        state
+            .workspace_memberships
+            .create(&membership)
+            .await
+            .unwrap();
+        let app = crate::api::api_router().with_state(state.clone());
+        let (status, json) = post_message(
+            app,
+            "gyre-admin-key-r3",
+            "ws-r3",
+            serde_json::json!({
+                "to": {"agent": "agent-r3"},
+                "kind": "task_assignment",
+                "payload": {"task_id": "TASK-R3"}
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "body: {json}");
+        assert_eq!(
+            state
+                .messages
+                .list_unacked(&Id::new("agent-r3"), 10)
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "accepted Directed send must be persisted"
+        );
+    }
+
+    /// Origin table, global-token row (rule 6 forge authority preserved):
+    /// the global GYRE_AUTH_TOKEN still resolves to Server origin — it can
+    /// send server_only kinds AND target Broadcast.
+    #[tokio::test]
+    async fn global_token_keeps_server_origin_and_broadcast_authority() {
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // server_only kind → allowed (Server origin).
+        let (status, json) = post_message(
+            app.clone(),
+            "test-token",
+            "ws-gt",
+            serde_json::json!({
+                "to": {"workspace": "ws-gt"},
+                "kind": "agent_created",
+                "payload": {"agent_id": "some-agent"}
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "body: {json}");
+
+        // Broadcast destination → allowed (Server origin, rule 6).
+        let (status, json) = post_message(
+            app,
+            "test-token",
+            "ws-gt",
+            serde_json::json!({
+                "to": "broadcast",
+                "kind": "task_created",
+                "payload": {"task_id": "TASK-BC-GT"}
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "body: {json}");
+        // Broadcast messages are never persisted.
+        let msg_id = json["id"].as_str().unwrap();
+        assert!(
+            state
+                .messages
+                .find_by_id(&Id::new(msg_id))
+                .await
+                .unwrap()
+                .is_none(),
+            "Broadcast messages must never be stored"
+        );
+    }
+
+    /// Scoping rule 6 preserved for Admin API keys: an Admin-role API-key
+    /// caller can still send a Broadcast message (separate role check),
+    /// while a non-Admin API-key caller cannot (403).
+    #[tokio::test]
+    async fn admin_api_key_broadcast_allowed_non_admin_rejected() {
+        let state = test_state();
+        create_workspace(&state, "ws-b6", "default").await;
+        seed_api_key_user(
+            &state,
+            "u-admin-b6",
+            "gyre-admin-key-b6",
+            vec![gyre_domain::UserRole::Admin],
+            "default",
+        )
+        .await;
+        // Non-Admin caller that IS a workspace member — ABAC allows it, so
+        // the 403 below can only come from the Broadcast origin/role guard.
+        seed_api_key_user(
+            &state,
+            "u-dev-b6",
+            "gyre-dev-key-b6",
+            vec![gyre_domain::UserRole::Developer],
+            "default",
+        )
+        .await;
+        let membership = gyre_domain::WorkspaceMembership::new(
+            Id::new("m-b6"),
+            Id::new("u-dev-b6"),
+            Id::new("ws-b6"),
+            gyre_domain::WorkspaceRole::Developer,
+            Id::new("u-admin-b6"),
+            0,
+        );
+        state
+            .workspace_memberships
+            .create(&membership)
+            .await
+            .unwrap();
+
+        // Admin API key → Broadcast allowed (rule 6 role check).
+        //
+        // The probe kind MUST be a non-server_only Event-tier kind (a
+        // Custom kind): the server_only() 403 gate runs BEFORE the Broadcast
+        // guard, so a server_only probe (e.g. task_created) would be
+        // rejected there for the Admin API-key caller — which resolves to
+        // User origin under the auth-mechanism origin table — and the test
+        // would exercise the wrong gate. Custom kinds are Event tier with
+        // server_only() == false, so the only gate that can reject the
+        // non-Admin probe below is the Broadcast origin/role guard.
+        let app = crate::api::api_router().with_state(state.clone());
+        let (status, json) = post_message(
+            app.clone(),
+            "gyre-admin-key-b6",
+            "ws-b6",
+            serde_json::json!({
+                "to": "broadcast",
+                "kind": "rule6_broadcast_probe",
+                "payload": {"probe": "rule6-admin"}
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "body: {json}");
+
+        // Non-Admin API key (member) → Broadcast rejected by the guard.
+        let (status, json) = post_message(
+            app,
+            "gyre-dev-key-b6",
+            "ws-b6",
+            serde_json::json!({
+                "to": "broadcast",
+                "kind": "rule6_broadcast_probe",
+                "payload": {"probe": "rule6-non-admin"}
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "body: {json}");
+        assert!(
+            json["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Broadcast destination requires Server origin or Admin role"),
+            "403 must come from the Broadcast guard, got: {json}"
+        );
+    }
+
+    /// Scoping rule 1 (tenant isolation): a global-token (Server-origin)
+    /// caller whose tenant is "default" sending a Directed message to an
+    /// agent in a tenant-2 workspace is rejected 403 and nothing is stored
+    /// or broadcast; a same-tenant send still succeeds. This is the
+    /// cross-tenant Directed leak probe — with the tenant comparison
+    /// removed, the cross-tenant request returns 201.
+    #[tokio::test]
+    async fn cross_tenant_directed_send_rejected_for_server_origin() {
+        let state = test_state();
+        // Caller (global token) tenant: "default" (system principal tenant).
+        create_workspace(&state, "ws-t1", "default").await;
+        create_agent_in_workspace(state.clone(), "agent-t1", "ws-t1").await;
+        // Target workspace in ANOTHER tenant.
+        create_workspace(&state, "ws-t2", "tenant-2").await;
+        create_agent_in_workspace(state.clone(), "agent-t2", "ws-t2").await;
+
+        let mut bus_rx = state.message_broadcast_tx.subscribe();
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // Cross-tenant Directed send → 403, nothing stored or broadcast.
+        let (status, json) = post_message(
+            app.clone(),
+            "test-token",
+            "ws-t2",
+            serde_json::json!({
+                "to": {"agent": "agent-t2"},
+                "kind": "task_assignment",
+                "payload": {"task_id": "TASK-X-TENANT"}
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "body: {json}");
+        assert!(
+            json["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("different tenant"),
+            "403 must come from the rule-1 tenant isolation check, got: {json}"
+        );
+        assert!(
+            state
+                .messages
+                .list_unacked(&Id::new("agent-t2"), 10)
+                .await
+                .unwrap()
+                .is_empty(),
+            "cross-tenant Directed send must not be persisted"
+        );
+        assert!(
+            bus_rx.try_recv().is_err(),
+            "cross-tenant Directed send must not be broadcast"
+        );
+
+        // Same-tenant Directed send → 201 (the check discriminates, it is
+        // not a blanket rejection).
+        let (status, json) = post_message(
+            app,
+            "test-token",
+            "ws-t1",
+            serde_json::json!({
+                "to": {"agent": "agent-t1"},
+                "kind": "task_assignment",
+                "payload": {"task_id": "TASK-SAME-TENANT"}
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "body: {json}");
+        assert_eq!(
+            state
+                .messages
+                .list_unacked(&Id::new("agent-t1"), 10)
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "same-tenant Directed send must be persisted"
+        );
+        let bus_msg = bus_rx
+            .try_recv()
+            .expect("same-tenant send must be broadcast");
+        assert_eq!(
+            bus_msg.to,
+            gyre_common::message::Destination::Agent(Id::new("agent-t1"))
+        );
+    }
+
+    /// Scoping rule 1 is fail-closed on an unresolvable target workspace
+    /// (review round-4 repair): workspace deletes do not cascade agents, so
+    /// a dangling agent whose workspace record is gone is a real
+    /// inconsistent-state leak vector. The old code logged a warning and
+    /// proceeded with the send; the tenant scope being indeterminable must
+    /// REJECT the send (403), not allow it through — with the skip-and-log
+    /// behavior restored, this request returns 201 and the message reaches
+    /// the dangling agent's inbox.
+    #[tokio::test]
+    async fn unresolvable_target_workspace_rejects_send() {
+        let state = test_state();
+        // Dangling agent: its workspace record is deliberately NOT created
+        // (the state after DELETE /api/v1/workspaces/W — mem deletes only
+        // the workspace row, leaving the agent).
+        let mut agent = Agent::new(Id::new("agent-dangling"), "agent-dangling", 0);
+        agent.workspace_id = Id::new("ws-gone");
+        state.agents.create(&agent).await.unwrap();
+
+        let mut bus_rx = state.message_broadcast_tx.subscribe();
+        let app = crate::api::api_router().with_state(state.clone());
+
+        let (status, json) = post_message(
+            app,
+            "test-token",
+            "ws-gone",
+            serde_json::json!({
+                "to": {"agent": "agent-dangling"},
+                "kind": "task_assignment",
+                "payload": {"task_id": "TASK-DANGLING"}
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "body: {json}");
+        assert!(
+            json["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("cannot be resolved"),
+            "403 must name the unresolvable tenant scope, got: {json}"
+        );
+        assert!(
+            state
+                .messages
+                .list_unacked(&Id::new("agent-dangling"), 10)
+                .await
+                .unwrap()
+                .is_empty(),
+            "a send with an unresolvable target tenant scope must not be persisted"
+        );
+        assert!(
+            bus_rx.try_recv().is_err(),
+            "a send with an unresolvable target tenant scope must not be broadcast"
+        );
+    }
+
+    /// Crash-recovery contract: GET inbox responses still INCLUDE the
+    /// `acknowledged` field (it is excluded only from POST responses and
+    /// WebSocket pushes).
+    #[tokio::test]
+    async fn get_inbox_still_includes_acknowledged() {
+        let state = test_state();
+        create_agent_in_workspace(state.clone(), "agent-keep-ack", "ws-ka").await;
+        let msg = gyre_common::message::Message {
+            id: Id::new("msg-ka"),
+            tenant_id: Id::new("default"),
+            from: MessageOrigin::Server,
+            workspace_id: Some(Id::new("ws-ka")),
+            to: Destination::Agent(Id::new("agent-keep-ack")),
+            kind: MessageKind::TaskAssignment,
+            payload: None,
+            created_at: 1_000,
+            signature: None,
+            key_id: None,
+            acknowledged: false,
+        };
+        state.messages.store(&msg).await.unwrap();
+
+        let app = crate::api::api_router().with_state(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/agents/agent-keep-ack/messages?after_ts=0")
+                    .header(auth_header().0, auth_header().1)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let arr = json.as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["id"], "msg-ka");
+        assert!(
+            arr[0].get("acknowledged").is_some_and(|v| v.is_boolean()),
+            "GET inbox must include `acknowledged` (crash-recovery contract), got: {arr:?}"
+        );
     }
 }

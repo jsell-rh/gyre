@@ -102,8 +102,29 @@ Shared schema with `tenant_id` column on all tenant-scoped tables. Diesel's quer
 
 ### Which Tables Get tenant_id
 
-**Tenant-scoped (have tenant_id):**
-- projects
+> **Amendment (2026-11-19, operator decision `3e7bbde727f5dcf55afb0217`,
+> option_a — "Amend the stale table list to match shipped reality").**
+> This classification is corrected to match the shipped schema; the prior
+> text is preserved under "Historical classification (superseded)" below.
+> - `projects` is removed from the tenant-scoped list: the Project entity
+>   was removed by M33 (`specs/index.md` — "Workspace becomes the primary
+>   grouping entity"), and migration `2026-03-24-000013_remove_projects`
+>   drops the `projects` table and makes `workspace_id` NOT NULL on
+>   `repositories`.
+> - `users` moves from the global list into a new **tenant-bound**
+>   category: migration `2026-10-08-000058_user_entity_profile_fields`
+>   adds a nullable `users.tenant_id` column (indexed by
+>   `2026-11-13-000065_user_tenant_scope`), each user belongs to exactly
+>   one tenant per `specs/system/user-management.md` (cross-tenant sharing
+>   is not supported), and the API-key auth extractor fail-closes on users
+>   with no tenant binding rather than fabricating a scope.
+>
+> This is a requirements correction only — no code changed. It documents
+> what the migrations and the auth extractor already enforce; the
+> migrations remain ground truth for which tables carry `tenant_id`
+> (`scripts/check-tenant-filter.sh` derives the set mechanically).
+
+**Tenant-scoped (NOT NULL tenant_id):**
 - repositories
 - agents
 - tasks
@@ -120,22 +141,54 @@ Shared schema with `tenant_id` column on all tenant-scoped tables. Diesel's quer
 - quality_gates
 - gate_results
 
+(`projects` appeared here historically; it was removed by M33 — see the
+amendment record above.)
+
+**Tenant-bound (nullable tenant_id, fail-closed auth):**
+- users — exactly one tenant per user. The column is nullable only because
+  legacy OIDC-provisioned rows predate the binding (migration
+  `2026-10-08-000058`); the auth extractor rejects API-key logins for users
+  with no tenant binding instead of inventing one, so an unbound user can
+  never authenticate as a fabricated tenant scope. Supersedes the old
+  "users is global / a user can belong to multiple tenants" entry, which
+  contradicted `specs/system/user-management.md` (User entity carries
+  `tenant_id`; cross-tenant sharing explicitly not supported).
+
 **Global (no tenant_id):**
-- users (a user can belong to multiple tenants)
 - api_keys (scoped to user, not tenant)
 - siem_targets (may be global or per-tenant - TBD)
 - network_peers (infrastructure-level)
 - `__diesel_schema_migrations` (system table)
+
+#### Historical classification (superseded)
+
+Superseded 2026-11-19 by operator decision `3e7bbde727f5dcf55afb0217`
+(option_a); preserved for history. The `projects` entry died with M33
+(migration `2026-03-24-000013_remove_projects`), and the `users` entry
+contradicted `specs/system/user-management.md` and migrations
+`2026-10-08-000058` / `2026-11-13-000065`.
+
+**Tenant-scoped (have tenant_id):** projects, repositories, agents, tasks,
+merge_requests, review_comments, reviews, merge_queue, agent_commits,
+agent_worktrees, activity_events, analytics_events, cost_entries,
+audit_events, quality_gates, gate_results
+
+**Global (no tenant_id):** users (a user can belong to multiple tenants),
+api_keys (scoped to user, not tenant), siem_targets (may be global or
+per-tenant - TBD), network_peers (infrastructure-level),
+`__diesel_schema_migrations` (system table)
 
 ### Tenant Enforcement
 
 ```rust
 // Every query on a tenant-scoped table MUST include tenant filtering.
 // Diesel's type system helps here - the tenant_id column is non-optional.
+// (Example uses `repositories`, the tenant-scoped table that replaced the
+// M33-removed `projects`; the rule is identical for every table above.)
 
-fn list_projects(conn: &mut DbConn, tenant: &TenantId) -> Vec<Project> {
-    projects::table
-        .filter(projects::tenant_id.eq(tenant))
+fn list_repositories(conn: &mut DbConn, tenant: &TenantId) -> Vec<Repository> {
+    repositories::table
+        .filter(repositories::tenant_id.eq(tenant))
         .load(conn)
 }
 ```
@@ -150,7 +203,8 @@ fn list_projects(conn: &mut DbConn, tenant: &TenantId) -> Vec<Project> {
 
 Tenant is resolved from the authenticated principal:
 - JWT claims include tenant_id (from Keycloak realm/org)
-- API key resolves to user -> user's active tenant
+- API key resolves to user -> user's tenant binding (fail-closed: a user
+  with no tenant binding cannot authenticate via API key)
 - Agent token resolves to agent -> agent's tenant
 - Global auth token -> system tenant (admin access to all)
 

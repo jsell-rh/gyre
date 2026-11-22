@@ -1,10 +1,10 @@
 use anyhow::Result;
 use gyre_server::{
     abac_middleware, audit_simulator, bootstrap_default_tenant, build_router, build_state, jobs,
-    merge_processor, procfs_monitor, register_default_compute_target, seed_builtin_meta_specs,
-    seed_builtin_personas, siem, signal_chain, spawn_budget_daily_reset,
-    spawn_llm_rate_limiter_cleanup, spawn_presence_eviction, spawn_stale_agent_detector,
-    spawn_stale_peer_detector, telemetry, JwtConfig,
+    merge_processor, message_dispatcher, procfs_monitor, register_default_compute_target,
+    seed_builtin_meta_specs, seed_builtin_personas, siem, signal_chain, spawn_budget_daily_reset,
+    spawn_llm_rate_limiter_cleanup, spawn_presence_eviction, spawn_session_cleanup,
+    spawn_stale_agent_detector, spawn_stale_peer_detector, telemetry, JwtConfig,
 };
 use std::sync::Arc;
 use tracing::info;
@@ -48,9 +48,10 @@ async fn main() -> Result<()> {
     bootstrap_default_tenant(&state).await;
 
     // Initialise ABAC resource resolver and seed built-in policies (M34 Slice 4).
-    // Fails closed: if any built-in policy (incl. the immutable
-    // builtin:require-human-spec-approval Deny, HSI §2) cannot be persisted,
-    // refuse to start rather than serve with a partially seeded policy set.
+    // Fails closed: abort startup when any built-in policy (incl. the immutable
+    // builtin:require-human-spec-approval Deny, HSI §2) cannot be seeded —
+    // running without them (including default-deny) would leave the server
+    // unrestricted (specs/reviews/task-077.md F6 flaw class).
     abac_middleware::init_resolver();
     abac_middleware::seed_builtin_policies(&state).await?;
 
@@ -76,6 +77,15 @@ async fn main() -> Result<()> {
     jobs::spawn_job(
         Arc::clone(&state.job_registry),
         "retention_cleanup".to_string(),
+        Arc::clone(&state),
+    );
+
+    // Hourly code-search file reindex (search.md §Index Updates — file
+    // content is eventually consistent; pushes also trigger the job on
+    // demand via the job registry).
+    jobs::spawn_job(
+        Arc::clone(&state.job_registry),
+        "search_code_index".to_string(),
         Arc::clone(&state),
     );
 
@@ -129,6 +139,36 @@ async fn main() -> Result<()> {
         Arc::clone(&state),
     );
 
+    // Email digest drain (user-management.md §Email Notifications) — every
+    // 60 s, per user's configured digest frequency. Registered in the job
+    // registry (manual trigger + status); spawn_job is the executing loop.
+    jobs::spawn_job(
+        Arc::clone(&state.job_registry),
+        "email_digest".to_string(),
+        Arc::clone(&state),
+    );
+
+    // Meta-spec preview GC (§5 of meta-spec-reconciliation.md): expire preview
+    // runs so throwaway branches, worktrees and tokens cannot outlive their TTL.
+    jobs::spawn_job(
+        Arc::clone(&state.job_registry),
+        "meta_spec_preview_gc".to_string(),
+        Arc::clone(&state),
+    );
+
+    // PR hygiene (specs/development/agent-workflow.md §PRs as the
+    // Collaboration Primitive, task-270): continuously (minutes-scale
+    // interval) monitors open MRs for stale classes — unreviewed,
+    // conflicted, long-open, abandoned — and acts: nudge reviewers,
+    // rebase, escalate, or close with explanation. Registered in the job
+    // registry (manual trigger + status); spawn_job is the executing
+    // interval loop (NOT run_at_utc_hour daily).
+    jobs::spawn_job(
+        Arc::clone(&state.job_registry),
+        gyre_server::pr_hygiene::JOB_NAME.to_string(),
+        Arc::clone(&state),
+    );
+
     // Background tasks.
     // Task-115 (agent-runtime.md §1 Phase 3): detect Delegation/Coordination
     // tasks and run repo orchestrators under per-repo registry locks.
@@ -144,6 +184,14 @@ async fn main() -> Result<()> {
     audit_simulator::spawn_audit_simulator(state.clone());
     spawn_budget_daily_reset(state.clone());
     spawn_llm_rate_limiter_cleanup(state.clone());
+    gyre_server::api::invitations::spawn_invitation_expiry(state.clone());
+    spawn_session_cleanup(state.clone());
+
+    // Message bus: drain the dispatch channel into registered consumers
+    // (notification bridge) and run the hourly Event-TTL expiry job
+    // (message-bus.md §Relationship to Notifications, §Implementation Notes).
+    message_dispatcher::spawn_message_consumer(state.clone()).await;
+    message_dispatcher::spawn_message_expiry(state.clone());
 
     let app = build_router(state);
 

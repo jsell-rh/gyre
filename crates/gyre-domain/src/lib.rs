@@ -8,12 +8,15 @@
 //!
 //! Violations are caught by `scripts/check-arch.sh` and CI.
 
+use gyre_common::Id;
+
 pub mod activity;
 pub mod agent;
 pub mod agent_card;
 pub mod agent_tracking;
 pub mod analytics;
 pub mod attestation;
+pub mod attestation_verification;
 pub mod audit;
 pub mod budget;
 pub mod call_graph_resolve;
@@ -21,11 +24,15 @@ pub mod compose;
 pub mod compute_target;
 pub mod constraint_evaluator;
 pub mod container_audit;
+pub mod decisions;
 pub mod dependency;
 pub mod extractor;
 pub mod git_types;
 pub mod go_extractor;
+pub mod graph_diff;
+pub mod invitation;
 pub mod llm_config;
+pub mod merge_attestation;
 pub mod merge_queue;
 pub mod merge_request;
 pub mod message_type;
@@ -37,14 +44,19 @@ pub mod policy;
 pub mod prompt_template;
 pub mod python_extractor;
 pub mod quality_gate;
+pub mod repo_access;
 pub mod repository;
 pub mod review;
 pub mod rust_extractor;
+pub mod scim_group;
+pub mod search_query;
 pub mod spec_approval;
 pub mod spec_assertions;
 pub mod spec_ledger;
 pub mod spec_lifecycle_config;
+pub mod spec_links;
 pub mod spec_policy;
+pub mod stack;
 pub mod task;
 pub mod team;
 pub mod tenant;
@@ -67,8 +79,12 @@ pub use analytics::{AnalyticsEvent, CostEntry};
 pub use attestation::{
     constraint_count, root_signer, AttestationBundle, AttestationGateResult, MergeAttestation,
 };
+pub use attestation_verification::{
+    assemble_verification_result, check_bundle_consistency, GateVerificationResult,
+    VerificationResult,
+};
 pub use audit::{AuditEvent, AuditEventType, AuditOutcome};
-pub use budget::{BudgetCallRecord, BudgetConfig, BudgetUsage};
+pub use budget::{BudgetCallRecord, BudgetConfig, BudgetEnforcementAction, BudgetUsage};
 pub use compose::{AgentCompose, AgentSpec, TaskSpec};
 pub use compute_target::{ComputeTargetEntity, ComputeTargetType};
 pub use constraint_evaluator::{
@@ -77,6 +93,10 @@ pub use constraint_evaluator::{
     TargetContext,
 };
 pub use container_audit::ContainerAuditRecord;
+pub use decisions::{
+    evaluate_custom, BuiltinDecision, CustomDecisionSpec, CustomRule, DecisionRequest,
+    DecisionResult,
+};
 pub use dependency::{
     BreakingChange, BreakingChangeBehavior, DependencyEdge, DependencyPolicy, DependencyStatus,
     DependencyType, DetectionMethod,
@@ -84,7 +104,12 @@ pub use dependency::{
 pub use extractor::{ExtractionError, ExtractionResult, LanguageExtractor};
 pub use git_types::{BranchInfo, CommitInfo, DiffResult, FileDiff, MergeResult, RevertResult};
 pub use go_extractor::GoExtractor;
+pub use invitation::{InvitationPolicy, InvitationStatus, TenantInvitation, WorkspaceInvitation};
 pub use llm_config::{is_valid_function_key, LlmFunctionConfig, VALID_FUNCTION_KEYS};
+pub use merge_attestation::{
+    AuthorAttestation, GateAttestation as MergeGateAttestation, MergeAttestationBundle,
+    SpecRefAttestation, MERGE_ATTESTATION_VERSION,
+};
 pub use merge_queue::{MergeQueueEntry, MergeQueueEntryStatus};
 pub use merge_request::{
     DependencySource, DiffStats, MergeRequest, MergeRequestDependency, MrError, MrStatus,
@@ -99,14 +124,18 @@ pub use network_peer::NetworkPeer;
 pub use notification::{Notification, NotificationType};
 pub use policy::{
     builtin_policies, trust_policies_for_level, Condition, ConditionOp, ConditionValue, Policy,
-    PolicyDecision, PolicyEffect, PolicyScope,
+    PolicyDecision, PolicyEffect, PolicyScope, SYSTEM_ABAC_IDENTITY,
 };
 pub use prompt_template::{PromptTemplate, LLM_FUNCTION_KEYS};
 pub use python_extractor::PythonExtractor;
 pub use quality_gate::{GatePhase, GateResult, GateStatus, GateType, QualityGate};
+pub use repo_access::{
+    effective_repo_permissions, effective_repo_role, RepoAccessOverride, RepoPermission,
+};
 pub use repository::{RepoStatus, Repository};
 pub use review::{Review, ReviewComment, ReviewDecision};
 pub use rust_extractor::RustExtractor;
+pub use scim_group::{ScimGroup, ScimGroupMember, ScimWorkspaceMapping};
 pub use spec_approval::SpecApproval;
 pub use spec_assertions::{
     evaluate_assertions, parse_assertions, AssertionResult, Comparison, ParsedAssertion, Predicate,
@@ -115,17 +144,41 @@ pub use spec_assertions::{
 pub use spec_ledger::{ApprovalStatus, SpecApprovalEvent, SpecLedgerEntry};
 pub use spec_lifecycle_config::SpecLifecycleConfig;
 pub use spec_policy::SpecPolicy;
+pub use stack::{
+    attestation_level_from_label, AgentStack, HookEntry, McpServerEntry, StackDriftEvent,
+    StackLockfile,
+};
 pub use task::{Task, TaskError, TaskPriority, TaskStatus, TaskType};
-pub use team::Team;
+pub use team::{Team, TeamMembership};
 pub use tenant::Tenant;
 pub use typescript_extractor::TypeScriptExtractor;
 pub use user::{
-    DiffView, FeedScope, GlobalRole, NotificationChannels, Theme, UiDensity, User, UserPreferences,
-    UserPreferencesPatch, UserRole,
+    DiffView, DigestFrequency, EmailConfig, FeedScope, GlobalRole, NotificationChannels,
+    NotificationPriority, SlackConfig, Theme, UiDensity, User, UserPreferences,
+    UserPreferencesPatch, UserRole, WebhookConfig,
 };
-pub use user_profile::{JudgmentEntry, JudgmentType, UserNotificationPreference, UserToken};
+pub use user_profile::{
+    JudgmentEntry, JudgmentType, UserNotificationPreference, UserSession, UserToken,
+};
 pub use workspace::{
     builtin_personas, BuiltinPersonaDef, Persona, PersonaApprovalStatus, PersonaScope, TrustLevel,
     Workspace, BUILTIN_PERSONA_DEFS,
 };
 pub use workspace_membership::{WorkspaceMembership, WorkspaceRole};
+
+/// Bootstrap workspace scope for entities constructed without an explicit
+/// workspace assignment.
+///
+/// This is the DOCUMENTED contract, not a fabricated fallback:
+/// hierarchy-enforcement.md §1 "Bootstrap Behavior" provisions a default
+/// workspace under the default tenant on first startup, and its migration
+/// strategy backfills tasks, agents, and merge requests into that
+/// workspace ("Same for tasks, agents, merge_requests"); its single-tenant
+/// note states construction-time scope defaults suffice while the default
+/// tenant is the only tenant. Constructors without a workspace parameter
+/// bind the entity to that provisioned bootstrap workspace; callers with a
+/// real workspace at hand MUST assign it explicitly (spawn paths do —
+/// e.g. spawn.rs sets `agent.workspace_id = repo.workspace_id`).
+pub(crate) fn bootstrap_workspace() -> Id {
+    Id::new("default")
+}

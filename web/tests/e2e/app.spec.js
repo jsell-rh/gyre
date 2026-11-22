@@ -38,9 +38,10 @@ test.describe('App shell', () => {
     const searchTrigger = page.locator('.search-trigger').first();
     await expect(searchTrigger).toBeVisible({ timeout: 3000 });
 
-    // Decisions badge visible in topbar
-    const decisionsBadge = page.locator('[data-testid="decisions-badge"]');
-    await expect(decisionsBadge).toBeVisible({ timeout: 3000 });
+    // Notification bell visible in topbar (user-management.md §In-App
+    // Notification UI — unread-count badge opening the notification drawer)
+    const notificationBell = page.locator('[data-testid="notification-bell"]');
+    await expect(notificationBell).toBeVisible({ timeout: 3000 });
 
     // User avatar button visible
     const userBtn = page.getByRole('button', { name: /user menu/i });
@@ -89,10 +90,12 @@ test.describe('Auth flow', () => {
     const userBtn = page.getByRole('button', { name: /user menu/i });
     await userBtn.click();
 
-    // Dropdown menu should appear with at least Profile and API Token
+    // Dropdown menu should appear with at least Profile and API Token.
+    // Exact-text match: the menu also offers "Public profile"
+    // (/@{username}, task-114), which substring-matches "Profile".
     const dropdown = page.locator('[role="menu"]');
     await expect(dropdown).toBeVisible({ timeout: 3000 });
-    await expect(page.locator('[role="menuitem"]', { hasText: 'Profile' })).toBeVisible();
+    await expect(page.locator('[role="menuitem"]', { hasText: /^Profile$/ })).toBeVisible();
     await expect(page.locator('[role="menuitem"]', { hasText: 'API Token' })).toBeVisible();
   });
 
@@ -130,7 +133,7 @@ test.describe('Auth flow', () => {
     await page.waitForLoadState('networkidle');
 
     await page.getByRole('button', { name: /user menu/i }).click();
-    await page.locator('[role="menuitem"]', { hasText: 'Profile' }).click();
+    await page.locator('[role="menuitem"]', { hasText: /^Profile$/ }).click();
 
     await page.waitForLoadState('networkidle');
     // URL should contain /profile

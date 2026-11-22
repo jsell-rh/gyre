@@ -93,6 +93,14 @@ pub async fn jj_log(
 }
 
 /// POST /api/v1/repos/:id/jj/new
+///
+/// Creates the new change and signs its commit (task-264,
+/// identity-security.md §Layer 3): every commit-producing surface produces
+/// a persisted `CommitSignature`. Signing follows `GYRE_SIGNING_MODE`
+/// (keyless Fulcio by default, local forge key by explicit configuration,
+/// `none` only as an explicit operator opt-in). In keyless mode a caller
+/// without a presentable OIDC JWT is refused (403), and a Fulcio failure
+/// fails the operation (502) — never a silent local-key fallback.
 pub async fn jj_new(
     State(state): State<Arc<AppState>>,
     Path(repo_id): Path<String>,
@@ -114,27 +122,56 @@ pub async fn jj_new(
         .await;
         return Err(ApiError::Forbidden(reason));
     }
-    let change_id = state
+    let new_change = state
         .jj_ops
         .jj_new(&path, &req.description)
         .await
         .map_err(ApiError::Internal)?;
-    Ok(Json(serde_json::json!({ "change_id": change_id })))
+
+    // task-264: sign the new change's commit — the same shared entry point
+    // every commit surface uses. `none` mode skips signing (explicit
+    // operator opt-in); keyless failures surface as 403/502 errors.
+    let attribution = commit_signatures::SigningAttribution::from_auth(&auth);
+    match commit_signatures::sign_commit(
+        &state,
+        &repo_id,
+        &new_change.commit_id,
+        &attribution,
+        auth.bearer_token.as_deref(),
+    )
+    .await
+    {
+        Ok(Some(record)) => {
+            state
+                .commit_signatures
+                .save(&record)
+                .await
+                .map_err(ApiError::Internal)?;
+        }
+        Ok(None) => {}
+        Err(e) => return Err(e.into()),
+    }
+
+    Ok(Json(serde_json::json!({
+        "change_id": new_change.change_id,
+        "commit_id": new_change.commit_id,
+    })))
 }
 
 /// POST /api/v1/repos/:id/jj/squash
 ///
 /// Squashes the working copy into its parent change and signs the resulting
-/// commit SHA. Signing mode comes from `GYRE_SIGNING_MODE`:
+/// commit. Signing mode comes from `GYRE_SIGNING_MODE` (keyless Fulcio is
+/// the default; `local` and `none` are explicit operator opt-ins):
 /// - `fulcio`: keyless Sigstore signing — Fulcio certificate issued against
-///   the caller's OIDC JWT, commit signed with the ephemeral key, signature
-///   recorded in Rekor (task-107).
+///   the caller's OIDC JWT, the canonical attribution-bound payload signed
+///   with the ephemeral key, the signature recorded in Rekor (task-107,
+///   task-264). A Fulcio/Rekor failure FAILS the squash with an explicit
+///   error naming the signing mode — there is no silent fallback to the
+///   local forge key (task-264). A caller with no presentable OIDC JWT is
+///   refused (403) rather than presenting an empty token to Fulcio.
 /// - `none`: no signature record.
-/// - `local` (default): forge Ed25519 key (M13.8).
-///
-/// Any failure in the external Fulcio/Rekor stack falls back to local
-/// signing with a warning — squash itself never fails because of the
-/// external signing stack.
+/// - `local` (explicit configuration only): forge Ed25519 key (M13.8).
 pub async fn jj_squash(
     State(state): State<Arc<AppState>>,
     Path(repo_id): Path<String>,
@@ -161,83 +198,57 @@ pub async fn jj_squash(
         .await
         .map_err(ApiError::Internal)?;
 
-    let config = &state.signing_config;
-    if config.mode == commit_signatures::SigningMode::None {
-        // `none` mode: skip signing entirely — no record is produced. The
-        // response reports the commit with an empty signature so callers can
-        // distinguish "unsigned" from "signed" without a second lookup.
-        return Ok(Json(CommitSignature {
-            repo_id: repo_id.clone(),
-            commit_sha,
-            signer_id: auth.agent_id.clone(),
-            task_id: String::new(),
-            spawned_by: String::new(),
-            algorithm: String::new(),
-            signature: String::new(),
-            signing_key_id: String::new(),
-            signed_at: 0,
-            sigstore_mode: gyre_ports::SigstoreMode::Local,
-            oidc_subject: String::new(),
-            oidc_issuer: String::new(),
-            certificate_pem: None,
-            certificate_chain_pem: None,
-            rekor_entry_id: None,
-        }));
-    }
-
     // Attribution comes from the caller's validated JWT claims — never
     // placeholder literals (task-107 F2). Non-JWT callers (dev token, API
     // key) fall back to the resolved agent id with empty task/user fields.
     let attribution = commit_signatures::SigningAttribution::from_auth(&auth);
 
-    let record = if config.mode == commit_signatures::SigningMode::Fulcio {
-        // Keyless: present the caller's JWT to Fulcio. The token was
-        // validated at authentication time; Fulcio re-validates the OIDC
-        // identity itself before issuing.
-        let jwt = auth.bearer_token.clone().unwrap_or_default();
-        let transport = crate::sigstore::production_transport(state.http_client.clone());
-        match crate::sigstore::sign_commit_keyless(
-            &repo_id,
-            &commit_sha,
-            &attribution,
-            &jwt,
-            config,
-            transport.as_ref(),
-        )
-        .await
-        {
-            Ok(signed) => {
-                let record = signed.record;
-                tracing::info!(
-                    commit_sha = %commit_sha,
-                    rekor_entry_id = ?record.rekor_entry_id,
-                    "jj squash: commit signed via Fulcio keyless (task-107)"
-                );
-                record
-            }
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    "jj squash: Fulcio keyless signing failed; falling back to local signing"
-                );
-                commit_signatures::sign_commit_local(
-                    &repo_id,
-                    &commit_sha,
-                    &attribution,
-                    &state.agent_signing_key,
-                    &state.base_url,
-                )
-            }
+    // task-264: the shared signing entry point — keyless by default, no
+    // silent local-key fallback, refusal for callers with no presentable
+    // OIDC identity.
+    let record = match commit_signatures::sign_commit(
+        &state,
+        &repo_id,
+        &commit_sha,
+        &attribution,
+        auth.bearer_token.as_deref(),
+    )
+    .await
+    .map_err(ApiError::from)?
+    {
+        Some(record) => record,
+        None => {
+            // `none` mode: skip signing entirely — no record is produced.
+            // The response reports the commit with an empty signature so
+            // callers can distinguish "unsigned" from "signed" without a
+            // second lookup.
+            return Ok(Json(CommitSignature {
+                repo_id: repo_id.clone(),
+                commit_sha,
+                signer_id: auth.agent_id.clone(),
+                task_id: String::new(),
+                spawned_by: String::new(),
+                algorithm: String::new(),
+                signature: String::new(),
+                signing_key_id: String::new(),
+                signed_at: 0,
+                sigstore_mode: gyre_ports::SigstoreMode::Local,
+                oidc_subject: String::new(),
+                oidc_issuer: String::new(),
+                certificate_pem: None,
+                certificate_chain_pem: None,
+                rekor_entry_id: None,
+            }));
         }
-    } else {
-        commit_signatures::sign_commit_local(
-            &repo_id,
-            &commit_sha,
-            &attribution,
-            &state.agent_signing_key,
-            &state.base_url,
-        )
     };
+
+    if record.sigstore_mode == gyre_ports::SigstoreMode::Fulcio {
+        tracing::info!(
+            commit_sha = %commit_sha,
+            rekor_entry_id = ?record.rekor_entry_id,
+            "jj squash: commit signed via Fulcio keyless (task-107)"
+        );
+    }
 
     state
         .commit_signatures
@@ -465,6 +476,82 @@ mod tests {
         assert!(json["change_id"].as_str().is_some());
     }
 
+    /// task-264 (identity-security.md §Layer 3): jj new is a commit-producing
+    /// surface — the new change's commit must carry a persisted
+    /// CommitSignature record, retrievable through the signature endpoint
+    /// and VALIDATED by the verification endpoint (real Ed25519 check
+    /// against the forge key, local mode). Before task-264, jj new produced
+    /// no signature at all.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn jj_new_signs_commit_with_persisted_validated_signature() {
+        let state = crate::mem::test_state();
+        let app = crate::build_router(state.clone());
+        let (app, repo_id) = create_project_and_repo(app).await;
+
+        let body = serde_json::json!({ "description": "signed change" });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/repos/{repo_id}/jj/new"))
+                    .header("Authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let commit_id = json["commit_id"]
+            .as_str()
+            .expect("jj new response carries the signed commit id")
+            .to_string();
+
+        // The signature record is persisted and retrievable repo-scoped.
+        let sig_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/api/v1/repos/{repo_id}/commits/{commit_id}/signature"
+                    ))
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            sig_resp.status(),
+            StatusCode::OK,
+            "jj new must produce a persisted CommitSignature (task-264)"
+        );
+        let sig_json = body_json(sig_resp).await;
+        assert_eq!(sig_json["commit_sha"].as_str().unwrap(), commit_id);
+        assert_eq!(sig_json["sigstore_mode"].as_str().unwrap(), "local");
+
+        // The existing verification endpoint validates it — the real
+        // Ed25519 check, not a 200-only probe.
+        let ver_resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/api/v1/repos/{repo_id}/commits/{commit_id}/signature/verification"
+                    ))
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ver_resp.status(), StatusCode::OK);
+        let ver_json = body_json(ver_resp).await;
+        assert!(ver_json["valid"].as_bool().unwrap());
+        assert!(ver_json["signature_valid"].as_bool().unwrap());
+    }
+
     /// jj squash returns 200 with a commit signature (M13.8 Sigstore).
     #[tokio::test]
     async fn jj_squash_returns_commit_signature() {
@@ -557,26 +644,27 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 
-    // ── Signing mode handler coverage (task-107) ─────────────────────────────
+    // ── Signing mode handler coverage (task-107, task-264) ───────────────────
     //
-    // These exercise the jj_squash HANDLER wiring, not the sigstore module
+    // These exercise the jj HANDLER wiring, not the sigstore module
     // (whose signing/verification phases have their own suite in
     // sigstore.rs over an upstream-contract mock stack):
-    // - fulcio mode drives the real production transport (state.http_client)
-    //   against a guaranteed-unreachable stack, then falls back to local
-    //   signing — the handler's own fallback guarantee.
     // - attribution (F2) is threaded from the caller's validated JWT claims
     //   into the stored record with DISTINCT values, so a regression to
     //   placeholder literals fails the assertion.
-    // - the fallback record verifies through the verification endpoint's
-    //   real Ed25519 path (GET .../signature/verification).
+    // - task-264: fulcio mode with an unreachable Fulcio FAILS LOUDLY — an
+    //   explicit 502 naming the signing mode, no local-key record — and a
+    //   non-JWT caller is refused (403) instead of presenting an empty
+    //   token to Fulcio and silently degrading to local signing.
 
-    /// fulcio mode + unreachable Fulcio: the handler must fall back to local
-    /// signing (squash never fails because of the external signing stack),
-    /// carrying the caller's JWT attribution (task-107 F2) and verifying
-    /// through the verification endpoint afterwards.
+    /// task-264 (the task's verification intent, verbatim): fulcio mode +
+    /// unreachable Fulcio + a real presentable JWT → the squash must FAIL
+    /// with an explicit error naming the signing mode, and NO record signed
+    /// with the local forge key may be produced for the operation. The old
+    /// behavior logged "Fulcio keyless signing failed; falling back to local
+    /// signing" and returned a local-key record with 200.
     #[tokio::test(flavor = "multi_thread")]
-    async fn jj_squash_fulcio_unreachable_falls_back_to_local() {
+    async fn jj_squash_fulcio_unreachable_fails_loudly_no_local_fallback() {
         let mut state = crate::mem::test_state();
         // Configure fulcio mode pointing at a host that can never be
         // connected to: `fulcio.invalid` is the RFC 6761 reserved TLD that
@@ -584,8 +672,7 @@ mod tests {
         // sandbox it resolves to a sinkhole IP that refuses connections
         // (verified: connect refused in single-digit ms). Either way the
         // production transport's tokio::time::timeout and error path are
-        // exercised for real — the fallback must hold for unreachable
-        // stacks, not just malformed responses.
+        // exercised for real.
         //
         // Arc::get_mut: test_state() returns a fresh Arc with refcount 1
         // (its internal clones were dropped), so the state can be
@@ -609,9 +696,9 @@ mod tests {
 
         let (app, repo_id) = create_project_and_repo(app).await;
 
-        // Mint and register a real agent JWT with DISTINCT attribution
-        // values, so the assertions would catch the old placeholder-literal
-        // bug (`task_id: "task-107"`, `spawned_by: "system"` — F2).
+        // Mint and register a real agent JWT (presentable to Fulcio) with
+        // DISTINCT attribution values, so a silent local fallback would be
+        // observable in the record's fields.
         let jwt = state
             .agent_signing_key
             .mint(
@@ -620,6 +707,10 @@ mod tests {
                 "user-fallback",
                 &state.base_url,
                 3600,
+                "default",
+                "test-ws",
+                &repo_id,
+                "test-repo",
             )
             .expect("mint JWT");
         state
@@ -639,66 +730,42 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let sig_json = body_json(resp).await;
-        // The fallback record is local-mode Ed25519 (not fulcio).
+        // FAILS LOUDLY: explicit error, never a 200-with-local-record.
         assert_eq!(
-            sig_json["sigstore_mode"].as_str().unwrap(),
-            "local",
-            "unreachable Fulcio must fall back to local signing"
+            resp.status(),
+            StatusCode::BAD_GATEWAY,
+            "unreachable Fulcio with keyless mode must fail the squash explicitly"
         );
-        assert_eq!(sig_json["algorithm"].as_str().unwrap(), "EdDSA");
-        assert!(!sig_json["signature"].as_str().unwrap().is_empty());
-        // F2: attribution threaded from the caller's validated claims.
-        assert_eq!(sig_json["signer_id"].as_str().unwrap(), "agent-fallback");
-        assert_eq!(sig_json["task_id"].as_str().unwrap(), "task-77");
-        assert_eq!(sig_json["spawned_by"].as_str().unwrap(), "user-fallback");
-        let sha = sig_json["commit_sha"].as_str().unwrap().to_string();
+        let err_json = body_json(resp).await;
+        let error = err_json["error"].as_str().unwrap();
+        assert!(
+            error.contains("fulcio"),
+            "the response must identify the actual signing mode used: {error}"
+        );
 
-        // The fallback record is persisted and retrievable repo-scoped.
-        let sig_resp = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri(format!("/api/v1/repos/{repo_id}/commits/{sha}/signature"))
-                    .header("Authorization", "Bearer test-token")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+        // No local-key record was produced for this operation: the squash
+        // commit SHA (the NoopJjOps double's fixed squash SHA) has no
+        // persisted signature at all.
+        let squash_sha = "0000000000000000000000000000000000000000";
+        let record = state
+            .commit_signatures
+            .find(&repo_id, squash_sha)
             .await
             .unwrap();
-        assert_eq!(sig_resp.status(), StatusCode::OK);
-
-        // The verification endpoint verifies the local fallback record
-        // against the forge Ed25519 key — the real check, not a 200-only
-        // probe (task-107 plan item 3, local branch).
-        let ver_resp = app
-            .oneshot(
-                Request::builder()
-                    .uri(format!(
-                        "/api/v1/repos/{repo_id}/commits/{sha}/signature/verification"
-                    ))
-                    .header("Authorization", "Bearer test-token")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(ver_resp.status(), StatusCode::OK);
-        let ver_json = body_json(ver_resp).await;
-        assert!(ver_json["valid"].as_bool().unwrap());
-        assert!(ver_json["signature_valid"].as_bool().unwrap());
-        assert_eq!(ver_json["signer_id"].as_str().unwrap(), "agent-fallback");
-        assert_eq!(ver_json["task_id"].as_str().unwrap(), "task-77");
-        assert_eq!(ver_json["spawned_by"].as_str().unwrap(), "user-fallback");
+        assert!(
+            record.is_none(),
+            "no record signed with the local forge key may be produced for a \
+             failed keyless operation"
+        );
     }
 
-    /// fulcio mode with a non-JWT bearer (dev token): there is no agent JWT
-    /// to present to Fulcio, so keyless signing cannot proceed and the
-    /// handler must still fall back to local signing without failing the
-    /// squash (empty bearer → sub extraction fails → fallback).
+    /// task-264: fulcio mode with a non-JWT bearer (dev token) — there is
+    /// no OIDC identity to present to Fulcio, so keyless signing must be
+    /// REFUSED with an explicit error (403). The old behavior presented an
+    /// empty bearer token (guaranteeing Fulcio failure) and silently fell
+    /// back to local signing.
     #[tokio::test(flavor = "multi_thread")]
-    async fn jj_squash_fulcio_without_jwt_falls_back_to_local() {
+    async fn jj_squash_fulcio_without_jwt_is_refused() {
         let mut state = crate::mem::test_state();
         let state_mut = Arc::get_mut(&mut state).expect("sole owner");
         state_mut.signing_config = crate::commit_signatures::SigningConfig {
@@ -723,18 +790,25 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let sig_json = body_json(resp).await;
         assert_eq!(
-            sig_json["sigstore_mode"].as_str().unwrap(),
-            "local",
-            "keyless signing without a presentable JWT must fall back to local"
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "keyless signing without a presentable JWT must be refused, not fallen back"
         );
-        // Attribution for non-JWT callers: resolved agent id, empty (not
-        // fabricated) task/user fields (F2).
-        assert_eq!(sig_json["signer_id"].as_str().unwrap(), "system");
-        assert_eq!(sig_json["task_id"].as_str().unwrap(), "");
-        assert_eq!(sig_json["spawned_by"].as_str().unwrap(), "");
+        let err_json = body_json(resp).await;
+        let error = err_json["error"].as_str().unwrap();
+        assert!(
+            error.contains("no presentable OIDC identity"),
+            "the refusal must name the missing identity: {error}"
+        );
+        // No local-key record was produced for the refusal.
+        let squash_sha = "0000000000000000000000000000000000000000";
+        assert!(state
+            .commit_signatures
+            .find(&repo_id, squash_sha)
+            .await
+            .unwrap()
+            .is_none());
     }
 
     /// `none` mode: squash succeeds with an empty unsigned record and no
@@ -862,10 +936,21 @@ mod tests {
                 .unwrap();
         }
 
-        // Mint an agent JWT (scope=agent ≠ repo:special → ABAC will deny).
+        // Mint an agent JWT (repo scope ≠ the policy's repo:special claim →
+        // ABAC will deny).
         let jwt = state
             .agent_signing_key
-            .mint("agent-blocked", "task-1", "system", &state.base_url, 3600)
+            .mint(
+                "agent-blocked",
+                "task-1",
+                "system",
+                &state.base_url,
+                3600,
+                "t1",
+                "ws-1",
+                "repo-jj-abac",
+                "jj-abac",
+            )
             .expect("mint JWT");
 
         // Register the JWT so the auth middleware accepts it.

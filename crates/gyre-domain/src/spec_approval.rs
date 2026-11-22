@@ -14,7 +14,8 @@ use serde::{Deserialize, Serialize};
 /// - Pending  — no timestamp columns set
 /// - Approved — approved_at is set
 /// - Revoked  — revoked_at is set (post-merge withdrawal)
-/// - Rejected — rejected_at is set (pre-merge decline)
+/// - Rejected — rejected_at is set (pre-merge decline, or decline after
+///   approval: POST /specs/:path/reject on an already-approved spec)
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalStatus {
@@ -152,15 +153,23 @@ impl SpecApproval {
         Ok(())
     }
 
-    /// Transition Pending → Rejected (pre-merge decline).
+    /// Transition Pending → Rejected, or Approved → Rejected (decline
+    /// after approval: `POST /specs/:path/reject` on an already-approved
+    /// spec — the declining human's judgment must be recorded in
+    /// `rejected_by` so it surfaces in their HSI §12 judgment ledger).
     /// Clears the other timestamp columns to maintain mutual exclusivity.
+    /// Revoked and Rejected are terminal — a terminal row cannot be
+    /// re-rejected.
     pub fn reject(
         &mut self,
         rejected_by: impl Into<String>,
         reason: &str,
         now: u64,
     ) -> Result<(), ApprovalTransitionError> {
-        if self.status() != ApprovalStatus::Pending {
+        if !matches!(
+            self.status(),
+            ApprovalStatus::Pending | ApprovalStatus::Approved
+        ) {
             return Err(ApprovalTransitionError::new(
                 self.status(),
                 ApprovalStatus::Rejected,
@@ -243,6 +252,26 @@ mod tests {
     }
 
     #[test]
+    fn approved_to_rejected_records_declining_human() {
+        // Decline after approval (agent-gates.md §Spec Approval Ledger):
+        // POST /specs/:path/reject on an already-approved spec must record
+        // the declining human in rejected_by — otherwise the judgment
+        // surfaces in nobody's HSI §12 ledger.
+        let mut a = approval();
+        a.approve(100).unwrap();
+        a.reject("user:reviewer", "changed my mind", 200).unwrap();
+        assert_eq!(a.status(), ApprovalStatus::Rejected);
+        assert!(!a.is_active());
+        // Mutual exclusivity: approved_at cleared on transition.
+        assert_eq!(a.approved_at, None);
+        assert_eq!(a.rejected_at, Some(200));
+        assert_eq!(a.rejected_by.as_deref(), Some("user:reviewer"));
+        assert_eq!(a.rejected_reason.as_deref(), Some("changed my mind"));
+        // Terminal: cannot be rejected twice.
+        assert!(a.reject("user:reviewer", "again", 300).is_err());
+    }
+
+    #[test]
     fn invalid_transitions_are_rejected() {
         // Pending cannot be revoked directly (Pending → Approved → Revoked).
         let mut a = approval();
@@ -251,11 +280,6 @@ mod tests {
         // Pending cannot be rejected twice.
         let mut a = approval();
         a.reject("user:reviewer", "no", 100).unwrap();
-        assert!(a.reject("user:reviewer", "no", 110).is_err());
-
-        // Approved cannot be rejected (only revoked).
-        let mut a = approval();
-        a.approve(100).unwrap();
         assert!(a.reject("user:reviewer", "no", 110).is_err());
 
         // Approved cannot be re-approved.
@@ -269,6 +293,7 @@ mod tests {
         a.revoke("user:admin", "reason", 200).unwrap();
         assert!(a.approve(300).is_err());
         assert!(a.revoke("user:admin", "reason", 300).is_err());
+        assert!(a.reject("user:reviewer", "no", 300).is_err());
     }
 
     #[test]

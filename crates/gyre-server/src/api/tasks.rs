@@ -4,10 +4,9 @@ use axum::{
     Json,
 };
 use gyre_common::Id;
-use gyre_domain::{AnalyticsEvent, Task, TaskPriority, TaskStatus, TaskType};
-use gyre_ports::search::SearchDocument;
+use gyre_domain::{Task, TaskPriority, TaskStatus, TaskType};
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 use tracing::instrument;
 
 use crate::AppState;
@@ -183,10 +182,54 @@ fn parse_task_priority(s: &str) -> Result<TaskPriority, ApiError> {
     }
 }
 
+/// POST /api/v1/tasks
+///
+/// identity-security.md §Task-Scoped JWT Claims — task-row mutation
+/// surface: an agent principal may only create tasks inside its token's
+/// scope. Explicit `workspace_id`/`repo_id` targets must match the caller's
+/// verified claims; absent targets are clamped to them (the same contract
+/// the MCP `gyre_create_task` path enforces via `check_create_task_target` —
+/// a scoped caller cannot create floating unscoped tasks). Non-agent
+/// principals are unaffected.
 pub async fn create_task(
     State(state): State<Arc<AppState>>,
+    auth: crate::auth::AuthenticatedAgent,
     Json(req): Json<CreateTaskRequest>,
 ) -> Result<(StatusCode, Json<TaskResponse>), ApiError> {
+    let mut req = req;
+    // Preview agents (meta-spec reconciliation §5) run ceremony-free: no task
+    // ledger writes. The MCP dispatch already refuses `gyre_create_task` for
+    // preview agents, but allowedTools is advisory and builtin policy grants
+    // the Agent role 'write' on '*' — without this gate a preview agent's live
+    // JWT can create task-ledger rows through the REST surface, the same
+    // escape class closed for POST /agents/{id}/complete and POST /merge-requests.
+    if crate::api::meta_specs::caller_is_preview_agent(&state, &auth).await {
+        return Err(ApiError::Forbidden(
+            "preview agents may not create tasks — preview runs skip task ceremony; \
+             the preview branch is the deliverable"
+                .to_string(),
+        ));
+    }
+    if auth.agent_task_claim().is_some() {
+        if let Some(ws_id) = req.workspace_id.as_deref() {
+            if Some(ws_id.to_string()) != auth.workspace_id {
+                return Err(ApiError::Forbidden(format!(
+                    "agent token is not scoped to workspace {ws_id}"
+                )));
+            }
+        } else {
+            req.workspace_id = auth.workspace_id.clone();
+        }
+        if let Some(repo_id) = req.repo_id.as_deref() {
+            if Some(repo_id.to_string()) != auth.repo_id {
+                return Err(ApiError::Forbidden(format!(
+                    "agent token is not scoped to repo {repo_id}"
+                )));
+            }
+        } else {
+            req.repo_id = auth.repo_id.clone();
+        }
+    }
     let now = now_secs();
     let mut task = Task::new(new_id(), req.title, now);
     task.description = req.description;
@@ -207,32 +250,31 @@ pub async fn create_task(
         .collect();
     task.spec_path = req.spec_path;
     task.spec_ref = req.spec_ref;
-    if let Some(ws_id) = req.workspace_id {
-        task.workspace_id = Id::new(ws_id);
+    // Caller-supplied scope fields are validated against the caller's tenant
+    // before they are persisted (task-102 F2 anti-forgery: the auth extractor
+    // already knows the caller's scope; a body field must never re-attribute
+    // the task to another tenant's workspace/repo). The repo check also
+    // verifies repo∈workspace when BOTH fields are supplied.
+    let requested_ws: Option<Id> = req
+        .workspace_id
+        .as_ref()
+        .map(|ws_id| Id::new(ws_id.clone()));
+    if let Some(ws_id) = &requested_ws {
+        super::audit::validate_workspace_scope(&state, ws_id, &auth).await?;
+        task.workspace_id = ws_id.clone();
     }
-    if let Some(repo_id) = req.repo_id {
-        task.repo_id = Id::new(repo_id);
+    if let Some(repo_id) = &req.repo_id {
+        super::audit::validate_repo_scope(&state, &Id::new(repo_id), &auth, requested_ws.as_ref())
+            .await?;
+        task.repo_id = Id::new(repo_id.clone());
     }
     state.tasks.create(&task).await?;
-    // Index for search.
-    let mut facets = HashMap::new();
-    facets.insert("status".to_string(), "backlog".to_string());
-    facets.insert("priority".to_string(), task_priority_str(&task.priority));
-    let _ = state
-        .search
-        .index(SearchDocument {
-            entity_type: "task".to_string(),
-            entity_id: task.id.to_string(),
-            title: task.title.clone(),
-            body: task.description.clone().unwrap_or_default(),
-            workspace_id: None,
-            repo_id: None,
-            facets,
-        })
-        .await;
+    // Index for search (search.md §Searchable Entities: task facets
+    // status/priority/assigned_to, workspace/repo scope).
+    crate::search_indexer::index(&state, crate::search_indexer::task_document(&task)).await;
     state
         .emit_event(
-            Some(task.workspace_id.clone()),
+            task.workspace_id.clone(),
             gyre_common::message::Destination::Workspace(task.workspace_id.clone()),
             gyre_common::message::MessageKind::TaskCreated,
             Some(serde_json::json!({"task_id": task.id.to_string()})),
@@ -288,16 +330,51 @@ pub async fn get_task(
     Ok(Json(TaskResponse::from(task)))
 }
 
+/// PUT /api/v1/tasks/:id
+///
+/// identity-security.md §Task-Scoped JWT Claims — shared per-handler check:
+/// an agent principal (worker-tier, task-bound JWT) may only mutate the
+/// task its token names. Returns 403 on mismatch; non-agent principals
+/// (users, system, orchestrators) pass through untouched.
+fn require_task_claim(auth: &crate::auth::AuthenticatedAgent, task: &Task) -> Result<(), ApiError> {
+    if let Some(claim) = auth.agent_task_claim() {
+        if task.id.to_string() != claim {
+            return Err(ApiError::Forbidden(format!(
+                "agent token is scoped to task {claim}, not task {}",
+                task.id
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// identity-security.md §Task-Scoped JWT Claims — hard task-scope boundary:
+/// this handler mutates title, description, priority, assigned_to (with
+/// generation bump), branch, pr_link, and labels, so an agent principal
+/// whose `task_id` claim does not match the target task gets 403 — tier-level
+/// ABAC scoping alone does not enforce the task boundary. Non-agent
+/// principals are unaffected.
 pub async fn update_task(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    auth: crate::auth::AuthenticatedAgent,
     Json(req): Json<UpdateTaskRequest>,
 ) -> Result<Json<TaskResponse>, ApiError> {
+    // Preview agents may not mutate the task ledger (meta-spec reconciliation
+    // §5 skip-ceremony; same rationale as the create_task guard above).
+    if crate::api::meta_specs::caller_is_preview_agent(&state, &auth).await {
+        return Err(ApiError::Forbidden(
+            "preview agents may not update tasks — preview runs skip task ceremony; \
+             the preview branch is the deliverable"
+                .to_string(),
+        ));
+    }
     let mut task = state
         .tasks
         .find_by_id(&Id::new(&id))
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("task {id} not found")))?;
+    require_task_claim(&auth, &task)?;
     if let Some(title) = req.title {
         task.title = title;
     }
@@ -327,29 +404,54 @@ pub async fn update_task(
     }
     task.updated_at = now_secs();
     state.tasks.update(&task).await?;
+    // search.md §Index Updates: task updated -> index updated (status/priority
+    // facets must reflect current values, not create-time ones).
+    crate::search_indexer::index(&state, crate::search_indexer::task_document(&task)).await;
     Ok(Json(TaskResponse::from(task)))
 }
 
-#[instrument(skip(state, req), fields(task_id = %id, new_status = %req.status))]
+/// identity-security.md §Task-Scoped JWT Claims — hard task-scope boundary:
+/// the status transition mutates task-owned state, so an agent principal
+/// whose `task_id` claim does not match the target task gets 403.
+/// Non-agent principals are unaffected.
+#[instrument(skip(state, auth, req), fields(task_id = %id, new_status = %req.status))]
 pub async fn transition_task_status(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    auth: crate::auth::AuthenticatedAgent,
     Json(req): Json<TransitionStatusRequest>,
 ) -> Result<Json<TaskResponse>, ApiError> {
+    // Preview agents may not transition task status (meta-spec reconciliation
+    // §5 skip-ceremony; same escape class as the create/update guards above).
+    // This route is the dangerous one: a Done/Cancelled transition of a
+    // reconciliation/drift-labeled task fires on_reconciliation_task_terminal
+    // below, advancing meta-spec rollouts — a durable production effect from
+    // throwaway preview scratch work that §5 requires to leave no footprint.
+    if crate::api::meta_specs::caller_is_preview_agent(&state, &auth).await {
+        return Err(ApiError::Forbidden(
+            "preview agents may not transition task status — preview runs skip task \
+             ceremony; the preview branch is the deliverable"
+                .to_string(),
+        ));
+    }
     let mut task = state
         .tasks
         .find_by_id(&Id::new(&id))
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("task {id} not found")))?;
+    require_task_claim(&auth, &task)?;
     let new_status = parse_task_status(&req.status)?;
-    task.transition_status(new_status)
+    let old_status = task.status.clone();
+    task.transition_status(new_status.clone())
         .map_err(|e| ApiError::InvalidInput(e.to_string()))?;
     let ts = now_secs();
     task.updated_at = ts;
     state.tasks.update(&task).await?;
+    // search.md §Index Updates: status change -> index updated.
+    crate::search_indexer::index(&state, crate::search_indexer::task_document(&task)).await;
     state
         .emit_event(
-            Some(task.workspace_id.clone()),
+            task.workspace_id.clone(),
             gyre_common::message::Destination::Workspace(task.workspace_id.clone()),
             gyre_common::message::MessageKind::TaskTransitioned,
             Some(serde_json::json!({"task_id": task.id.to_string(), "status": req.status})),
@@ -371,18 +473,21 @@ pub async fn transition_task_status(
         crate::reconciliation::on_reconciliation_task_terminal(&state, &task.workspace_id).await;
     }
 
-    // Auto-track status transition as analytics event
-    let event = AnalyticsEvent::new(
-        new_id(),
-        "task.status_changed",
-        task.assigned_to.as_ref().map(|id| id.to_string()),
-        serde_json::json!({
-            "task_id": task.id.to_string(),
-            "new_status": req.status,
-        }),
-        ts,
-    );
-    let _ = state.analytics.record(&event).await;
+    // Auto-track status transition as analytics event (task-146 helper:
+    // spec-required old_status/new_status/assigned_to properties,
+    // caller-bound scope, search-indexed on write).
+    super::analytics::record_task_status_changed(&state, &task, &old_status).await;
+
+    // agent-workflow.md §Parallel Work via Worktrees: worktrees are
+    // ephemeral — Cancelled is terminal (platform-model.md §Task Status:
+    // "cannot be re-opened"), so the cancelled task's agents have their
+    // worktrees torn down (session end state captured first, inside the
+    // shared helper — the working copy is that capture's data source).
+    // Not applied to a manual Done: the Done teardown fires on the Ralph
+    // loop's merge watcher, which owns the terminal transition.
+    if task.status == TaskStatus::Cancelled {
+        crate::api::spawn::cleanup_worktrees_for_task(&state, &task).await;
+    }
 
     Ok(Json(TaskResponse::from(task)))
 }
@@ -413,6 +518,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/api/v1/tasks")
+                    .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
@@ -473,6 +579,7 @@ mod tests {
                 Request::builder()
                     .method("PUT")
                     .uri(format!("/api/v1/tasks/{id}"))
+                    .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&update_body).unwrap()))
                     .unwrap(),
@@ -482,6 +589,217 @@ mod tests {
         assert_eq!(update_resp.status(), StatusCode::OK);
         let updated = body_json(update_resp).await;
         assert_eq!(updated["priority"], "high");
+    }
+
+    /// Mint a worker JWT bound to `task_id` and register it in
+    /// agent_tokens so the auth extractor resolves the agent principal
+    /// (task-263 task-scope boundary probes).
+    async fn agent_token_for_task(
+        state: &std::sync::Arc<crate::AppState>,
+        task_id: &str,
+    ) -> String {
+        let token = state
+            .agent_signing_key
+            .mint_worker_scoped(
+                "agent-scope-1",
+                task_id,
+                "system",
+                &state.base_url,
+                3600,
+                "default",
+                "ws-1",
+                "repo-1",
+                "repo-1",
+                None,
+                Some(1),
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        state
+            .kv_store
+            .kv_set("agent_tokens", "agent-scope-1", token.clone())
+            .await
+            .unwrap();
+        token
+    }
+
+    /// AC (task-263): a valid, non-expired agent JWT spawned for task A
+    /// gets 403 on PUT /api/v1/tasks/:id for task B — the FULL content
+    /// update (title/description/priority/assigned_to/branch/pr_link/
+    /// labels), not only the status transition — and on the task-status
+    /// transition of task B; its own task still works.
+    #[tokio::test]
+    async fn agent_jwt_cannot_mutate_foreign_task() {
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let (app, task_a) = create_test_task(app, "Task A").await;
+        let (app, task_b) = create_test_task(app, "Task B").await;
+        let token = agent_token_for_task(&state, &task_a).await;
+
+        // Full content update of task B → 403.
+        let body = serde_json::json!({
+            "title": "hijacked",
+            "description": "hijacked",
+            "priority": "urgent",
+            "branch": "feat/evil",
+            "pr_link": "https://example.com/pr",
+            "labels": ["hijacked"],
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/tasks/{task_b}"))
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        // Task B is untouched.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/tasks/{task_b}"))
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let got = body_json(resp).await;
+        assert_eq!(got["title"], "Task B");
+
+        // Status transition of task B → 403.
+        let body = serde_json::json!({ "status": "in_progress" });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/tasks/{task_b}/status"))
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // The agent's own task is not locked out: content update and
+        // transition both pass the boundary (non-agent principals keep
+        // their rights — asserted by every pre-existing test above).
+        let body = serde_json::json!({ "title": "A updated by its agent" });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/tasks/{task_a}"))
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = serde_json::json!({ "status": "in_progress" });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/tasks/{task_a}/status"))
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    /// Task creation by an agent principal is clamped to its token's scope
+    /// (the MCP gyre_create_task contract): explicit foreign targets are
+    /// rejected, absent targets inherit the caller's claims.
+    #[tokio::test]
+    async fn agent_jwt_create_task_clamped_to_claims() {
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        // The clamped claims (ws-1/repo-1) must resolve to real scoped
+        // entities: create_task validates the caller-supplied/inherited
+        // scope against the stores (task-102 F2 anti-forgery), so seed the
+        // workspace (tenant "default", matching the minted JWT) and its
+        // repo before minting the token.
+        state
+            .workspaces
+            .create(&gyre_domain::Workspace::new(
+                gyre_common::Id::new("ws-1"),
+                gyre_common::Id::new("default"),
+                "Clamp WS",
+                "clamp-ws",
+                0,
+            ))
+            .await
+            .unwrap();
+        state
+            .repos
+            .create(&gyre_domain::Repository::new(
+                gyre_common::Id::new("repo-1"),
+                gyre_common::Id::new("ws-1"),
+                "clamp-repo",
+                "/tmp/gyre-test-clamp-repo",
+                0,
+            ))
+            .await
+            .unwrap();
+        let token = agent_token_for_task(&state, "task-own").await;
+
+        // Explicit foreign workspace → 403.
+        let body = serde_json::json!({ "title": "foreign", "workspace_id": "ws-other" });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/tasks")
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // Absent targets → clamped to the token's workspace/repo claims.
+        let body = serde_json::json!({ "title": "scoped" });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/tasks")
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let json = body_json(resp).await;
+        assert_eq!(json["workspace_id"], "ws-1");
+        assert_eq!(json["repo_id"], "repo-1");
     }
 
     #[tokio::test]
@@ -495,6 +813,7 @@ mod tests {
                 Request::builder()
                     .method("PUT")
                     .uri(format!("/api/v1/tasks/{id}/status"))
+                    .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
@@ -518,6 +837,7 @@ mod tests {
                 Request::builder()
                     .method("PUT")
                     .uri(format!("/api/v1/tasks/{id}/status"))
+                    .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
@@ -525,6 +845,125 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// Regression (task-202 review): the `task.status_changed` activity event
+    /// emitted on the transition write path must carry its workspace/repo
+    /// scope, so search.md §Searchable Entities' Activity Event workspace/repo
+    /// filters actually match write-path-indexed events (the scope used to be
+    /// dropped at every emit site except the orchestrator spawn path).
+    #[tokio::test]
+    async fn task_transition_activity_event_is_workspace_scoped() {
+        use gyre_ports::search::SearchQuery;
+        use std::sync::Arc;
+
+        // Real SQLite FTS5 backend — the workspace filter is SQL, not a stub.
+        let db = tempfile::NamedTempFile::new().unwrap();
+        let storage = gyre_adapters::SqliteStorage::new(db.path().to_str().unwrap()).unwrap();
+        let state = crate::mem::test_state_with_search(
+            Arc::new(storage) as Arc<dyn gyre_ports::SearchPort>
+        );
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // Create a task scoped to a known workspace/repo. The workspace and
+        // repo rows must exist in the caller's tenant: create_task derives
+        // the task's scope fields through the caller-scope validators
+        // (task-102 F2), so the rows are seeded before the request.
+        state
+            .workspaces
+            .create(&gyre_domain::Workspace::new(
+                gyre_common::Id::new("ws-scope-1"),
+                gyre_common::Id::new("default"),
+                "Scoped",
+                "scoped",
+                1000,
+            ))
+            .await
+            .unwrap();
+        state
+            .repos
+            .create(&gyre_domain::Repository::new(
+                gyre_common::Id::new("repo-scope-1"),
+                gyre_common::Id::new("ws-scope-1"),
+                "scoped-repo",
+                "/tmp/scoped-repo.git".to_string(),
+                1000,
+            ))
+            .await
+            .unwrap();
+        let body = serde_json::json!({
+            "title": "Scoped transition probe",
+            "workspace_id": "ws-scope-1",
+            "repo_id": "repo-scope-1",
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/tasks")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let json = body_json(resp).await;
+        let id = json["id"].as_str().unwrap().to_string();
+
+        // Transition it — emits and indexes task.status_changed.
+        let body = serde_json::json!({ "status": "in_progress" });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/tasks/{id}/status"))
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // The activity event must be retrievable through the workspace
+        // filter — this is exactly the query that returned nothing when the
+        // emit sites dropped the scope.
+        let results = state
+            .search
+            .search(SearchQuery {
+                query: "task.status_changed".to_string(),
+                parsed: gyre_ports::search::parse_query("task.status_changed"),
+                entity_type: Some("activity_event".to_string()),
+                workspace_id: Some("ws-scope-1".to_string()),
+                limit: 10,
+                // The indexed document's tenant resolves from the seeded
+                // workspace row ("default") at index time — the direct
+                // port call must carry the same tenant the production
+                // scope-derivation path (search_scope::derive_search_scope)
+                // would hand the adapter for a caller in that tenant.
+                tenant_id: "default".to_string(),
+                accessible_workspace_ids: None,
+                accessible_repo_ids: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            results.len(),
+            1,
+            "activity event must be findable via the workspace filter"
+        );
+        assert_eq!(
+            results[0].facets.get("workspace").map(String::as_str),
+            Some("ws-scope-1")
+        );
+        assert_eq!(
+            results[0].facets.get("repo").map(String::as_str),
+            Some("repo-scope-1")
+        );
     }
 
     #[tokio::test]
@@ -537,6 +976,7 @@ mod tests {
                 Request::builder()
                     .method("PUT")
                     .uri(format!("/api/v1/tasks/{id}/status"))
+                    .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
@@ -556,5 +996,60 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let json = body_json(resp).await;
         assert_eq!(json.as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn task_status_transition_emits_analytics_event() {
+        // analytics.md §Auto-Emitted Events: task.status_changed must carry
+        // old_status, new_status, task_id, assigned_to.
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let (app, id) = create_test_task(app, "Analytics task").await;
+
+        // Assign the task so assigned_to is populated in the event.
+        let assign_body = serde_json::json!({ "assigned_to": "agent-77" });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/tasks/{id}"))
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&assign_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = serde_json::json!({ "status": "in_progress" });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/tasks/{id}/status"))
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let events = state
+            .analytics
+            .query(Some("task.status_changed"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 1, "one status_changed event expected");
+        let ev = &events[0];
+        assert_eq!(ev.properties["task_id"], id);
+        assert_eq!(ev.properties["old_status"], "Backlog");
+        assert_eq!(ev.properties["new_status"], "InProgress");
+        assert_eq!(ev.properties["assigned_to"], "agent-77");
+        // agent_id on the event is the assigned agent.
+        assert_eq!(ev.agent_id.as_deref(), Some("agent-77"));
     }
 }

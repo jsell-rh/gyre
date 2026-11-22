@@ -1921,9 +1921,11 @@ async fn run_explorer_agent_sdk(
             break;
         };
 
-        let check_result = graph.as_ref().and_then(|(nodes, edges)| {
-            self_check_dry_run(&query_json, nodes, edges, selected_node_id)
-        });
+        let check_result = if let Some((nodes, edges)) = graph.as_ref() {
+            self_check_dry_run(state, repo_id, &query_json, nodes, edges, selected_node_id).await
+        } else {
+            None
+        };
 
         match check_result {
             Some(dr) => {
@@ -3223,7 +3225,8 @@ async fn run_explorer_agent(
                 // Dry-run the query server-side, with validation first.
                 // `None` = structurally invalid (failed to deserialize).
                 let dry_run_result =
-                    self_check_dry_run(&query_json, nodes, edges, selected_node_id);
+                    self_check_dry_run(state, repo_id, &query_json, nodes, edges, selected_node_id)
+                        .await;
                 let dry_run_result = match dry_run_result {
                     Some(dr) => Some(dr),
                     None => {
@@ -3541,12 +3544,21 @@ async fn execute_tool(
                             nodes,
                         )
                         .await;
-                    let result = gyre_domain::view_query_resolver::dry_run_with_call_graph(
+                    // SHA/ref-based diff scopes resolve their change set from
+                    // the repo's real git via the shared two-commit graph-diff
+                    // core.
+                    let diff_changes =
+                        crate::graph_diff_core::resolve_view_query_diff_changes_for_state(
+                            state, repo_id, &query,
+                        )
+                        .await;
+                    let result = gyre_domain::view_query_resolver::dry_run_with_diff_change_set(
                         &query,
                         nodes,
                         edges,
                         selected_node_id,
                         Some(call_graph_complete),
+                        diff_changes.as_ref(),
                     );
                     serde_json::to_string_pretty(&result).unwrap_or_else(|e| format!("Error: {e}"))
                 }
@@ -3961,7 +3973,13 @@ fn parse_view_query_from_text(text: &str) -> (String, Option<serde_json::Value>)
 /// (structurally invalid — it must NOT be sent to the frontend). Otherwise
 /// returns the DryRunResult with any validation errors/warnings merged into
 /// `warnings` so they participate in the actionable-warning classification.
-fn self_check_dry_run(
+///
+/// SHA/ref-based Diff scopes resolve their change set from the repo's real
+/// git via the shared two-commit graph-diff core before the pure domain
+/// resolver runs.
+async fn self_check_dry_run(
+    state: &AppState,
+    repo_id: &str,
     query_json: &serde_json::Value,
     nodes: &[gyre_common::graph::GraphNode],
     edges: &[gyre_common::graph::GraphEdge],
@@ -3971,7 +3989,17 @@ fn self_check_dry_run(
         serde_json::from_value::<gyre_common::view_query::ViewQuery>(query_json.clone()).ok()?;
     let validation_errors = query.validate();
     let validation_warnings = query.warnings();
-    let mut dr = gyre_domain::view_query_resolver::dry_run(&query, nodes, edges, selected_node_id);
+    let diff_changes =
+        crate::graph_diff_core::resolve_view_query_diff_changes_for_state(state, repo_id, &query)
+            .await;
+    let mut dr = gyre_domain::view_query_resolver::dry_run_with_diff_change_set(
+        &query,
+        nodes,
+        edges,
+        selected_node_id,
+        None,
+        diff_changes.as_ref(),
+    );
     for err in validation_errors {
         dr.warnings.push(format!("Validation: {}", err));
     }
@@ -3999,17 +4027,14 @@ fn actionable_dry_run_warnings<'a>(
 fn is_actionable_warning(w: &str, query_json: &serde_json::Value) -> bool {
     // [info] prefixed warnings are informational — never trigger
     // refinement. These are inherent to the data model and cannot
-    // be fixed by query changes (e.g., "SHA-based diff is approximate").
+    // be fixed by query changes (e.g., trace-metric warnings).
     if w.starts_with("[info]") {
         return false;
     }
     // Unfixable warnings: inherent to the data source, not
     // resolvable by query refinement. Skip to avoid wasting
     // a self-check turn.
-    const UNFIXABLE_PREFIXES: &[&str] = &[
-        "SHA-based diff shows an approximate",
-        "Graph data truncated",
-    ];
+    const UNFIXABLE_PREFIXES: &[&str] = &["Graph data truncated"];
     if UNFIXABLE_PREFIXES.iter().any(|p| w.starts_with(p)) {
         return false;
     }

@@ -28,6 +28,11 @@ impl Ctx {
         let port = listener.local_addr().unwrap().port();
         let base_url = format!("http://127.0.0.1:{port}");
 
+        // task-264: production's default signing mode is keyless Fulcio;
+        // this harness drives pushes/merges with non-JWT dev tokens, so it
+        // explicitly opts into local forge-key signing (the documented
+        // operator opt-in). Keyless/fail-loud signing has its own suites.
+        unsafe { std::env::set_var("GYRE_SIGNING_MODE", "local") };
         let state = build_state(TOKEN, &base_url, None);
         abac_middleware::seed_builtin_policies(&state)
             .await
@@ -48,6 +53,8 @@ impl Ctx {
         let port = listener.local_addr().unwrap().port();
         let base_url = format!("http://127.0.0.1:{port}");
 
+        // task-264: see Ctx::new — explicit local-signing opt-in.
+        unsafe { std::env::set_var("GYRE_SIGNING_MODE", "local") };
         let base_state = build_state(TOKEN, &base_url, None);
         let mut s = (*base_state).clone();
         s.llm = Some(Arc::new(MockLlmPortFactory::echo()) as Arc<dyn LlmPortFactory>);
@@ -746,6 +753,9 @@ async fn test_push_triggers_graph_extraction() {
     let base_url = format!("http://127.0.0.1:{port}");
     let api = format!("{base_url}/api/v1");
 
+    // task-264: see Ctx::new — explicit local-signing opt-in (this test
+    // pushes real commits through git-receive-pack).
+    unsafe { std::env::set_var("GYRE_SIGNING_MODE", "local") };
     let state = gyre_server::build_state(token, &base_url, None);
     abac_middleware::seed_builtin_policies(&state)
         .await
@@ -911,6 +921,468 @@ async fn test_push_triggers_graph_extraction() {
     assert!(
         !deltas.is_empty(),
         "expected at least one architectural delta after push"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// View-query diff scope: commit-range change set from the shared two-commit
+// graph-diff core (view-query-grammar.md §2 `diff`)
+// ---------------------------------------------------------------------------
+
+/// Real-repo, real-git, real-extraction integration test for the SHA/ref-based
+/// diff scope.
+///
+/// History: commit A adds `pub fn f/g/h` (each `-> u32`); commit B changes
+/// only f's signature (the intermediate-commit case the old single-snapshot
+/// heuristic silently missed); commit C changes only g's signature; the graph
+/// is extracted at C via the normal push flow. Commit D (second push) deletes
+/// h so the removed-node contract is exercised against real git too.
+///
+/// Contract under test (exact-set assertions — they kill both pre-fix failure
+/// modes: all-present-nodes when to == HEAD, and empty when to < HEAD):
+/// - Diff{A, C} matches exactly {f, g} — h (untouched) excluded, f (changed
+///   only at intermediate commit B) INCLUDED.
+/// - Diff{A, B} matches exactly {f} — a to_commit older than HEAD resolves.
+/// - Removed nodes are named in warnings; {{count}} resolves to the matched
+///   set size; an unresolvable ref warns and matches nothing.
+/// - GET /graph/diff exposes the SAME change set (shared core, criterion 8).
+#[tokio::test(flavor = "multi_thread")]
+async fn test_view_query_diff_scope_commit_range() {
+    use gyre_server::merge_processor;
+    use tempfile::TempDir;
+
+    let token = "diff-scope-push-token";
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let base_url = format!("http://127.0.0.1:{port}");
+    let api = format!("{base_url}/api/v1");
+
+    // task-264: see Ctx::new — explicit local-signing opt-in (this test
+    // pushes real commits through git-receive-pack).
+    unsafe { std::env::set_var("GYRE_SIGNING_MODE", "local") };
+    let state = gyre_server::build_state(token, &base_url, None);
+    abac_middleware::seed_builtin_policies(&state)
+        .await
+        .expect("seed built-in policies");
+    merge_processor::spawn_merge_processor(state.clone());
+    let app = gyre_server::build_router(Arc::clone(&state));
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let client = reqwest::Client::new();
+    let auth = format!("Bearer {token}");
+    let ws_id = format!(
+        "ws-{}",
+        &uuid::Uuid::new_v4().to_string().replace('-', "")[..8]
+    );
+
+    // Create workspace (needed for git URL slug resolution).
+    let ws_resp: Value = client
+        .post(format!("{api}/workspaces"))
+        .header("Authorization", &auth)
+        .json(&json!({ "tenant_id": "default", "name": &ws_id, "slug": &ws_id }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let workspace_id = ws_resp["id"].as_str().unwrap().to_string();
+
+    // Create a repo in the workspace.
+    let repo_resp: Value = client
+        .post(format!("{api}/repos"))
+        .header("Authorization", &auth)
+        .json(&json!({ "workspace_id": &workspace_id, "name": "diffrepo" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let repo_id = repo_resp["id"].as_str().unwrap().to_string();
+    let clone_url = format!("{base_url}/git/{ws_id}/diffrepo.git");
+    let token_owned = token.to_string();
+    let clone_url_owned = clone_url.clone();
+
+    // Commit history, all pushed in one push (the push flow extracts at HEAD
+    // = commit C). Tags mark the boundary commits; the server resolves them
+    // against its real git.
+    let workdir = tokio::task::spawn_blocking(move || {
+        fn git(args: &[&str], dir: &std::path::Path, token: &str) -> std::process::Output {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .env("GIT_ASKPASS", "true")
+                .env("GIT_CONFIG_COUNT", "1")
+                .env("GIT_CONFIG_KEY_0", "http.extraHeader")
+                .env(
+                    "GIT_CONFIG_VALUE_0",
+                    format!("Authorization: Bearer {token}"),
+                )
+                .output()
+                .expect("git command failed")
+        }
+        fn git_local(args: &[&str], dir: &std::path::Path) {
+            let status = std::process::Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .status()
+                .expect("git command failed");
+            assert!(status.success(), "git {:?} failed", args);
+        }
+
+        let work = TempDir::new().unwrap();
+        let dir = work.path().join("repo");
+
+        // Clone the empty repo.
+        let out = git(
+            &["clone", &clone_url_owned, "repo"],
+            work.path(),
+            &token_owned,
+        );
+        let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+        let ok = out.status.success()
+            || stderr.contains("empty repository")
+            || stderr.contains("warning");
+        assert!(ok, "clone failed: {stderr}");
+
+        git_local(&["config", "user.email", "agent@gyre.local"], &dir);
+        git_local(&["config", "user.name", "Diff Agent"], &dir);
+
+        let write_lib = |content: &str| {
+            std::fs::create_dir_all(dir.join("src")).unwrap();
+            std::fs::write(dir.join("src").join("lib.rs"), content).unwrap();
+        };
+
+        // Commit A: adds f, g, h.
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"diffrepo\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        write_lib("\npub fn f() -> u32 { 1 }\npub fn g() -> u32 { 2 }\npub fn h() -> u32 { 3 }\n");
+        git_local(&["add", "."], &dir);
+        git_local(&["commit", "-m", "A: add f, g, h"], &dir);
+        git_local(&["tag", "tagA"], &dir);
+
+        // Commit B: modifies ONLY f (signature change — the extractor records
+        // the fn signature in doc_comment). f is the intermediate-commit case.
+        write_lib("\npub fn f() -> u64 { 1 }\npub fn g() -> u32 { 2 }\npub fn h() -> u32 { 3 }\n");
+        git_local(&["add", "."], &dir);
+        git_local(&["commit", "-m", "B: change f"], &dir);
+        git_local(&["tag", "tagB"], &dir);
+
+        // Commit C: modifies ONLY g.
+        write_lib("\npub fn f() -> u64 { 1 }\npub fn g() -> u64 { 2 }\npub fn h() -> u32 { 3 }\n");
+        git_local(&["add", "."], &dir);
+        git_local(&["commit", "-m", "C: change g"], &dir);
+        git_local(&["tag", "tagC"], &dir);
+
+        // Commit D (pushed later): deletes h.
+        write_lib("\npub fn f() -> u64 { 1 }\npub fn g() -> u64 { 2 }\n");
+        git_local(&["add", "."], &dir);
+        git_local(&["commit", "-m", "D: delete h"], &dir);
+        git_local(&["tag", "tagD"], &dir);
+
+        // Push A..C to main (one push — extraction runs at C), plus the tags
+        // marking the boundaries.
+        let push = git(&["push", "origin", "HEAD~1:main"], &dir, &token_owned);
+        let stderr = String::from_utf8_lossy(&push.stderr);
+        assert!(push.status.success(), "push failed: {stderr}");
+        for tag in ["tagA", "tagB", "tagC"] {
+            let out = git(&["push", "origin", tag], &dir, &token_owned);
+            assert!(
+                out.status.success(),
+                "push tag {tag} failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+
+        (dir, work)
+    })
+    .await
+    .unwrap();
+
+    // Wait for the background extraction at C: poll until f/g/h function
+    // nodes exist in the stored graph.
+    let mut extracted = false;
+    for _ in 0..120 {
+        let body: Value = client
+            .get(format!("{api}/repos/{repo_id}/graph"))
+            .header("Authorization", &auth)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let names: Vec<&str> = body["nodes"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter(|n| n["node_type"] == "function")
+                    .filter_map(|n| n["name"].as_str())
+                    .collect()
+            })
+            .unwrap_or_default();
+        if ["f", "g", "h"].iter().all(|want| names.contains(want)) {
+            extracted = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+    assert!(
+        extracted,
+        "extraction at commit C did not produce f/g/h nodes"
+    );
+
+    // ── Acceptance 1: Diff{A, C} matches exactly {f, g} ─────────────────────
+    //
+    // Against the OLD single-snapshot heuristic this fails: every node's
+    // last_modified_sha is C (the extraction stamps all present nodes), so
+    // the boundary-SHA predicate matches h as well — the whole active graph.
+    let dryrun = |query: Value| {
+        let client = client.clone();
+        let api = api.clone();
+        let auth = auth.clone();
+        let repo_id = repo_id.clone();
+        async move {
+            let resp: Value = client
+                .post(format!("{api}/repos/{repo_id}/graph/query-dryrun"))
+                .header("Authorization", &auth)
+                .json(&json!({ "query": query }))
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            resp
+        }
+    };
+
+    let diff_query = |from: &str, to: &str| {
+        json!({
+            "scope": { "type": "diff", "from_commit": from, "to_commit": to },
+            "annotation": { "title": "{{count}} changed" }
+        })
+    };
+
+    let resp = dryrun(diff_query("tagA", "tagC")).await;
+    let mut names: Vec<String> = resp["matched_node_names"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|n| n.as_str().map(|s| s.to_string()))
+        .collect();
+    names.sort();
+    assert_eq!(
+        names, vec!["f".to_string(), "g".to_string()],
+        "Diff{{A, C}} must match exactly f and g (h untouched, f changed at intermediate B); got {names:?}"
+    );
+    // Not the whole graph: package/module nodes exist but are not matched.
+    assert_eq!(resp["matched_nodes"].as_u64().unwrap(), 2);
+    // {{count}} resolves to the matched-set size.
+    assert_eq!(
+        resp["resolved_annotation"]["title"].as_str().unwrap(),
+        "2 changed"
+    );
+
+    // ── Acceptance 1 (second half): Diff{A, B} matches exactly {f} ──────────
+    //
+    // Against the OLD heuristic this returns the EMPTY set (no node's
+    // snapshot provenance matches the older to_commit).
+    let resp = dryrun(diff_query("tagA", "tagB")).await;
+    let names: Vec<String> = resp["matched_node_names"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|n| n.as_str().map(|s| s.to_string()))
+        .collect();
+    assert_eq!(
+        names,
+        vec!["f".to_string()],
+        "Diff{{A, B}} must match exactly f (to_commit older than HEAD); got {names:?}"
+    );
+
+    // ── Criterion 8: GET /graph/diff serves the SAME change set ────────────
+    let body: Value = client
+        .get(format!(
+            "{api}/repos/{repo_id}/graph/diff?from=tagA&to=tagC"
+        ))
+        .header("Authorization", &auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let mut modified: Vec<String> = body["nodes"]["modified"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|n| n.as_str().map(|s| s.to_string()))
+        .collect();
+    modified.sort();
+    assert_eq!(
+        modified,
+        vec!["lib::f".to_string(), "lib::g".to_string()],
+        "GET /graph/diff must expose the identical change set (shared core)"
+    );
+    assert!(body["nodes"]["added"].as_array().unwrap().is_empty());
+    assert!(body["nodes"]["removed"].as_array().unwrap().is_empty());
+    // A..B through the same shared core.
+    let body: Value = client
+        .get(format!(
+            "{api}/repos/{repo_id}/graph/diff?from=tagA&to=tagB"
+        ))
+        .header("Authorization", &auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        body["nodes"]["modified"].as_array().unwrap().len(),
+        1,
+        "GET /graph/diff A..B must expose exactly the one modified node"
+    );
+
+    // ── Acceptance 4: unresolvable ref warns and matches nothing ────────────
+    let resp = dryrun(diff_query("no-such-branch", "tagC")).await;
+    assert_eq!(resp["matched_nodes"].as_u64().unwrap(), 0);
+    assert!(
+        resp["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|w| w.as_str())
+            .any(|w| w.contains("no-such-branch")),
+        "unresolvable ref must be named in warnings"
+    );
+
+    // ── Acceptance 3: removed nodes are named in warnings ───────────────────
+    // Second push: commit D deletes h; the extraction at D soft-deletes the
+    // stored node. Diff{A, D} must name h as removed and still match f+g.
+    {
+        let (dir, _work) = workdir;
+        let token2 = token.to_string();
+        tokio::task::spawn_blocking(move || {
+            let out = std::process::Command::new("git")
+                .args(["push", "origin", "tagD"])
+                .current_dir(&dir)
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .env("GIT_ASKPASS", "true")
+                .env("GIT_CONFIG_COUNT", "1")
+                .env("GIT_CONFIG_KEY_0", "http.extraHeader")
+                .env(
+                    "GIT_CONFIG_VALUE_0",
+                    format!("Authorization: Bearer {token2}"),
+                )
+                .output()
+                .expect("git push failed");
+            assert!(
+                out.status.success(),
+                "push tagD failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            let out = std::process::Command::new("git")
+                .args(["push", "origin", "HEAD:main"])
+                .current_dir(&dir)
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .env("GIT_ASKPASS", "true")
+                .env("GIT_CONFIG_COUNT", "1")
+                .env("GIT_CONFIG_KEY_0", "http.extraHeader")
+                .env(
+                    "GIT_CONFIG_VALUE_0",
+                    format!("Authorization: Bearer {token2}"),
+                )
+                .output()
+                .expect("git push failed");
+            assert!(
+                out.status.success(),
+                "push D to main failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        })
+        .await
+        .unwrap();
+    }
+
+    // Wait for the extraction at D: h disappears from the active graph.
+    let mut h_gone = false;
+    for _ in 0..120 {
+        let body: Value = client
+            .get(format!("{api}/repos/{repo_id}/graph"))
+            .header("Authorization", &auth)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let has_h = body["nodes"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .any(|n| n["node_type"] == "function" && n["name"] == "h")
+            })
+            .unwrap_or(false);
+        if !has_h {
+            h_gone = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+    assert!(h_gone, "extraction at commit D did not soft-delete h");
+
+    let resp = dryrun(diff_query("tagA", "tagD")).await;
+    let mut names: Vec<String> = resp["matched_node_names"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|n| n.as_str().map(|s| s.to_string()))
+        .collect();
+    names.sort();
+    assert_eq!(names, vec!["f".to_string(), "g".to_string()]);
+    assert_eq!(resp["matched_nodes"].as_u64().unwrap(), 2);
+    assert_eq!(
+        resp["resolved_annotation"]["title"].as_str().unwrap(),
+        "2 changed"
+    );
+    assert!(
+        resp["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|w| w.as_str())
+            .any(|w| w.contains("lib::h")),
+        "removed node h must be named in warnings, got: {:?}",
+        resp["warnings"]
+    );
+
+    // Shared core consistency for the removal range too.
+    let body: Value = client
+        .get(format!(
+            "{api}/repos/{repo_id}/graph/diff?from=tagA&to=tagD"
+        ))
+        .header("Authorization", &auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        body["nodes"]["removed"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|n| n.as_str())
+            .collect::<Vec<_>>(),
+        vec!["lib::h"]
     );
 }
 
@@ -1236,6 +1708,7 @@ async fn test_divergence_detection_creates_notifications() {
     let ports = DivergencePorts {
         notification_repo: ctx.state.notifications.as_ref(),
         membership_repo: ctx.state.workspace_memberships.as_ref(),
+        on_created: None,
     };
 
     check_divergence(
@@ -1252,7 +1725,7 @@ async fn test_divergence_detection_creates_notifications() {
     let admin_notifs = ctx
         .state
         .notifications
-        .list_for_user(&admin_user, None, None, None, None, 10, 0)
+        .list_for_user(&admin_user, None, None, None, None, None, &[], 10, 0)
         .await
         .unwrap();
     assert_eq!(
@@ -1270,7 +1743,7 @@ async fn test_divergence_detection_creates_notifications() {
     let dev_notifs = ctx
         .state
         .notifications
-        .list_for_user(&dev_user, None, None, None, None, 10, 0)
+        .list_for_user(&dev_user, None, None, None, None, None, &[], 10, 0)
         .await
         .unwrap();
     assert_eq!(dev_notifs.len(), 1, "Developer should have 1 notification");
@@ -1278,7 +1751,7 @@ async fn test_divergence_detection_creates_notifications() {
     let viewer_notifs = ctx
         .state
         .notifications
-        .list_for_user(&viewer_user, None, None, None, None, 10, 0)
+        .list_for_user(&viewer_user, None, None, None, None, None, &[], 10, 0)
         .await
         .unwrap();
     assert!(
@@ -1377,6 +1850,7 @@ async fn test_divergence_below_threshold_no_notifications() {
     let ports = DivergencePorts {
         notification_repo: ctx.state.notifications.as_ref(),
         membership_repo: ctx.state.workspace_memberships.as_ref(),
+        on_created: None,
     };
 
     check_divergence(
@@ -1393,7 +1867,7 @@ async fn test_divergence_below_threshold_no_notifications() {
     let notifs = ctx
         .state
         .notifications
-        .list_for_user(&user_id, None, None, None, None, 10, 0)
+        .list_for_user(&user_id, None, None, None, None, None, &[], 10, 0)
         .await
         .unwrap();
     assert!(
@@ -1489,6 +1963,7 @@ async fn test_divergence_skips_reconciliation_agents() {
     let ports = DivergencePorts {
         notification_repo: ctx.state.notifications.as_ref(),
         membership_repo: ctx.state.workspace_memberships.as_ref(),
+        on_created: None,
     };
 
     check_divergence(
@@ -1505,7 +1980,7 @@ async fn test_divergence_skips_reconciliation_agents() {
     let notifs = ctx
         .state
         .notifications
-        .list_for_user(&user_id, None, None, None, None, 10, 0)
+        .list_for_user(&user_id, None, None, None, None, None, &[], 10, 0)
         .await
         .unwrap();
     assert!(
@@ -1603,6 +2078,7 @@ async fn test_divergence_skips_same_agent() {
     let ports = DivergencePorts {
         notification_repo: ctx.state.notifications.as_ref(),
         membership_repo: ctx.state.workspace_memberships.as_ref(),
+        on_created: None,
     };
 
     check_divergence(
@@ -1618,7 +2094,7 @@ async fn test_divergence_skips_same_agent() {
     let notifs = ctx
         .state
         .notifications
-        .list_for_user(&user_id, None, None, None, None, 10, 0)
+        .list_for_user(&user_id, None, None, None, None, None, &[], 10, 0)
         .await
         .unwrap();
     assert!(
@@ -1717,6 +2193,7 @@ async fn test_divergence_skips_human_pushed_deltas() {
     let ports = DivergencePorts {
         notification_repo: ctx.state.notifications.as_ref(),
         membership_repo: ctx.state.workspace_memberships.as_ref(),
+        on_created: None,
     };
 
     check_divergence(
@@ -1732,7 +2209,7 @@ async fn test_divergence_skips_human_pushed_deltas() {
     let notifs = ctx
         .state
         .notifications
-        .list_for_user(&user_id, None, None, None, None, 10, 0)
+        .list_for_user(&user_id, None, None, None, None, None, &[], 10, 0)
         .await
         .unwrap();
     assert!(

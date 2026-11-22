@@ -245,6 +245,24 @@ impl SpecApprovalRepository for PgStorage {
         .await?
     }
 
+    async fn list_by_approver(&self, approver_id: &str) -> Result<Vec<SpecApproval>> {
+        let pool = Arc::clone(&self.pool);
+        let approver = approver_id.to_string();
+        tokio::task::spawn_blocking(move || -> Result<Vec<SpecApproval>> {
+            let mut conn = pool.get().context("get db connection")?;
+            let rows = spec_approvals::table
+                .filter(spec_approvals::approver_id.eq(&approver))
+                .order(spec_approvals::id.desc())
+                .load::<SpecApprovalRow>(&mut *conn)
+                .context("list spec approvals by approver")?;
+            Ok(rows
+                .into_iter()
+                .map(SpecApprovalRow::into_approval)
+                .collect())
+        })
+        .await?
+    }
+
     async fn approve(&self, id: &Id, now: u64) -> Result<Option<()>, ApprovalTransitionError> {
         self.transition(id, move |a| a.approve(now)).await
     }

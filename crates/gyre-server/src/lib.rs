@@ -4,6 +4,8 @@ pub(crate) mod abac;
 pub mod abac_middleware;
 pub mod abandoned_branch;
 pub mod agent_audit;
+pub mod agent_sessions;
+pub mod aibom_spec_registry;
 pub mod api;
 pub mod attestation;
 pub mod audit_simulator;
@@ -13,9 +15,11 @@ pub(crate) mod constraint_check;
 pub mod container_audit;
 pub mod dep_staleness;
 pub mod domain_events;
+pub mod email;
 pub mod gate_executor;
 pub(crate) mod git_http;
 pub mod git_refs;
+pub mod graph_diff_core;
 pub mod graph_extraction;
 pub mod procfs_monitor;
 pub mod sigstore;
@@ -29,12 +33,15 @@ pub mod llm_rate_limit;
 pub mod log_compression;
 pub(crate) mod mcp;
 pub(crate) mod mem;
+pub mod merge_attestation;
+pub mod merge_policy;
 pub mod merge_processor;
-pub(crate) mod messages;
+pub mod message_dispatcher;
 pub mod metrics;
 pub mod middleware;
 pub mod mirror_sync;
 pub(crate) mod oidc;
+pub mod pr_hygiene;
 pub mod pre_accept;
 pub mod prompt_assembly;
 pub mod ralph_loop;
@@ -42,21 +49,29 @@ pub mod rate_limit;
 pub(crate) mod rbac;
 pub mod reconciliation;
 pub mod retention;
+pub mod search_indexer;
+pub mod search_scope;
+pub mod search_sync;
 pub mod secret_rotation;
 pub mod siem;
 pub(crate) mod signing;
 pub(crate) mod snapshot;
 pub(crate) mod spa;
+pub mod spec_lifecycle_patrol;
 pub mod spec_link_staleness;
 pub mod spec_patrol;
 pub mod spec_registry;
 pub mod speculative_merge;
 // sqlite.rs (rusqlite) removed — use gyre_adapters::SqliteStorage (Diesel) instead.
 pub(crate) mod explorer_ws;
+pub mod notification_dispatcher;
 pub mod notifications;
 pub mod otlp_receiver;
+pub mod policy_cache;
 pub mod policy_engine;
 pub mod signal_chain;
+pub mod spiffe;
+pub mod spiffe_federation;
 pub mod stale_agents;
 pub mod stale_peers;
 pub mod telemetry;
@@ -65,6 +80,7 @@ pub mod trusted_proxy;
 pub(crate) mod tty;
 pub mod version_compute;
 pub mod workload_attestation;
+pub mod workspace_ownership;
 pub(crate) mod ws;
 
 use axum::{routing::get, Router};
@@ -73,14 +89,15 @@ use gyre_common::message::{Destination, Message, MessageKind, MessageOrigin, Tel
 use gyre_common::Id;
 use gyre_common::WsMessage;
 use gyre_ports::{
-    AgentCommitRepository, AgentRepository, AnalyticsRepository, ApiKeyRepository,
-    AttestationRepository, AuditRepository, BreakingChangeRepository, BudgetCallRepository,
-    BudgetRepository, BudgetUsageRepository, ComputeTargetRepository, ContainerAuditRepository,
-    ConversationRepository, CostRepository, DependencyPolicyRepository, DependencyRepository,
-    GateResultRepository, GitOpsPort, GraphPort, JjOpsPort, KvJsonStore, LlmConfigRepository,
-    MergeQueueRepository, MergeRequestRepository, MetaSpecBindingRepository, MetaSpecRepository,
-    MetaSpecSetRepository, NetworkPeerRepository, NotificationRepository, PersonaRepository,
-    PolicyRepository, PreAcceptGate, ProcessHandle, PushGateRepository, QualityGateRepository,
+    AgentCommitRepository, AgentRepository, AgentSessionRepository, AnalyticsRepository,
+    ApiKeyRepository, AttestationRepository, AttestationStorage, AuditRepository,
+    BreakingChangeRepository, BudgetCallRepository, BudgetRepository, BudgetUsageRepository,
+    ComputeTargetRepository, ContainerAuditRepository, ConversationRepository, CostRepository,
+    DependencyPolicyRepository, DependencyRepository, GateResultRepository, GitOpsPort, GraphPort,
+    JjOpsPort, KvJsonStore, LlmConfigRepository, MergeQueueRepository, MergeRequestRepository,
+    MetaSpecBindingRepository, MetaSpecRepository, MetaSpecSetRepository, NetworkPeerRepository,
+    NotificationRepository, PersonaRepository, PolicyRepository, PreAcceptGate, ProcessHandle,
+    PushGateRepository, QualityGateRepository, RekorClient, RepoAccessOverrideRepository,
     RepoRepository, ReviewRepository, RolloutPolicyRepository, SpawnLogRepository,
     SpecApprovalEventRepository, SpecApprovalRepository, SpecLedgerRepository,
     SpecLifecycleRepository, SpecPolicyRepository, TaskRepository, TeamRepository,
@@ -209,6 +226,15 @@ pub struct AppState {
     pub auth_token: String,
     /// Base URL for building clone URLs, e.g. "http://localhost:3000".
     pub base_url: String,
+    /// SPIFFE workload-attestation service (identity-security.md Layer 1):
+    /// trust-domain CA / external SPIRE Workload API, trust-bundle
+    /// publication, and SVID issuance for agent sessions.
+    pub spiffe: Arc<spiffe::SpiffeService>,
+    /// SPIFFE federation (identity-security.md §Federation): trust-bundle
+    /// exchange with peer Gyre instances — bundle endpoints keyed by trust
+    /// domain (`GYRE_SPIFFE_FEDERATION_PEERS`), refreshed on interval.
+    /// Independent of the OIDC-issuer federation (`trusted_issuers`).
+    pub spiffe_federation: Arc<spiffe_federation::FederationBundles>,
     pub repos: Arc<dyn RepoRepository>,
     pub agents: Arc<dyn AgentRepository>,
     pub tasks: Arc<dyn TaskRepository>,
@@ -218,21 +244,45 @@ pub struct AppState {
     pub git_ops: Arc<dyn GitOpsPort>,
     pub jj_ops: Arc<dyn JjOpsPort>,
     pub agent_commits: Arc<dyn AgentCommitRepository>,
+    /// Agent sessions (one per context window) — source-control.md
+    /// §Agent-to-Commit Tracking. Port-backed so sessions survive a
+    /// server restart.
+    pub agent_sessions: Arc<dyn AgentSessionRepository>,
     pub worktrees: Arc<dyn WorktreeRepository>,
     /// In-memory ring buffer for Telemetry-tier messages (replaces ActivityStore).
     pub telemetry_buffer: Arc<TelemetryBuffer>,
     /// Unified broadcast channel for WebSocket message delivery (replaces broadcast_tx + event_tx).
     pub message_broadcast_tx: broadcast::Sender<Message>,
     /// Generic key-value JSON store for server-internal HashMap stores (M29.5B).
-    /// Persists: agent_messages, agent_tokens, agent_cards, compute_targets,
+    /// Persists: agent_tokens, agent_cards, compute_targets,
     /// agent_stacks, repo_stack_policies, workload_attestations, workspace_repos,
     /// abac_policies — all keyed by (namespace, key).
     pub kv_store: Arc<dyn KvJsonStore>,
     /// Ed25519 signing key for Gyre's built-in OIDC provider (M18).
     /// Used to mint and verify agent JWTs returned by POST /api/v1/agents/spawn.
     pub agent_signing_key: Arc<auth::AgentSigningKey>,
-    /// Agent JWT TTL in seconds. Configurable via GYRE_AGENT_JWT_TTL (default: 300, M27.5).
+    /// Retained public material of every signing key ever active on this
+    /// deployment (message-bus.md §Edge Cases "Signature key rotation"):
+    /// `GET /.well-known/jwks.json` serves these entries — minus the
+    /// active key's kid — so messages signed before a key rotation remain
+    /// verifiable by key_id. Durable in DB-backed deployments; empty in
+    /// pure in-memory mode, where the key itself is fresh per boot.
+    pub signing_key_history: Vec<auth::HistoricalSigningKey>,
+    /// Merge attestation bundle verification (agent-gates.md §Part 3
+    /// Verification). Stateless — holds only the forge key handle.
+    pub attestation_verifier: Arc<dyn gyre_ports::AttestationVerifier>,
+    /// Agent JWT TTL in seconds. Configurable via GYRE_AGENT_JWT_TTL (default: 3600).
     pub agent_jwt_ttl_secs: u64,
+    /// Lifetime of a meta-spec preview run before the GC sweep tears it down.
+    /// Configurable via GYRE_META_SPEC_PREVIEW_TTL_HOURS (default: 24 h).
+    pub preview_ttl_secs: u64,
+    /// TTL of the short-lived agent JWTs minted for preview agents.
+    /// Configurable via GYRE_PREVIEW_JWT_TTL_SECS (default: 1800 s).
+    pub preview_jwt_ttl_secs: u64,
+    /// Max concurrent preview agents. Configurable via
+    /// GYRE_PREVIEW_BUDGET_MAX_CONCURRENT; `None` = the workspace's own
+    /// budget governs preview runs (meta-spec-reconciliation §5).
+    pub preview_budget_max_concurrent: Option<u64>,
     /// User repository for JWT/SSO user management.
     pub users: Arc<dyn UserRepository>,
     /// API key repository: key -> user_id.
@@ -256,16 +306,34 @@ pub struct AppState {
     pub retention_store: RetentionStore,
     /// Background job registry.
     pub job_registry: Arc<JobRegistry>,
+    /// Workspaces with a live budget-exhaustion grace timer running
+    /// (agent-runtime.md §4 Enforcement Levels: 100% → 60s grace). Purely
+    /// process-local synchronization — a restart drops the timer, and the
+    /// next usage report re-enters enforcement because usage is still at
+    /// or above the limit. Not durable state; deliberately not port-backed.
+    pub budget_grace_in_progress: Arc<tokio::sync::Mutex<std::collections::HashSet<String>>>,
     /// Product analytics event store.
     pub analytics: Arc<dyn AnalyticsRepository>,
     /// Cost tracking store.
     pub costs: Arc<dyn CostRepository>,
     /// Audit event store.
     pub audit: Arc<dyn AuditRepository>,
+    /// Merge attestation bundle storage (agent-gates.md §Part 3
+    /// Storage): git note on the merge commit + `merge_attestation_bundle`
+    /// audit event, queryable by MR id and commit SHA.
+    pub attestation_storage: Arc<dyn AttestationStorage>,
+    /// Rekor transparency log for merge attestation non-repudiation
+    /// (no-op until a Rekor backend is configured).
+    pub rekor: Arc<dyn RekorClient>,
     /// SIEM target store and forwarding state.
     pub siem_store: SiemStore,
     /// Broadcast channel for live audit event SSE stream.
     pub audit_broadcast_tx: broadcast::Sender<String>,
+    /// Broadcast channel for live notification SSE stream
+    /// (user-management.md §API > Notifications: `/notifications/stream`).
+    /// Carries serialized `Notification` JSON; per-stream filtering by
+    /// user/tenant/workspace happens in the SSE handler.
+    pub notification_broadcast_tx: broadcast::Sender<String>,
     /// WireGuard network peer registry.
     pub network_peers: Arc<dyn NetworkPeerRepository>,
     /// Cross-repo dependency graph (M22.4).
@@ -354,9 +422,15 @@ pub struct AppState {
     pub spec_ledger: Arc<dyn gyre_ports::SpecLedgerRepository>,
     /// Spec approval event history (persisted).
     pub spec_approval_history: Arc<dyn gyre_ports::SpecApprovalEventRepository>,
+    /// Spec link graph repository (spec-links.md §Forge-Maintained Spec Graph).
+    /// Durable source of truth; `spec_links_store` is the hot in-memory cache
+    /// loaded from this at boot and written through on every mutation.
+    pub spec_link_repo: Arc<dyn gyre_ports::SpecLinkRepository>,
     /// Persisted spec assertion check results (system-explorer.md §9).
     pub spec_assertion_results: Arc<dyn gyre_ports::SpecAssertionResultRepository>,
-    /// Spec links graph: all inter-spec links from manifests (M22.3).
+    /// In-memory hot cache of the spec-link graph, rebuilt from the repository
+    /// at boot (see `load_spec_links_into_store`) and written through on every
+    /// mutation. The SQL table is authoritative; this is the reader-facing view.
     pub spec_links_store: spec_registry::SpecLinksStore,
     /// Budget limits per entity: entity_key -> BudgetConfig (M22.2).
     pub budget_configs: Arc<dyn BudgetRepository>,
@@ -374,12 +448,30 @@ pub struct AppState {
     pub personas: Arc<dyn PersonaRepository>,
     /// Full declarative ABAC policy engine (M22.6).
     pub policies: Arc<dyn PolicyRepository>,
+    /// Shared policy-set cache handle (§Performance): `policies` is wrapped
+    /// in a read-through [`policy_cache::CachedPolicyRepository`]; this handle
+    /// is the invalidation entry point for writers that persist policies
+    /// WITHOUT the `PolicyRepository` port (`apply_trust_transition`).
+    pub policy_cache: Arc<policy_cache::PolicyCache>,
     /// Workspace membership repository (M22.8).
     pub workspace_memberships: Arc<dyn WorkspaceMembershipRepository>,
+    /// Per-repo access override repository (user-management.md §Repo Access).
+    pub repo_access_overrides: Arc<dyn RepoAccessOverrideRepository>,
     /// Team repository (M22.8).
     pub teams: Arc<dyn TeamRepository>,
     /// Notification repository (M22.8).
     pub notifications: Arc<dyn NotificationRepository>,
+    /// Tenant invitation repository (task-110, user-management.md).
+    pub tenant_invitations: Arc<dyn gyre_ports::TenantInvitationRepository>,
+    /// Workspace invitation repository (task-110, user-management.md).
+    pub workspace_invitations: Arc<dyn gyre_ports::WorkspaceInvitationRepository>,
+    /// SCIM Group resources and their membership sets (task-266,
+    /// identity-security.md §SCIM Provisioning). Durable: SQLite/PG
+    /// adapters over migration 000068.
+    pub scim_groups: Arc<dyn gyre_ports::ScimGroupRepository>,
+    /// Per-workspace IdP-group → workspace-role mappings (task-266,
+    /// identity-security.md §Group-to-Workspace Mapping). Durable.
+    pub scim_mappings: Arc<dyn gyre_ports::ScimMappingRepository>,
     /// WireGuard coordination plane configuration (M26.1).
     pub wg_config: WireGuardConfig,
     /// Knowledge graph store — nodes, edges, and architectural deltas (realized-model).
@@ -401,6 +493,10 @@ pub struct AppState {
     pub messages: Arc<dyn gyre_ports::MessageRepository>,
     /// Bounded mpsc sender for background message consumer dispatch.
     pub message_dispatch_tx: tokio::sync::mpsc::Sender<gyre_common::message::Message>,
+    /// Receiver half of the dispatch channel. `None` once the consumer task
+    /// took ownership — exactly one dispatcher may drain the bus.
+    message_dispatch_rx:
+        Arc<tokio::sync::Mutex<Option<tokio::sync::mpsc::Receiver<gyre_common::message::Message>>>>,
     /// Max unacked Directed messages per agent before 429. Configurable via GYRE_AGENT_INBOX_MAX.
     pub agent_inbox_max: u64,
     /// Per-user, per-workspace last-seen tracking (HSI §1).
@@ -450,8 +546,14 @@ pub struct AppState {
     pub llm: Option<Arc<dyn gyre_ports::LlmPortFactory>>,
     /// Per-user notification preferences (HSI §12).
     pub user_notification_prefs: Arc<dyn gyre_ports::UserNotificationPreferenceRepository>,
+    /// Per-user delivery-channel preferences (user-management.md §Delivery Channels).
+    pub user_channel_prefs: Arc<dyn gyre_ports::UserChannelPreferenceRepository>,
     /// Per-user API tokens (HSI §12). Hashed at rest; plaintext never stored.
     pub user_tokens: Arc<dyn gyre_ports::UserTokenRepository>,
+    /// Authenticated user sessions (user-management.md §Session Management).
+    /// Created on successful API-key auth, one per (credential, device);
+    /// revocable individually or in bulk ("sign out everywhere").
+    pub sessions: Arc<dyn gyre_ports::SessionRepository>,
     /// Secret repository (platform-model.md §7): scoped credential storage,
     /// encrypted at rest in the adapter. Agent spawn resolves secrets through
     /// this and injects them as GYRE_CRED_* env vars for the cred-proxy sidecar.
@@ -561,60 +663,140 @@ fn sign_bus_message(key: &auth::AgentSigningKey, msg: &Message) -> (String, Stri
 }
 
 impl AppState {
+    /// Persist a notification and fan it out to both realtime channels
+    /// (user-management.md §API > Notifications): the `/notifications/stream`
+    /// SSE subscribers and the live `/ws` connections authenticated as the
+    /// notification's owner (the in-app bell).
+    ///
+    /// Single fan-out point for notification creation: every production
+    /// emitter goes through here (or through the
+    /// [`BroadcastingNotificationRepo`](crate::notifications::BroadcastingNotificationRepo)
+    /// this delegates to, which background paths without an `&AppState` use)
+    /// so a connected client sees every notification the moment it is
+    /// stored. Fan-out is fire-and-forget (no subscribers, a lagged one, or
+    /// an offline owner must never fail the persist).
+    pub async fn create_notification(
+        &self,
+        notification: &gyre_common::Notification,
+    ) -> anyhow::Result<()> {
+        self.broadcasting_notifications().create(notification).await
+    }
+
     /// Resolve the tenant scope for a server-originated message about a
     /// workspace: the workspace record's tenant. Skips the emission and
     /// logs when the workspace cannot be resolved (same contract as
     /// `emit_reconciliation_completed`): a message carrying a fabricated
     /// tenant re-targets delivery to whatever scope the id happens to
     /// collide with.
-    async fn message_tenant_id(&self, workspace_id: Option<&Id>) -> Option<Id> {
-        match workspace_id {
-            Some(wid) => match self.workspaces.find_by_id(wid).await {
-                Ok(Some(ws)) => Some(ws.tenant_id),
-                Ok(None) => {
-                    tracing::warn!(
-                        workspace_id = %wid,
-                        "emit: workspace not found; skipping message (cannot resolve tenant scope)"
-                    );
-                    None
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        workspace_id = %wid,
-                        error = %e,
-                        "emit: failed to resolve workspace tenant; skipping message"
-                    );
-                    None
-                }
-            },
-            // Broadcast messages have no workspace; server-originated
-            // broadcasts carry the documented default-tenant scope
-            // (message-bus.md auth-context table).
-            None => Some(Id::new(auth::system_principal_tenant())),
+    async fn message_tenant_id(&self, workspace_id: &Id) -> Option<Id> {
+        match self.workspaces.find_by_id(workspace_id).await {
+            Ok(Some(ws)) => Some(ws.tenant_id),
+            Ok(None) => {
+                tracing::warn!(
+                    workspace_id = %workspace_id,
+                    "emit: workspace not found; skipping message (cannot resolve tenant scope)"
+                );
+                None
+            }
+            Err(e) => {
+                tracing::warn!(
+                    workspace_id = %workspace_id,
+                    error = %e,
+                    "emit: failed to resolve workspace tenant; skipping message"
+                );
+                None
+            }
         }
     }
 
     /// Emit an Event-tier server-originated message: sign, persist, broadcast to WS clients,
     /// and dispatch to consumers. Best-effort: logs errors, never panics.
+    ///
+    /// The message's tenant is resolved from the workspace record — a
+    /// server-originated message never rides a fabricated scope identity. If
+    /// the owning tenant cannot be resolved, the message is dropped with a
+    /// warning (skip-and-log, per the task-099 F1 remediation direction).
     pub async fn emit_event(
         &self,
-        workspace_id: Option<Id>,
+        workspace_id: Id,
         to: Destination,
         kind: MessageKind,
         payload: Option<serde_json::Value>,
     ) {
+        // F1: tenant scope resolved from the workspace record, never a
+        // fabricated literal (skip-and-log on unresolvable).
+        let Some(tenant_id) = self.message_tenant_id(&workspace_id).await else {
+            return;
+        };
+        if let Err(e) = self
+            .emit_scoped_event(tenant_id, Some(workspace_id), to, kind, payload)
+            .await
+        {
+            tracing::warn!("emit_event: dropped message: {e}");
+        }
+    }
+
+    /// Emit an Event-tier server-originated message scoped to a tenant whose
+    /// Id the caller already holds (tenant-level domain events such as the
+    /// tenant meta-spec set update). The scope is known by construction —
+    /// derived from the authenticated caller's tenant in the handler — so it
+    /// is carried directly instead of being derived from a workspace record;
+    /// it is never fabricated. The message has no single workspace audience
+    /// (`workspace_id: None`): the audience (the tenant's workspaces) is
+    /// enumerated by the consumers of the event, not by this emitter.
+    ///
+    /// The destination MUST be Broadcast: a non-Broadcast message without a
+    /// workspace scope is rejected by `emit_scoped_event` (the send-path
+    /// scopeless-message guard) — tenant-level events fan out to the whole
+    /// tenant, they are never stored or delivered scoped.
+    pub async fn emit_tenant_event(
+        &self,
+        tenant_id: Id,
+        to: Destination,
+        kind: MessageKind,
+        payload: Option<serde_json::Value>,
+    ) {
+        if let Err(e) = self
+            .emit_scoped_event(tenant_id, None, to, kind, payload)
+            .await
+        {
+            tracing::warn!("emit_tenant_event: dropped message: {e}");
+        }
+    }
+
+    /// Shared body of the Event-tier emitters: build, sign, persist
+    /// (non-Broadcast), broadcast to WS clients, and dispatch to consumers.
+    /// Best-effort: logs errors, never panics.
+    ///
+    /// Scopeless-message guard (message-bus.md §Message Envelope — the
+    /// send_message() helper validation): a message whose destination is not
+    /// Broadcast MUST carry a workspace scope. Such a message is never
+    /// constructed, stored, or broadcast — the emitter returns Err and logs
+    /// at error level.
+    async fn emit_scoped_event(
+        &self,
+        tenant_id: Id,
+        workspace_id: Option<Id>,
+        to: Destination,
+        kind: MessageKind,
+        payload: Option<serde_json::Value>,
+    ) -> anyhow::Result<()> {
         use std::time::{SystemTime, UNIX_EPOCH};
+        if !matches!(to, Destination::Broadcast) && workspace_id.is_none() {
+            tracing::error!(
+                destination = ?to,
+                kind = %kind,
+                "emit: refusing to construct non-Broadcast message without workspace scope"
+            );
+            return Err(anyhow::anyhow!(
+                "non-Broadcast message requires a workspace scope (workspace_id is None)"
+            ));
+        }
         let created_at = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as u64;
         let id = Id::new(uuid::Uuid::new_v4().to_string());
-
-        // F1: tenant scope resolved from the workspace record, never a
-        // fabricated literal (skip-and-log on unresolvable).
-        let Some(tenant_id) = self.message_tenant_id(workspace_id.as_ref()).await else {
-            return;
-        };
 
         let mut msg = Message {
             id,
@@ -634,16 +816,40 @@ impl AppState {
         msg.signature = Some(sig);
         msg.key_id = Some(kid);
 
-        // Persist (not Broadcast — those are never stored).
-        if !matches!(msg.to, Destination::Broadcast) {
+        // Persist (not Broadcast — those are never stored). Broadcast-only
+        // kinds (DataSeeded/QueueUpdated) are storage-exempt regardless of
+        // destination (message-bus.md §Broadcast-only kinds): they flow
+        // through the in-memory broadcast channel only.
+        if !matches!(msg.to, Destination::Broadcast) && !msg.kind.broadcast_only() {
             if let Err(e) = self.messages.store(&msg).await {
                 tracing::warn!("emit_event: failed to persist message: {e}");
             }
         }
         // Broadcast to WebSocket clients.
         let _ = self.message_broadcast_tx.send(msg.clone());
-        // Dispatch to consumers (notification system, etc.).
-        let _ = self.message_dispatch_tx.try_send(msg);
+        // Dispatch to consumers (notification system, etc.). Consumer drops under
+        // backpressure are logged, never block the send path (message-bus.md
+        // §Relationship to Notifications).
+        match self.message_dispatch_tx.try_send(msg) {
+            Ok(()) => {}
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                tracing::warn!(
+                    "message dispatch channel full; consumer dropped a message (best-effort tier)"
+                );
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                tracing::debug!("message dispatch channel closed; no consumers registered");
+            }
+        }
+        Ok(())
+    }
+
+    /// Take ownership of the message-dispatch receiver. Returns `None` if the
+    /// dispatcher already took it — only one consumer task may drain the bus.
+    pub async fn take_message_dispatch_rx(
+        &self,
+    ) -> Option<tokio::sync::mpsc::Receiver<gyre_common::message::Message>> {
+        self.message_dispatch_rx.lock().await.take()
     }
 
     /// Emit a Telemetry-tier message: push to TelemetryBuffer and broadcast to WS clients.
@@ -662,7 +868,7 @@ impl AppState {
         let id = Id::new(uuid::Uuid::new_v4().to_string());
 
         // F1: tenant scope resolved from the workspace record.
-        let Some(tenant_id) = self.message_tenant_id(Some(&workspace_id)).await else {
+        let Some(tenant_id) = self.message_tenant_id(&workspace_id).await else {
             return;
         };
 
@@ -698,6 +904,22 @@ async fn require_auth_middleware(
 
     // /api/v1/version is intentionally public.
     if req.uri().path() == "/api/v1/version" {
+        return next.run(req).await;
+    }
+
+    // SCIM 2.0 provisioning endpoints (identity-security.md §SCIM
+    // Provisioning) authenticate with the dedicated `GYRE_SCIM_TOKEN`
+    // bearer token — a server-to-server credential separate from the agent
+    // JWT / global-token ladder below. Passing a SCIM request through that
+    // ladder rejected it 401 ("Invalid token") before the handler-level
+    // `check_scim_auth` ever ran, so the specced authentication model did
+    // not work end-to-end in the shipped server. The exemption is safe
+    // because every /scim/v2 handler enforces `check_scim_auth` itself:
+    // fail-closed 403 when GYRE_SCIM_TOKEN is unset, constant-time bearer
+    // compare otherwise. ABAC middleware passes these routes through as
+    // resolver-exempt (RouteResourceMapping::exempt entries), so no policy
+    // evaluation is skipped by this bypass.
+    if req.uri().path().starts_with("/scim/v2/") {
         return next.run(req).await;
     }
 
@@ -843,11 +1065,47 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             get(oidc::openid_configuration),
         )
         .route("/.well-known/jwks.json", get(oidc::jwks))
+        // SPIFFE trust bundle (identity-security.md Layer 1): the trust
+        // domain's X.509-SVID anchors in SPIFFE bundle format, at the
+        // standard well-known location. Public like the JWKS endpoint —
+        // any verifier must be able to check SVIDs.
+        .route(
+            spiffe::TRUST_BUNDLE_PATH,
+            get(spiffe::trust_bundle_endpoint),
+        )
         .route("/ws", get(ws::ws_handler))
         .route("/ws/agents/:id/tty", get(tty::tty_handler))
         // WebSocket ticket endpoint: issues short-lived, single-use tokens.
         // Prevents leaking real auth tokens in WebSocket URL query parameters.
         .route("/api/v1/ws-ticket", post(explorer_ws::issue_ws_ticket))
+        // Invitation magic-link acceptance (task-110, user-management.md
+        // §Tenant-Level User Onboarding): the 256-bit CSPRNG token in the
+        // URL is the auth factor — the invitee has no credentials yet, so
+        // these cannot run behind require_auth_middleware. The handler
+        // validates the token hash, single-use status, and expiry.
+        .route(
+            "/api/v1/invite/:token/accept",
+            post(api::invitations::accept_tenant_invitation),
+        )
+        .route(
+            "/api/v1/invite/:token/decline",
+            post(api::invitations::decline_tenant_invitation),
+        )
+        // Magic-link preview for the /invite/{token} accept page: same
+        // token-as-auth-factor trust model, strictly read-only (no status
+        // transition, no claim, no credentials) — see the handler.
+        .route(
+            "/api/v1/invite/:token/preview",
+            get(api::invitations::preview_invitation),
+        )
+        .route(
+            "/api/v1/workspaces/invitations/:token/accept",
+            post(api::invitations::accept_workspace_invitation),
+        )
+        .route(
+            "/api/v1/workspaces/invitations/:token/decline",
+            post(api::invitations::decline_workspace_invitation),
+        )
         // Explorer WebSocket (explorer-implementation.md).
         // WebSocket upgrades cannot go through body-reading ABAC middleware,
         // so auth + repo-scoped tenant checks are enforced inside the handler.
@@ -963,11 +1221,174 @@ pub fn configured_repos_path() -> std::path::PathBuf {
 pub const AGENT_SIGNING_KEY_KV_NAMESPACE: &str = "server_identity";
 pub const AGENT_SIGNING_KEY_KV_KEY: &str = "agent_signing_key_pkcs8_b64";
 
-/// Resolve the forge Ed25519 signing key for this boot:
+/// KV key (same `server_identity` namespace) holding the retained public
+/// material of every signing key that has ever been active on this
+/// deployment (message-bus.md §Edge Cases "Signature key rotation"):
+/// a JSON array of `{kid, public_key_b64}` entries. JWKS serves every
+/// entry whose kid is not the active key's, so messages signed before a
+/// rotation remain verifiable by key_id. Only public material is stored
+/// here — the private key slot (`AGENT_SIGNING_KEY_KV_KEY`) is untouched
+/// by rotation bookkeeping.
+pub const AGENT_SIGNING_KEY_HISTORY_KV_KEY: &str = "agent_signing_key_history";
+
+/// Load the retained signing-key history from durable storage. An
+/// unreadable or malformed entry is skipped with a warning (that kid stops
+/// resolving in JWKS) rather than aborting the boot; a missing entry is a
+/// first rotation-free boot and yields an empty history.
+fn load_signing_key_history(
+    sqlite_db: &Option<Arc<gyre_adapters::SqliteStorage>>,
+    pg_db: &Option<Arc<gyre_adapters::PgStorage>>,
+) -> Vec<auth::HistoricalSigningKey> {
+    let raw: anyhow::Result<Option<String>> = if let Some(pg) = pg_db {
+        pg.kv_get_sync(
+            AGENT_SIGNING_KEY_KV_NAMESPACE,
+            AGENT_SIGNING_KEY_HISTORY_KV_KEY,
+        )
+    } else if let Some(sqlite) = sqlite_db {
+        sqlite.kv_get_sync(
+            AGENT_SIGNING_KEY_KV_NAMESPACE,
+            AGENT_SIGNING_KEY_HISTORY_KV_KEY,
+        )
+    } else {
+        return Vec::new();
+    };
+    let raw = match raw {
+        Ok(Some(v)) => v,
+        Ok(None) => return Vec::new(),
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "could not read the signing-key history; JWKS will serve only the active key this boot"
+            );
+            return Vec::new();
+        }
+    };
+
+    #[derive(serde::Deserialize)]
+    struct HistoryEntry {
+        kid: String,
+        public_key_b64: String,
+    }
+
+    let entries: Vec<HistoryEntry> = match serde_json::from_str(&raw) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "signing-key history is malformed; JWKS will serve only the active key this boot"
+            );
+            return Vec::new();
+        }
+    };
+
+    let mut history = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let bytes = match B64
+            .decode(entry.public_key_b64.trim())
+            .map_err(|e| format!("base64: {e}"))
+            .and_then(|b| {
+                if b.len() == 32 {
+                    Ok(b)
+                } else {
+                    Err(format!(
+                        "expected 32 Ed25519 public-key bytes, got {}",
+                        b.len()
+                    ))
+                }
+            }) {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::warn!(
+                    kid = %entry.kid,
+                    error = %e,
+                    "skipping unreadable signing-key history entry"
+                );
+                continue;
+            }
+        };
+        let key = auth::HistoricalSigningKey::from_public_key_bytes(bytes);
+        if key.kid != entry.kid {
+            tracing::warn!(
+                stored_kid = %entry.kid,
+                derived_kid = %key.kid,
+                "skipping signing-key history entry whose kid does not match its public key"
+            );
+            continue;
+        }
+        history.push(key);
+    }
+    history
+}
+
+/// Ensure the active key's public material is present in the retained
+/// history and persist the updated history. Every key that has ever been
+/// active ends up exactly once in this set; at serve time JWKS filters out
+/// the active kid, so what remains is precisely the historical keys.
+/// Rotation chains (K1 → K2 → K3) accumulate: boot K2 appends K2 to a set
+/// that already holds K1, boot K3 appends K3 — JWKS on the K3 boot serves
+/// K1 and K2 alongside the active K3. Best-effort with a loud warning on
+/// write failure (old kids stop resolving after this boot's rotation).
+fn retain_active_key_in_history(
+    sqlite_db: &Option<Arc<gyre_adapters::SqliteStorage>>,
+    pg_db: &Option<Arc<gyre_adapters::PgStorage>>,
+    mut history: Vec<auth::HistoricalSigningKey>,
+    active: &auth::AgentSigningKey,
+) -> Vec<auth::HistoricalSigningKey> {
+    if history.iter().any(|k| k.kid == active.kid) {
+        return history;
+    }
+    history.push(auth::HistoricalSigningKey::from_public_key_bytes(
+        active.public_key_bytes.clone(),
+    ));
+
+    #[derive(serde::Serialize)]
+    struct HistoryEntry<'a> {
+        kid: &'a str,
+        public_key_b64: String,
+    }
+    let entries: Vec<HistoryEntry> = history
+        .iter()
+        .map(|k| HistoryEntry {
+            kid: &k.kid,
+            public_key_b64: B64.encode(&k.public_key_bytes),
+        })
+        .collect();
+    let encoded = serde_json::to_string(&entries)
+        .unwrap_or_else(|e| panic!("signing-key history must serialize (plain strings): {e}"));
+
+    let store_result = if let Some(pg) = pg_db {
+        pg.kv_set_sync(
+            AGENT_SIGNING_KEY_KV_NAMESPACE,
+            AGENT_SIGNING_KEY_HISTORY_KV_KEY,
+            &encoded,
+        )
+    } else if let Some(sqlite) = sqlite_db {
+        sqlite.kv_set_sync(
+            AGENT_SIGNING_KEY_KV_NAMESPACE,
+            AGENT_SIGNING_KEY_HISTORY_KV_KEY,
+            &encoded,
+        )
+    } else {
+        Ok(())
+    };
+    if let Err(e) = store_result {
+        tracing::warn!(
+            error = %e,
+            "could not persist the signing-key history; signatures made before a rotation will not verify after a restart"
+        );
+    }
+    history
+}
+
+/// Resolve the forge Ed25519 signing key for this boot, along with the
+/// retained public-key history JWKS serves after rotations (see
+/// `AGENT_SIGNING_KEY_HISTORY_KV_KEY`). Resolution order:
 ///
 /// 1. `GYRE_AGENT_SIGNING_KEY` (base64 PKCS#8 DER, v1 or v2) — explicit
-///    operator provisioning; takes precedence and is never overwritten in the
-///    DB, so rotation is a deliberate operator act. Invalid material is a
+///    operator provisioning; takes precedence and the private material is
+///    never written to the DB (only its public key joins the retained
+///    history, which is the specced rotation-visibility behavior), so
+///    rotation is a deliberate operator act. Invalid material is a
 ///    hard startup error: silently falling back to a different key would
 ///    break every signature the operator expects to verify.
 /// 2. The key persisted in the durable KV store (PostgreSQL or SQLite,
@@ -975,10 +1396,14 @@ pub const AGENT_SIGNING_KEY_KV_KEY: &str = "agent_signing_key_pkcs8_b64";
 /// 3. A freshly generated key, persisted for the next boot. In pure
 ///    in-memory mode (no DB) the key is fresh per boot, matching the
 ///    process-lifetime scope of everything else in that mode.
+///
+/// The returned history contains every key ever active on this deployment
+/// (including the active one); JWKS filters the active kid out at serve
+/// time.
 fn load_or_persist_agent_signing_key(
     sqlite_db: &Option<Arc<gyre_adapters::SqliteStorage>>,
     pg_db: &Option<Arc<gyre_adapters::PgStorage>>,
-) -> Arc<auth::AgentSigningKey> {
+) -> (Arc<auth::AgentSigningKey>, Vec<auth::HistoricalSigningKey>) {
     // 1. Operator-provisioned key.
     if let Ok(encoded) = std::env::var("GYRE_AGENT_SIGNING_KEY") {
         let der = B64
@@ -991,7 +1416,58 @@ fn load_or_persist_agent_signing_key(
             kid = %key.kid,
             "using operator-provisioned agent signing key from GYRE_AGENT_SIGNING_KEY"
         );
-        return Arc::new(key);
+        // Rotation bookkeeping. The retained history normally already holds
+        // the previous active key (every DB-backed boot adds its key). One
+        // case does not: a deployment that predates history retention has
+        // its previous key only in the current slot — fold that key into
+        // the history so this rotation keeps its kid resolvable in JWKS.
+        // Then make sure this boot's key joins the history too, so its kid
+        // keeps resolving if the operator rotates onward later.
+        let mut history = load_signing_key_history(sqlite_db, pg_db);
+        let persisted_current: anyhow::Result<Option<String>> = if let Some(pg) = pg_db {
+            pg.kv_get_sync(AGENT_SIGNING_KEY_KV_NAMESPACE, AGENT_SIGNING_KEY_KV_KEY)
+        } else if let Some(sqlite) = sqlite_db {
+            sqlite.kv_get_sync(AGENT_SIGNING_KEY_KV_NAMESPACE, AGENT_SIGNING_KEY_KV_KEY)
+        } else {
+            Ok(None)
+        };
+        match persisted_current {
+            Ok(Some(encoded)) => {
+                match B64
+                    .decode(encoded.trim())
+                    .map_err(|e| format!("base64: {e}"))
+                    .and_then(|der| auth::AgentSigningKey::from_pkcs8(&der))
+                {
+                    Ok(previous) if previous.kid != key.kid => {
+                        if !history.iter().any(|h| h.kid == previous.kid) {
+                            tracing::info!(
+                                kid = %previous.kid,
+                                "retaining the previous signing key in JWKS history after rotation"
+                            );
+                            history.push(auth::HistoricalSigningKey::from_public_key_bytes(
+                                previous.public_key_bytes.clone(),
+                            ));
+                        }
+                    }
+                    Ok(_) => { /* same key re-provisioned — no rotation */ }
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            "persisted agent signing key is unreadable; its kid cannot be retained in JWKS history"
+                        );
+                    }
+                }
+            }
+            Ok(None) => { /* first boot with this DB — nothing to retain */ }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "could not read the persisted agent signing key; the pre-rotation kid cannot be retained in JWKS history"
+                );
+            }
+        }
+        let history = retain_active_key_in_history(sqlite_db, pg_db, history, &key);
+        return (Arc::new(key), history);
     }
 
     // 2. Key persisted in the durable KV store.
@@ -1014,7 +1490,13 @@ fn load_or_persist_agent_signing_key(
                     kid = %key.kid,
                     "loaded persisted agent signing key (local-mode commit signatures remain verifiable across restarts)"
                 );
-                return Arc::new(key);
+                let history = retain_active_key_in_history(
+                    sqlite_db,
+                    pg_db,
+                    load_signing_key_history(sqlite_db, pg_db),
+                    &key,
+                );
+                return (Arc::new(key), history);
             }
             Err(e) => {
                 // Unreadable stored material: regenerate and overwrite below,
@@ -1029,13 +1511,14 @@ fn load_or_persist_agent_signing_key(
         Ok(None) => { /* first boot with this DB — generate below */ }
         Err(e) => {
             // Read failed (transient DB trouble): keep this boot's key
-            // process-local and do NOT overwrite storage, so a transient
-            // failure cannot destroy the existing key.
+            // process-local and do NOT overwrite storage (including the
+            // key history), so a transient failure cannot destroy the
+            // existing key.
             tracing::warn!(
                 error = %e,
                 "could not read persisted agent signing key; using a process-local key for this boot"
             );
-            return Arc::new(auth::AgentSigningKey::generate());
+            return (Arc::new(auth::AgentSigningKey::generate()), Vec::new());
         }
     }
 
@@ -1063,7 +1546,168 @@ fn load_or_persist_agent_signing_key(
             "could not persist the agent signing key; local-mode commit signatures will not verify after a restart"
         );
     }
-    key
+    let history = retain_active_key_in_history(
+        sqlite_db,
+        pg_db,
+        load_signing_key_history(sqlite_db, pg_db),
+        &key,
+    );
+    (key, history)
+}
+
+/// KV key holding the persisted SPIFFE trust-domain CA (local mode).
+pub const SPIFFE_CA_KV_KEY: &str = "spiffe_trust_domain_ca";
+
+/// Resolve the SPIFFE workload-attestation service for this boot
+/// (identity-security.md Layer 1):
+///
+/// - Trust domain: `GYRE_SPIFFE_TRUST_DOMAIN` (default `gyre.example.com`).
+/// - External mode: `GYRE_SPIFFE_WORKLOAD_API_SOCKET` (UDS path to a SPIRE
+///   Workload API) + `GYRE_SPIFFE_TRUST_BUNDLE_URL` (the trust domain's
+///   bundle in SPIFFE bundle format, e.g. SPIRE's federation bundle
+///   endpoint). SVIDs are then obtained from the Workload API and the
+///   operator-configured bundle is the verification anchor.
+/// - Local mode (default): Gyre operates a trust-domain CA, persisted in
+///   the durable KV store like the agent signing key. `GYRE_SPIFFE_CA`
+///   (JSON: base64 PKCS#8 key + CA certificate PEM) provisions the CA
+///   explicitly and is never overwritten.
+///
+/// Invalid operator material is a hard startup error: silently falling
+/// back to a different anchor would break every SVID the operator expects
+/// to verify.
+fn load_spiffe_service(
+    sqlite_db: &Option<Arc<gyre_adapters::SqliteStorage>>,
+    pg_db: &Option<Arc<gyre_adapters::PgStorage>>,
+) -> Arc<spiffe::SpiffeService> {
+    let trust_domain = std::env::var("GYRE_SPIFFE_TRUST_DOMAIN")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| spiffe::DEFAULT_TRUST_DOMAIN.to_string());
+    // Validate: the trust domain must be usable in a SPIFFE ID.
+    if gyre_spiffe::SpiffeId::agent(&trust_domain, "worker", "probe").is_err() {
+        panic!("GYRE_SPIFFE_TRUST_DOMAIN {trust_domain:?} is not a valid SPIFFE trust domain");
+    }
+    let svid_ttl_secs = std::env::var("GYRE_SPIFFE_SVID_TTL")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|ttl: &u64| *ttl > 0)
+        .unwrap_or(gyre_spiffe::BASE_SVID_TTL_SECS);
+
+    if let Ok(socket) = std::env::var("GYRE_SPIFFE_WORKLOAD_API_SOCKET") {
+        let Ok(bundle_url) = std::env::var("GYRE_SPIFFE_TRUST_BUNDLE_URL") else {
+            panic!(
+                "GYRE_SPIFFE_WORKLOAD_API_SOCKET requires GYRE_SPIFFE_TRUST_BUNDLE_URL \
+                 (the trust domain's SPIFFE bundle in SPIFFE bundle format)"
+            );
+        };
+        let service =
+            spiffe::SpiffeService::external(trust_domain, socket, bundle_url, svid_ttl_secs)
+                .expect("external SPIFFE service construction must succeed");
+        tracing::info!(
+            trust_domain = %service.trust_domain(),
+            "SPIFFE workload attestation: external SPIRE Workload API mode"
+        );
+        return Arc::new(service);
+    }
+
+    // 1. Operator-provisioned CA.
+    if let Ok(encoded) = std::env::var("GYRE_SPIFFE_CA") {
+        let serialized: gyre_spiffe::ca::SerializedCa = serde_json::from_str(encoded.trim())
+            .unwrap_or_else(|e| panic!("GYRE_SPIFFE_CA is not valid CA material: {e}"));
+        let ca = gyre_spiffe::TrustDomainCa::from_serialized(&serialized)
+            .unwrap_or_else(|e| panic!("GYRE_SPIFFE_CA is not usable CA material: {e}"));
+        tracing::info!(
+            trust_domain = %trust_domain,
+            "using operator-provisioned SPIFFE trust-domain CA from GYRE_SPIFFE_CA"
+        );
+        return Arc::new(
+            spiffe::SpiffeService::local(trust_domain, ca, svid_ttl_secs)
+                .expect("local SPIFFE service construction must succeed"),
+        );
+    }
+
+    // 2. CA persisted in the durable KV store.
+    let persisted: anyhow::Result<Option<String>> = if let Some(pg) = pg_db {
+        pg.kv_get_sync(AGENT_SIGNING_KEY_KV_NAMESPACE, SPIFFE_CA_KV_KEY)
+    } else if let Some(sqlite) = sqlite_db {
+        sqlite.kv_get_sync(AGENT_SIGNING_KEY_KV_NAMESPACE, SPIFFE_CA_KV_KEY)
+    } else {
+        Ok(None)
+    };
+    match persisted {
+        Ok(Some(json)) => match serde_json::from_str::<gyre_spiffe::ca::SerializedCa>(&json)
+            .map_err(|e| format!("json: {e}"))
+            .and_then(|serialized| {
+                gyre_spiffe::TrustDomainCa::from_serialized(&serialized)
+                    .map_err(|e| format!("ca: {e}"))
+            }) {
+            Ok(ca) => {
+                tracing::info!(
+                    trust_domain = %trust_domain,
+                    "loaded persisted SPIFFE trust-domain CA (issued SVIDs and the trust bundle survive restarts)"
+                );
+                return Arc::new(
+                    spiffe::SpiffeService::local(trust_domain, ca, svid_ttl_secs)
+                        .expect("local SPIFFE service construction must succeed"),
+                );
+            }
+            Err(e) => {
+                // Unreadable stored material: regenerate and overwrite below,
+                // loudly — SVIDs issued by the old CA will no longer verify,
+                // which the operator must know about.
+                tracing::error!(
+                    error = %e,
+                    "persisted SPIFFE CA is unreadable; generating a replacement"
+                );
+            }
+        },
+        Ok(None) => { /* first boot with this DB — generate below */ }
+        Err(e) => {
+            // Read failed (transient DB trouble): keep this boot's CA
+            // process-local and do NOT overwrite storage, so a transient
+            // failure cannot destroy the existing CA.
+            tracing::warn!(
+                error = %e,
+                "could not read the persisted SPIFFE CA; using a process-local CA for this boot"
+            );
+            let ca = gyre_spiffe::TrustDomainCa::generate(&trust_domain)
+                .expect("CA generation must succeed");
+            return Arc::new(
+                spiffe::SpiffeService::local(trust_domain, ca, svid_ttl_secs)
+                    .expect("local SPIFFE service construction must succeed"),
+            );
+        }
+    }
+
+    // 3. Fresh CA, persisted for subsequent boots.
+    let ca =
+        gyre_spiffe::TrustDomainCa::generate(&trust_domain).expect("CA generation must succeed");
+    let serialized = serde_json::to_string(&ca.serialize()).expect("CA serialization");
+    let store_result = if let Some(pg) = pg_db {
+        pg.kv_set_sync(
+            AGENT_SIGNING_KEY_KV_NAMESPACE,
+            SPIFFE_CA_KV_KEY,
+            &serialized,
+        )
+    } else if let Some(sqlite) = sqlite_db {
+        sqlite.kv_set_sync(
+            AGENT_SIGNING_KEY_KV_NAMESPACE,
+            SPIFFE_CA_KV_KEY,
+            &serialized,
+        )
+    } else {
+        Ok(())
+    };
+    if let Err(e) = store_result {
+        tracing::warn!(
+            error = %e,
+            "could not persist the SPIFFE trust-domain CA; issued SVIDs will not verify after a restart"
+        );
+    }
+    Arc::new(
+        spiffe::SpiffeService::local(trust_domain, ca, svid_ttl_secs)
+            .expect("local SPIFFE service construction must succeed"),
+    )
 }
 
 pub fn build_state(
@@ -1071,8 +1715,10 @@ pub fn build_state(
     base_url: &str,
     jwt_config: Option<Arc<JwtConfig>>,
 ) -> Arc<AppState> {
+    let (message_dispatch_tx, message_dispatch_rx) = tokio::sync::mpsc::channel(256);
     let (message_broadcast_tx, _) = broadcast::channel(256);
     let (audit_broadcast_tx, _) = broadcast::channel(1024);
+    let (notification_broadcast_tx, _) = broadcast::channel(1024);
     let telemetry_buffer = Arc::new(TelemetryBuffer::new(
         std::env::var("GYRE_TELEMETRY_BUFFER_SIZE")
             .ok()
@@ -1144,6 +1790,10 @@ pub fn build_state(
     // ABAC engine (which reads through `state.policies`). In DB-backed mode both
     // come from the same storage struct, so this store is unused.
     let mem_policy_store = Arc::new(Mutex::new(HashMap::new()));
+    // Shared policy-set cache (§Performance): assigned into AppState both as
+    // the `policies` wrapper's backing cache and as the `policy_cache`
+    // invalidation handle.
+    let policy_cache = Arc::new(policy_cache::PolicyCache::default());
     // Shared workspace store for pure-mem mode: `MemComputeTargetRepository`
     // pairs with `MemWorkspaceRepository` so `has_workspace_references`
     // (agent-runtime.md §3 delete guard) sees real workspace assignments
@@ -1160,14 +1810,173 @@ pub fn build_state(
     let mem_meta_spec_binding_store =
         Arc::new(RwLock::new(Vec::<gyre_domain::MetaSpecBinding>::new()));
 
+    // In pure in-memory mode (no DB), the judgment ledger (HSI §12) aggregates
+    // the SAME audit / spec-approval / spec-ledger stores these repos write
+    // through. In DB-backed mode these stores are unused.
+    let mem_audit = Arc::new(mem::MemAuditRepository::default());
+    let mem_spec_approvals = Arc::new(mem::MemSpecApprovalRepository::default());
+    let mem_spec_ledger = Arc::new(mem::MemSpecLedgerRepository::default());
+
+    // Same as `store!` but the mem branch shares a pre-constructed store.
+    macro_rules! store_shared {
+        ($trait:ty, $arc:expr) => {
+            if let Some(d) = &pg_db {
+                Arc::clone(d) as Arc<$trait>
+            } else if let Some(d) = &sqlite_db {
+                Arc::clone(d) as Arc<$trait>
+            } else {
+                Arc::clone(&$arc) as Arc<$trait>
+            }
+        };
+    }
+
+    // search.md §Index Updates: entity repositories are wrapped in
+    // search-sync decorators so every write path (REST, MCP, background
+    // jobs) keeps the search index in sync. The search port must be resolved
+    // first because the decorators hold a clone of it. It is wrapped in the
+    // tenant-resolution decorator (search_scope) so every indexed document
+    // carries its tenant scope — the mem fallback has no workspace table to
+    // derive it from, so resolution happens server-side, uniformly for every
+    // index path (§Access Scoping step 1).
+    let workspaces: Arc<dyn WorkspaceRepository> = store!(
+        dyn WorkspaceRepository,
+        mem::MemWorkspaceRepository::with_policy_store(Arc::clone(&mem_policy_store))
+            .with_workspace_store(Arc::clone(&mem_workspace_store))
+    );
+    let search: Arc<dyn gyre_ports::SearchPort> = search_scope::with_tenant_resolution(
+        store!(
+            dyn gyre_ports::SearchPort,
+            gyre_adapters::MemSearchAdapter::new()
+        ),
+        Arc::clone(&workspaces),
+    );
+    let agents: Arc<dyn AgentRepository> = search_sync::wrap_agents(
+        store!(dyn AgentRepository, mem::MemAgentRepository::default()),
+        Arc::clone(&search),
+    );
+    // Shared task store: the persona repo's atomic
+    // `apply_approval_reset_with_task` (persona approval reset + approval
+    // task in one write) must land in the same store as every normal task
+    // write. DB-backed modes use one storage object for both ports, so the
+    // share only matters for the mem fallback.
+    let mem_task_store: Arc<
+        tokio::sync::Mutex<std::collections::HashMap<String, gyre_domain::Task>>,
+    > = Arc::default();
+    let tasks: Arc<dyn TaskRepository> = search_sync::wrap_tasks(
+        store!(
+            dyn TaskRepository,
+            mem::MemTaskRepository::from_store(Arc::clone(&mem_task_store))
+        ),
+        Arc::clone(&search),
+    );
+    let merge_requests: Arc<dyn MergeRequestRepository> = search_sync::wrap_mrs(
+        store!(dyn MergeRequestRepository, mem::MemMrRepository::default()),
+        Arc::clone(&search),
+    );
+    let reviews: Arc<dyn ReviewRepository> = search_sync::wrap_reviews(
+        store!(dyn ReviewRepository, mem::MemReviewRepository::default()),
+        Arc::clone(&merge_requests),
+        Arc::clone(&search),
+    );
+    let personas: Arc<dyn PersonaRepository> = search_sync::wrap_personas(
+        store!(
+            dyn PersonaRepository,
+            mem::MemPersonaRepository::with_task_store(Arc::default(), Arc::clone(&mem_task_store))
+        ),
+        Arc::clone(&search),
+    );
+    let analytics: Arc<dyn AnalyticsRepository> = search_sync::wrap_analytics(
+        store!(
+            dyn AnalyticsRepository,
+            mem::MemAnalyticsRepository::default()
+        ),
+        Arc::clone(&search),
+    );
+    // The audit repo keeps both concerns: search-sync indexing on every
+    // recorded event (task-202) AND store sharing with the judgment ledger
+    // in pure-mem mode (task-209, HSI §12) — the decorator wraps the shared
+    // store instead of constructing its own.
+    let audit: Arc<dyn AuditRepository> = search_sync::wrap_audit(
+        store_shared!(dyn AuditRepository, mem_audit),
+        Arc::clone(&search),
+    );
+
+    // agent-gates.md §Part 3 Storage: merge attestation bundles stored
+    // as git notes on the merge commit + `merge_attestation_bundle`
+    // audit events (queryable by MR id and commit SHA). Wraps the same
+    // audit repository so bundles flow through the identical store
+    // (SQLite/PG/mem) and search-sync path as every other audit event.
+    let attestation_storage: Arc<dyn AttestationStorage> = Arc::new(
+        gyre_adapters::MergeAttestationStorage::new(Arc::clone(&audit)),
+    );
+
+    // Spec-link graph persistence (spec-links.md §Forge-Maintained Spec Graph).
+    // The SQL table is authoritative; the in-memory store is a hot cache,
+    // loaded here at boot so the graph survives restarts without re-push.
+    let spec_link_repo: Arc<dyn gyre_ports::SpecLinkRepository> = store!(
+        dyn gyre_ports::SpecLinkRepository,
+        mem::MemSpecLinkRepository::default()
+    );
+    let spec_links_store: spec_registry::SpecLinksStore = Arc::new(Mutex::new(Vec::new()));
+    load_spec_links_into_store(&spec_link_repo, &spec_links_store);
+
+    // Load or persist the forge's Ed25519 signing key first: both the
+    // AppState field and the attestation verifier (which re-derives the
+    // gate agents' keys from the same material) share it. The retained
+    // public-key history keeps pre-rotation signatures verifiable via
+    // JWKS (message-bus.md §Edge Cases "Signature key rotation").
+    let (agent_signing_key, signing_key_history) =
+        load_or_persist_agent_signing_key(&sqlite_db, &pg_db);
+    // identity-security.md §Task-Scoped JWT Claims: aud is `gyre`, or
+    // GYRE_OIDC_AUDIENCE when the operator configured one. Carried on
+    // the key so every mint and every validation agree on the audience.
+    // The audience is mint/validation metadata, not key material, so the
+    // override keeps the kid (and the retained history) consistent.
+    let agent_signing_key = {
+        let audience = std::env::var("GYRE_OIDC_AUDIENCE")
+            .ok()
+            .filter(|a| !a.is_empty())
+            .unwrap_or_else(|| crate::auth::DEFAULT_AGENT_JWT_AUDIENCE.to_string());
+        if agent_signing_key.audience() == audience {
+            agent_signing_key
+        } else {
+            Arc::new((*agent_signing_key).clone().with_audience(audience))
+        }
+    };
+
+    // Rekor transparency-log publication for merge attestation bundles
+    // (task-264): the REAL HTTP client replaces the old no-op stub. It is
+    // configured only when GYRE_REKOR_URL is set — an unconfigured log
+    // makes every submission fail explicitly (surfaced as a warning by
+    // the storage path), never a silent Ok(None).
+    let rekor: Arc<dyn RekorClient> = Arc::new(gyre_adapters::HttpRekorClient::new(
+        std::env::var("GYRE_REKOR_URL")
+            .ok()
+            .map(|u| u.trim().to_string())
+            .filter(|u| !u.is_empty()),
+        agent_signing_key.public_key_pem(),
+    ));
+
+    // SPIFFE workload attestation (identity-security.md Layer 1): resolve
+    // the trust domain and anchor before wiring AppState.
+    let spiffe_service = load_spiffe_service(&sqlite_db, &pg_db);
+
+    // SPIFFE federation (identity-security.md §Federation): exchanged
+    // trust bundles for peer trust domains, keyed by trust domain.
+    let spiffe_federation = Arc::new(spiffe_federation::FederationBundles::from_env(
+        spiffe_service.trust_domain(),
+    ));
+
     Arc::new(AppState {
         auth_token: auth_token.to_string(),
         base_url: base_url.to_string(),
+        spiffe: spiffe_service,
+        spiffe_federation,
         repos: store!(dyn RepoRepository, mem::MemRepoRepository::default()),
-        agents: store!(dyn AgentRepository, mem::MemAgentRepository::default()),
-        tasks: store!(dyn TaskRepository, mem::MemTaskRepository::default()),
-        merge_requests: store!(dyn MergeRequestRepository, mem::MemMrRepository::default()),
-        reviews: store!(dyn ReviewRepository, mem::MemReviewRepository::default()),
+        agents,
+        tasks,
+        merge_requests,
+        reviews,
         merge_queue: store!(
             dyn MergeQueueRepository,
             mem::MemMergeQueueRepository::default()
@@ -1178,6 +1987,10 @@ pub fn build_state(
             dyn AgentCommitRepository,
             mem::MemAgentCommitRepository::default()
         ),
+        agent_sessions: store!(
+            dyn AgentSessionRepository,
+            mem::MemAgentSessionRepository::default()
+        ),
         worktrees: store!(
             dyn WorktreeRepository,
             mem::MemWorktreeRepository::default()
@@ -1185,12 +1998,29 @@ pub fn build_state(
         telemetry_buffer,
         message_broadcast_tx,
         kv_store: store!(dyn KvJsonStore, mem::MemKvStore::default()),
-        agent_signing_key: load_or_persist_agent_signing_key(&sqlite_db, &pg_db),
-        // M27.5: Default reduced from 3600 to 300 s (5 min) to limit JWT exposure window.
+        agent_signing_key: agent_signing_key.clone(),
+        // Retained signing-key history (see the loader): public material of
+        // every key ever active on this deployment; JWKS serves the entries
+        // whose kid is not the active key's.
+        signing_key_history,
+        // Attestation bundle verification protocol (agent-gates.md §Part 3
+        // Verification): the forge-key verifier backing
+        // POST /api/v1/attestations/verify and `gyre verify-attestation`.
+        attestation_verifier: Arc::new(crate::merge_attestation::ForgeAttestationVerifier::new(
+            agent_signing_key.clone(),
+        )),
+        // Agent JWT TTL (identity-security.md §Task-Scoped JWT Claims:
+        // configurable via GYRE_AGENT_JWT_TTL, default 3600 s). The earlier
+        // 300 s default was an undocumented M27.5 deviation from the claims
+        // table; the spec default is restored here.
         agent_jwt_ttl_secs: std::env::var("GYRE_AGENT_JWT_TTL")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(300),
+            .unwrap_or(3600),
+        // Meta-spec preview mode (meta-spec-reconciliation.md §5).
+        preview_ttl_secs: api::meta_specs::preview_ttl_secs_from_env(),
+        preview_jwt_ttl_secs: api::meta_specs::preview_jwt_ttl_secs_from_env(),
+        preview_budget_max_concurrent: api::meta_specs::preview_budget_max_concurrent_from_env(),
         users: store!(dyn UserRepository, mem::MemUserRepository::default()),
         api_keys: store!(dyn ApiKeyRepository, mem::MemApiKeyRepository::default()),
         jwt_config,
@@ -1204,14 +2034,17 @@ pub fn build_state(
         explorer_sessions: Arc::new(explorer_ws::ExplorerSessionRegistry::new()),
         retention_store: RetentionStore::new(),
         job_registry: Arc::new(JobRegistry::new()),
-        analytics: store!(
-            dyn AnalyticsRepository,
-            mem::MemAnalyticsRepository::default()
-        ),
+        budget_grace_in_progress: Arc::new(tokio::sync::Mutex::new(
+            std::collections::HashSet::new(),
+        )),
+        analytics,
         costs: store!(dyn CostRepository, mem::MemCostRepository::default()),
-        audit: store!(dyn AuditRepository, mem::MemAuditRepository::default()),
+        audit,
+        attestation_storage,
+        rekor,
         siem_store: SiemStore::new(),
         audit_broadcast_tx,
+        notification_broadcast_tx,
         network_peers: store!(
             dyn NetworkPeerRepository,
             mem::MemNetworkPeerRepository::default()
@@ -1220,8 +2053,14 @@ pub fn build_state(
             dyn DependencyRepository,
             mem::MemDependencyRepository::default()
         ),
-        breaking_changes: Arc::new(mem::MemBreakingChangeRepository::default()),
-        dependency_policies: Arc::new(mem::MemDependencyPolicyRepository::default()),
+        breaking_changes: store!(
+            dyn BreakingChangeRepository,
+            mem::MemBreakingChangeRepository::default()
+        ),
+        dependency_policies: store!(
+            dyn DependencyPolicyRepository,
+            mem::MemDependencyPolicyRepository::default()
+        ),
         rate_limiter: rate_limit::RateLimiter::new(rate_per_sec),
         process_registry: Arc::new(Mutex::new(HashMap::new())),
         spawned_backends: Arc::new(Mutex::new(HashMap::new())),
@@ -1247,10 +2086,7 @@ pub fn build_state(
         ),
         db_storage,
         storage,
-        spec_approvals: store!(
-            dyn SpecApprovalRepository,
-            mem::MemSpecApprovalRepository::default()
-        ),
+        spec_approvals: store_shared!(dyn SpecApprovalRepository, mem_spec_approvals),
         spec_policies: store!(
             dyn SpecPolicyRepository,
             mem::MemSpecPolicyRepository::default()
@@ -1296,22 +2132,39 @@ pub fn build_state(
             dyn ContainerAuditRepository,
             mem::MemContainerAuditRepository::default()
         ),
-        spec_ledger: store!(
-            dyn SpecLedgerRepository,
-            mem::MemSpecLedgerRepository::default()
-        ),
+        spec_ledger: store_shared!(dyn SpecLedgerRepository, mem_spec_ledger),
         spec_approval_history: store!(
             dyn SpecApprovalEventRepository,
             mem::MemSpecApprovalEventRepository::default()
         ),
+        spec_link_repo,
         spec_assertion_results: store!(
             dyn gyre_ports::SpecAssertionResultRepository,
             mem::MemSpecAssertionResultRepository::default()
         ),
-        spec_links_store: Arc::new(Mutex::new(Vec::new())),
+        spec_links_store,
         budget_configs: store!(
             dyn BudgetRepository,
             mem::MemBudgetConfigRepository::default()
+        ),
+        tenant_invitations: store!(
+            dyn gyre_ports::TenantInvitationRepository,
+            mem::MemTenantInvitationRepository::default()
+        ),
+        workspace_invitations: store!(
+            dyn gyre_ports::WorkspaceInvitationRepository,
+            mem::MemWorkspaceInvitationRepository::default()
+        ),
+        // SCIM groups and group-to-workspace mappings are durable
+        // (task-266): SQLite/PostgreSQL adapters implement the ports over
+        // migration 000068; mem mode keeps the in-code store.
+        scim_groups: store!(
+            dyn gyre_ports::ScimGroupRepository,
+            mem::MemScimGroupRepository::default()
+        ),
+        scim_mappings: store!(
+            dyn gyre_ports::ScimMappingRepository,
+            mem::MemScimMappingRepository::default()
         ),
         budget_usages: store!(
             dyn BudgetUsageRepository,
@@ -1321,25 +2174,39 @@ pub fn build_state(
             dyn BudgetCallRepository,
             mem::MemBudgetCallRepository::default()
         ),
-        search: store!(
-            dyn gyre_ports::SearchPort,
-            gyre_adapters::MemSearchAdapter::new()
-        ),
+        search,
         tenants: store!(
             dyn gyre_ports::TenantRepository,
             mem::MemTenantRepository::default()
         ),
-        workspaces: store!(
-            dyn WorkspaceRepository,
-            mem::MemWorkspaceRepository::with_policy_store(Arc::clone(&mem_policy_store))
-                .with_workspace_store(Arc::clone(&mem_workspace_store))
+        workspaces,
+        personas,
+        // §Performance: the policy repository is wrapped in a read-through
+        // cache — policy evaluation happens on every request and must not
+        // hit the store each time. Mutations through the port invalidate
+        // the cache; `apply_trust_transition` (the one out-of-band policy
+        // writer) is invalidated explicitly by its handlers via
+        // `policy_cache`.
+        policies: Arc::new(policy_cache::CachedPolicyRepository::new(
+            store!(
+                dyn PolicyRepository,
+                mem::MemPolicyRepository::from_store(Arc::clone(&mem_policy_store))
+            ),
+            Arc::clone(&policy_cache),
+        )) as Arc<dyn PolicyRepository>,
+        policy_cache,
+        // Workspace memberships are durable: SQLite/PostgreSQL adapters
+        // implement the port (M22.8 schema); mem mode keeps the in-code
+        // store. Before task-121 this was unconditionally the mem adapter,
+        // so a DB-backed server silently lost every membership on restart.
+        workspace_memberships: store!(
+            dyn WorkspaceMembershipRepository,
+            mem::MemWorkspaceMembershipRepository::default()
         ),
-        personas: store!(dyn PersonaRepository, mem::MemPersonaRepository::default()),
-        policies: store!(
-            dyn PolicyRepository,
-            mem::MemPolicyRepository::from_store(Arc::clone(&mem_policy_store))
+        repo_access_overrides: store!(
+            dyn RepoAccessOverrideRepository,
+            mem::MemRepoAccessOverrideRepository::default()
         ),
-        workspace_memberships: Arc::new(mem::MemWorkspaceMembershipRepository::default()),
         teams: Arc::new(mem::MemTeamRepository::default()),
         notifications: store!(
             dyn NotificationRepository,
@@ -1379,20 +2246,14 @@ pub fn build_state(
             dyn RolloutPolicyRepository,
             mem::MemRolloutPolicyRepository::default()
         ),
-        messages: Arc::new(mem::MemMessageRepository::default()),
-        message_dispatch_tx: {
-            let (tx, rx) = tokio::sync::mpsc::channel(256);
-            // Drain the channel so the receiver is not dropped.
-            // ReconciliationCompleted → MetaSpecDrift notification creation happens
-            // synchronously in emit_reconciliation_completed() helper, not here.
-            tokio::spawn(async move {
-                let mut rx = rx;
-                while let Some(_msg) = rx.recv().await {
-                    // No-op drain. Consumers can be wired via spawn_message_consumer().
-                }
-            });
-            tx
-        },
+        messages: store!(
+            dyn gyre_ports::MessageRepository,
+            mem::MemMessageRepository::default()
+        ),
+        message_dispatch_tx: message_dispatch_tx.clone(),
+        message_dispatch_rx: std::sync::Arc::new(tokio::sync::Mutex::new(Some(
+            message_dispatch_rx,
+        ))),
         agent_inbox_max: std::env::var("GYRE_AGENT_INBOX_MAX")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -1427,13 +2288,21 @@ pub fn build_state(
             dyn ComputeTargetRepository,
             mem::MemComputeTargetRepository::with_workspace_store(Arc::clone(&mem_workspace_store))
         ),
+        user_tokens: store!(
+            dyn gyre_ports::UserTokenRepository,
+            mem::MemUserTokenRepository::default()
+        ),
         user_notification_prefs: store!(
             dyn gyre_ports::UserNotificationPreferenceRepository,
             mem::MemUserNotificationPreferenceRepository::default()
         ),
-        user_tokens: store!(
-            dyn gyre_ports::UserTokenRepository,
-            mem::MemUserTokenRepository::default()
+        sessions: store!(
+            dyn gyre_ports::SessionRepository,
+            mem::MemSessionRepository::default()
+        ),
+        user_channel_prefs: store!(
+            dyn gyre_ports::UserChannelPreferenceRepository,
+            mem::MemUserChannelPreferenceRepository::default()
         ),
         secrets: store!(
             dyn gyre_ports::SecretRepository,
@@ -1441,7 +2310,11 @@ pub fn build_state(
         ),
         judgment_ledger: store!(
             dyn gyre_ports::JudgmentLedgerRepository,
-            mem::MemJudgmentLedgerRepository
+            mem::MemJudgmentLedgerRepository::with_sources(
+                &mem_audit,
+                &mem_spec_approvals,
+                &mem_spec_ledger
+            )
         ),
         orchestrator_registry: signal_chain::OrchestratorRegistry::new(),
         ws_tickets: auth::WsTicketStore::new(),
@@ -1467,6 +2340,50 @@ pub fn build_state(
             }
         },
     })
+}
+
+/// Load the persisted spec-link graph into the in-memory hot cache
+/// (spec-links.md §Forge-Maintained Spec Graph).
+///
+/// Runs on a dedicated thread with its own single-threaded runtime: callers
+/// are sync constructors (`build_state`) that may already be inside a tokio
+/// runtime, where `Handle::block_on` would panic. On read failure the cache
+/// stays empty and the error is surfaced — an unreadable graph must not
+/// silently masquerade as "no links" to staleness checks and gates.
+pub fn load_spec_links_into_store(
+    repo: &Arc<dyn gyre_ports::SpecLinkRepository>,
+    store: &spec_registry::SpecLinksStore,
+) {
+    let repo = Arc::clone(repo);
+    let store = Arc::clone(store);
+    let handle = std::thread::spawn(move || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build runtime for spec link load")
+            .block_on(async {
+                match repo.list_all().await {
+                    Ok(persisted) => {
+                        if !persisted.is_empty() {
+                            tracing::info!(
+                                count = persisted.len(),
+                                "spec-links: loaded persisted spec link graph"
+                            );
+                        }
+                        *store.lock().await = persisted;
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            "spec-links: failed to load persisted spec link graph: {e}"
+                        );
+                    }
+                }
+            });
+    })
+    .join();
+    if let Err(e) = handle {
+        tracing::error!("spec-links: spec link load thread panicked: {e:?}");
+    }
 }
 
 /// Evict stale presence entries (server_last_seen older than 60 seconds).
@@ -1520,87 +2437,26 @@ pub fn spawn_presence_eviction(state: Arc<AppState>) {
     });
 }
 
-/// Emit a `ReconciliationCompleted` Event-tier message and create priority-6
-/// `MetaSpecDrift` notifications for all Admin/Developer/Owner workspace members (HSI §4).
+/// Emit a `ReconciliationCompleted` Event-tier message (HSI §4 /
+/// meta-spec-reconciliation.md §11).
 ///
-/// This is the "MessageConsumer path" for ReconciliationCompleted: the spec says p6 is
-/// "async acceptable", so we create notifications inline alongside the event emission.
-/// This avoids the complexity of a separate consumer while meeting the spec requirement.
+/// The priority-6 `MetaSpecDrift` notifications are created downstream by the
+/// notification bridge (`NotificationBridge` in `message_dispatcher.rs`), per
+/// HSI §8 p6: "Via `MessageConsumer` consuming `ReconciliationCompleted`
+/// events". This function only emits the event.
 pub async fn emit_reconciliation_completed(
     state: &Arc<AppState>,
     workspace_id: Id,
     payload: Option<serde_json::Value>,
 ) {
-    use gyre_common::{Notification, NotificationType};
-    use gyre_domain::WorkspaceRole;
-
-    // Emit Event-tier message.
     state
         .emit_event(
-            Some(workspace_id.clone()),
-            Destination::Workspace(workspace_id.clone()),
+            workspace_id.clone(),
+            Destination::Workspace(workspace_id),
             MessageKind::ReconciliationCompleted,
             payload,
         )
         .await;
-
-    // Resolve tenant_id from workspace record (avoid hardcoding "default").
-    let tenant_id = match state.workspaces.find_by_id(&workspace_id).await {
-        Ok(Some(ws)) => ws.tenant_id.to_string(),
-        Ok(None) => {
-            tracing::warn!("emit_reconciliation_completed: workspace {workspace_id} not found; skipping notifications");
-            return;
-        }
-        Err(e) => {
-            tracing::warn!(
-                "emit_reconciliation_completed: failed to resolve workspace tenant: {e}"
-            );
-            return;
-        }
-    };
-
-    // Create priority-6 MetaSpecDrift notifications for all Admin/Developer/Owner members.
-    let members = match state
-        .workspace_memberships
-        .list_by_workspace(&workspace_id)
-        .await
-    {
-        Ok(m) => m,
-        Err(e) => {
-            tracing::warn!("emit_reconciliation_completed: failed to list members: {e}");
-            return;
-        }
-    };
-
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64;
-
-    for member in &members {
-        if !matches!(
-            member.role,
-            WorkspaceRole::Admin | WorkspaceRole::Developer | WorkspaceRole::Owner
-        ) {
-            continue;
-        }
-        let notif_id = Id::new(uuid::Uuid::new_v4().to_string());
-        let notif = Notification::new(
-            notif_id,
-            workspace_id.clone(),
-            member.user_id.clone(),
-            NotificationType::MetaSpecDrift,
-            "Meta-spec reconciliation completed — workspace specs may have drifted",
-            &tenant_id,
-            now,
-        );
-        if let Err(e) = state.notifications.create(&notif).await {
-            tracing::warn!(
-                "emit_reconciliation_completed: failed to create MetaSpecDrift notification for {}: {e}",
-                member.user_id
-            );
-        }
-    }
 }
 
 /// Delegate to keep backwards-compatibility. New code should use stale_agents::spawn_stale_agent_detector.
@@ -1722,7 +2578,14 @@ pub fn spawn_llm_rate_limiter_cleanup(state: Arc<AppState>) {
     });
 }
 
-/// Spawn a background task that resets budget daily counters at midnight UTC (M22.2).
+/// Spawn the budget rolling-window background job (agent-runtime.md §4
+/// Budget Reset): runs hourly and re-syncs every entity's token/cost
+/// counters to the per-call records inside the last 24 hours, so
+/// time-based budgets (`max_tokens_per_day`, `max_cost_per_day`) reset on
+/// a rolling window. Replaces the pre-task-119 midnight-UTC counter reset.
+/// The same cycle enforces the per-agent lifetime ceilings
+/// (`max_agent_lifetime_secs`, repo override → effective workspace limit)
+/// so agents that stopped reporting usage are still bounded.
 pub fn spawn_budget_daily_reset(state: Arc<AppState>) {
     tokio::spawn(async move {
         state
@@ -1730,21 +2593,55 @@ pub fn spawn_budget_daily_reset(state: Arc<AppState>) {
             .mark_scheduled("spawn_budget_reset")
             .await;
         loop {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
-            let secs_until_midnight = 86400 - (now % 86400);
-            tokio::time::sleep(tokio::time::Duration::from_secs(secs_until_midnight)).await;
+            tokio::time::sleep(tokio::time::Duration::from_secs(3600)).await;
             let started_at = jobs::now_secs();
-            let result = api::budget::reset_daily_counters(&state).await;
+            let result = api::budget::apply_rolling_24h_window(&state).await;
             if let Err(error) = &result {
-                tracing::error!(%error, "failed to reset budget daily counters");
+                tracing::error!(%error, "failed to apply budget rolling 24h window");
             }
+            // Lifetime enforcement is best-effort alongside the reset —
+            // its failures are logged inside, never fail the job cycle.
+            api::budget::enforce_agent_lifetimes(&state).await;
             state
                 .job_registry
                 .record_cycle("spawn_budget_reset", started_at, &result)
                 .await;
+        }
+    });
+}
+
+/// Spawn a background task that deletes long-expired user sessions
+/// (user-management.md §Session Management — task-111 plan §6).
+///
+/// Sessions whose `expires_at` is more than 30 days in the past are
+/// deleted. Revoked rows are NEVER deleted, whatever their age (the
+/// `SessionRepository::delete_expired_before` port contract): a revoked row
+/// is the durable record that keeps a signed-out credential rejected
+/// ("sign out everywhere") — deleting one would silently re-authorize the
+/// API key it belonged to.
+pub fn spawn_session_cleanup(state: Arc<AppState>) {
+    const INTERVAL_SECS: u64 = 24 * 3600; // daily
+    const RETENTION_PAST_EXPIRY_SECS: u64 = 30 * 24 * 3600; // 30 days
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_secs(INTERVAL_SECS)).await;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let cutoff = now.saturating_sub(RETENTION_PAST_EXPIRY_SECS);
+            match state.sessions.delete_expired_before(cutoff).await {
+                Ok(n) if n > 0 => {
+                    tracing::info!(
+                        deleted = n,
+                        "session retention cleanup removed expired sessions"
+                    );
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!("session retention cleanup failed: {e}");
+                }
+            }
         }
     });
 }
@@ -2267,6 +3164,286 @@ mod tests {
             tenants.iter().filter(|t| t.slug == "default").count(),
             1,
             "second bootstrap call must not create a duplicate default tenant"
+        );
+    }
+
+    // ── Scopeless-message guard (message-bus.md §Message Envelope) ──────────────
+    //
+    // The send_message() helper validation: a non-Broadcast message with
+    // workspace_id: None must be rejected with Err + an error-level log record,
+    // and never constructed, stored, or broadcast.
+
+    /// tracing field visitor capturing an event's `message` field.
+    struct CaptureVisit(String);
+    impl tracing::field::Visit for CaptureVisit {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            if field.name() == "message" {
+                self.0 = format!("{value:?}");
+            }
+        }
+    }
+
+    /// Capturing tracing layer: records (level, message) pairs while a scoped
+    /// default subscriber is active.
+    struct CaptureLayer(Arc<std::sync::Mutex<Vec<(tracing::Level, String)>>>);
+    impl<S> tracing_subscriber::Layer<S> for CaptureLayer
+    where
+        S: tracing::Subscriber,
+    {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            let mut visit = CaptureVisit(String::new());
+            event.record(&mut visit);
+            self.0
+                .lock()
+                .unwrap()
+                .push((*event.metadata().level(), visit.0));
+        }
+    }
+
+    /// MessageRepository wrapper counting store() calls, delegating to the mem
+    /// adapter — proves whether the emitter reached the persistence port.
+    struct CountingMessages {
+        inner: mem::MemMessageRepository,
+        stores: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl gyre_ports::MessageRepository for CountingMessages {
+        async fn store(&self, message: &Message) -> anyhow::Result<()> {
+            self.stores
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.inner.store(message).await
+        }
+        async fn find_by_id(&self, id: &Id) -> anyhow::Result<Option<Message>> {
+            self.inner.find_by_id(id).await
+        }
+        async fn list_after(
+            &self,
+            agent_id: &Id,
+            after_ts: u64,
+            after_id: Option<&Id>,
+            limit: usize,
+        ) -> anyhow::Result<Vec<Message>> {
+            self.inner
+                .list_after(agent_id, after_ts, after_id, limit)
+                .await
+        }
+        async fn list_unacked(&self, agent_id: &Id, limit: usize) -> anyhow::Result<Vec<Message>> {
+            self.inner.list_unacked(agent_id, limit).await
+        }
+        async fn count_unacked(&self, agent_id: &Id) -> anyhow::Result<u64> {
+            self.inner.count_unacked(agent_id).await
+        }
+        async fn acknowledge(&self, message_id: &Id, agent_id: &Id) -> anyhow::Result<()> {
+            self.inner.acknowledge(message_id, agent_id).await
+        }
+        async fn acknowledge_all(&self, agent_id: &Id, reason: &str) -> anyhow::Result<u64> {
+            self.inner.acknowledge_all(agent_id, reason).await
+        }
+        async fn list_by_workspace(
+            &self,
+            workspace_id: &Id,
+            kind: Option<&str>,
+            since: Option<u64>,
+            before_ts: Option<u64>,
+            before_id: Option<&Id>,
+            limit: Option<usize>,
+        ) -> anyhow::Result<Vec<Message>> {
+            self.inner
+                .list_by_workspace(workspace_id, kind, since, before_ts, before_id, limit)
+                .await
+        }
+        async fn expire_events(&self, older_than: u64) -> anyhow::Result<u64> {
+            self.inner.expire_events(older_than).await
+        }
+        async fn expire_acked_inboxes(&self, older_than: u64) -> anyhow::Result<u64> {
+            self.inner.expire_acked_inboxes(older_than).await
+        }
+        async fn expire_for_agents(
+            &self,
+            agent_ids: &[Id],
+            older_than: u64,
+        ) -> anyhow::Result<u64> {
+            self.inner.expire_for_agents(agent_ids, older_than).await
+        }
+    }
+
+    #[tokio::test]
+    async fn emit_scoped_event_rejects_scopeless_non_broadcast_message() {
+        use gyre_common::message::Destination;
+        use tracing_subscriber::prelude::*;
+
+        let counting = Arc::new(CountingMessages {
+            inner: mem::MemMessageRepository::default(),
+            stores: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let state = mem::test_state_with_messages(counting.clone());
+        let mut bus_rx = state.message_broadcast_tx.subscribe();
+        let mut dispatch_rx = state
+            .take_message_dispatch_rx()
+            .await
+            .expect("dispatcher not yet taken");
+
+        let logs = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(CaptureLayer(logs.clone()));
+        // current_thread test runtime: the whole future (and every await resume)
+        // runs on this thread, so the thread-local default subscriber captures
+        // everything the emitter logs.
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        // Workspace destination + workspace_id None → Err, error-level log,
+        // nothing stored / broadcast / dispatched.
+        let result = state
+            .emit_scoped_event(
+                Id::new("tenant-1"),
+                None,
+                Destination::Workspace(Id::new("ws-x")),
+                MessageKind::TaskCreated,
+                None,
+            )
+            .await;
+        assert!(
+            result.is_err(),
+            "scopeless Workspace message must be rejected"
+        );
+
+        // Agent destination + workspace_id None → same rejection.
+        let result = state
+            .emit_scoped_event(
+                Id::new("tenant-1"),
+                None,
+                Destination::Agent(Id::new("agent-x")),
+                MessageKind::TaskAssignment,
+                None,
+            )
+            .await;
+        assert!(result.is_err(), "scopeless Agent message must be rejected");
+
+        // Clone the captured records out so the MutexGuard is confined to
+        // this statement — the test body contains later awaits, and holding
+        // a lock guard across an await point is the clippy::await_holding_lock
+        // defect class (a guard held while suspended can deadlock the
+        // capturing layer on another thread).
+        let captured: Vec<(tracing::Level, String)> = logs.lock().unwrap().clone();
+        assert!(
+            captured
+                .iter()
+                .any(|(level, msg)| *level == tracing::Level::ERROR
+                    && msg.contains("workspace scope")),
+            "the guard must log at error level, captured: {captured:?}"
+        );
+
+        assert_eq!(
+            counting.stores.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "no message may reach store()"
+        );
+        assert!(
+            bus_rx.try_recv().is_err(),
+            "no message may reach the broadcast channel"
+        );
+        assert!(
+            dispatch_rx.try_recv().is_err(),
+            "no message may reach the dispatch consumer"
+        );
+
+        // Control 1 — Broadcast is the specced carve-out: workspace_id None is
+        // valid for Broadcast (never stored, but broadcast + dispatched).
+        let result = state
+            .emit_scoped_event(
+                Id::new("tenant-1"),
+                None,
+                Destination::Broadcast,
+                MessageKind::TaskCreated,
+                None,
+            )
+            .await;
+        assert!(result.is_ok(), "Broadcast without workspace scope is valid");
+        assert_eq!(counting.stores.load(std::sync::atomic::Ordering::SeqCst), 0);
+        let bus_msg = bus_rx.try_recv().expect("Broadcast must be broadcast");
+        assert!(matches!(bus_msg.to, Destination::Broadcast));
+        let _ = dispatch_rx.try_recv();
+
+        // Control 2 — a scoped (Some(workspace_id)) Workspace message passes the
+        // guard, is stored once, and is broadcast.
+        let result = state
+            .emit_scoped_event(
+                Id::new("tenant-1"),
+                Some(Id::new("ws-x")),
+                Destination::Workspace(Id::new("ws-x")),
+                MessageKind::TaskCreated,
+                None,
+            )
+            .await;
+        assert!(result.is_ok(), "scoped message must pass the guard");
+        assert_eq!(
+            counting.stores.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "scoped message must be stored exactly once"
+        );
+        let bus_msg = bus_rx.try_recv().expect("scoped message must be broadcast");
+        assert_eq!(bus_msg.workspace_id, Some(Id::new("ws-x")));
+    }
+
+    /// message-bus.md §Broadcast-only kinds: `DataSeeded` and `QueueUpdated`
+    /// are storage-exempt — "never hitting `MessageRepository::store()`" —
+    /// REGARDLESS of destination. The internal emitter (`emit_scoped_event`)
+    /// must short-circuit storage for these kinds by kind, not only by
+    /// destination: emitted to a Workspace destination, the message must
+    /// still reach the broadcast channel while no row is persisted. Against
+    /// the prior destination-only guard this test fails (the row is stored).
+    #[tokio::test]
+    async fn emit_event_broadcast_only_kind_never_stored_for_workspace_destination() {
+        let state = mem::test_state();
+        mem::ensure_test_workspace(&state, "ws-bo-emit").await;
+        let mut rx = state.message_broadcast_tx.subscribe();
+
+        state
+            .emit_event(
+                Id::new("ws-bo-emit"),
+                Destination::Workspace(Id::new("ws-bo-emit")),
+                MessageKind::DataSeeded,
+                None,
+            )
+            .await;
+        state
+            .emit_event(
+                Id::new("ws-bo-emit"),
+                Destination::Workspace(Id::new("ws-bo-emit")),
+                MessageKind::QueueUpdated,
+                None,
+            )
+            .await;
+
+        // Both reached the broadcast channel (subscribers see them).
+        for expected in [MessageKind::DataSeeded, MessageKind::QueueUpdated] {
+            let msg = rx
+                .try_recv()
+                .unwrap_or_else(|e| panic!("{expected:?} must reach broadcast channel: {e}"));
+            assert_eq!(msg.kind, expected);
+            assert!(matches!(msg.from, MessageOrigin::Server));
+            // Storage exemption is kind-based: no row for either kind.
+            assert!(
+                state.messages.find_by_id(&msg.id).await.unwrap().is_none(),
+                "{expected:?} must never hit MessageRepository::store()"
+            );
+        }
+
+        // The workspace listing is empty — neither kind was persisted even
+        // though the destination was a Workspace.
+        let listed = state
+            .messages
+            .list_by_workspace(&Id::new("ws-bo-emit"), None, None, None, None, Some(100))
+            .await
+            .unwrap();
+        assert!(
+            listed.is_empty(),
+            "broadcast-only kinds must never hit MessageRepository::store(), \
+             even addressed to a Workspace destination"
         );
     }
 }

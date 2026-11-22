@@ -240,9 +240,9 @@ pub async fn repo_status(
         .unwrap_or(false);
 
     // main_green: run post-merge gates against current default-branch HEAD.
-    // Fail CLOSED (task-095 R3-F3): when the HEAD ref does not resolve there
-    // is no tree to validate — report `main_green: false` with the failure in
-    // `pause_reason` context, never a green reading from an unvalidated tree.
+    // Fail closed (task-095 R3-F3): when the HEAD ref does not resolve there
+    // is no tree to validate — report `main_green: false`, never a green
+    // reading from an unvalidated tree or an empty-string SHA.
     let main_green = if skip_gates || gates.is_empty() {
         None
     } else {
@@ -253,11 +253,18 @@ pub async fn repo_status(
         .await
         {
             Some(head_sha) => Some(
-                crate::gate_executor::run_post_merge_gates(&state, &repo, &head_sha)
+                crate::gate_executor::run_post_merge_gates(&state, &repo, &head_sha, None)
                     .await
                     .is_ok(),
             ),
-            None => Some(false),
+            None => {
+                tracing::warn!(
+                    repo_id = %repo.id,
+                    branch = %repo.default_branch,
+                    "recovery: default-branch HEAD unresolvable; reporting main_green=false"
+                );
+                Some(false)
+            }
         }
     };
 
@@ -275,10 +282,33 @@ pub async fn repo_status(
 /// Reverts the MR's merge commit on the target branch and applies the
 /// recovery side effects (mark Reverted, notify author, remediation task,
 /// invalidate gate results — platform-model.md §6 steps 2, 4–7).
+///
+/// identity-security.md §Task-Scoped JWT Claims — by-effect task-scope
+/// surface (task-263 review repair): the handler's execution mutates task
+/// rows — `apply_revert_side_effects` step 6 creates a High-priority
+/// remediation task — in addition to rewriting the repo's default-branch
+/// history and marking the MR Reverted. No task claim can cover those
+/// effects: the remediation task is a fresh row outside the caller's
+/// claim, and the history rewrite is repo-wide — the same effect class
+/// for which `archive_repo` denies task-bound agents outright. The
+/// route's middleware ABAC resolves only repo-tier scoping, and the
+/// seeded 'agent-scoped-access' builtin (priority 700) Allows the 'write'
+/// action for Agent-role subjects on resource type '*', so under default
+/// configuration a task-A worker JWT could revert task B's merged MR
+/// here. Task-bound agent principals are therefore denied outright;
+/// non-agent principals (Admin users, the system token, orchestrators)
+/// keep their existing rights.
 pub async fn revert_mr(
     State(state): State<Arc<AppState>>,
     Path((repo_id, mr_id)): Path<(String, String)>,
+    auth: crate::auth::AuthenticatedAgent,
 ) -> Result<(StatusCode, Json<RevertResponse>), ApiError> {
+    if auth.agent_task_claim().is_some() {
+        return Err(ApiError::Forbidden(
+            "agent tokens cannot revert merged MRs: the recovery protocol rewrites repo history and creates remediation tasks"
+                .to_string(),
+        ));
+    }
     let repo = state
         .repos
         .find_by_id(&Id::new(&repo_id))
@@ -436,6 +466,7 @@ pub async fn set_post_merge_gates(
             required: dto.required,
             gate_phase: GatePhase::PostMerge,
             timeout_secs: dto.timeout_secs,
+            position: 0,
             created_at: now,
         };
         state.quality_gates.save(&gate).await?;
@@ -494,12 +525,12 @@ mod tests {
         let mut mr = MergeRequest::new(
             Id::new(mr_id),
             repo_id.clone(),
+            Id::new("ws-1"),
             "Merged MR",
             "feat/x",
             "main",
             1000,
         );
-        mr.workspace_id = Id::new("ws-1");
         mr.transition_status(MrStatus::Approved).unwrap();
         mr.transition_status(MrStatus::Merged).unwrap();
         mr.merge_commit_sha = merge_sha.map(|s| s.to_string());
@@ -513,6 +544,10 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri(format!("/api/v1/repos/{repo_id}/revert/{mr_id}"))
+                    // The revert handler takes the auth extractor (task-263
+                    // review repair): the operator path authenticates with
+                    // the global test token.
+                    .header("authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -746,6 +781,7 @@ mod tests {
                 required: true,
                 gate_phase: GatePhase::PostMerge,
                 timeout_secs: Some(10),
+                position: 0,
                 created_at: 1000,
             })
             .await
@@ -793,6 +829,7 @@ mod tests {
                 required: true,
                 gate_phase: GatePhase::PostMerge,
                 timeout_secs: Some(10),
+                position: 0,
                 created_at: 1000,
             })
             .await
@@ -816,5 +853,110 @@ mod tests {
             "?gates=false must skip gate execution (main_green null), got {body}"
         );
         assert_eq!(body["queue_paused"], serde_json::json!(false));
+    }
+
+    /// task-263 review repair (identity-security.md §Task-Scoped JWT
+    /// Claims, by-effect sweep): POST /repos/:id/revert/:mr_id mutates
+    /// task rows — `apply_revert_side_effects` step 6 creates a
+    /// High-priority remediation task — in addition to rewriting the
+    /// repo's default-branch history. A valid, non-expired worker JWT
+    /// must therefore get 403 here regardless of its task/repo scope: no
+    /// task claim can cover a repo-wide history rewrite plus a fresh
+    /// remediation task row. The MR stays Merged, no revert commit is
+    /// made, and no remediation task appears; the operator (global
+    /// token) keeps the right on the same fixture — proving the denial
+    /// is the agent-principal boundary, not a broken fixture.
+    #[tokio::test]
+    async fn agent_jwt_cannot_revert_merged_mr() {
+        let git = Arc::new(ConfigurableGitOps::default());
+        let revert_calls = git.revert_calls.clone();
+        let state = test_state_with_git_ops(git);
+        let repo = seed_repo(&state, "revert-agent-scope").await;
+        let mr = seed_merged_mr(&state, &repo.id, "mr-agent-scope", Some("deadbeef")).await;
+
+        // A worker JWT minted for a task in another repo of the same
+        // workspace — a realistic task-bound agent principal.
+        let token = state
+            .agent_signing_key
+            .mint_worker_scoped(
+                "agent-rev-scope",
+                "task-rev-1",
+                "system",
+                &state.base_url,
+                3600,
+                "default",
+                "ws-1",
+                "repo-other",
+                "repo-other",
+                None,
+                Some(1),
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        state
+            .kv_store
+            .kv_set("agent_tokens", "agent-rev-scope", token.clone())
+            .await
+            .unwrap();
+        let app = app(state.clone());
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/repos/{}/revert/{}", repo.id, mr.id))
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // Task B's merged MR is untouched: still Merged, no revert commit,
+        // no remediation task row (the apply_revert_side_effects effect).
+        let stored = state
+            .merge_requests
+            .find_by_id(&mr.id)
+            .await
+            .unwrap()
+            .expect("MR must still exist");
+        assert_eq!(stored.status, MrStatus::Merged);
+        assert!(
+            revert_calls.lock().is_empty(),
+            "no revert commit may be made"
+        );
+        let remediation = state
+            .tasks
+            .list()
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|t| t.labels.iter().any(|l| l == "reverted-mr"))
+            .count();
+        assert_eq!(remediation, 0, "no remediation task may be created");
+
+        // Positive control on the same fixture: the operator (global
+        // token) reverts the same MR — the boundary is scoped to agent
+        // principals, and the 403 above was not a fixture artifact.
+        let resp = post_revert(&app, repo.id.as_str(), mr.id.as_str()).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(revert_calls.lock().len(), 1);
+        let remediation = state
+            .tasks
+            .list()
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|t| t.labels.iter().any(|l| l == "reverted-mr"))
+            .count();
+        assert_eq!(
+            remediation, 1,
+            "operator revert creates the remediation task"
+        );
     }
 }

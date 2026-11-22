@@ -10,6 +10,10 @@ use gyre_domain::BudgetUsage;
 ///
 /// Atomic operations (increment/decrement/add) are required to prevent
 /// race conditions under concurrent agent spawns.
+// async_trait generates a must_use future per method; the trait itself is
+// not the must_use surface, so the double_must_use lint is suppressed here
+// exactly as in sibling ports (see compute.rs, storage.rs).
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait BudgetUsageRepository: Send + Sync {
     /// Upsert a budget usage snapshot for `entity_key`.
@@ -50,8 +54,16 @@ pub trait BudgetUsageRepository: Send + Sync {
         cost_usd: f64,
     ) -> Result<()>;
 
-    /// Reset `tokens_used_today` and `cost_today` to zero for every entry.
-    /// Updates `period_start` to `now`. Called at midnight UTC by the
-    /// `spawn_budget_daily_reset` background job.
-    async fn reset_daily_counters(&self, now: u64) -> Result<()>;
+    /// Atomically add `minutes` of agent wall-clock compute time to the
+    /// usage entry (agent-runtime.md §4 What's Tracked: `compute_minutes`,
+    /// spawn → complete/kill). Creates the entry if absent. Tracking-only —
+    /// no limit field consumes it.
+    async fn add_compute_minutes(
+        &self,
+        entity_key: &str,
+        entity_type: &str,
+        entity_id: &str,
+        now: u64,
+        minutes: u64,
+    ) -> Result<()>;
 }

@@ -1068,6 +1068,9 @@ impl<'ast, 'a> Visit<'ast> for ItemVisitor<'a> {
                                             .get(&self.qualified(&bare_type))
                                             .cloned(),
                                     ];
+                                    // The first candidate that resolves wins
+                                    // (clippy::never_loop: the loop body always
+                                    // broke on the first iteration).
                                     if let Some(candidate) = candidates.iter().flatten().next() {
                                         let dep_edge = self.ctx.make_edge(
                                             EdgeType::DependsOn,

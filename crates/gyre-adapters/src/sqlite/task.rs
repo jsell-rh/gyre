@@ -1,6 +1,7 @@
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use diesel::prelude::*;
+use diesel::sqlite::SqliteConnection;
 use gyre_common::Id;
 use gyre_domain::{Task, TaskPriority, TaskStatus, TaskType};
 use gyre_ports::TaskRepository;
@@ -164,6 +165,82 @@ struct NewTaskRow<'a> {
     generation: i32,
 }
 
+/// Insert-or-update a task row on an existing connection — the write half
+/// of `TaskRepository::create`, shared with the transactional
+/// `PersonaRepository::apply_approval_reset_with_task` (persona push: the
+/// persona approval reset and its human-approval task persist in ONE
+/// transaction, so a failure between them can never strand a reset persona
+/// without its approval task).
+pub(crate) fn upsert_task_txn(
+    conn: &mut SqliteConnection,
+    task: &Task,
+    tenant_id: &str,
+) -> Result<()> {
+    let labels_json = serde_json::to_string(&task.labels)?;
+    let depends_on_json = serde_json::to_string(
+        &task
+            .depends_on
+            .iter()
+            .map(|id| id.as_str())
+            .collect::<Vec<_>>(),
+    )?;
+    let task_type_str = task.task_type.as_ref().map(task_type_to_str);
+    let row = NewTaskRow {
+        id: task.id.as_str(),
+        title: &task.title,
+        description: task.description.as_deref(),
+        status: status_to_str(&task.status),
+        priority: priority_to_str(&task.priority),
+        assigned_to: task.assigned_to.as_ref().map(|id| id.as_str()),
+        parent_task_id: task.parent_task_id.as_ref().map(|id| id.as_str()),
+        labels: &labels_json,
+        branch: task.branch.as_deref(),
+        pr_link: task.pr_link.as_deref(),
+        created_at: task.created_at as i64,
+        updated_at: task.updated_at as i64,
+        tenant_id,
+        workspace_id: task.workspace_id.as_str(),
+        spec_path: task.spec_path.as_deref(),
+        spec_ref: task.spec_ref.as_deref(),
+        repo_id: task.repo_id.as_str(),
+        cancelled_at: task.cancelled_at.map(|v| v as i64),
+        cancelled_reason: task.cancelled_reason.as_deref(),
+        task_type: task_type_str,
+        order: task.order.map(|v| v as i32),
+        depends_on: &depends_on_json,
+        generation: task.generation as i32,
+    };
+    diesel::insert_into(tasks::table)
+        .values(&row)
+        .on_conflict(tasks::id)
+        .do_update()
+        .set((
+            tasks::title.eq(row.title),
+            tasks::description.eq(row.description),
+            tasks::status.eq(row.status),
+            tasks::priority.eq(row.priority),
+            tasks::assigned_to.eq(row.assigned_to),
+            tasks::parent_task_id.eq(row.parent_task_id),
+            tasks::labels.eq(row.labels),
+            tasks::branch.eq(row.branch),
+            tasks::pr_link.eq(row.pr_link),
+            tasks::updated_at.eq(row.updated_at),
+            tasks::workspace_id.eq(row.workspace_id),
+            tasks::spec_path.eq(row.spec_path),
+            tasks::spec_ref.eq(row.spec_ref),
+            tasks::repo_id.eq(row.repo_id),
+            tasks::cancelled_at.eq(row.cancelled_at),
+            tasks::cancelled_reason.eq(row.cancelled_reason),
+            tasks::task_type.eq(row.task_type),
+            tasks::order.eq(row.order),
+            tasks::depends_on.eq(row.depends_on),
+            tasks::generation.eq(row.generation),
+        ))
+        .execute(conn)
+        .context("insert task")?;
+    Ok(())
+}
+
 #[async_trait]
 impl TaskRepository for SqliteStorage {
     async fn create(&self, task: &Task) -> Result<()> {
@@ -172,68 +249,7 @@ impl TaskRepository for SqliteStorage {
         let tenant = self.tenant_id.clone();
         tokio::task::spawn_blocking(move || -> Result<()> {
             let mut conn = pool.get().context("get db connection")?;
-            let labels_json = serde_json::to_string(&t.labels)?;
-            let depends_on_json = serde_json::to_string(
-                &t.depends_on
-                    .iter()
-                    .map(|id| id.as_str())
-                    .collect::<Vec<_>>(),
-            )?;
-            let task_type_str = t.task_type.as_ref().map(task_type_to_str);
-            let row = NewTaskRow {
-                id: t.id.as_str(),
-                title: &t.title,
-                description: t.description.as_deref(),
-                status: status_to_str(&t.status),
-                priority: priority_to_str(&t.priority),
-                assigned_to: t.assigned_to.as_ref().map(|id| id.as_str()),
-                parent_task_id: t.parent_task_id.as_ref().map(|id| id.as_str()),
-                labels: &labels_json,
-                branch: t.branch.as_deref(),
-                pr_link: t.pr_link.as_deref(),
-                created_at: t.created_at as i64,
-                updated_at: t.updated_at as i64,
-                tenant_id: &tenant,
-                workspace_id: t.workspace_id.as_str(),
-                spec_path: t.spec_path.as_deref(),
-                spec_ref: t.spec_ref.as_deref(),
-                repo_id: t.repo_id.as_str(),
-                cancelled_at: t.cancelled_at.map(|v| v as i64),
-                cancelled_reason: t.cancelled_reason.as_deref(),
-                task_type: task_type_str,
-                order: t.order.map(|v| v as i32),
-                depends_on: &depends_on_json,
-                generation: t.generation as i32,
-            };
-            diesel::insert_into(tasks::table)
-                .values(&row)
-                .on_conflict(tasks::id)
-                .do_update()
-                .set((
-                    tasks::title.eq(row.title),
-                    tasks::description.eq(row.description),
-                    tasks::status.eq(row.status),
-                    tasks::priority.eq(row.priority),
-                    tasks::assigned_to.eq(row.assigned_to),
-                    tasks::parent_task_id.eq(row.parent_task_id),
-                    tasks::labels.eq(row.labels),
-                    tasks::branch.eq(row.branch),
-                    tasks::pr_link.eq(row.pr_link),
-                    tasks::updated_at.eq(row.updated_at),
-                    tasks::workspace_id.eq(row.workspace_id),
-                    tasks::spec_path.eq(row.spec_path),
-                    tasks::spec_ref.eq(row.spec_ref),
-                    tasks::repo_id.eq(row.repo_id),
-                    tasks::cancelled_at.eq(row.cancelled_at),
-                    tasks::cancelled_reason.eq(row.cancelled_reason),
-                    tasks::task_type.eq(row.task_type),
-                    tasks::order.eq(row.order),
-                    tasks::depends_on.eq(row.depends_on),
-                    tasks::generation.eq(row.generation),
-                ))
-                .execute(&mut *conn)
-                .context("insert task")?;
-            Ok(())
+            upsert_task_txn(&mut conn, &t, &tenant)
         })
         .await?
     }

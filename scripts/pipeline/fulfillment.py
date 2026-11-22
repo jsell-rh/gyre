@@ -67,10 +67,6 @@ def reconcile(store, checkout, base):
             # completed receipt remain intact; the cleanup reconciler purges it.
             store.db.execute("UPDATE work SET state='obsolete',token=token+1 WHERE task=? AND generation=? AND stage='verify' AND state IN ('ready','retry','claimed') AND json_extract(input,'$.candidate')=?",
                 (task['name'],task['generation'],data['candidate']))
-            lane=store.setting('integration_lane')
-            if lane and lane['task']==task['name']:
-                store.db.execute("DELETE FROM settings WHERE key='integration_lane'")
-                store.event('integration_released',{'reason':'already verified upstream'},task['name'])
             store.event('implementation_already_upstream',proof,task['name'])
             resolved.append(task['name'])
     return resolved

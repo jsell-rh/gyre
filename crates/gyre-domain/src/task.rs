@@ -101,7 +101,7 @@ impl Task {
             pr_link: None,
             spec_path: None,
             spec_ref: None,
-            workspace_id: Id::new("default"),
+            workspace_id: crate::bootstrap_workspace(),
             repo_id: Id::new(""),
             cancelled_at: None,
             cancelled_reason: None,

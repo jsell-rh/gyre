@@ -40,6 +40,24 @@ pub struct SpawnAgentRequest {
     pub agent_type: Option<String>,
     /// For interrogation agents: SHA-256 of the original agent's conversation to load as context.
     pub conversation_sha: Option<String>,
+    /// Persona this agent runs, as a bare name (e.g. "security" — the form
+    /// the spec manifest's `gates:` entries use). Recorded at spawn time in
+    /// the `agent_personas` KV namespace — the persona source
+    /// `build_agent_context` and the manifest-gate persona checks read
+    /// (spec-registry.md §16). Validated fail-closed at spawn: the name
+    /// must resolve to an Approved persona in the spawn's scope chain
+    /// (`resolve_persona_in_chain`, same posture as `persona_slug`) — the
+    /// namespace feeds the manifest gates' persona check, so an unvalidated
+    /// writer would let any spawn-capable caller mint a gate-satisfiable
+    /// persona identity. Optional for backward compatibility.
+    #[serde(default)]
+    pub persona: Option<String>,
+    /// Persona slug to bind to this agent (platform-model.md §4.3): resolved
+    /// nearest-scope-wins (repo → workspace → tenant), must be Approved, and
+    /// its system prompt is injected as `GYRE_PROMPT_PERSONA`. Fail-closed: a
+    /// slug that does not resolve to an Approved persona rejects the spawn.
+    #[serde(default)]
+    pub persona_slug: Option<String>,
 }
 
 /// JWT TTL for interrogation agents: 30 minutes (HSI §4).
@@ -61,6 +79,17 @@ pub struct SpawnAgentResponse {
     /// SHA256 of the workspace's meta-spec set at spawn time, for provenance (M32).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub meta_spec_set_sha: Option<String>,
+    /// The session's X.509-SVID chain (PEM, leaf first; identity-security.md
+    /// Layer 1). Public certificate material — the workload also receives it
+    /// (with the private key) in its `GYRE_SVID_PEM` / `GYRE_SVID_KEY`
+    /// environment variables and presents it on the attestation path.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub svid_pem: Option<String>,
+    /// The session's SPIFFE ID
+    /// (`spiffe://{trust-domain}/agent/{role}/session/{jwt sub}`, the
+    /// session segment being the agent's JWT subject `agent:<uuid>`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spiffe_id: Option<String>,
     /// Whether the compute-target process launch succeeded
     /// (agent-runtime.md §1 Phase 7 spawn-failure handling). False means
     /// the agent record exists but no process is running.
@@ -194,7 +223,7 @@ fn interrogation_policies_for(agent_id: &str, now: u64) -> Vec<Policy> {
             enabled: true,
             immutable: false,
             built_in: false,
-            created_by: "system".to_string(),
+            created_by: Id::new("system"),
             created_at: now,
             updated_at: now,
         },
@@ -217,7 +246,7 @@ fn interrogation_policies_for(agent_id: &str, now: u64) -> Vec<Policy> {
             enabled: true,
             immutable: false,
             built_in: false,
-            created_by: "system".to_string(),
+            created_by: Id::new("system"),
             created_at: now,
             updated_at: now,
         },
@@ -247,7 +276,7 @@ fn interrogation_policies_for(agent_id: &str, now: u64) -> Vec<Policy> {
             enabled: true,
             immutable: false,
             built_in: false,
-            created_by: "system".to_string(),
+            created_by: Id::new("system"),
             created_at: now,
             updated_at: now,
         },
@@ -369,7 +398,221 @@ pub async fn cleanup_jj_workspace(
     }
 }
 
+/// Tear down an agent's worktrees on a terminal path — the ONE shared
+/// teardown for every path where the agent's work is terminally complete
+/// (agent-workflow.md §Parallel Work via Worktrees: "worktrees are ephemeral
+/// — created at task start, cleaned up on completion"): the stale-agent Dead
+/// transition, the admin kill, task Done after MR merge (the Ralph-loop
+/// watcher), the Phase 7 iteration ceiling, fail_agent, and task
+/// cancellation.
+///
+/// This is the real VCS operation, not just a DB row delete: each worktree's
+/// jj workspace is forgotten from the repo's shared jj checkout and its
+/// working-copy directory removed ([`cleanup_jj_workspace`]), the plain-git
+/// worktree is removed via the git_ops port, and only then is the
+/// `agent_worktrees` DB record deleted. The pushed branch, the MR, the
+/// commits, and the snapshot refs stay intact server-side — only the
+/// working copy and its record go.
+///
+/// Ordering contract: snapshot refs are written against the bare repo (not
+/// the worktree) at completion, and callers must capture session end state
+/// (`agent_sessions::end_session` observes the worktree's real branch and
+/// dirty state) BEFORE invoking this — the working copy is that
+/// observation's data source. Ralph-loop gate-failure respawns REUSE the
+/// worktree (`relaunch_agent_session`), so this must never fire at
+/// MR-creation completion — only on terminal states.
+pub async fn cleanup_agent_worktrees(state: &AppState, agent_id: &Id) {
+    let worktrees = match state.worktrees.find_by_agent(agent_id).await {
+        Ok(wts) => wts,
+        Err(e) => {
+            tracing::warn!(
+                agent_id = %agent_id,
+                "worktree cleanup: find_by_agent failed: {e}"
+            );
+            return;
+        }
+    };
+    for wt in worktrees {
+        if let Ok(Some(repo)) = state.repos.find_by_id(&wt.repository_id).await {
+            // Plain-git worktree removal via the git_ops port FIRST, while
+            // the working copy still exists: `git worktree remove` deletes
+            // the directory AND its administrative metadata (the registered
+            // entry under .git/worktrees) in one real VCS operation. A
+            // plain-git worktree is not a jj workspace, so the jj forget
+            // below just warns; a jj workspace is not a registered git
+            // worktree, so this call just warns — each kind is torn down by
+            // its own operation.
+            if let Err(e) = state.git_ops.remove_worktree(&repo.path, &wt.path).await {
+                tracing::warn!("remove_worktree failed for agent {agent_id}: {e}");
+            }
+            // jj workspace teardown (source-control.md §4): forget the
+            // workspace from the shared jj checkout and remove the working
+            // copy dir (also the filesystem backstop when the git removal
+            // above could not run — e.g. a dirty plain-git worktree that
+            // `git worktree remove` refuses without --force).
+            cleanup_jj_workspace(
+                state,
+                &agent_id.to_string(),
+                &repo.path,
+                &wt.path,
+                &format!("agent-{agent_id}"),
+            )
+            .await;
+        }
+        let _ = state.worktrees.delete(&wt.id).await;
+    }
+}
+
+/// Terminal worktree teardown for a CANCELLED task
+/// (agent-workflow.md §Parallel Work via Worktrees: a cancelled task's work
+/// is terminally complete — platform-model.md §Task Status: "Cancelled …
+/// terminal — cannot be re-opened"). Resolves every agent that worked the
+/// task — the assignee plus any agent whose current task is this task —
+/// captures each agent's session end state (BEFORE removing the working
+/// copy it observes), then tears the worktrees down via
+/// [`cleanup_agent_worktrees`]. Shared by every task-cancellation surface
+/// (the HTTP status endpoint, the MCP task-update tool, repo archival, spec
+/// rejection) so none can drift.
+pub async fn cleanup_worktrees_for_task(state: &Arc<AppState>, task: &gyre_domain::Task) {
+    let mut agent_ids: Vec<Id> = Vec::new();
+    if let Some(assignee) = &task.assigned_to {
+        agent_ids.push(assignee.clone());
+    }
+    if let Ok(agents) = state.agents.list().await {
+        for agent in agents {
+            if agent.current_task_id.as_ref() == Some(&task.id) && !agent_ids.contains(&agent.id) {
+                agent_ids.push(agent.id.clone());
+            }
+        }
+    }
+    for agent_id in agent_ids {
+        let Ok(Some(agent)) = state.agents.find_by_id(&agent_id).await else {
+            continue;
+        };
+        // Session capture before working-copy removal (source-control.md
+        // §Agent-to-Commit Tracking): records the worktree's real current
+        // branch and dirty state while it still exists. Best-effort no-op
+        // when no session is open.
+        crate::agent_sessions::end_session(state, &agent).await;
+        cleanup_agent_worktrees(state, &agent_id).await;
+    }
+}
+
 // ── Handlers ──────────────────────────────────────────────────────────────────
+
+// ── Shared agent-process launch ──────────────────────────────────────────
+
+/// Launch an agent's runtime process on its resolved compute target and
+/// record the resulting workload attestation (G10 + M19.4).
+///
+/// This is the platform's single agent-process execution path, shared by the
+/// task-driven spawn path (`spawn_agent_core`) and the forge-spawned gate
+/// agents (`gate_executor::spawn_manifest_gate_agent`, spec-registry.md §16):
+/// it dispatches to the concrete `ComputeTarget` implementation (container /
+/// ssh / kubernetes / local), launches `command` with the caller-built
+/// `container_env` — which must carry the agent's `GYRE_AUTH_TOKEN`, the only
+/// channel through which a launched runtime receives its credentials —
+/// registers the process handle in the process registry (with its exit
+/// monitor) via `register_spawned_agent`, and writes the agent's workload
+/// attestation record from the captured PID / container id / image so the
+/// agent's reviews can satisfy attestation-level constraints.
+///
+/// Best-effort per branch: a failed container/ssh/local launch is logged and
+/// leaves the attestation without a PID. Returns `Err` only for the SSH
+/// container-mode agent-name rejection (shell-injection guard — `spawn_agent_core`
+/// already applies it before any state is written; the arm-level check keeps
+/// the invariant for callers that don't go through `spawn_agent_core`, like
+/// the forge-spawned gate agents); on success returns the spawned container
+/// id, if any (surfaced in the spawn response).
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn launch_agent_workload(
+    state: &Arc<AppState>,
+    agent: &Agent,
+    resolved_target_config: Option<super::compute::ComputeTargetConfig>,
+    command: String,
+    args: Vec<String>,
+    mut container_env: std::collections::HashMap<String, String>,
+    work_dir: String,
+    compute_target_label: String,
+    spiffe_role: &str,
+) -> Result<Option<String>, ApiError> {
+    // identity-security.md Layer 1: issue the session's X.509-SVID before
+    // dispatch so the workload receives it in its environment
+    // (GYRE_SVID_PEM / GYRE_SVID_KEY / GYRE_SPIFFE_ID). Issuance is gated
+    // on the spawn-time authorization evidence this path already holds
+    // (post-ABAC spawn, resolved compute target, stack evidence below); a
+    // failed issuance fails the launch closed — an unattested workload is
+    // never spawned silently.
+    // Stack evidence: a manifest-declared stack (GYRE_STACK_HASH already in
+    // the environment, e.g. a gate's `stack_hash`) wins; otherwise resolve
+    // from the session's authorized launch configuration.
+    let stack_evidence = match container_env.get("GYRE_STACK_HASH") {
+        Some(existing) if !existing.is_empty() => existing.clone(),
+        _ => {
+            crate::spiffe::resolve_session_stack_evidence(
+                state,
+                &agent.id.to_string(),
+                &compute_target_label,
+                None,
+                None,
+                Some(spiffe_role),
+            )
+            .await
+        }
+    };
+    let svid = crate::spiffe::issue_session_svid(
+        state,
+        &agent.id.to_string(),
+        spiffe_role,
+        &compute_target_label,
+        &stack_evidence,
+    )
+    .await
+    .map_err(ApiError::Internal)?;
+    // The gate workload presents this stack fingerprint on the attestation
+    // path (same contract as the spawn path's GYRE_STACK_HASH injection).
+    container_env.insert("GYRE_STACK_HASH".to_string(), stack_evidence.clone());
+    let svid_record = &svid.record;
+    container_env.insert("GYRE_SPIFFE_ID".to_string(), svid_record.spiffe_id.clone());
+    container_env.insert("GYRE_SVID_PEM".to_string(), svid_record.chain_pem.clone());
+    // The SVID private key is handed to the workload (the SVID = leaf +
+    // key, per the SPIFFE X.509-SVID specification); the server retains
+    // only the record above.
+    container_env.insert("GYRE_SVID_KEY".to_string(), svid.private_key_pem.clone());
+
+    let dispatch = dispatch_agent_launch(
+        state,
+        agent,
+        &resolved_target_config,
+        &command,
+        &args,
+        &container_env,
+        &work_dir,
+    )
+    .await?;
+
+    // Workload attestation record (M19.4 metadata + the session's SVID
+    // identity). Metadata only — verification is the SVID surface in
+    // `spiffe::verify_workload_identity`.
+    let att = workload_attestation::attest_agent_with_container(
+        &agent.id.to_string(),
+        dispatch.pid,
+        &compute_target_label,
+        &svid_record.stack_fingerprint,
+        dispatch.container_id.clone(),
+        dispatch.container_image.clone(),
+        Some(svid_record.spiffe_id.clone()),
+        Some(svid_record.serial.clone()),
+    );
+    if let Ok(json) = serde_json::to_string(&att) {
+        let _ = state
+            .kv_store
+            .kv_set("workload_attestations", &agent.id.to_string(), json)
+            .await;
+    }
+
+    Ok(dispatch.container_id)
+}
 
 /// POST /api/v1/agents/spawn
 ///
@@ -391,6 +634,53 @@ pub(crate) async fn spawn_agent_core(
     // fails to create, the just-created agent record and its token are
     // deleted (see both rollback paths below), so a failed spawn leaves no
     // orphaned entities.
+    // identity-security.md §Task-Scoped JWT Claims — hard task-scope
+    // boundary (spawn surface): an agent principal may spawn onto a target
+    // task only when its own token authorizes that task — the target
+    // matching the caller's `task_id` claim, or the token carrying an
+    // explicit spawn scope (`repo:{name}:spawn` / `workspace:{id}:spawn`)
+    // covering the target task's repo/workspace (the same claim-level
+    // right the MCP gyre_spawn_worker path validates via
+    // validate_tool_scope). Without this check the spawn surface is
+    // contained only by the absence of 'spawn' from the Agent-role builtin
+    // ABAC allow — a policy default, not code. Human/system/orchestrator
+    // principals keep their existing rights (agent_task_claim is None for
+    // them). A target task that does not resolve skips this gate and fails
+    // in the existence check below with its normal error.
+    if let Some(claim) = auth.agent_task_claim() {
+        if req.task_id != claim {
+            let spawn_scope_covers = match state.tasks.find_by_id(&Id::new(&req.task_id)).await {
+                Ok(Some(task)) => {
+                    let repo_spawn_right = state
+                        .repos
+                        .find_by_id(&task.repo_id)
+                        .await
+                        .ok()
+                        .flatten()
+                        .map(|r| {
+                            auth.scope
+                                .iter()
+                                .any(|s| *s == format!("repo:{}:spawn", r.name))
+                        })
+                        .unwrap_or(false);
+                    let ws_spawn_right = auth
+                        .scope
+                        .iter()
+                        .any(|s| *s == format!("workspace:{}:spawn", task.workspace_id));
+                    repo_spawn_right || ws_spawn_right
+                }
+                // Missing task / lookup failure: the existence check
+                // below rejects the spawn — no scope decision needed.
+                _ => true,
+            };
+            if !spawn_scope_covers {
+                return Err(ApiError::Forbidden(format!(
+                    "agent token is scoped to task {claim}; cannot spawn onto task {}",
+                    req.task_id
+                )));
+            }
+        }
+    }
     // Verify repo exists
     let repo = state
         .repos
@@ -408,8 +698,14 @@ pub(crate) async fn spawn_agent_core(
         return Err(ApiError::Forbidden(reason));
     }
 
-    // M22.2: Budget enforcement — check workspace concurrent-agent and daily limits.
-    super::budget::check_spawn_budget(&state, &repo.workspace_id.to_string())
+    // M22.2 / agent-runtime.md §4: Budget enforcement — check workspace
+    // concurrent-agent and daily limits (dependent-weighted when the repo
+    // inherits the workspace limit, see budget.rs), then the repo-level
+    // budget (override, or the weighted inherited limit).
+    super::budget::check_spawn_budget_for_repo(state, &repo)
+        .await
+        .map_err(ApiError::TooManyRequests)?;
+    super::budget::check_repo_spawn_budget(state, &repo)
         .await
         .map_err(ApiError::TooManyRequests)?;
 
@@ -450,12 +746,31 @@ pub(crate) async fn spawn_agent_core(
     }
 
     // Fetch workspace for compute target resolution and clone URL.
-    let workspace = state
-        .workspaces
-        .find_by_id(&repo.workspace_id)
-        .await
-        .ok()
-        .flatten();
+    //
+    // §1 Token Scoping: the workspace row is also the source of the tenant
+    // scope claim for the agent JWT. A missing row means the repo carries a
+    // dangling workspace reference (POST /api/v1/repos still accepts any
+    // workspace_id, so the state is reachable via the public API). Fail the
+    // spawn closed — never mint an unscoped legacy token that would bypass
+    // the MCP scope gate — mirroring the orchestrator spawn path
+    // (orchestrator.rs) and the stale-restart path (stale_agents.rs).
+    let workspace = match state.workspaces.find_by_id(&repo.workspace_id).await {
+        Ok(Some(ws)) => Some(ws),
+        Err(e) => {
+            return Err(ApiError::Internal(anyhow::anyhow!(
+                "workspace lookup for repo {}: {e}",
+                repo.id
+            )));
+        }
+        Ok(None) => {
+            return Err(ApiError::NotFound(format!(
+                "workspace {} referenced by repo {} does not exist; the tenant scope for \
+                 the agent token cannot be determined — fix the repo's workspace \
+                 reference before spawning",
+                repo.workspace_id, repo.id
+            )));
+        }
+    };
 
     // Resolve compute target via DB: request ID → workspace assignment → tenant default.
     // Tenant guard (task-117 F2): a request-supplied compute_target_id must exist
@@ -554,10 +869,86 @@ pub(crate) async fn spawn_agent_core(
         }
     }
 
+    // platform-model.md §4.3: resolve the spawn's requested persona through
+    // the repo → workspace → tenant chain and bind it to the agent row.
+    // Fail-closed on a slug that does not resolve to an Approved persona
+    // (same posture as orchestrator spawns): an agent styled by a missing or
+    // unapproved persona is exactly what the spec forbids.
+    let persona: Option<gyre_domain::Persona> = match &req.persona_slug {
+        Some(slug) if !slug.is_empty() => {
+            let ws = workspace.as_ref().ok_or_else(|| {
+                ApiError::InvalidInput(format!(
+                    "cannot resolve persona '{slug}': workspace {} unresolvable",
+                    repo.workspace_id
+                ))
+            })?;
+            let prompt_scope = crate::api::prompts::PromptScope {
+                tenant_id: Some(ws.tenant_id.clone()),
+                workspace_id: repo.workspace_id.clone(),
+                repo_id: Some(repo.id.clone()),
+                task_id: Some(Id::new(&req.task_id)),
+                agent_id: None,
+            };
+            Some(
+                crate::api::prompts::resolve_persona_in_chain(state, slug, &prompt_scope)
+                    .await
+                    .map_err(ApiError::InvalidInput)?,
+            )
+        }
+        _ => None,
+    };
+
+    // Bare persona name (review repair, manifest gates): the `persona`
+    // field feeds the `agent_personas` KV namespace — the exact trust
+    // source `evaluate_persona_reviews` (gate_executor) uses to decide
+    // whether a reviewer runs a manifest gate's required persona. A
+    // caller-supplied string recorded verbatim would let any
+    // spawn-capable caller (a repo orchestrator via gyre_spawn_worker, any
+    // Developer via the REST route) mint a gate-satisfiable persona
+    // identity: spawn a worker labeled `security`, self-approve the MR,
+    // merge — the weakened-persona scenario the manifest gate constraints
+    // exist to prevent. Fail-closed exactly like `persona_slug`: the name
+    // must resolve to an Approved persona in the spawn's scope chain, and
+    // validation runs BEFORE any state is created (agent row, token,
+    // worktree, task assignment) so a rejected spawn leaves nothing
+    // behind. The comparison a manifest gate makes is against the persona
+    // string, so the requested name is what gets recorded — but only once
+    // it has resolved to a human-approved persona. The forge's own
+    // manifest-gate writer (`spawn_manifest_gate_agent`) is server-
+    // internal and sources the persona from the reviewed manifest — it
+    // does not pass through this validation.
+    let bare_persona: Option<String> = match req.persona.as_deref() {
+        Some(name) if !name.is_empty() => {
+            let ws = workspace.as_ref().ok_or_else(|| {
+                ApiError::InvalidInput(format!(
+                    "cannot resolve persona '{name}': workspace {} unresolvable",
+                    repo.workspace_id
+                ))
+            })?;
+            let prompt_scope = crate::api::prompts::PromptScope {
+                tenant_id: Some(ws.tenant_id.clone()),
+                workspace_id: repo.workspace_id.clone(),
+                repo_id: Some(repo.id.clone()),
+                task_id: Some(Id::new(&req.task_id)),
+                agent_id: None,
+            };
+            crate::api::prompts::resolve_persona_in_chain(state, name, &prompt_scope)
+                .await
+                .map_err(ApiError::InvalidInput)?;
+            Some(name.to_string())
+        }
+        _ => None,
+    };
+
     // Create agent with Active status
     let mut agent = Agent::new(new_id(), req.name, now);
     agent.parent_id = req.parent_id.map(Id::new);
     agent.spawned_by = Some(auth.agent_id.clone());
+    // §4.3 persona binding: persisted on the agent row so system://persona
+    // can resolve it without a slug argument later.
+    if let Some(p) = &persona {
+        agent.persona_id = Some(p.id.clone());
+    }
     if let Some(behavior) = req.disconnected_behavior {
         agent.disconnected_behavior = behavior;
     }
@@ -574,6 +965,25 @@ pub(crate) async fn spawn_agent_core(
     } else {
         state.agent_jwt_ttl_secs
     };
+
+    // Pre-mint a JWT without workload claims so it can be injected into the
+    // container environment at spawn time.  After spawn we create the workload
+    // attestation record (stored in state.workload_attestations) which is
+    // queryable via GET /api/v1/agents/{id}/workload.
+    //
+    // §1 Token Scoping: the hierarchy claims come from the spawn context —
+    // repo → workspace → tenant. A worker agent's token is scoped to its
+    // repo (`repo:{name}:write`). The workspace row was resolved (and its
+    // existence enforced) before the agent record was created, so the
+    // tenant scope is always determined here; a mint failure fails the
+    // spawn closed — an agent that cannot receive a scoped token is never
+    // downgraded to an unscoped legacy token that would bypass the MCP
+    // scope gate.
+    let ws = workspace.as_ref().ok_or_else(|| {
+        ApiError::Internal(anyhow::anyhow!(
+            "workspace resolved before agent creation but missing at token mint"
+        ))
+    })?;
 
     // agent-runtime.md §3 (Nix-Based Image Build): "The image hash is
     // recorded in workload attestation (`wl_image_hash` JWT claim)." The
@@ -606,34 +1016,130 @@ pub(crate) async fn spawn_agent_core(
         _ => None,
     };
 
-    // Pre-mint a JWT so it can be injected into the container environment at
-    // spawn time.  After spawn we create the workload attestation record
-    // (stored in state.workload_attestations) which is queryable via
-    // GET /api/v1/agents/{id}/workload.
+    // Pre-mint a JWT carrying the worker's repo scope so `subject.repo_scope`
+    // (§Attributes, source "Agent OIDC claim") is real on every request the
+    // agent makes, plus the wl_* workload claims. The workload claims now
+    // reflect the SVID-backed attestation (identity-security.md Layer 1):
+    // `wl_stack_hash` is the SAME stack evidence the SVID issuance and the
+    // workload attestation record bind (it is read once here, before the
+    // launch, and reused below), `wl_compute_target` is the resolved
+    // authorized target, and `wl_hostname` the COMPUTE TARGET's host —
+    // for an Ssh spawn that is the configured remote host, not the forge
+    // server's own hostname (identity-security.md claims table: "Hostname
+    // of the compute target (present when spawned on remote target)").
+    // Further detail
+    // is queryable via GET /api/v1/agents/{id}/workload. Under §1 Token
+    // Scoping the mint also carries the full hierarchy context (tenant,
+    // workspace, repo) and the fine-grained `repo:{name}:write` scope list.
+    //
+    // Task-263 (identity-security.md §Task-Scoped JWT Claims): `persona` is
+    // populated from the spawn request's validated persona/persona_slug —
+    // the request carries and validates a persona through
+    // resolve_persona_in_chain, so the mint reflects it instead of running
+    // the worker persona-less.
+    //
+    // Layer-1 stack evidence (identity-security.md): resolved ONCE here —
+    // the JWT `wl_stack_hash` claim, the SVID issuance, and the workload
+    // attestation record all carry this same value (see
+    // `spiffe::resolve_session_stack_evidence`).
+    let spawn_compute_target_label = resolved_ct_entity
+        .as_ref()
+        .map(|e| e.id.to_string())
+        .unwrap_or_else(|| "local".to_string());
+    let spawn_stack_evidence = crate::spiffe::resolve_session_stack_evidence(
+        state,
+        &agent.id.to_string(),
+        &spawn_compute_target_label,
+        resolved_ct_entity.as_ref(),
+        wl_image_hash.as_deref(),
+        bare_persona.as_deref(),
+    )
+    .await;
+    let wl_stack_hash = Some(spawn_stack_evidence.clone());
+    // `wl_hostname` — the hostname of the compute target: the configured
+    // remote host for an Ssh target; the local host for local/Container
+    // spawns (the workload runs on this machine, so the forge hostname
+    // IS the compute-target hostname); honestly absent for Kubernetes
+    // (the workload runs in a cluster — no single host fact exists at
+    // mint time, and minting the forge hostname here would fabricate the
+    // compute target's identity).
+    let wl_hostname = match resolved_ct_entity.as_ref() {
+        Some(e) if e.target_type == ComputeTargetType::Ssh => e
+            .config
+            .get("host")
+            .and_then(|h| h.as_str())
+            .map(|h| h.to_string()),
+        Some(e) if e.target_type == ComputeTargetType::Kubernetes => None,
+        _ => Some(crate::workload_attestation::read_hostname()),
+    };
+    let wl_compute_target = Some(spawn_compute_target_label.clone());
+    let mint_persona = persona
+        .as_ref()
+        .map(|p| p.slug.clone())
+        .or_else(|| bare_persona.clone());
     let token = state
         .agent_signing_key
-        .mint_with_workload(
+        .mint_worker_scoped(
             &agent.id.to_string(),
             &req.task_id,
             &auth.agent_id,
             &state.base_url,
             jwt_ttl,
-            None,
-            None,
-            None,
-            None,
-            None,
+            &ws.tenant_id.to_string(),
+            &repo.workspace_id.to_string(),
+            &req.repo_id,
+            &repo.name,
+            // The spawn request's validated persona (persona_slug resolved
+            // through the scope chain, or the validated bare persona name)
+            // — identity-security.md §Task-Scoped JWT Claims `persona`.
+            mint_persona.as_deref(),
+            // identity-security.md attestation levels: 1=raw subprocess,
+            // 2=CLI-managed, 3=Gyre-managed container with attestation.
+            // Every spawn-minted JWT carries attestation_level (Task-Scoped
+            // JWT Claims reference): no target (None) is a plain local
+            // subprocess — level 1, not an absent claim. An absent claim
+            // leaves subject.attestation_level unset at ABAC evaluation, so
+            // Deny policies keyed on the least-attested class would
+            // silently miss raw-subprocess agents.
+            Some(
+                resolved_ct_entity
+                    .as_ref()
+                    .map_or(1u8, |ct| match ct.target_type {
+                        ComputeTargetType::Container => 3,
+                        ComputeTargetType::Ssh => 2,
+                        // Kubernetes falls back to 1 until the runtime
+                        // reports workload attestations for pods
+                        // (tracked by task-129).
+                        ComputeTargetType::Kubernetes => 1,
+                    }),
+            ),
+            wl_hostname,
+            wl_compute_target,
+            wl_stack_hash,
             wl_image_hash,
         )
-        .unwrap_or_else(|e| {
-            tracing::error!("JWT pre-mint failed, falling back to UUID token: {e}");
-            uuid::Uuid::new_v4().to_string()
-        });
+        .map_err(|e| ApiError::Internal(anyhow::anyhow!("agent token mint: {e}")))?;
     // Store now so the container can authenticate immediately upon start.
+    // (§1: mint failure fails the spawn closed — a fallback UUID token would
+    // carry no scope list, degrading the worker to pre-§1 containment.)
     let _ = state
         .kv_store
         .kv_set("agent_tokens", &agent.id.to_string(), token.clone())
         .await;
+
+    // Record the agent's persona (spec-registry.md §16): the
+    // `agent_personas` KV namespace is the persona source
+    // `build_agent_context` and the manifest-gate persona checks read —
+    // spawn time is its production writer. `bare_persona` is the
+    // validated form of `req.persona` (resolved to an Approved persona
+    // above, before any state was created) — recording the raw request
+    // field here would bypass that validation.
+    if let Some(persona) = &bare_persona {
+        let _ = state
+            .kv_store
+            .kv_set("agent_personas", &agent.id.to_string(), persona.clone())
+            .await;
+    }
 
     // HSI §4: For interrogation agents — create scoped ABAC policies and store
     // the conversation context for the conversation://context MCP resource.
@@ -787,14 +1293,14 @@ pub(crate) async fn spawn_agent_core(
                         // The workspace's working copy IS the agent's new
                         // change — describe it so the change is named.
                         match state.jj_ops.jj_new(&jj_workspace_path, &description).await {
-                            Ok(cid) => {
+                            Ok(new_change) => {
                                 tracing::info!(
                                     agent_id = %agent.id,
                                     workspace = %jj_workspace_path,
-                                    change_id = %cid,
+                                    change_id = %new_change.change_id,
                                     "jj workspace provisioned for agent"
                                 );
-                                change_id = Some(cid);
+                                change_id = Some(new_change.change_id);
                             }
                             Err(e) => {
                                 tracing::warn!(
@@ -911,6 +1417,13 @@ pub(crate) async fn spawn_agent_core(
         None
     };
 
+    // source-control.md §Agent-to-Commit Tracking: one session per context
+    // window — the spawn starts session 1. Port-backed, so it survives a
+    // server restart; commits pushed while it is open are stamped with
+    // this session's id. The initial branch is the spawn-time branch
+    // (AgentWorktree.branch).
+    crate::agent_sessions::start_session(state, &agent.id, &repo.id, &req.branch).await;
+
     // Agent-runtime §2: assemble the meta-spec prompt set for this agent —
     // required tenant → required workspace → spec-level bindings at pinned
     // versions. The set is injected into the agent environment and recorded
@@ -927,6 +1440,15 @@ pub(crate) async fn spawn_agent_core(
                 set_sha: prompt_set.set_sha.clone(),
                 assembled_at: now,
                 meta_specs_used: prompt_set.sections.iter().map(|s| s.used.clone()).collect(),
+                // agent-runtime.md §5: the rendered meta-spec system prompt
+                // (the persona section) — recorded verbatim so the MCP
+                // `system://persona` prompt serves exactly what the agent
+                // received in `GYRE_META_SPEC_PROMPT` at spawn. The
+                // protocol section is system-managed and served separately
+                // via `system://protocol` (`GYRE_PROTOCOL_PROMPT`).
+                rendered_prompt: Some(crate::prompt_assembly::render_system_prompt(
+                    &prompt_set.sections,
+                )),
             },
         )
         .await;
@@ -941,19 +1463,21 @@ pub(crate) async fn spawn_agent_core(
         task.generation = task.generation.saturating_add(1);
     }
     task.assigned_to = Some(agent.id.clone());
+    let pre_assign_status = task.status.clone();
     if task.status == TaskStatus::Backlog {
         let _ = task.transition_status(TaskStatus::InProgress);
     }
     task.updated_at = now;
     state.tasks.update(&task).await?;
+    // task.status_changed analytics event (analytics.md §Auto-Emitted
+    // Events: "Task transitions status") — the spawn auto-advance
+    // Backlog→InProgress is a production transition and must record,
+    // like the HTTP status endpoint and MCP update_task.
+    if task.status != pre_assign_status {
+        super::analytics::record_task_status_changed(state, &task, &pre_assign_status).await;
+    }
 
-    // Build clone URL: {base_url}/git/{workspace_slug}/{repo_name}
-    // Reuse the already-fetched workspace; fall back to workspace_id if not found.
-    let ws_slug = workspace
-        .as_ref()
-        .map(|ws| ws.slug.clone())
-        .unwrap_or_else(|| repo.workspace_id.to_string());
-    let clone_url = format!("{}/git/{}/{}", state.base_url, ws_slug, repo.name);
+    let clone_url = build_clone_url(state, workspace.as_ref(), &repo);
 
     // Launch a real process and monitor its lifecycle. Shared with the
     // Ralph-loop re-spawn path (agent-runtime.md §1 Phase 7) so first
@@ -962,6 +1486,7 @@ pub(crate) async fn spawn_agent_core(
         state,
         &AgentLaunchCtx {
             agent: agent.clone(),
+            stack_fingerprint: spawn_stack_evidence.clone(),
             workspace: workspace.clone(),
             repo: repo.clone(),
             task: task.clone(),
@@ -972,36 +1497,30 @@ pub(crate) async fn spawn_agent_core(
             resolved_ct_entity: resolved_ct_entity.clone(),
             jj_workspace_path: jj_workspace_path.clone(),
             plain_worktree_path: worktree_path.clone(),
+            persona_name: bare_persona.clone(),
+            persona: persona.clone(),
+            is_interrogation,
         },
     )
-    .await;
+    .await
+    .map_err(|e| ApiError::Internal(anyhow::anyhow!("agent launch: {e:#}")))?;
     let spawned_pid = launch.pid;
     let spawned_container_id = launch.container_id;
     let spawned_container_image = launch.container_image;
-    // G10 + M19.4: Create workload attestation now that we know the PID / container ID.
-    let att = {
-        // Retrieve the stack hash recorded by the agent (M14.1), if any.
-        let stack_hash = state
-            .kv_store
-            .kv_get("agent_stacks", &agent.id.to_string())
-            .await
-            .ok()
-            .flatten()
-            .and_then(|s| {
-                serde_json::from_str::<super::stack_attest::AgentStack>(&s)
-                    .ok()
-                    .map(|st| st.fingerprint())
-            })
-            .unwrap_or_default();
-        workload_attestation::attest_agent_with_container(
-            &agent.id.to_string(),
-            spawned_pid,
-            &launch.compute_target_label,
-            &stack_hash,
-            spawned_container_id.clone(),
-            spawned_container_image.clone(),
-        )
-    };
+    // Workload attestation record: M19.4 launch metadata plus the
+    // session's SVID identity issued inside `launch_agent_process`. The
+    // stack fingerprint is the SAME value the JWT `wl_stack_hash` claim
+    // carries (bound to the SVID-backed attestation record).
+    let att = workload_attestation::attest_agent_with_container(
+        &agent.id.to_string(),
+        spawned_pid,
+        &launch.compute_target_label,
+        &spawn_stack_evidence,
+        spawned_container_id.clone(),
+        spawned_container_image.clone(),
+        launch.spiffe_id.clone(),
+        launch.svid_serial.clone(),
+    );
     if let Ok(json) = serde_json::to_string(&att) {
         let _ = state
             .kv_store
@@ -1028,15 +1547,31 @@ pub(crate) async fn spawn_agent_core(
         .await;
     }
 
-    // Auto-track agent spawn
+    // Auto-track agent spawn (analytics.md §Auto-Emitted Events).
+    // The persona property reports the persona actually bound to this
+    // agent (platform-model.md §4.3 resolution of req.persona_slug);
+    // an unbound worker runs the `default-worker` bootstrap persona
+    // (agent-runtime.md §Bootstrap), which is the honest label for None.
+    let persona_label = persona
+        .as_ref()
+        .map(|p| p.slug.clone())
+        .unwrap_or_else(|| "default-worker".to_string());
     let ev = AnalyticsEvent::new(
         new_id(),
         "agent.spawned",
         Some(agent.id.to_string()),
-        serde_json::json!({ "task_id": req.task_id }),
+        serde_json::json!({
+            "task_id": req.task_id,
+            "compute_target": launch.compute_target_label,
+            "persona": persona_label,
+            "orchestrator_type": "worker",
+        }),
         now,
-    );
+    )
+    .with_scope(None, None, Some(&repo.workspace_id), Some(&repo.id));
     let _ = state.analytics.record(&ev).await;
+    // search.md §Searchable Entities: activity events are indexed on write.
+    crate::search_indexer::index(state, crate::search_indexer::activity_event_document(&ev)).await;
 
     // M22.2: Increment budget active-agent counter for the workspace.
     super::budget::increment_active_agents(state, &repo.workspace_id.to_string()).await;
@@ -1077,11 +1612,434 @@ pub(crate) async fn spawn_agent_core(
         jj_change_id,
         container_id: spawned_container_id,
         meta_spec_set_sha,
+        svid_pem: launch.svid_pem,
+        spiffe_id: launch.spiffe_id,
         process_launched: launch.launched,
     })
 }
 
 // ── Compute-target launch (shared by spawn + Ralph-loop re-spawn) ─────────────
+
+/// Outcome of the raw compute-target dispatch for one agent process:
+/// whether a process actually started, and the PID / container id / image
+/// digest captured for workload attestation.
+struct AgentLaunchDispatch {
+    launched: bool,
+    pid: Option<u32>,
+    container_id: Option<String>,
+    container_image: Option<String>,
+}
+
+/// The platform's single four-backend process dispatch (container / SSH /
+/// kubernetes / local auto-detect), shared by [`launch_agent_process`]
+/// (task-driven spawns and Ralph-loop re-spawns, which build the agent env
+/// from [`AgentLaunchCtx`]) and [`launch_agent_workload`] (callers that
+/// build the env themselves, like the forge-spawned gate agents —
+/// spec-registry.md §16).
+///
+/// Registers every successfully spawned process via
+/// [`register_spawned_agent`] (process registry + backend routing + exit
+/// monitor). Launch failure per arm is logged and reported as
+/// `launched: false` — the caller decides the failure policy.
+///
+/// Returns `Err` only for the SSH container-mode agent-name rejection
+/// (shell-injection guard, M19.5-A).
+#[allow(clippy::too_many_arguments)]
+async fn dispatch_agent_launch(
+    state: &Arc<AppState>,
+    agent: &Agent,
+    resolved_target_config: &Option<super::compute::ComputeTargetConfig>,
+    command: &str,
+    args: &[String],
+    container_env: &std::collections::HashMap<String, String>,
+    work_dir: &str,
+) -> Result<AgentLaunchDispatch, ApiError> {
+    let mut launched = false;
+    let spawned_pid: Option<u32>;
+    let spawned_container_id: Option<String>; // M19.1/M19.3/M19.4
+    let spawned_container_image: Option<String>; // M19.3/M19.4
+
+    let spawn_config = gyre_ports::SpawnConfig {
+        name: agent.name.clone(),
+        command: command.to_string(),
+        args: args.to_vec(),
+        env: container_env.clone(),
+        work_dir: work_dir.to_string(),
+    };
+
+    match &resolved_target_config {
+        Some(cfg) if cfg.target_type == "container" => {
+            // M19.1: Spawn via ContainerTarget.
+            let image = cfg.config["image"]
+                .as_str()
+                .unwrap_or("gyre-agent:latest")
+                .to_string();
+            let mut ct = gyre_adapters::compute::ContainerTarget::new(image.clone());
+            // Apply optional config overrides from the stored target config.
+            // G8: default --network=none (secure). Compute target config
+            // must explicitly set "network": "bridge" for agents that
+            // need to reach the server (clone, heartbeat, complete).
+            let network = cfg.config["network"].as_str().unwrap_or("none");
+            ct = ct.with_network(network);
+            if let Some(mem) = cfg.config["memory_limit"].as_str() {
+                ct = ct.with_memory_limit(mem);
+            }
+            if let Some(pids) = cfg.config["pids_limit"].as_u64() {
+                ct = ct.with_pids_limit(pids as u32);
+            }
+            if let Some(user) = cfg.config["user"].as_str() {
+                ct = ct.with_user(user);
+            }
+
+            match gyre_ports::ComputeTarget::spawn_process(&ct, &spawn_config).await {
+                Ok(handle) => {
+                    spawned_pid = handle.pid;
+                    launched = true;
+                    spawned_container_id = Some(handle.id.clone());
+                    // Workload-attestation image hash: the resolved
+                    // image digest (sha256:...), not the image name —
+                    // `derive_attestation_level` treats a non-empty
+                    // image_hash as a Level-3 "Gyre-managed runtime"
+                    // signal, so a bare tag must not inflate it.
+                    // Best-effort: no runtime / unresolvable image →
+                    // None (level stays 2).
+                    spawned_container_image = ct.image_digest().await.ok();
+
+                    // M19.3: Capture container audit record (best-effort).
+                    let runtime_str = cfg.config["runtime"]
+                        .as_str()
+                        .unwrap_or("docker")
+                        .to_string();
+                    let rec = container_audit::capture_spawn_audit(
+                        &agent.id.to_string(),
+                        &handle.id,
+                        &image,
+                        &runtime_str,
+                    )
+                    .await;
+                    let _ = state.container_audits.save(&rec).await;
+
+                    // M19.3: Emit AgentContainerSpawned event.
+                    state
+                        .emit_event(
+                            agent.workspace_id.clone(),
+                            gyre_common::message::Destination::Workspace(
+                                agent.workspace_id.clone(),
+                            ),
+                            gyre_common::message::MessageKind::AgentContainerSpawned,
+                            Some(serde_json::json!({
+                                "agent_id": agent.id.to_string(),
+                                "container_id": handle.id,
+                                "image": image,
+                                "runtime": runtime_str,
+                            })),
+                        )
+                        .await;
+
+                    // M23: Emit container_started audit event.
+                    {
+                        let ctx = crate::container_audit::AuditCtx {
+                            audit: state.audit.as_ref(),
+                            broadcast_tx: &state.audit_broadcast_tx,
+                            search: state.search.as_ref(),
+                        };
+                        crate::container_audit::emit_started(
+                            &ctx,
+                            &agent.id.to_string(),
+                            &handle.id,
+                            &image,
+                        )
+                        .await;
+                    }
+
+                    register_spawned_agent(
+                        state,
+                        agent,
+                        handle.clone(),
+                        SpawnBackend::Container(ct),
+                        resolved_target_config,
+                    )
+                    .await;
+                }
+                Err(e) => {
+                    spawned_pid = None;
+                    spawned_container_id = None;
+                    spawned_container_image = None;
+                    tracing::warn!(
+                        agent_id = %agent.id,
+                        "container spawn failed (best-effort): {e}. \
+                        If the image is missing, build it first: \
+                        `docker build -t gyre-agent:latest docker/gyre-agent/`."
+                    );
+                }
+            }
+        }
+        Some(cfg) if cfg.target_type == "ssh" => {
+            // agent-runtime.md §3 Supported Backends — SSH: "SSH to
+            // remote host, `docker run` there". SshDockerTarget runs
+            // docker on the remote host with the same security
+            // defaults as the container backend and tracks the remote
+            // *container* (not the short-lived docker client process):
+            // the handle id is the remote container ID, `kill_process`
+            // runs `docker rm --force` remotely, and `is_alive` runs
+            // `docker inspect` remotely.
+            //
+            // `container_mode: false` is the legacy M19.5 escape hatch
+            // (bare remote process via SshTarget) kept for configs that
+            // predate the spec default.
+            //
+            // NOTE: the agent-name charset/length validation for this
+            // arm lives at the top of spawn_agent_core, beside the
+            // duplicate-name check — it must run before any state is
+            // written (see the comment there).
+            let container_mode = cfg.config["container_mode"].as_bool().unwrap_or(true);
+
+            // Worktree path: local absolute path for bare remote mode;
+            // the remote container clones its own checkout into
+            // /workspace (entrypoint.sh), so /workspace is the workdir.
+            let remote_work_dir = if container_mode {
+                "/workspace".to_string()
+            } else {
+                work_dir.to_string()
+            };
+
+            // Remote spawn uses the same env-injected SpawnConfig; the
+            // ssh backend forwards env via `--env K=V` docker args.
+            let ssh_spawn_config = gyre_ports::SpawnConfig {
+                work_dir: remote_work_dir,
+                ..spawn_config.clone()
+            };
+
+            if container_mode {
+                // M19.5-A: validate agent name to prevent shell injection
+                // into the remote `docker run` command line.
+                // `spawn_agent_core` applies the same validation before any
+                // state is written; this arm-level check keeps the invariant
+                // for callers that don't route through it (forge-spawned
+                // gate agents) — it must reject before the remote container
+                // is created.
+                let safe_name = agent
+                    .name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.');
+                if !safe_name || agent.name.is_empty() || agent.name.len() > 63 {
+                    return Err(ApiError::InvalidInput(
+                        "agent name must be 1-63 chars of [a-zA-Z0-9._-] for container use"
+                            .to_string(),
+                    ));
+                }
+                let ssh_docker =
+                    gyre_adapters::compute::ssh::ssh_docker_target_from_config(&cfg.config);
+                match gyre_ports::ComputeTarget::spawn_process(&ssh_docker, &ssh_spawn_config).await
+                {
+                    Ok(handle) => {
+                        spawned_pid = handle.pid;
+                        launched = true;
+                        spawned_container_id = Some(handle.id.clone());
+                        // Resolved digest from the REMOTE docker daemon
+                        // (see container arm: image_hash must be a
+                        // digest, not a tag, to count as Level 3).
+                        spawned_container_image = ssh_docker.remote_image_digest().await.ok();
+                        register_spawned_agent(
+                            state,
+                            agent,
+                            handle.clone(),
+                            SpawnBackend::SshDocker(ssh_docker),
+                            resolved_target_config,
+                        )
+                        .await;
+                    }
+                    Err(e) => {
+                        spawned_pid = None;
+                        spawned_container_id = None;
+                        spawned_container_image = None;
+                        tracing::warn!(
+                            agent_id = %agent.id,
+                            "SSH docker spawn failed (best-effort): {e}"
+                        );
+                    }
+                }
+            } else {
+                // Legacy bare remote-process mode (M19.5).
+                let user = cfg.config["user"].as_str().unwrap_or("root").to_string();
+                let host = cfg.config["host"]
+                    .as_str()
+                    .unwrap_or("localhost")
+                    .to_string();
+                let mut ssh_target = gyre_adapters::compute::SshTarget::new(user, host);
+                if let Some(id_file) = cfg.config["identity_file"].as_str() {
+                    ssh_target = ssh_target.with_identity(id_file);
+                }
+                if let Some(port) = cfg.config["port"].as_u64() {
+                    ssh_target = ssh_target.with_port(port as u16);
+                }
+                if let Some(bin) = cfg.config["ssh_path"].as_str() {
+                    ssh_target = ssh_target.with_ssh_path(bin);
+                }
+                match gyre_ports::ComputeTarget::spawn_process(&ssh_target, &ssh_spawn_config).await
+                {
+                    Ok(handle) => {
+                        spawned_pid = handle.pid;
+                        launched = true;
+                        spawned_container_id = None;
+                        spawned_container_image = None;
+                        register_spawned_agent(
+                            state,
+                            agent,
+                            handle.clone(),
+                            SpawnBackend::SshBare(ssh_target),
+                            resolved_target_config,
+                        )
+                        .await;
+                    }
+                    Err(e) => {
+                        spawned_pid = None;
+                        spawned_container_id = None;
+                        spawned_container_image = None;
+                        tracing::warn!(
+                            agent_id = %agent.id,
+                            "SSH spawn failed (best-effort): {e}"
+                        );
+                    }
+                }
+            }
+        }
+        Some(cfg) if cfg.target_type == "kubernetes" => {
+            // agent-runtime.md §3: Kubernetes backend — create a Pod
+            // with the agent image. kill_process deletes the Pod;
+            // is_alive checks the Pod phase.
+            let k8s =
+                gyre_adapters::compute::kubernetes::kubernetes_target_from_config(&cfg.config);
+
+            // The Pod mounts no volume for the server-local worktree
+            // (build_pod_manifest emits no volumes), and the agent
+            // image clones its own checkout into /workspace
+            // (entrypoint.sh) — the image WorkingDir is /workspace, so
+            // a server-local absolute path as workingDir makes the
+            // container fail to start under CRI (runc chdir ENOENT).
+            // Mirror the SSH container arm: /workspace is the workdir.
+            let k8s_spawn_config = gyre_ports::SpawnConfig {
+                work_dir: "/workspace".to_string(),
+                ..spawn_config.clone()
+            };
+            match gyre_ports::ComputeTarget::spawn_process(&k8s, &k8s_spawn_config).await {
+                Ok(handle) => {
+                    spawned_pid = handle.pid;
+                    launched = true;
+                    spawned_container_id = Some(handle.id.clone());
+                    // Digest the cluster actually pulled (imageID), not
+                    // the image tag (see container arm).
+                    spawned_container_image = k8s.pod_image_digest(&handle.id).await.ok();
+                    register_spawned_agent(
+                        state,
+                        agent,
+                        handle.clone(),
+                        SpawnBackend::Kubernetes(k8s),
+                        resolved_target_config,
+                    )
+                    .await;
+                }
+                Err(e) => {
+                    spawned_pid = None;
+                    spawned_container_id = None;
+                    spawned_container_image = None;
+                    tracing::warn!(
+                        agent_id = %agent.id,
+                        "kubernetes pod spawn failed (best-effort): {e}"
+                    );
+                }
+            }
+        }
+        _ => {
+            // agent-runtime.md §3 fallback chain, final link: local
+            // container auto-detection (Docker or Podman). Only when no
+            // container runtime is available do we spawn a bare local
+            // process — the e2e flow relies on this (GYRE_AGENT_COMMAND).
+            //
+            // An EXPLICITLY configured GYRE_AGENT_COMMAND wins over
+            // auto-detection: a deployment that names the agent command
+            // has made a runtime choice (e.g. a host-installed agent
+            // runner), and silently preferring a locally-installed
+            // Docker whose image may not exist would ignore it.
+            let explicit_command = std::env::var("GYRE_AGENT_COMMAND").ok();
+            let auto_container = if explicit_command.is_some() {
+                None
+            } else {
+                gyre_adapters::compute::container::Runtime::detect()
+                    .await
+                    .ok()
+            };
+            match auto_container {
+                Some(runtime) => {
+                    let image = std::env::var("GYRE_AGENT_IMAGE")
+                        .unwrap_or_else(|_| "gyre-agent:latest".to_string());
+                    let ct = gyre_adapters::compute::ContainerTarget::new(image.clone())
+                        .with_runtime(runtime);
+                    match gyre_ports::ComputeTarget::spawn_process(&ct, &spawn_config).await {
+                        Ok(handle) => {
+                            spawned_pid = handle.pid;
+                            launched = true;
+                            spawned_container_id = Some(handle.id.clone());
+                            // Digest, not image name (see container arm).
+                            spawned_container_image = ct.image_digest().await.ok();
+                            register_spawned_agent(
+                                state,
+                                agent,
+                                handle.clone(),
+                                SpawnBackend::Container(ct),
+                                resolved_target_config,
+                            )
+                            .await;
+                        }
+                        Err(e) => {
+                            spawned_pid = None;
+                            spawned_container_id = None;
+                            spawned_container_image = None;
+                            tracing::warn!(
+                                agent_id = %agent.id,
+                                "auto-detected container spawn failed (best-effort): {e}"
+                            );
+                        }
+                    }
+                }
+                None => {
+                    // No container runtime — bare local process (e2e /
+                    // dev environments with GYRE_AGENT_COMMAND).
+                    let local = gyre_adapters::compute::LocalTarget;
+                    match gyre_ports::ComputeTarget::spawn_process(&local, &spawn_config).await {
+                        Ok(handle) => {
+                            spawned_pid = handle.pid;
+                            launched = true;
+                            spawned_container_id = None;
+                            spawned_container_image = None;
+                            register_spawned_agent(
+                                state,
+                                agent,
+                                handle.clone(),
+                                SpawnBackend::Local,
+                                resolved_target_config,
+                            )
+                            .await;
+                        }
+                        Err(e) => {
+                            spawned_pid = None;
+                            spawned_container_id = None;
+                            spawned_container_image = None;
+                            tracing::warn!(agent_id = %agent.id, "process spawn failed (best-effort): {e}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(AgentLaunchDispatch {
+        launched,
+        pid: spawned_pid,
+        container_id: spawned_container_id,
+        container_image: spawned_container_image,
+    })
+}
 
 /// Everything the compute-target launch of one agent session needs.
 ///
@@ -1091,6 +2049,10 @@ pub(crate) async fn spawn_agent_core(
 pub(crate) struct AgentLaunchCtx {
     /// The agent record (already persisted, already `Active`).
     pub agent: Agent,
+    /// The session's stack evidence (resolved once by the caller before
+    /// the JWT mint so the `wl_stack_hash` claim and the SVID issuance
+    /// bind the same value).
+    pub stack_fingerprint: String,
     /// The agent's workspace record (secret resolution, tenant scope).
     pub workspace: Option<gyre_domain::Workspace>,
     /// The repo the agent works in.
@@ -1112,6 +2074,21 @@ pub(crate) struct AgentLaunchCtx {
     pub jj_workspace_path: String,
     /// Plain-git worktree path (fallback working dir).
     pub plain_worktree_path: String,
+    /// Persona this agent runs, as a bare name (e.g. "security" — the form
+    /// the spec manifest's `gates:` entries use, spec-registry.md §16).
+    /// Injected as GYRE_PERSONA so the launched runtime can self-identify
+    /// when submitting reviews. `None` for spawns that carry no persona.
+    pub persona_name: Option<String>,
+    /// The persona bound to the agent row at spawn time
+    /// (platform-model.md §4.3): its `system_prompt` is injected as
+    /// GYRE_PROMPT_PERSONA. `None` when the agent has no bound persona —
+    /// an unbound worker has no persona prompt, which is honest, not a
+    /// gap. The re-spawn path resolves the same binding so first spawn
+    /// and re-spawn never drift.
+    pub persona: Option<gyre_domain::Persona>,
+    /// Interrogation agents have no worktree; their context prompt
+    /// records that honestly instead of citing one.
+    pub is_interrogation: bool,
 }
 
 /// Outcome of one compute-target launch attempt.
@@ -1125,6 +2102,15 @@ pub(crate) struct AgentLaunchResult {
     pub container_image: Option<String>,
     /// Label of the target the launch resolved to (attestation/audit).
     pub compute_target_label: String,
+    /// The session's SPIFFE ID (identity-security.md Layer 1), when SVID
+    /// issuance succeeded — feeds the workload attestation record and the
+    /// spawn response.
+    pub spiffe_id: Option<String>,
+    /// Leaf serial (hex) of the issued SVID.
+    pub svid_serial: Option<String>,
+    /// The issued SVID chain (PEM, leaf first) — surfaced in the spawn
+    /// response so the caller can present it on the attestation path.
+    pub svid_pem: Option<String>,
 }
 
 /// Launch the agent process on the resolved compute target and register it
@@ -1138,12 +2124,35 @@ pub(crate) struct AgentLaunchResult {
 pub(crate) async fn launch_agent_process(
     state: &Arc<AppState>,
     ctx: &AgentLaunchCtx,
-) -> AgentLaunchResult {
+) -> Result<AgentLaunchResult, ApiError> {
     let compute_target_label = ctx
         .resolved_ct_entity
         .as_ref()
         .map(|e| e.id.to_string())
         .unwrap_or_else(|| "local".to_string());
+
+    // identity-security.md Layer 1: issue the session's X.509-SVID before
+    // the environment is built so the workload receives it at start
+    // (GYRE_SVID_PEM / GYRE_SVID_KEY / GYRE_SPIFFE_ID, alongside its
+    // GYRE_AUTH_TOKEN). Issuance is gated on the spawn-time authorization
+    // evidence this path already holds (post-ABAC spawn, resolved compute
+    // target, registered stack evidence); a failed issuance fails the
+    // launch closed — an unattested workload is never spawned silently.
+    let spiffe_role = crate::spiffe::agent_role(
+        ctx.persona_name
+            .as_deref()
+            .or_else(|| ctx.persona.as_ref().map(|p| p.slug.as_str())),
+        &ctx.agent.orchestrator_type,
+    );
+    let svid = crate::spiffe::issue_session_svid(
+        state,
+        &ctx.agent.id.to_string(),
+        &spiffe_role,
+        &compute_target_label,
+        &ctx.stack_fingerprint,
+    )
+    .await
+    .map_err(ApiError::Internal)?;
 
     let resolved_target_config: Option<super::compute::ComputeTargetConfig> = ctx
         .resolved_ct_entity
@@ -1169,12 +2178,37 @@ pub(crate) async fn launch_agent_process(
     let prompt_set = &ctx.prompt_set;
     let req_branch = &ctx.branch;
     let clone_url = &ctx.clone_url;
-    let mut launched = false;
-    let spawned_pid: Option<u32>;
-    let spawned_container_id: Option<String>; // M19.1/M19.3/M19.4
-    let spawned_container_image: Option<String>; // M19.3/M19.4
 
-    {
+    // platform-model.md §4.3 MCP Prompts: build the four system prompts for
+    // this agent. They are injected into the container environment below —
+    // part of the agent's initial context, not fetched. The persona prompt is
+    // only present when a persona is bound (an unbound worker has none);
+    // protocol/context/constraints always are. Interrogation agents have no
+    // worktree, so their context prompt records that honestly.
+    let prompt_scope = crate::api::prompts::PromptScope {
+        tenant_id: workspace.as_ref().map(|ws| ws.tenant_id.clone()),
+        workspace_id: repo.workspace_id.clone(),
+        repo_id: Some(repo.id.clone()),
+        task_id: Some(task.id.clone()),
+        agent_id: Some(agent.id.clone()),
+    };
+    let prompt_protocol = crate::api::prompts::protocol_prompt().to_string();
+    let prompt_context = crate::api::prompts::context_prompt_for_spawn(
+        state,
+        &prompt_scope,
+        task,
+        repo,
+        if ctx.is_interrogation {
+            None
+        } else {
+            Some((req_branch.as_str(), worktree_path.as_str()))
+        },
+    )
+    .await;
+    let prompt_constraints = crate::api::prompts::constraints_prompt(state, &prompt_scope).await;
+    let prompt_persona = ctx.persona.as_ref().map(|p| p.system_prompt.clone());
+
+    let dispatch = {
         // Docker requires an absolute working directory path. Canonicalize
         // the worktree path so legacy relative paths (older repo.path rows
         // persisted before repos_root was made absolute, or a relative
@@ -1226,6 +2260,14 @@ pub(crate) async fn launch_agent_process(
                 prompt_set.set_sha.clone(),
             );
         }
+        // agent-runtime.md §5 Agent Prompt Structure: the PROTOCOL section
+        // (Ralph loop rules, MCP tools, heartbeat, escalation, completion)
+        // is system-managed — injected at spawn and served on demand via
+        // the MCP `system://protocol` prompt.
+        container_env.insert(
+            "GYRE_PROTOCOL_PROMPT".to_string(),
+            crate::prompt_assembly::render_protocol_prompt(),
+        );
         container_env.insert("GYRE_SERVER_URL".to_string(), state.base_url.clone());
         container_env.insert("GYRE_AUTH_TOKEN".to_string(), token.clone());
         container_env.insert("GYRE_CLONE_URL".to_string(), clone_url.clone());
@@ -1233,10 +2275,111 @@ pub(crate) async fn launch_agent_process(
         container_env.insert("GYRE_AGENT_ID".to_string(), agent.id.to_string());
         container_env.insert("GYRE_TASK_ID".to_string(), task.id.to_string());
         container_env.insert("GYRE_REPO_ID".to_string(), repo.id.to_string());
+        // agent-workflow.md §Immediate Feedback (task-268): pre-PR local
+        // verification. Resolve the repo's locally-runnable command gates
+        // from the REAL QualityGateRepository config (pre-merge
+        // TestCommand/LintCommand rows — the per-MR checks that must pass
+        // before merge; never hardcoded commands) and deliver them to the
+        // container as machine-readable GYRE_LOCAL_GATES JSON. The
+        // reference runner (docker/gyre-agent/agent-runner.mjs) executes
+        // each command in the agent's working directory after the agent
+        // query loop and BEFORE completion/MR creation, feeding failures
+        // back to the agent for remediation. Post-merge gates validate the
+        // new default-branch HEAD after merge, so they are not pre-PR
+        // checks; non-command gates (RequiredApprovals, AgentReview, ...)
+        // are not locally runnable. A repo with no command gates gets an
+        // empty list. Resolution failure fails the launch closed: an
+        // unreadable gate config must not silently degrade to "no local
+        // verification" and let an MR open anyway.
+        let local_gates: Vec<serde_json::Value> = state
+            .quality_gates
+            .list_by_repo_id_and_phase(&repo.id.to_string(), gyre_domain::GatePhase::PreMerge)
+            .await
+            .map_err(ApiError::Internal)?
+            .into_iter()
+            .filter(|g| {
+                matches!(
+                    g.gate_type,
+                    gyre_domain::GateType::TestCommand | gyre_domain::GateType::LintCommand
+                )
+            })
+            .filter_map(|g| {
+                let command = g.command.as_deref()?.trim().to_string();
+                if command.is_empty() {
+                    return None;
+                }
+                Some(serde_json::json!({
+                    "id": g.id.to_string(),
+                    "name": g.name,
+                    "command": command,
+                    "timeout_secs": g.timeout_secs,
+                }))
+            })
+            .collect();
+        container_env.insert(
+            "GYRE_LOCAL_GATES".to_string(),
+            serde_json::to_string(&local_gates).unwrap_or_else(|_| "[]".to_string()),
+        );
+        // Layer 1 workload identity (identity-security.md): the session's
+        // X.509-SVID. The workload presents GYRE_SVID_PEM on the
+        // attestation path (heartbeat/attest) for fail-closed
+        // workload-identity verification.
+        container_env.insert("GYRE_SPIFFE_ID".to_string(), svid.record.spiffe_id.clone());
+        container_env.insert("GYRE_SVID_PEM".to_string(), svid.record.chain_pem.clone());
+        // The SVID private key is handed to the workload (the SVID = leaf
+        // + key, per the SPIFFE X.509-SVID specification); the server
+        // retains only the issuance record.
+        container_env.insert("GYRE_SVID_KEY".to_string(), svid.private_key_pem.clone());
+        // The stack fingerprint the workload must present on the
+        // attestation path (bound to the SVID-backed record at issuance).
+        container_env.insert("GYRE_STACK_HASH".to_string(), ctx.stack_fingerprint.clone());
         // Ralph-loop position (agent-runtime.md §1 Phase 7 / §5 prompt
         // structure): 0 on first spawn, 1+ on every re-spawn so a fresh
         // session knows which iteration it is running.
         container_env.insert("GYRE_ITERATION".to_string(), agent.iteration.to_string());
+        if let Some(persona) = &ctx.persona_name {
+            // Bare persona name (manifest form), not a personas/… path — the
+            // agent uses it to self-identify when submitting reviews
+            // (spec-registry.md §16).
+            container_env.insert("GYRE_PERSONA".to_string(), persona.clone());
+        }
+
+        // platform-model.md §4.3: the persona/protocol/context/constraints
+        // prompts are injected at spawn time so the agent does not need to
+        // fetch them. `GYRE_PROTOCOL_PROMPT` carries the same system-managed
+        // protocol text the MCP `system://protocol` prompt serves; the
+        // persona prompt is the bound persona's prompt (the MCP
+        // `system://persona` prompt serves the assembled meta-spec set per
+        // agent-runtime.md §5).
+        if let Some(persona_prompt) = &prompt_persona {
+            container_env.insert("GYRE_PROMPT_PERSONA".to_string(), persona_prompt.clone());
+        }
+        // Persona attestation (platform-model.md §8: the persona prompt is
+        // served from the approved persona entity — version + content_hash
+        // identify exactly which approved content the agent received, for
+        // downstream attestation/review). `ctx.persona` only ever holds a
+        // persona that resolved fail-closed to Approved at spawn.
+        if let Some(persona) = &ctx.persona {
+            container_env.insert("GYRE_PERSONA_ID".to_string(), persona.id.to_string());
+            container_env.insert(
+                "GYRE_PERSONA_VERSION".to_string(),
+                persona.version.to_string(),
+            );
+            container_env.insert(
+                "GYRE_PERSONA_CONTENT_HASH".to_string(),
+                persona.content_hash.clone(),
+            );
+            container_env.insert(
+                "GYRE_PERSONA_APPROVAL_STATUS".to_string(),
+                format!("{:?}", persona.approval_status),
+            );
+        }
+        container_env.insert("GYRE_PROMPT_PROTOCOL".to_string(), prompt_protocol.clone());
+        container_env.insert("GYRE_PROMPT_CONTEXT".to_string(), prompt_context.clone());
+        container_env.insert(
+            "GYRE_PROMPT_CONSTRAINTS".to_string(),
+            prompt_constraints.clone(),
+        );
 
         // Platform Model §7 Secrets Delivery: resolve scoped secrets from the
         // repository (tenant → workspace → repo → task, nearest scope wins)
@@ -1245,17 +2388,18 @@ pub(crate) async fn launch_agent_process(
         // process starts — raw values are never in the agent env.
         // Failure is logged and skipped: a missing/undecryptable secret must
         // not block spawning the agent itself.
-        // Resolve the tenant from the workspace record; never fabricate a
-        // "default" tenant. On an unresolvable workspace, skip tenant-scoped
-        // (and thus all) secret resolution and warn — the spawn itself must
-        // continue without GYRE_CRED_* env vars.
-        match workspace.as_ref() {
-            Some(ws) => {
-                let tenant_id = ws.tenant_id.to_string();
+        // tenant_id comes from the workspace row resolved (and enforced)
+        // at the start of the spawn (§1 Token Scoping).
+        // An unresolvable workspace means the tenant scope cannot be
+        // determined — skip the tenant-scoped secret resolution and log
+        // rather than fabricating a "default" tenant identity (task-097 F3).
+        let tenant_id = workspace.as_ref().map(|ws| ws.tenant_id.to_string());
+        match tenant_id.as_deref() {
+            Some(tenant) => {
                 match state
                     .secrets
                     .resolve_for_agent(
-                        &tenant_id,
+                        tenant,
                         &repo.workspace_id.to_string(),
                         repo.id.as_str(),
                         Some(task.id.as_str()),
@@ -1273,7 +2417,7 @@ pub(crate) async fn launch_agent_process(
                                 task_id = %task.id,
                                 repo_id = %repo.id,
                                 workspace_id = %repo.workspace_id,
-                                tenant_id = %tenant_id,
+                                tenant_id = %tenant,
                                 secret_name = %name,
                                 scope = "tenant>workspace>repo>task",
                                 "secret.accessed: secret resolved for agent spawn (GYRE_CRED_* injection)"
@@ -1349,370 +2493,46 @@ pub(crate) async fn launch_agent_process(
             }
         }
 
-        let spawn_config = gyre_ports::SpawnConfig {
-            name: agent.name.clone(),
-            command: command.clone(),
-            args: args.clone(),
-            env: container_env.clone(),
-            work_dir: effective_work_dir.clone(),
-        };
+        dispatch_agent_launch(
+            state,
+            agent,
+            &resolved_target_config,
+            &command,
+            &args,
+            &container_env,
+            &effective_work_dir,
+        )
+        .await
+    };
 
-        match &resolved_target_config {
-            Some(cfg) if cfg.target_type == "container" => {
-                // M19.1: Spawn via ContainerTarget.
-                let image = cfg.config["image"]
-                    .as_str()
-                    .unwrap_or("gyre-agent:latest")
-                    .to_string();
-                let mut ct = gyre_adapters::compute::ContainerTarget::new(image.clone());
-                // Apply optional config overrides from the stored target config.
-                // G8: default --network=none (secure). Compute target config
-                // must explicitly set "network": "bridge" for agents that
-                // need to reach the server (clone, heartbeat, complete).
-                let network = cfg.config["network"].as_str().unwrap_or("none");
-                ct = ct.with_network(network);
-                if let Some(mem) = cfg.config["memory_limit"].as_str() {
-                    ct = ct.with_memory_limit(mem);
-                }
-                if let Some(pids) = cfg.config["pids_limit"].as_u64() {
-                    ct = ct.with_pids_limit(pids as u32);
-                }
-                if let Some(user) = cfg.config["user"].as_str() {
-                    ct = ct.with_user(user);
-                }
-
-                match gyre_ports::ComputeTarget::spawn_process(&ct, &spawn_config).await {
-                    Ok(handle) => {
-                        spawned_pid = handle.pid;
-                        launched = true;
-                        spawned_container_id = Some(handle.id.clone());
-                        // Workload-attestation image hash: the resolved
-                        // image digest (sha256:...), not the image name —
-                        // `derive_attestation_level` treats a non-empty
-                        // image_hash as a Level-3 "Gyre-managed runtime"
-                        // signal, so a bare tag must not inflate it.
-                        // Best-effort: no runtime / unresolvable image →
-                        // None (level stays 2).
-                        spawned_container_image = ct.image_digest().await.ok();
-
-                        // M19.3: Capture container audit record (best-effort).
-                        let runtime_str = cfg.config["runtime"]
-                            .as_str()
-                            .unwrap_or("docker")
-                            .to_string();
-                        let rec = container_audit::capture_spawn_audit(
-                            &agent.id.to_string(),
-                            &handle.id,
-                            &image,
-                            &runtime_str,
-                        )
-                        .await;
-                        let _ = state.container_audits.save(&rec).await;
-
-                        // M19.3: Emit AgentContainerSpawned event.
-                        state
-                            .emit_event(
-                                Some(agent.workspace_id.clone()),
-                                gyre_common::message::Destination::Workspace(
-                                    agent.workspace_id.clone(),
-                                ),
-                                gyre_common::message::MessageKind::AgentContainerSpawned,
-                                Some(serde_json::json!({
-                                    "agent_id": agent.id.to_string(),
-                                    "container_id": handle.id,
-                                    "image": image,
-                                    "runtime": runtime_str,
-                                })),
-                            )
-                            .await;
-
-                        // M23: Emit container_started audit event.
-                        {
-                            let ctx = crate::container_audit::AuditCtx {
-                                audit: state.audit.as_ref(),
-                                broadcast_tx: &state.audit_broadcast_tx,
-                            };
-                            crate::container_audit::emit_started(
-                                &ctx,
-                                &agent.id.to_string(),
-                                &handle.id,
-                                &image,
-                            )
-                            .await;
-                        }
-
-                        register_spawned_agent(
-                            state,
-                            &agent,
-                            handle.clone(),
-                            SpawnBackend::Container(ct),
-                            &resolved_target_config,
-                        )
-                        .await;
-                    }
-                    Err(e) => {
-                        spawned_pid = None;
-                        spawned_container_id = None;
-                        spawned_container_image = None;
-                        tracing::warn!(
-                            agent_id = %agent.id,
-                            "container spawn failed (best-effort): {e}. \
-                            If the image is missing, build it first: \
-                            `docker build -t gyre-agent:latest docker/gyre-agent/`."
-                        );
-                    }
-                }
-            }
-            Some(cfg) if cfg.target_type == "ssh" => {
-                // agent-runtime.md §3 Supported Backends — SSH: "SSH to
-                // remote host, `docker run` there". SshDockerTarget runs
-                // docker on the remote host with the same security
-                // defaults as the container backend and tracks the remote
-                // *container* (not the short-lived docker client process):
-                // the handle id is the remote container ID, `kill_process`
-                // runs `docker rm --force` remotely, and `is_alive` runs
-                // `docker inspect` remotely.
-                //
-                // `container_mode: false` is the legacy M19.5 escape hatch
-                // (bare remote process via SshTarget) kept for configs that
-                // predate the spec default.
-                //
-                // NOTE: the agent-name charset/length validation for this
-                // arm lives at the top of spawn_agent_core, beside the
-                // duplicate-name check — it must run before any state is
-                // written (see the comment there).
-                let container_mode = cfg.config["container_mode"].as_bool().unwrap_or(true);
-
-                // Worktree path: local absolute path for bare remote mode;
-                // the remote container clones its own checkout into
-                // /workspace (entrypoint.sh), so /workspace is the workdir.
-                let remote_work_dir = if container_mode {
-                    "/workspace".to_string()
-                } else {
-                    effective_work_dir
-                };
-
-                // Remote spawn uses the same env-injected SpawnConfig; the
-                // ssh backend forwards env via `--env K=V` docker args.
-                let ssh_spawn_config = gyre_ports::SpawnConfig {
-                    work_dir: remote_work_dir,
-                    ..spawn_config.clone()
-                };
-
-                if container_mode {
-                    let ssh_docker =
-                        gyre_adapters::compute::ssh::ssh_docker_target_from_config(&cfg.config);
-                    match gyre_ports::ComputeTarget::spawn_process(&ssh_docker, &ssh_spawn_config)
-                        .await
-                    {
-                        Ok(handle) => {
-                            spawned_pid = handle.pid;
-                            launched = true;
-                            spawned_container_id = Some(handle.id.clone());
-                            // Resolved digest from the REMOTE docker daemon
-                            // (see container arm: image_hash must be a
-                            // digest, not a tag, to count as Level 3).
-                            spawned_container_image = ssh_docker.remote_image_digest().await.ok();
-                            register_spawned_agent(
-                                state,
-                                &agent,
-                                handle.clone(),
-                                SpawnBackend::SshDocker(ssh_docker),
-                                &resolved_target_config,
-                            )
-                            .await;
-                        }
-                        Err(e) => {
-                            spawned_pid = None;
-                            spawned_container_id = None;
-                            spawned_container_image = None;
-                            tracing::warn!(
-                                agent_id = %agent.id,
-                                "SSH docker spawn failed (best-effort): {e}"
-                            );
-                        }
-                    }
-                } else {
-                    // Legacy bare remote-process mode (M19.5).
-                    let user = cfg.config["user"].as_str().unwrap_or("root").to_string();
-                    let host = cfg.config["host"]
-                        .as_str()
-                        .unwrap_or("localhost")
-                        .to_string();
-                    let mut ssh_target = gyre_adapters::compute::SshTarget::new(user, host);
-                    if let Some(id_file) = cfg.config["identity_file"].as_str() {
-                        ssh_target = ssh_target.with_identity(id_file);
-                    }
-                    if let Some(port) = cfg.config["port"].as_u64() {
-                        ssh_target = ssh_target.with_port(port as u16);
-                    }
-                    match gyre_ports::ComputeTarget::spawn_process(&ssh_target, &ssh_spawn_config)
-                        .await
-                    {
-                        Ok(handle) => {
-                            spawned_pid = handle.pid;
-                            launched = true;
-                            spawned_container_id = None;
-                            spawned_container_image = None;
-                            register_spawned_agent(
-                                state,
-                                &agent,
-                                handle.clone(),
-                                SpawnBackend::SshBare(ssh_target),
-                                &resolved_target_config,
-                            )
-                            .await;
-                        }
-                        Err(e) => {
-                            spawned_pid = None;
-                            spawned_container_id = None;
-                            spawned_container_image = None;
-                            tracing::warn!(
-                                agent_id = %agent.id,
-                                "SSH spawn failed (best-effort): {e}"
-                            );
-                        }
-                    }
-                }
-            }
-            Some(cfg) if cfg.target_type == "kubernetes" => {
-                // agent-runtime.md §3: Kubernetes backend — create a Pod
-                // with the agent image. kill_process deletes the Pod;
-                // is_alive checks the Pod phase.
-                let k8s =
-                    gyre_adapters::compute::kubernetes::kubernetes_target_from_config(&cfg.config);
-
-                // The Pod mounts no volume for the server-local worktree
-                // (build_pod_manifest emits no volumes), and the agent
-                // image clones its own checkout into /workspace
-                // (entrypoint.sh) — the image WorkingDir is /workspace, so
-                // a server-local absolute path as workingDir makes the
-                // container fail to start under CRI (runc chdir ENOENT).
-                // Mirror the SSH container arm: /workspace is the workdir.
-                let k8s_spawn_config = gyre_ports::SpawnConfig {
-                    work_dir: "/workspace".to_string(),
-                    ..spawn_config.clone()
-                };
-                match gyre_ports::ComputeTarget::spawn_process(&k8s, &k8s_spawn_config).await {
-                    Ok(handle) => {
-                        spawned_pid = handle.pid;
-                        launched = true;
-                        spawned_container_id = Some(handle.id.clone());
-                        // Digest the cluster actually pulled (imageID), not
-                        // the image tag (see container arm).
-                        spawned_container_image = k8s.pod_image_digest(&handle.id).await.ok();
-                        register_spawned_agent(
-                            state,
-                            &agent,
-                            handle.clone(),
-                            SpawnBackend::Kubernetes(k8s),
-                            &resolved_target_config,
-                        )
-                        .await;
-                    }
-                    Err(e) => {
-                        spawned_pid = None;
-                        spawned_container_id = None;
-                        spawned_container_image = None;
-                        tracing::warn!(
-                            agent_id = %agent.id,
-                            "kubernetes pod spawn failed (best-effort): {e}"
-                        );
-                    }
-                }
-            }
-            _ => {
-                // agent-runtime.md §3 fallback chain, final link: local
-                // container auto-detection (Docker or Podman). Only when no
-                // container runtime is available do we spawn a bare local
-                // process — the e2e flow relies on this (GYRE_AGENT_COMMAND).
-                //
-                // An EXPLICITLY configured GYRE_AGENT_COMMAND wins over
-                // auto-detection: a deployment that names the agent command
-                // has made a runtime choice (e.g. a host-installed agent
-                // runner), and silently preferring a locally-installed
-                // Docker whose image may not exist would ignore it.
-                let explicit_command = std::env::var("GYRE_AGENT_COMMAND").ok();
-                let auto_container = if explicit_command.is_some() {
-                    None
-                } else {
-                    gyre_adapters::compute::container::Runtime::detect()
-                        .await
-                        .ok()
-                };
-                match auto_container {
-                    Some(runtime) => {
-                        let image = std::env::var("GYRE_AGENT_IMAGE")
-                            .unwrap_or_else(|_| "gyre-agent:latest".to_string());
-                        let ct = gyre_adapters::compute::ContainerTarget::new(image.clone())
-                            .with_runtime(runtime);
-                        match gyre_ports::ComputeTarget::spawn_process(&ct, &spawn_config).await {
-                            Ok(handle) => {
-                                spawned_pid = handle.pid;
-                                launched = true;
-                                spawned_container_id = Some(handle.id.clone());
-                                // Digest, not image name (see container arm).
-                                spawned_container_image = ct.image_digest().await.ok();
-                                register_spawned_agent(
-                                    state,
-                                    &agent,
-                                    handle.clone(),
-                                    SpawnBackend::Container(ct),
-                                    &resolved_target_config,
-                                )
-                                .await;
-                            }
-                            Err(e) => {
-                                spawned_pid = None;
-                                spawned_container_id = None;
-                                spawned_container_image = None;
-                                tracing::warn!(
-                                    agent_id = %agent.id,
-                                    "auto-detected container spawn failed (best-effort): {e}"
-                                );
-                            }
-                        }
-                    }
-                    None => {
-                        // No container runtime — bare local process (e2e /
-                        // dev environments with GYRE_AGENT_COMMAND).
-                        let local = gyre_adapters::compute::LocalTarget;
-                        match gyre_ports::ComputeTarget::spawn_process(&local, &spawn_config).await
-                        {
-                            Ok(handle) => {
-                                spawned_pid = handle.pid;
-                                launched = true;
-                                spawned_container_id = None;
-                                spawned_container_image = None;
-                                register_spawned_agent(
-                                    state,
-                                    &agent,
-                                    handle.clone(),
-                                    SpawnBackend::Local,
-                                    &resolved_target_config,
-                                )
-                                .await;
-                            }
-                            Err(e) => {
-                                spawned_pid = None;
-                                spawned_container_id = None;
-                                spawned_container_image = None;
-                                tracing::warn!(agent_id = %agent.id, "process spawn failed (best-effort): {e}");
-                            }
-                        }
-                    }
-                }
+    // The only Err the dispatch returns is the SSH container-mode
+    // agent-name rejection (shell-injection guard). `spawn_agent_core`
+    // already applies that validation before any state is written, so the
+    // REST spawn surface never reaches this branch; treat a rejection as
+    // "not launched" so the caller's failure policy decides.
+    let dispatch = match dispatch {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::warn!(agent_id = %ctx.agent.id, "agent process launch rejected: {e:#}");
+            AgentLaunchDispatch {
+                launched: false,
+                pid: None,
+                container_id: None,
+                container_image: None,
             }
         }
-    }
+    };
 
-    AgentLaunchResult {
-        launched,
-        pid: spawned_pid,
-        container_id: spawned_container_id,
-        container_image: spawned_container_image,
+    Ok(AgentLaunchResult {
+        launched: dispatch.launched,
+        pid: dispatch.pid,
+        container_id: dispatch.container_id,
+        container_image: dispatch.container_image,
         compute_target_label,
-    }
+        spiffe_id: Some(svid.record.spiffe_id.clone()),
+        svid_serial: Some(svid.record.serial.clone()),
+        svid_pem: Some(svid.record.chain_pem.clone()),
+    })
 }
 
 // ── Spawned-agent registration (agent-runtime.md §3) ─────────────────────────
@@ -1819,7 +2639,7 @@ const EXIT_MONITOR_POLL_SECS: u64 = 5;
 ///    event (M23).
 ///
 /// This is the single registration path for every backend dispatch arm in
-/// [`spawn_agent_core`]; before the task-117 consolidation each arm
+/// [`launch_agent_workload`]; before the task-117 consolidation each arm
 /// hand-rolled its own registry insert + monitor with subtly different
 /// cleanup (the container arm was the only one capturing exit audits).
 async fn register_spawned_agent(
@@ -1856,78 +2676,430 @@ async fn register_spawned_agent(
 async fn monitor_spawned_agent_exit(state: Arc<AppState>, agent_id: String) {
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(EXIT_MONITOR_POLL_SECS)).await;
-
-        let handle = {
-            let registry = state.process_registry.lock().await;
-            match registry.get(&agent_id) {
-                Some(h) => h.clone(),
-                // Already unregistered (killed, or another monitor iteration
-                // finished first) — nothing left to watch.
-                None => break,
-            }
-        };
-
-        // Probe the backend that owns this handle. Clone the Arc out and
-        // DROP the lock before awaiting: an SSH probe can block for the
-        // TCP connect timeout, and holding the lock across it would stall
-        // admin kills and every new spawn registration.
-        let backend = {
-            let backends = state.spawned_backends.lock().await;
-            match backends.get(&agent_id) {
-                Some(b) => std::sync::Arc::clone(b),
-                // Already unregistered (killed, or another monitor iteration
-                // finished first) — nothing left to watch.
-                None => break,
-            }
-        };
-        let alive = gyre_ports::ComputeTarget::is_alive(backend.as_ref(), &handle)
-            .await
-            .unwrap_or(false);
-
-        if !alive {
-            state.process_registry.lock().await.remove(&agent_id);
-            state.spawned_backends.lock().await.remove(&agent_id);
-
-            // M19.3: Update the audit record on container exit. No-op when
-            // no audit record exists (local/SSH-bare spawns) —
-            // `capture_exit_audit` returns early on missing records.
-            container_audit::capture_exit_audit(state.container_audits.as_ref(), &agent_id).await;
-
-            // M23: Emit container_stopped audit event (best-effort).
-            {
-                let audit_rec = state
-                    .container_audits
-                    .find_by_agent_id(&agent_id)
-                    .await
-                    .ok()
-                    .flatten();
-                let exit_code = audit_rec.as_ref().and_then(|r| r.exit_code);
-                let ctx = crate::container_audit::AuditCtx {
-                    audit: state.audit.as_ref(),
-                    broadcast_tx: &state.audit_broadcast_tx,
-                };
-                let container_id_for_evt = audit_rec.map(|r| r.container_id).unwrap_or_default();
-                crate::container_audit::emit_stopped(
-                    &ctx,
-                    &agent_id,
-                    &container_id_for_evt,
-                    exit_code,
-                )
-                .await;
-            }
-
-            if let Ok(Some(mut a)) = state.agents.find_by_id(&Id::new(&agent_id)).await {
-                if a.status == AgentStatus::Active {
-                    let _ = a.transition_status(AgentStatus::Idle);
-                    let _ = state.agents.update(&a).await;
-                    // Platform Model §7: the run's process is gone — revoke its
-                    // task-scoped ephemeral secrets (teardown; logs `secret.revoked`).
-                    crate::secret_rotation::revoke_agent_task_secrets(&state, &a).await;
-                }
-            }
+        if !monitor_poll_once(&state, &agent_id).await {
             break;
         }
     }
+}
+
+/// A single exit-monitor iteration. Returns `true` while the agent should
+/// keep being polled, `false` once the monitor is done (agent unregistered
+/// or reported not-alive). Split out of the loop so tests can drive one
+/// iteration without the poll sleep.
+async fn monitor_poll_once(state: &AppState, agent_id: &str) -> bool {
+    let handle = {
+        let registry = state.process_registry.lock().await;
+        match registry.get(agent_id) {
+            Some(h) => h.clone(),
+            // Already unregistered (killed, or another monitor iteration
+            // finished first) — nothing left to watch. Drop the backend
+            // entry too if a kill path removed only the handle: leaving
+            // it would leak one Arc<SpawnBackend> per agent for the
+            // lifetime of the server.
+            None => {
+                drop(registry);
+                state.spawned_backends.lock().await.remove(agent_id);
+                return false;
+            }
+        }
+    };
+
+    // Probe the backend that owns this handle. Clone the Arc out and
+    // DROP the lock before awaiting: an SSH probe can block for the
+    // TCP connect timeout, and holding the lock across it would stall
+    // admin kills and every new spawn registration.
+    let backend = {
+        let backends = state.spawned_backends.lock().await;
+        match backends.get(agent_id) {
+            Some(b) => std::sync::Arc::clone(b),
+            // Already unregistered — nothing left to watch. Drop the
+            // handle entry too, symmetric with the branch above.
+            None => {
+                drop(backends);
+                state.process_registry.lock().await.remove(agent_id);
+                return false;
+            }
+        }
+    };
+    // Three-state probe (task-206 review F5): a liveness probe that ERRORS
+    // says nothing about the process. `Ok(false)` is a confirmed exit (the
+    // backend answered and reported the process gone); `Err` is a failed
+    // probe — transient SSH failure, unreachable daemon — and running the
+    // exit path on it would destroy preview work unrecoverably (token
+    // revoked, worktree force-removed, budget slot released) while the
+    // remote process still runs. A probe-failed agent stays monitored; the
+    // stale-agent detector and the preview GC own agents whose backend
+    // never becomes reachable again — normal agents park Idle through
+    // those paths, which is recoverable, unlike this path.
+    let alive = match gyre_ports::ComputeTarget::is_alive(backend.as_ref(), &handle).await {
+        Ok(alive) => alive,
+        Err(e) => {
+            tracing::warn!(
+                agent_id,
+                "exit-monitor liveness probe failed; agent stays monitored: {e:#}"
+            );
+            return true;
+        }
+    };
+
+    if !alive {
+        state.process_registry.lock().await.remove(agent_id);
+        state.spawned_backends.lock().await.remove(agent_id);
+
+        // M19.3: Update the audit record on container exit. No-op when
+        // no audit record exists (local/SSH-bare spawns) —
+        // `capture_exit_audit` returns early on missing records.
+        container_audit::capture_exit_audit(state.container_audits.as_ref(), agent_id).await;
+
+        // M23: Emit container_stopped audit event (best-effort).
+        {
+            let audit_rec = state
+                .container_audits
+                .find_by_agent_id(agent_id)
+                .await
+                .ok()
+                .flatten();
+            let exit_code = audit_rec.as_ref().and_then(|r| r.exit_code);
+            let ctx = crate::container_audit::AuditCtx {
+                audit: state.audit.as_ref(),
+                broadcast_tx: &state.audit_broadcast_tx,
+                search: state.search.as_ref(),
+            };
+            let container_id_for_evt = audit_rec.map(|r| r.container_id).unwrap_or_default();
+            crate::container_audit::emit_stopped(&ctx, agent_id, &container_id_for_evt, exit_code)
+                .await;
+        }
+
+        on_agent_process_exit(state, agent_id).await;
+        return false;
+    }
+    true
+}
+
+/// Shared process-exit transition for every compute-target monitor.
+///
+/// Preview agents are killed on completion (reconciliation §5): they land in
+/// Stopped with their token revoked and budget slot released — never Idle,
+/// because an Idle preview agent could be re-targeted onto real work.
+/// Normal agents keep the Active→Idle transition (with task-scoped secret
+/// revocation, platform-model.md §7 teardown).
+pub(crate) async fn on_agent_process_exit(state: &AppState, agent_id: &str) {
+    if super::meta_specs::finish_preview_agent(state, agent_id).await {
+        return;
+    }
+    if let Ok(Some(mut a)) = state.agents.find_by_id(&Id::new(agent_id)).await {
+        if a.status == AgentStatus::Active {
+            let _ = a.transition_status(AgentStatus::Idle);
+            let _ = state.agents.update(&a).await;
+            // Platform Model §7: the run's process is gone — revoke its
+            // task-scoped ephemeral secrets (teardown; logs `secret.revoked`).
+            crate::secret_rotation::revoke_agent_task_secrets(state, &a).await;
+        }
+    }
+}
+
+/// Force-kill the process behind a registered handle.
+///
+/// Container handles are killed by container id (`docker rm --force`), so they
+/// must not be dispatched to the local target — a container handle's pid (if
+/// any) belongs to the docker daemon's child, not to the agent. SSH handles
+/// carry the REMOTE pid echoed by the remote shell: dispatching them to the
+/// local target would terminate an unrelated local process that happens to
+/// hold that pid while the remote agent survives. Both are reconstructed
+/// from the handle itself — the spawning target object is long gone by the
+/// time a registry lookup kills a process.
+pub(crate) async fn kill_process_handle(handle: &gyre_ports::ProcessHandle) -> anyhow::Result<()> {
+    use gyre_ports::ComputeTarget;
+    if handle.target_type == "container" {
+        // The image is irrelevant to `docker rm --force`; the handle id is the
+        // container id recorded at spawn time.
+        let target = gyre_adapters::compute::ContainerTarget::new(String::new());
+        ComputeTarget::kill_process(&target, handle).await
+    } else if handle.target_type == "ssh" {
+        let target = gyre_adapters::compute::SshTarget::from_handle(handle).ok_or_else(|| {
+            anyhow::anyhow!(
+                "cannot reconstruct ssh target from handle id '{}' — refusing to \
+                 kill a local pid that belongs to a remote process",
+                handle.id
+            )
+        })?;
+        ComputeTarget::kill_process(&target, handle).await
+    } else {
+        ComputeTarget::kill_process(&gyre_adapters::compute::LocalTarget, handle).await
+    }
+}
+
+/// Build the agent clone URL: `{base_url}/git/{workspace_slug}/{repo_name}`.
+/// Falls back to the workspace id when the workspace record is unavailable.
+pub(crate) fn build_clone_url(
+    state: &AppState,
+    workspace: Option<&gyre_domain::Workspace>,
+    repo: &gyre_domain::Repository,
+) -> String {
+    let ws_slug = workspace
+        .map(|ws| ws.slug.clone())
+        .unwrap_or_else(|| repo.workspace_id.to_string());
+    format!("{}/git/{}/{}", state.base_url, ws_slug, repo.name)
+}
+
+/// Everything a task-less agent launch needs, decoupled from the task
+/// ledger so agents with no task assignment (meta-spec previews,
+/// reconciliation §5) share the platform's single dispatch
+/// ([`dispatch_agent_launch`]) with task-driven spawns.
+pub(crate) struct AgentLaunchParams<'a> {
+    pub state: &'a Arc<AppState>,
+    pub agent: &'a Agent,
+    pub repo: &'a gyre_domain::Repository,
+    /// `None` when the workspace record could not be loaded: tenant-scoped
+    /// secret resolution is skipped rather than aimed at a fabricated tenant.
+    pub workspace: Option<&'a gyre_domain::Workspace>,
+    /// Resolved compute target. `None` = local process spawn.
+    pub resolved_target_config: Option<super::compute::ComputeTargetConfig>,
+    pub token: &'a str,
+    pub branch: &'a str,
+    pub repo_id: &'a str,
+    pub worktree_path: &'a str,
+    /// `None` for agents with no task — `GYRE_TASK_ID` is then not injected.
+    pub task_id: Option<&'a str>,
+    pub clone_url: &'a str,
+    /// Extra agent-context env (preview agents inject their draft meta-spec
+    /// here). Merged before the server-owned identity/credential vars so it
+    /// can never shadow them.
+    pub extra_env: std::collections::HashMap<String, String>,
+}
+
+/// Outcome of a task-less launch: whether a process actually started on
+/// the resolved compute target.
+#[derive(Default)]
+pub(crate) struct LaunchOutcome {
+    /// Whether the dispatch actually started a process on any backend.
+    /// This is the authority on "did it start" — never the handle's
+    /// shape: SshDocker and Kubernetes handles carry `pid: None` by
+    /// design (their id is a remote container / Pod name), so callers
+    /// guessing from `pid`/`container_id` would misreport every
+    /// *successful* remote launch as a failure.
+    pub launched: bool,
+}
+
+/// Launch a task-less agent process (meta-spec preview, reconciliation §5)
+/// on its resolved compute target.
+///
+/// Unlike [`launch_agent_process`] (task-driven spawns, which build the full
+/// prompt/persona env from [`AgentLaunchCtx`]), the caller supplies the
+/// agent-context env directly via `extra_env` — a preview agent's governing
+/// context is the draft meta-spec, not an assembled prompt set. Process
+/// registration and the exit monitor are identical (both go through
+/// [`dispatch_agent_launch`]), so preview agents get the same lifecycle
+/// management — including the §5 kill-on-completion routing in
+/// [`on_agent_process_exit`] — as any other agent.
+pub(crate) async fn launch_taskless_agent_process(
+    params: AgentLaunchParams<'_>,
+) -> Result<LaunchOutcome, ApiError> {
+    let AgentLaunchParams {
+        state,
+        agent,
+        repo,
+        workspace,
+        resolved_target_config,
+        token,
+        branch,
+        repo_id,
+        worktree_path,
+        task_id,
+        clone_url,
+        extra_env,
+    } = params;
+
+    // Docker requires an absolute working directory path. Canonicalize the
+    // worktree path to ensure it's absolute even when GYRE_REPOS_PATH is
+    // relative (e.g. the configured repos root prefix).
+    let effective_work_dir = if std::path::Path::new(worktree_path).exists() {
+        std::fs::canonicalize(worktree_path)
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| worktree_path.to_string())
+    } else {
+        // Worktree not yet on disk — fall back to /workspace (absolute).
+        "/workspace".to_string()
+    };
+    // Command is server-controlled only — never from user input (C-1 RCE fix).
+    // Use compute target's configured command, GYRE_AGENT_COMMAND env var, or /gyre/entrypoint.sh.
+    let command = resolved_target_config
+        .as_ref()
+        .and_then(|cfg| cfg.config.get("command"))
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .or_else(|| std::env::var("GYRE_AGENT_COMMAND").ok())
+        .unwrap_or_else(|| "/gyre/entrypoint.sh".to_string());
+    let args: Vec<String> = resolved_target_config
+        .as_ref()
+        .and_then(|cfg| cfg.config.get("args"))
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // Inject agent context env vars so the container can bootstrap itself.
+    let mut container_env = std::collections::HashMap::new();
+    // Caller-supplied extra context (preview agents inject their draft
+    // meta-spec here). Merged before the standard vars so a stray key can
+    // never shadow the server-owned identity/credential env vars.
+    for (key, value) in extra_env {
+        container_env.insert(key, value);
+    }
+    container_env.insert("GYRE_SERVER_URL".to_string(), state.base_url.clone());
+    container_env.insert("GYRE_AUTH_TOKEN".to_string(), token.to_string());
+    container_env.insert("GYRE_CLONE_URL".to_string(), clone_url.to_string());
+    container_env.insert("GYRE_BRANCH".to_string(), branch.to_string());
+    container_env.insert("GYRE_AGENT_ID".to_string(), agent.id.to_string());
+    if let Some(task_id) = task_id {
+        container_env.insert("GYRE_TASK_ID".to_string(), task_id.to_string());
+    }
+    container_env.insert("GYRE_REPO_ID".to_string(), repo_id.to_string());
+
+    // identity-security.md Layer 1 (task-206 review repair): issue the
+    // session's X.509-SVID before dispatch, mirroring
+    // [`launch_agent_workload`]. Without it the preview agent's runner
+    // heartbeats — sent every 15 s with `GYRE_SVID_PEM` /
+    // `GYRE_STACK_HASH`, exactly as the preview prompt instructs — fail
+    // closed at `attest_session` ("session was never attested"), so
+    // `Agent::is_alive` falls back to `spawned_at` and the stale-agent
+    // detector flips a still-running preview agent to Stopped ~60 s into
+    // every real run. Issuance here is gated on the same spawn-time
+    // authorization evidence this path already holds (post-ABAC,
+    // post-budget, resolved compute target); a failed issuance fails the
+    // launch closed — an unattested workload is never spawned silently.
+    let compute_target_label = resolved_target_config
+        .as_ref()
+        .map(|c| c.id.clone())
+        .unwrap_or_else(|| "local".to_string());
+    let spiffe_role = crate::spiffe::agent_role(None, &agent.orchestrator_type);
+    let stack_evidence = match container_env.get("GYRE_STACK_HASH") {
+        Some(existing) if !existing.is_empty() => existing.clone(),
+        _ => {
+            crate::spiffe::resolve_session_stack_evidence(
+                state,
+                &agent.id.to_string(),
+                &compute_target_label,
+                None,
+                None,
+                Some(&spiffe_role),
+            )
+            .await
+        }
+    };
+    let svid = crate::spiffe::issue_session_svid(
+        state,
+        &agent.id.to_string(),
+        &spiffe_role,
+        &compute_target_label,
+        &stack_evidence,
+    )
+    .await
+    .map_err(ApiError::Internal)?;
+    // The workload presents this fingerprint on every heartbeat; it must
+    // be the exact evidence bound at issuance or verification fails.
+    container_env.insert("GYRE_STACK_HASH".to_string(), stack_evidence);
+    let svid_record = &svid.record;
+    container_env.insert("GYRE_SPIFFE_ID".to_string(), svid_record.spiffe_id.clone());
+    container_env.insert("GYRE_SVID_PEM".to_string(), svid_record.chain_pem.clone());
+    // The SVID private key is handed to the workload (the SVID = leaf +
+    // key, per the SPIFFE X.509-SVID specification); the server retains
+    // only the record above.
+    container_env.insert("GYRE_SVID_KEY".to_string(), svid.private_key_pem.clone());
+
+    // Platform Model §7 Secrets Delivery: resolve scoped secrets from the
+    // repository (tenant → workspace → repo → task, nearest scope wins)
+    // and inject as GYRE_CRED_* env vars. Failure is logged and skipped: a
+    // missing/undecryptable secret must not block spawning the agent itself.
+    // The tenant scope comes from the workspace record. When it cannot be
+    // resolved, tenant-scoped secret resolution is SKIPPED — never aimed
+    // at a fabricated "default" tenant (that silently re-targets secrets).
+    match workspace.map(|ws| ws.tenant_id.to_string()) {
+        None => tracing::warn!(
+            agent_id = %agent.id,
+            "workspace record unavailable; skipping tenant-scoped secret resolution"
+        ),
+        Some(tenant_id) => match state
+            .secrets
+            .resolve_for_agent(&tenant_id, &repo.workspace_id.to_string(), repo_id, task_id)
+            .await
+        {
+            Ok(resolved) => {
+                for (name, value) in resolved {
+                    // Secret values are raw bytes: a lossy conversion hands
+                    // the agent a corrupted credential (U+FFFD) with no
+                    // error. Skip the secret and name it in the log.
+                    match String::from_utf8(value) {
+                        Ok(v) => {
+                            container_env.insert(format!("GYRE_CRED_{name}"), v);
+                        }
+                        Err(_) => tracing::warn!(
+                            agent_id = %agent.id,
+                            secret = %name,
+                            "secret value is not valid UTF-8; skipping GYRE_CRED_{name}"
+                        ),
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    agent_id = %agent.id,
+                    "secret resolution failed; continuing without GYRE_CRED_* env vars: {e:#}"
+                );
+            }
+        },
+    }
+
+    // M27: cred-proxy addresses for credential routing.
+    container_env.insert(
+        "GYRE_CRED_PROXY".to_string(),
+        "http://127.0.0.1:8765".to_string(),
+    );
+    container_env.insert(
+        "ANTHROPIC_BASE_URL".to_string(),
+        "http://127.0.0.1:8765".to_string(),
+    );
+    // Placeholder so the Anthropic SDK initialises; cred-proxy injects the real key per request.
+    container_env.insert("ANTHROPIC_API_KEY".to_string(), "proxy-managed".to_string());
+
+    // Vertex AI: forward non-secret Vertex config env vars to the container.
+    for var_name in [
+        "CLAUDE_CODE_USE_VERTEX",
+        "ANTHROPIC_VERTEX_PROJECT_ID",
+        "CLOUD_ML_REGION",
+    ] {
+        if let Ok(val) = std::env::var(var_name) {
+            if !val.is_empty() {
+                container_env.insert(var_name.to_string(), val);
+            }
+        }
+    }
+    // Also check GYRE_VERTEX_LOCATION as an alias for CLOUD_ML_REGION.
+    if !container_env.contains_key("CLOUD_ML_REGION") {
+        if let Ok(val) = std::env::var("GYRE_VERTEX_LOCATION") {
+            if !val.is_empty() {
+                container_env.insert("CLOUD_ML_REGION".to_string(), val);
+            }
+        }
+    }
+
+    let dispatch = dispatch_agent_launch(
+        state,
+        agent,
+        &resolved_target_config,
+        &command,
+        &args,
+        &container_env,
+        &effective_work_dir,
+    )
+    .await?;
+
+    Ok(LaunchOutcome {
+        launched: dispatch.launched,
+    })
 }
 
 /// POST /api/v1/agents/spawn
@@ -1941,6 +3113,84 @@ pub async fn spawn_agent(
 ) -> Result<(StatusCode, Json<SpawnAgentResponse>), ApiError> {
     let resp = spawn_agent_core(&state, req, &auth, "POST /api/v1/agents/spawn").await?;
     Ok((StatusCode::CREATED, Json(resp)))
+}
+
+// ── Agent-lifecycle task-scope boundaries (identity-security.md
+// §Task-Scoped JWT Claims: "An agent cannot transition a task it was not
+// spawned for ... even if it holds a valid (non-expired) JWT") ──────────
+
+/// Completion boundary: an agent principal may only complete its own agent
+/// or an agent whose current task is covered by its `task_id` claim — the
+/// completion path transitions the target task to Review and opens its MR.
+/// Human/system/orchestrator principals are not restricted.
+fn require_agent_self_or_task_claim(
+    auth: &crate::auth::AuthenticatedAgent,
+    target: &Agent,
+) -> Result<(), ApiError> {
+    if let Some(claim) = auth.agent_task_claim() {
+        let own = auth.agent_id == target.id.to_string();
+        let task_covered = target
+            .current_task_id
+            .as_ref()
+            .is_some_and(|t| t.to_string() == claim);
+        if !own && !task_covered {
+            return Err(ApiError::Forbidden(format!(
+                "agent token is scoped to task {claim}; cannot complete agent {}",
+                target.id
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Termination boundary (stop/fail/status): an agent may terminate itself,
+/// never another task's workload or Task-scoped secrets — the token's task
+/// claim cannot cover destroying a different task's run.
+fn require_agent_self_only(
+    auth: &crate::auth::AuthenticatedAgent,
+    target: &Agent,
+) -> Result<(), ApiError> {
+    if auth.agent_task_claim().is_some() && auth.agent_id != target.id.to_string() {
+        return Err(ApiError::Forbidden(format!(
+            "agent token is scoped to task {}; cannot terminate agent {}",
+            auth.agent_task_claim().unwrap_or_default(),
+            target.id
+        )));
+    }
+    Ok(())
+}
+
+/// Tenant containment for ABAC-exempt agent-lifecycle routes (standing
+/// invariant: every route that runs without middleware ABAC must enforce
+/// per-handler authorization). The loaded entity's tenant is compared
+/// against the caller's; the bootstrap system principal is exempt (it
+/// created the tenant, mirroring `resolve_repo_by_slug`'s fallback).
+async fn require_agent_tenant_containment(
+    state: &Arc<AppState>,
+    auth: &crate::auth::AuthenticatedAgent,
+    agent: &Agent,
+) -> Result<(), ApiError> {
+    if auth.is_system_principal() {
+        return Ok(());
+    }
+    let workspace = state
+        .workspaces
+        .find_by_id(&agent.workspace_id)
+        .await
+        .map_err(ApiError::Internal)?
+        .ok_or_else(|| {
+            ApiError::NotFound(format!(
+                "workspace {} for agent {} not found",
+                agent.workspace_id, agent.id
+            ))
+        })?;
+    if auth.tenant_id != workspace.tenant_id.to_string() {
+        return Err(ApiError::Forbidden(format!(
+            "agent {} belongs to another tenant",
+            agent.id
+        )));
+    }
+    Ok(())
 }
 
 /// Create the completion MR for an agent (agent-runtime.md §1 Phase 6 step 1).
@@ -1984,10 +3234,21 @@ pub(crate) async fn create_mr_for_completion(
 
     let now = now_secs();
 
+    // The MR's workspace scope comes from its repository (M34 hierarchy
+    // enforcement, like create_mr). Refuse to create an MR whose scope
+    // cannot be resolved instead of fabricating a "default" workspace
+    // identity.
+    let repo = state
+        .repos
+        .find_by_id(&repo_id)
+        .await?
+        .ok_or_else(|| ApiError::NotFound(format!("repository {repo_id} not found")))?;
+
     // Create MergeRequest
     let mut mr = MergeRequest::new(
         new_id(),
         repo_id,
+        repo.workspace_id.clone(),
         title.to_string(),
         branch,
         target_branch,
@@ -2066,27 +3327,26 @@ pub(crate) async fn create_mr_for_completion(
 
     // Compute diff stats + conflict detection (like create_mr does) —
     // AFTER the jj export above so the stats reflect the agent's actual
-    // completed work (R19 F2).
-    if let Ok(Some(repo)) = state.repos.find_by_id(&mr.repository_id).await {
-        mr.workspace_id = repo.workspace_id.clone();
-        if let Ok(diff) = state
-            .git_ops
-            .diff(&repo.path, &mr.target_branch, &mr.source_branch)
-            .await
-        {
-            mr.diff_stats = Some(gyre_domain::DiffStats {
-                files_changed: diff.files_changed,
-                insertions: diff.insertions,
-                deletions: diff.deletions,
-            });
-        }
-        if let Ok(can_merge) = state
-            .git_ops
-            .can_merge(&repo.path, &mr.source_branch, &mr.target_branch)
-            .await
-        {
-            mr.has_conflicts = Some(!can_merge);
-        }
+    // completed work (R19 F2). `repo` is already resolved above (M34
+    // hierarchy enforcement); the MR's workspace scope was set at
+    // construction from it.
+    if let Ok(diff) = state
+        .git_ops
+        .diff(&repo.path, &mr.target_branch, &mr.source_branch)
+        .await
+    {
+        mr.diff_stats = Some(gyre_domain::DiffStats {
+            files_changed: diff.files_changed,
+            insertions: diff.insertions,
+            deletions: diff.deletions,
+        });
+    }
+    if let Ok(can_merge) = state
+        .git_ops
+        .can_merge(&repo.path, &mr.source_branch, &mr.target_branch)
+        .await
+    {
+        mr.has_conflicts = Some(!can_merge);
     }
 
     state.merge_requests.create(&mr).await?;
@@ -2094,6 +3354,7 @@ pub(crate) async fn create_mr_for_completion(
     // Transition task to Review (navigate through intermediate states as needed)
     if let Some(task_id) = &agent.current_task_id {
         if let Ok(Some(mut task)) = state.tasks.find_by_id(task_id).await {
+            let pre_transition_status = task.status.clone();
             if task.status == TaskStatus::Backlog {
                 let _ = task.transition_status(TaskStatus::InProgress);
             }
@@ -2103,6 +3364,14 @@ pub(crate) async fn create_mr_for_completion(
             let _ = task.transition_status(TaskStatus::Review);
             task.updated_at = now;
             let _ = state.tasks.update(&task).await;
+            // task.status_changed analytics event (analytics.md §Auto-Emitted
+            // Events: "Task transitions status") — the completion
+            // auto-advance to Review is a production transition and must
+            // record, like the HTTP status endpoint and MCP update_task.
+            if task.status != pre_transition_status {
+                super::analytics::record_task_status_changed(state, &task, &pre_transition_status)
+                    .await;
+            }
 
             // meta-spec-reconciliation.md §7 auto_merge: when the workspace's
             // rollout policy sets auto_merge, a reconciliation MR merges
@@ -2126,23 +3395,97 @@ pub(crate) async fn create_mr_for_completion(
     Ok((mr, true))
 }
 
+/// message-bus.md §Delivery Guarantees (Agent completion cleanup) and
+/// §Edge Cases (orphaned agents): bulk-ack every unacked Directed message
+/// in an agent's inbox with the lifecycle reason — "agent_completed" on the
+/// REST/MCP completion surfaces, "agent_orphaned" when the stale-agent
+/// detector marks the agent Dead. The rows remain stored for audit but are
+/// no longer redelivered, and `expire_acked_inboxes` reclaims them after the
+/// dead-inbox retention window (`GYRE_DEAD_INBOX_TTL_SECS`). Best-effort by
+/// design: a storage failure logs and leaves the inbox unacked — the
+/// messages stay redeliverable, the safe side of the Directed tier's
+/// at-least-once guarantee.
+pub(crate) async fn acknowledge_agent_inbox(state: &AppState, agent_id: &Id, reason: &str) {
+    match state.messages.acknowledge_all(agent_id, reason).await {
+        Ok(acked) if acked > 0 => tracing::info!(
+            agent_id = %agent_id,
+            acked,
+            reason,
+            "agent inbox bulk-acked on lifecycle transition"
+        ),
+        Ok(_) => {}
+        Err(e) => tracing::warn!(
+            agent_id = %agent_id,
+            reason,
+            error = %e,
+            "agent inbox bulk-ack failed; unacked Directed messages remain redeliverable"
+        ),
+    }
+}
+
 /// POST /api/v1/agents/{id}/complete
 ///
 /// Agent signals it has finished its task:
 /// 1. Creates a MergeRequest (source->target)
 /// 2. Transitions task status to Review
 /// 3. Transitions agent status to Idle
-#[instrument(skip(state, req), fields(agent_id = %id, branch = %req.branch))]
+///
+/// identity-security.md §Task-Scoped JWT Claims — hard task-scope boundary:
+/// the completion path transitions the target agent's task to Review and
+/// opens its completion MR, so an agent principal may only complete its own
+/// agent or an agent whose task is covered by its `task_id` claim (the same
+/// boundary the MCP twin `gyre_agent_complete` enforces self-only). The
+/// seeded 'agent-scoped-access' builtin ALLOWS the 'complete' action for
+/// Agent-role subjects on resource type '*', so without this per-handler
+/// check an agent JWT spawned for task A can complete task B's agent under
+/// DEFAULT configuration. Human/system/orchestrator principals are
+/// unaffected.
+#[instrument(skip(state, auth, req), fields(agent_id = %id, branch = %req.branch))]
 pub async fn complete_agent(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    auth: crate::auth::AuthenticatedAgent,
     Json(req): Json<CompleteAgentRequest>,
 ) -> Result<(StatusCode, Json<MrResponse>), ApiError> {
+    // Caller-keyed preview refusal (task-206 review F3): a preview agent
+    // completing ANY agent mints a real MR, transitions a task to Review
+    // and writes refs/agents/*/snapshots/* refs — MR-creation ceremony §5
+    // forbids for preview runs. The target-keyed guard below refuses
+    // completing a preview agent; this one refuses the preview agent as
+    // the CALLER, so it cannot run the ceremony against another agent.
+    // The builtin agent-scoped-access policy grants the Agent role
+    // 'complete' on 'agent', so this per-handler guard is the only
+    // refusal layer for a same-tenant preview-agent JWT.
+    if crate::api::meta_specs::caller_is_preview_agent(&state, &auth).await {
+        return Err(ApiError::Forbidden(
+            "preview agents may not complete agents — preview runs skip MR creation \
+             and completion ceremony"
+                .to_string(),
+        ));
+    }
     let mut agent = state
         .agents
         .find_by_id(&Id::new(&id))
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("agent {id} not found")))?;
+    require_agent_self_or_task_claim(&auth, &agent)?;
+
+    // Preview agents (meta-spec reconciliation §5) run ceremony-free: no MR,
+    // no provenance, no idle state — the branch push is the entire deliverable
+    // and the run ends when the process exits (routed through
+    // `finish_preview_agent`). The MCP dispatch already refuses
+    // `gyre_agent_complete` for preview agents, but allowedTools is advisory:
+    // the REST surface must enforce the same invariant or a preview agent can
+    // mint a real MR and park itself in Idle through this route.
+    // (task-206 review F3: the caller-keyed guard above refuses the preview
+    // agent as caller; this target-keyed guard refuses completing a preview
+    // agent as the target — both directions are containment.)
+    if crate::api::meta_specs::is_preview_agent(&state, &id).await {
+        return Err(ApiError::Forbidden(format!(
+            "agent {id} belongs to a meta-spec preview run — preview agents skip \
+             MR creation and completion ceremony; the run ends when the process exits"
+        )));
+    }
 
     let (mr, created) = create_mr_for_completion(
         &state,
@@ -2154,6 +3497,13 @@ pub async fn complete_agent(
     )
     .await?;
     if !created {
+        // Duplicate complete call (the completion MR already exists): the
+        // agent's teardown ran on the first call, but Directed messages that
+        // arrived since then sit unacked in its inbox — bulk-ack them so the
+        // dead-inbox retention job can reclaim the inbox (message-bus.md
+        // §Edge Cases: messages sent to a completed agent arrive into an
+        // inbox that will be cleaned by expire_acked_inboxes).
+        acknowledge_agent_inbox(&state, &agent.id, "agent_completed").await;
         return Ok((StatusCode::ACCEPTED, Json(MrResponse::from(mr))));
     }
     let now = now_secs();
@@ -2161,6 +3511,19 @@ pub async fn complete_agent(
     // Transition agent to Idle
     let _ = agent.transition_status(AgentStatus::Idle);
     state.agents.update(&agent).await?;
+
+    // source-control.md §Agent-to-Commit Tracking: completion terminates
+    // the agent's open session — records the worktree's real current
+    // branch and dirty state, and stamps ended_at. Best-effort: never
+    // fails the completion.
+    crate::agent_sessions::end_session(&state, &agent).await;
+
+    // message-bus.md §Delivery Guarantees (Agent completion cleanup): all
+    // unacked Directed messages in the completing agent's inbox are
+    // bulk-acked with reason "agent_completed" — retained for audit, no
+    // longer redelivered, and reclaimable by the dead-inbox retention job
+    // (expire_acked_inboxes) once GYRE_DEAD_INBOX_TTL_SECS elapses.
+    acknowledge_agent_inbox(&state, &agent.id, "agent_completed").await;
 
     // Agent lifecycle audit events (observability.md §Audit Event Types).
     crate::agent_audit::emit_completed(
@@ -2211,59 +3574,95 @@ pub async fn complete_agent(
         );
     }
 
-    // Auto-track agent completion
+    let duration_secs = now.saturating_sub(agent.spawned_at);
     let ev = AnalyticsEvent::new(
         new_id(),
         "agent.completed",
         Some(agent.id.to_string()),
-        serde_json::json!({ "mr_id": mr.id.to_string() }),
+        serde_json::json!({
+            "mr_id": mr.id.to_string(),
+            "task_id": agent.current_task_id.as_ref().map(|id| id.to_string()),
+            "duration_secs": duration_secs,
+        }),
         now,
-    );
+    )
+    .with_scope(None, None, Some(&mr.workspace_id), Some(&mr.repository_id));
     let _ = state.analytics.record(&ev).await;
+    // search.md §Searchable Entities: activity events are indexed on write.
+    crate::search_indexer::index(&state, crate::search_indexer::activity_event_document(&ev)).await;
 
     // Auto-track MR creation
     let ev = AnalyticsEvent::new(
         new_id(),
         "mr.created",
         Some(agent.id.to_string()),
-        serde_json::json!({ "mr_id": mr.id.to_string(), "source_branch": mr.source_branch }),
+        serde_json::json!({
+            "mr_id": mr.id.to_string(),
+            "source_branch": mr.source_branch,
+            // Scope facets (search.md §Searchable Entities: Activity Event
+            // is filterable by workspace/repo).
+            "workspace_id": mr.workspace_id.to_string(),
+            "repo_id": mr.repository_id.to_string(),
+        }),
         now,
     );
     let _ = state.analytics.record(&ev).await;
+    // search.md §Searchable Entities: activity events are indexed on write.
+    crate::search_indexer::index(&state, crate::search_indexer::activity_event_document(&ev)).await;
 
     // M22.2: Decrement budget active-agent counter when agent completes.
     if let Ok(Some(repo)) = state.repos.find_by_id(&mr.repository_id).await {
         super::budget::decrement_active_agents(&state, &repo.workspace_id.to_string()).await;
     }
+    // agent-runtime.md §4 What's Tracked: charge the agent's wall-clock
+    // compute time (spawn → complete) to the workspace, in minutes.
+    super::budget::record_compute_minutes_for_agent(&state, &agent).await;
 
     // Notify the spawning user that the agent completed and an MR is ready for review (HSI §2).
     if let Some(ref spawned_by) = agent.spawned_by {
-        let body_json = serde_json::json!({
-            "agent_id": agent.id.as_str(),
-            "agent_name": &agent.name,
-            "mr_id": mr.id.as_str(),
-            "mr_title": &mr.title,
-            "spec_path": mr.spec_ref.as_ref().map(|s| s.split('@').next().unwrap_or(s)),
-        })
-        .to_string();
+        // Tenant resolved from the MR's workspace — never a fabricated
+        // "default" scope identity (see
+        // scripts/check-fabricated-scope-defaults.sh; review F4 repair —
+        // fail_agent and notify_mr_reverted already follow this pattern).
+        let tenant_id = match state.workspaces.find_by_id(&mr.workspace_id).await {
+            Ok(Some(ws)) => ws.tenant_id.to_string(),
+            _ => {
+                tracing::warn!(
+                    agent_id = %agent.id,
+                    workspace_id = %mr.workspace_id,
+                    "complete_agent: cannot resolve tenant for completion notification — skipping"
+                );
+                String::new()
+            }
+        };
+        if !tenant_id.is_empty() {
+            let body_json = serde_json::json!({
+                "agent_id": agent.id.as_str(),
+                "agent_name": &agent.name,
+                "mr_id": mr.id.as_str(),
+                "mr_title": &mr.title,
+                "spec_path": mr.spec_ref.as_ref().map(|s| s.split('@').next().unwrap_or(s)),
+            })
+            .to_string();
 
-        crate::notifications::notify_rich(
-            state.as_ref(),
-            mr.workspace_id.clone(),
-            Id::new(spawned_by.clone()),
-            gyre_common::NotificationType::AgentCompleted,
-            format!(
-                "Agent '{}' completed — MR '{}' is ready for review",
-                agent.name, mr.title
-            ),
-            "default",
-            Some(body_json),
-            Some(mr.id.to_string()),
-            Some(mr.repository_id.to_string()),
-            "mr",
-            None,
-        )
-        .await;
+            crate::notifications::notify_rich(
+                state.as_ref(),
+                mr.workspace_id.clone(),
+                Id::new(spawned_by.clone()),
+                gyre_common::NotificationType::AgentCompleted,
+                format!(
+                    "Agent '{}' completed — MR '{}' is ready for review",
+                    agent.name, mr.title
+                ),
+                &tenant_id,
+                Some(body_json),
+                Some(mr.id.to_string()),
+                Some(mr.repository_id.to_string()),
+                "mr",
+                None,
+            )
+            .await;
+        }
     }
 
     // TASK-022: If this agent's task was a cascade test, report the result.
@@ -2286,6 +3685,40 @@ pub async fn complete_agent(
 
 // ── Agent lifecycle endpoints ─────────────────────────────────────────────────
 
+/// Per-handler tenant containment for the registry-exempt per-agent control
+/// routes (`POST /api/v1/agents/:id/stop`, `POST /api/v1/agents/:id/fail`):
+/// the target agent's workspace tenant must match the caller's authenticated
+/// tenant. These routes run without middleware ABAC (no resolver mapping, no
+/// exemption-file policy evaluation), so this comparison is the only
+/// cross-tenant guard — without it any authenticated principal in any tenant
+/// could stop or fail any agent (task-206 review F1). Fail-closed when the
+/// agent's workspace row is missing: the tenant scope cannot be determined,
+/// and proceeding would act on an agent whose scope is unverifiable.
+async fn assert_agent_tenant_contained(
+    state: &AppState,
+    agent: &Agent,
+    auth: &crate::auth::AuthenticatedAgent,
+) -> Result<(), ApiError> {
+    let ws_tenant = match state.workspaces.find_by_id(&agent.workspace_id).await {
+        Ok(Some(ws)) => ws.tenant_id.to_string(),
+        Ok(None) => {
+            return Err(ApiError::Forbidden(format!(
+                "agent {} references workspace {} which does not exist — the tenant scope \
+                 cannot be determined, refusing the request",
+                agent.id, agent.workspace_id
+            )));
+        }
+        Err(e) => return Err(ApiError::Internal(e)),
+    };
+    if ws_tenant != auth.tenant_id {
+        return Err(ApiError::Forbidden(format!(
+            "agent {} belongs to tenant {ws_tenant}, not the caller's tenant {}",
+            agent.id, auth.tenant_id
+        )));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Deserialize)]
 pub struct RecordUsageRequest {
     pub tokens_input: u64,
@@ -2296,14 +3729,33 @@ pub struct RecordUsageRequest {
 /// POST /api/v1/agents/:id/usage
 ///
 /// Agent reports its token/cost usage for the current session.
-/// Auth: agent-scoped JWT — the reporting agent must match :id.
+/// Auth: agent-scoped JWT — the reporting agent must match :id (the
+/// documented contract); Admin/global principals may report on behalf of an
+/// agent (operator tooling and the task-190 budget-accounting flow).
 /// Returns 200 OK, or 429 if workspace budget is exhausted (best-effort check).
-#[instrument(skip(state), fields(agent_id = %id))]
+#[instrument(skip(state, auth), fields(agent_id = %id))]
 pub async fn record_agent_usage(
     State(state): State<Arc<AppState>>,
+    auth: crate::auth::AuthenticatedAgent,
     Path(id): Path<String>,
     Json(req): Json<RecordUsageRequest>,
 ) -> Result<StatusCode, ApiError> {
+    // Per-handler authorization (registry-exempt route — no middleware ABAC
+    // runs, so this check is the only authorization surface). The usage
+    // report is the budget-enforcement input: a report against ANOTHER
+    // agent's id would charge that agent's workspace, push it over its
+    // budget and trigger the ≥100% enforcement action (graceful stop / hard
+    // kill) against the victim — the same cross-agent escape class the
+    // task-206 review closed on stop/fail. The cred-proxy sidecar always
+    // reports with the agent's own token, so the self-match branch is the
+    // production path; the Admin branch covers operator tooling.
+    if auth.agent_id != id && !auth.roles.contains(&gyre_domain::UserRole::Admin) {
+        return Err(ApiError::Forbidden(format!(
+            "usage reports are self-reported: caller '{}' may not record usage for agent '{id}'",
+            auth.agent_id
+        )));
+    }
+
     let agent = state
         .agents
         .find_by_id(&Id::new(&id))
@@ -2333,6 +3785,25 @@ pub async fn record_agent_usage(
 
     state.agents.record_usage(&usage).await?;
 
+    // agent-runtime.md §4 Cascade: agent usage charges against the repo's
+    // budget. Worker agents link their repo via the task (repo orchestrators
+    // carry `agent.repo_id`), so resolve the repo from the current task when
+    // the agent record has no direct binding.
+    let repo_id = match agent.repo_id.clone() {
+        Some(r) => Some(r),
+        None => match agent.current_task_id.as_ref() {
+            Some(task_id) => state
+                .tasks
+                .find_by_id(task_id)
+                .await
+                .ok()
+                .flatten()
+                .map(|t| t.repo_id)
+                .filter(|r| !r.to_string().is_empty()),
+            None => None,
+        },
+    };
+
     // Platform-model.md §Budget Tracking: every usage report appends one
     // per-call budget record and rolls into the workspace + tenant
     // tokens_used_today / cost_today counters (the input check_spawn_budget
@@ -2342,7 +3813,7 @@ pub async fn record_agent_usage(
         &super::budget::LlmCallUsage {
             tenant_id: workspace.tenant_id.clone(),
             workspace_id: agent.workspace_id.clone(),
-            repo_id: agent.repo_id.clone(),
+            repo_id,
             agent_id: Some(agent.id.clone()),
             task_id: agent.current_task_id.clone(),
             usage_type: "agent_run".to_string(),
@@ -2353,6 +3824,8 @@ pub async fn record_agent_usage(
                 .llm_model
                 .clone()
                 .unwrap_or_else(|| crate::llm_helpers::DEFAULT_LLM_MODEL.to_string()),
+            // Agent-initiated runs have no user-facing prompt template.
+            prompt_template_sha: None,
         },
     )
     .await;
@@ -2371,18 +3844,62 @@ pub async fn record_agent_usage(
 /// POST /api/v1/agents/:id/fail
 ///
 /// Marks an agent as Failed (non-recoverable error). Idempotent.
-#[instrument(skip(state), fields(agent_id = %id))]
+///
+/// Per-handler authorization (standing invariant for ABAC-exempt routes —
+/// this route sits in scripts/abac-route-registry-exemptions.txt, so no
+/// middleware policy runs): the caller must be contained in the target
+/// agent's tenant, and an agent principal may only fail its own agent
+/// (identity-security.md §Task-Scoped JWT Claims — failing another task's
+/// agent terminates its workload and revokes its Task-scoped secrets).
+/// Preview-agent callers are also refused (meta-spec reconciliation §5 —
+/// a preview agent's live JWT is a valid credential whose Agent role would
+/// otherwise reach this handler with no policy evaluation at all).
+#[instrument(skip(state, auth), fields(agent_id = %id))]
 pub async fn fail_agent(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    auth: crate::auth::AuthenticatedAgent,
 ) -> Result<StatusCode, ApiError> {
+    // meta-spec reconciliation §5 (task-206 review F1): failing an agent is
+    // a durable production effect — it revokes the victim's token and
+    // task-scoped secrets, decrements its workspace budget and fires
+    // orchestrator death handling (replacement spawns). Throwaway preview
+    // scratch must not reach it: the preview agent's JWT is a live Agent-role
+    // credential, and this route is registry-exempt so no ABAC policy is
+    // evaluated anywhere between require_auth and this branch.
+    if crate::api::meta_specs::caller_is_preview_agent(&state, &auth).await {
+        return Err(ApiError::Forbidden(
+            "preview agents may not fail agents — preview runs leave no production footprint"
+                .to_string(),
+        ));
+    }
+
     let mut agent = state
         .agents
         .find_by_id(&Id::new(&id))
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("agent {id} not found")))?;
+    require_agent_tenant_containment(&state, &auth, &agent).await?;
+    require_agent_self_only(&auth, &agent)?;
 
-    if agent.status == AgentStatus::Failed {
+    // Per-handler tenant containment: this route runs without middleware
+    // ABAC, so the comparison below is the only cross-tenant guard between
+    // a caller in tenant A and a kill of an agent in tenant B. Holds for
+    // EVERY caller — the global token included (its tenant is the bootstrap
+    // principal "default", same as the workspace-orchestrator spawn route's
+    // no-bypass containment).
+    assert_agent_tenant_contained(&state, &agent, &auth).await?;
+
+    // Already-terminal guard (task-093 review): a failed/stopped/dead agent
+    // is a corpse — re-failing it must not re-run the budget decrement,
+    // notifications, or orchestrator death handling (which would spawn a
+    // second live replacement, breaking §3.2 exactly-one-live). Idempotent
+    // 200. `transition_status` permits (any, Failed), so without this guard
+    // stop-then-fail double-fires the terminal side effects.
+    if matches!(
+        agent.status,
+        AgentStatus::Failed | AgentStatus::Stopped | AgentStatus::Dead
+    ) {
         return Ok(StatusCode::OK);
     }
 
@@ -2391,37 +3908,99 @@ pub async fn fail_agent(
         .map_err(|e| ApiError::InvalidInput(e.to_string()))?;
     state.agents.update(&agent).await?;
 
+    // source-control.md §Agent-to-Commit Tracking: failure terminates the
+    // agent's open session — records the worktree's real current branch
+    // and dirty state, and stamps ended_at. Best-effort: never fails the
+    // failure path.
+    crate::agent_sessions::end_session(&state, &agent).await;
+
+    // agent-workflow.md §Parallel Work via Worktrees: Failed is terminal,
+    // so the ephemeral worktree is torn down (jj workspace/git worktree
+    // removal + agent_worktrees record delete) AFTER the session end-state
+    // capture above — the working copy is that capture's data source. A
+    // later orchestrator replacement is a fresh entity with no worktree
+    // (`restart_orchestrator`), so teardown here cannot break a restart.
+    cleanup_agent_worktrees(&state, &agent.id).await;
+
     // M22.2: Decrement budget active-agent counter.
     let workspace_id = agent.workspace_id.to_string();
     super::budget::decrement_active_agents(&state, &workspace_id).await;
+    // A preview agent holds a real budget slot (spawned via
+    // POST /meta-specs/preview), and this route just released it — flag the
+    // preview bookkeeping so the preview-owned release (process exit,
+    // DELETE, GC) does not decrement the same slot a second time
+    // (exactly-once; `decrement_active` is MAX(0, n-1), so a double
+    // release permanently biases the counter down). No-op for normal
+    // agents. The process keeps running until it exits on its own; the
+    // exit monitor's finish path then sees the flag and skips its release.
+    super::meta_specs::mark_preview_slot_released(&state, &agent.id.to_string()).await;
+    // agent-runtime.md §4: wall-clock compute time (spawn → fail).
+    super::budget::record_compute_minutes_for_agent(&state, &agent).await;
+
+    // Auto-track agent failure (analytics.md §Auto-Emitted Events).
+    let now = now_secs();
+    let duration_secs = now.saturating_sub(agent.spawned_at);
+    let ev = AnalyticsEvent::new(
+        new_id(),
+        "agent.failed",
+        Some(agent.id.to_string()),
+        serde_json::json!({
+            "task_id": agent.current_task_id.as_ref().map(|id| id.to_string()),
+            "reason": "non-recoverable error",
+            "duration_secs": duration_secs,
+        }),
+        now,
+    )
+    .with_scope(
+        None,
+        None,
+        Some(&agent.workspace_id),
+        agent.repo_id.as_ref(),
+    );
+    let _ = state.analytics.record(&ev).await;
 
     // Platform Model §7: Failed is a terminal run-end (agent-runtime.md §1),
     // so the run's task-scoped ephemeral secrets must not outlive it —
     // revoke them alongside the teardown bookkeeping (review F2).
     crate::secret_rotation::revoke_agent_task_secrets(&state, &agent).await;
 
-    // Notify the spawning user that the agent failed (user-management.md
-    // §Notification Entity: AgentFailed — High, needs attention soon).
-    // Genuine escalations (agent asking for a human) keep AgentEscalation.
-    if let Some(ref spawned_by) = agent.spawned_by {
-        crate::notifications::notify_rich(
+    // Notify per user-management.md §Notification Entity (AgentFailed —
+    // High, needs attention soon; typing fixed by main's task-123) routed
+    // through the §Notification Routing for Agent Escalations chain:
+    // spawning user (primary), workspace Admins if the spawner is offline,
+    // workspace Owners when the priority is Urgent. Genuine agent
+    // escalations (merge-processor circuit breaker) keep AgentEscalation.
+    // The escalation routing subsumes the plain spawned_by notify (HSI §2).
+    // Tenant resolved from the agent's workspace — never fabricated.
+    let tenant_id = match state.workspaces.find_by_id(&agent.workspace_id).await {
+        Ok(Some(ws)) => ws.tenant_id.to_string(),
+        _ => {
+            tracing::warn!(
+                agent_id = %agent.id,
+                workspace_id = %agent.workspace_id,
+                "fail_agent: cannot resolve tenant for escalation notification — skipping"
+            );
+            "".to_string()
+        }
+    };
+    if !tenant_id.is_empty() {
+        crate::notification_dispatcher::notify_agent_escalation(
             state.as_ref(),
-            agent.workspace_id.clone(),
-            Id::new(spawned_by.clone()),
-            gyre_common::NotificationType::AgentFailed,
-            format!("Agent '{}' failed and needs attention", agent.name),
-            "default",
-            Some(
-                serde_json::json!({
-                    "agent_id": agent.id.as_str(),
-                    "agent_name": agent.name,
-                })
-                .to_string(),
-            ),
-            Some(agent.id.to_string()),
-            agent.repo_id.as_ref().map(|r| r.to_string()),
-            "agent",
-            None,
+            &agent,
+            crate::notification_dispatcher::EscalationContent {
+                notification_type: gyre_common::NotificationType::AgentFailed,
+                title: &format!("Agent '{}' failed and needs attention", agent.name),
+                tenant_id: &tenant_id,
+                body: Some(
+                    serde_json::json!({
+                        "agent_id": agent.id.as_str(),
+                        "agent_name": agent.name,
+                    })
+                    .to_string(),
+                ),
+                entity_ref: Some(agent.id.to_string()),
+                repo_id: agent.repo_id.as_ref().map(|r| r.to_string()),
+            },
         )
         .await;
     }
@@ -2444,28 +4023,74 @@ pub async fn fail_agent(
         }
     }
 
+    // TASK-093 (F6): orchestrator death handling on the fail path — same
+    // treatment as the stale-agent Abort path: restart a replacement when
+    // restart_on_failure is set (subject to the spawn budget) and escalate
+    // repo-tier deaths to the live workspace orchestrator.
+    if agent.is_orchestrator() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        crate::stale_agents::handle_orchestrator_death(&state, &agent, now, "fail").await;
+    }
+
     Ok(StatusCode::OK)
 }
 
 /// POST /api/v1/agents/:id/stop
 ///
 /// Marks an agent as Stopped (operator/orchestrator initiated). Idempotent.
-#[instrument(skip(state), fields(agent_id = %id))]
+///
+/// Per-handler authorization (standing invariant for ABAC-exempt routes —
+/// this route sits in scripts/abac-route-registry-exemptions.txt, so no
+/// middleware policy runs): the caller must be contained in the target
+/// agent's tenant, and an agent principal may only stop its own agent
+/// (identity-security.md §Task-Scoped JWT Claims — stopping another task's
+/// agent terminates its workload and revokes its Task-scoped secrets).
+/// Preview-agent callers are also refused (meta-spec reconciliation §5 —
+/// a preview agent's live JWT is a valid Agent-role credential on a route
+/// with no policy evaluation anywhere).
+#[instrument(skip(state, auth), fields(agent_id = %id))]
 pub async fn stop_agent(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    auth: crate::auth::AuthenticatedAgent,
 ) -> Result<StatusCode, ApiError> {
+    // meta-spec reconciliation §5 (task-206 review F1): stopping an agent is
+    // a durable production effect — token/task-secret revocation, budget
+    // decrement, orchestrator death handling with replacement spawns.
+    // Preview scratch must not reach it (same escape class as fail_agent
+    // above: live Agent-role JWT, registry-exempt route, no policy
+    // evaluation anywhere).
+    if crate::api::meta_specs::caller_is_preview_agent(&state, &auth).await {
+        return Err(ApiError::Forbidden(
+            "preview agents may not stop agents — preview runs leave no production footprint"
+                .to_string(),
+        ));
+    }
+
     let mut agent = state
         .agents
         .find_by_id(&Id::new(&id))
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("agent {id} not found")))?;
+    require_agent_tenant_containment(&state, &auth, &agent).await?;
+    require_agent_self_only(&auth, &agent)?;
 
-    if agent.status == AgentStatus::Stopped {
-        // early-return:ok - idempotency guard; key generation lives in
-        // bootstrap_agent_keypair, a separate pub(crate) fn the check's
-        // fn-boundary regex does not recognize, so its keygen is (wrongly)
-        // attributed to this function's span.
+    // Per-handler tenant containment — same no-bypass rule as fail_agent.
+    assert_agent_tenant_contained(&state, &agent, &auth).await?;
+
+    if matches!(
+        agent.status,
+        AgentStatus::Failed | AgentStatus::Stopped | AgentStatus::Dead
+    ) {
+        // early-return:ok — terminal-state idempotency guard (task-093
+        // review): stop after fail/dead must not re-run budget decrement or
+        // the orchestrator death handling (a second replacement would break
+        // §3.2 exactly-one-live). The check's fn-boundary regex attributes
+        // bootstrap_agent_keypair's keygen to this span; the original guard
+        // carried the same marker (see task-099 F2 revision history).
         return Ok(StatusCode::OK);
     }
 
@@ -2486,6 +4111,49 @@ pub async fn stop_agent(
     // M22.2: Decrement budget active-agent counter.
     let workspace_id = agent.workspace_id.to_string();
     super::budget::decrement_active_agents(&state, &workspace_id).await;
+    // Preview-agent slot bookkeeping — same exactly-once contract as the
+    // decrement above (see fail_agent): this route released the slot, so
+    // the preview-owned release must not release it again. The process
+    // keeps running (stop is a ledger transition, not a kill); its later
+    // exit routes through finish_preview_agent, which consults the flag.
+    super::meta_specs::mark_preview_slot_released(&state, &agent.id.to_string()).await;
+    // agent-runtime.md §4: wall-clock compute time (spawn → stop).
+    super::budget::record_compute_minutes_for_agent(&state, &agent).await;
+
+    // Auto-track agent kill (analytics.md §Auto-Emitted Events: agent.failed
+    // covers "fails or is killed").
+    let now = now_secs();
+    let ev = AnalyticsEvent::new(
+        new_id(),
+        "agent.failed",
+        Some(agent.id.to_string()),
+        serde_json::json!({
+            "task_id": agent.current_task_id.as_ref().map(|id| id.to_string()),
+            "reason": "killed",
+            "duration_secs": now.saturating_sub(agent.spawned_at),
+        }),
+        now,
+    )
+    .with_scope(
+        None,
+        None,
+        Some(&agent.workspace_id),
+        agent.repo_id.as_ref(),
+    );
+    let _ = state.analytics.record(&ev).await;
+
+    // TASK-093 (F6): orchestrator death handling on the stop path. Stop is
+    // operator-initiated, but `restart_on_failure` is the owner's explicit
+    // exactly-one-live directive for the orchestrator, so the same shared
+    // death handling runs here (restart gated by spawn budget, repo-tier
+    // escalation names the replacement when one was spawned).
+    if agent.is_orchestrator() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        crate::stale_agents::handle_orchestrator_death(&state, &agent, now, "stop").await;
+    }
 
     Ok(StatusCode::OK)
 }
@@ -2793,6 +4461,7 @@ async fn create_derived_input_for_agent(
 mod tests {
     use super::complete_agent;
     use super::create_interrogation_policies_in;
+    use super::monitor_poll_once;
     use super::register_spawned_agent;
     use super::spawn_agent_core;
     use super::CompleteAgentRequest;
@@ -2819,7 +4488,11 @@ mod tests {
     }
 
     async fn create_repo(app: Router) -> (Router, String) {
-        let body = serde_json::json!({"workspace_id": "ws-1", "name": "test-repo"});
+        // Spawn fails closed when the repo's workspace row is missing (§1
+        // Token Scoping: the workspace row is the tenant-scope source for
+        // agent JWTs) — create the fixture workspace first.
+        let (app, ws_id) = create_workspace(app, "ws-1").await;
+        let body = serde_json::json!({"workspace_id": ws_id, "name": "test-repo"});
         let resp = app
             .clone()
             .oneshot(
@@ -2845,6 +4518,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/api/v1/tasks")
+                    .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
@@ -2862,8 +4536,12 @@ mod tests {
         task_id: &str,
         branch: &str,
     ) -> (Router, serde_json::Value) {
+        // The name is derived from the branch so a test that spawns more
+        // than one agent (e.g. the task-scope boundary probes) does not
+        // trip spawn_agent_core's duplicate-agent-name 400 — every call
+        // site uses a distinct branch.
         let body = serde_json::json!({
-            "name": "worker-1",
+            "name": format!("worker-{}", branch.replace('/', "-")),
             "repo_id": repo_id,
             "task_id": task_id,
             "branch": branch,
@@ -2901,6 +4579,34 @@ mod tests {
         assert!(json.get("jj_change_id").is_some());
     }
 
+    /// identity-security.md §Task-Scoped JWT Claims: every JWT minted by
+    /// POST /api/v1/agents/spawn carries `attestation_level`. A spawn that
+    /// resolves no compute target is a plain local subprocess and must mint
+    /// level 1 — not omit the claim. An absent claim leaves
+    /// `subject.attestation_level` unset at ABAC evaluation, so Deny policies
+    /// keyed on the least-attested class (e.g. the spec's own
+    /// gate-approved-persona deny on attestation_level < 3) would silently
+    /// miss raw-subprocess agents (fail-open for those denies).
+    #[tokio::test]
+    async fn spawn_without_compute_target_mints_attestation_level_one() {
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let (app, repo_id) = create_repo(app).await;
+        let (app, task_id) = create_task(app, "no-target spawn").await;
+        let (_, json) = do_spawn(app, &repo_id, &task_id, "feat/no-target").await;
+
+        let token = json["token"].as_str().expect("spawn returns a token");
+        let claims = state
+            .agent_signing_key
+            .validate(token, &state.base_url)
+            .expect("spawn token is a valid agent JWT signed by this server");
+        assert_eq!(
+            claims.attestation_level,
+            Some(1),
+            "no-target (local subprocess) spawn must mint attestation_level 1"
+        );
+    }
+
     #[tokio::test]
     async fn spawn_response_includes_jj_change_id_field() {
         // Verifies the jj_change_id field is present in the spawn response JSON.
@@ -2915,6 +4621,17 @@ mod tests {
             json.get("jj_change_id").is_some(),
             "spawn response must include jj_change_id field: {json}"
         );
+    }
+
+    /// Seed the `ws-1` workspace row (tenant `default`) referenced by the
+    /// repo fixtures of the direct-drive `spawn_agent_core` unit tests.
+    /// §1 Token Scoping: spawn fails closed when the repo's workspace row
+    /// is missing (the workspace is the tenant-scope source for the minted
+    /// agent JWT), so the fixture row must exist.
+    async fn seed_ws1_workspace(state: &std::sync::Arc<crate::AppState>) {
+        let ws =
+            gyre_domain::Workspace::new(Id::new("ws-1"), Id::new("default"), "ws-1", "ws-1", 1000);
+        state.workspaces.create(&ws).await.unwrap();
     }
 
     /// F6 pin (legacy rows): a `repo.path` persisted BEFORE repos_root
@@ -2942,6 +4659,7 @@ mod tests {
             1000,
         );
         repo.default_branch = "main".to_string();
+        seed_ws1_workspace(&state).await;
         state.repos.create(&repo).await.unwrap();
 
         let mut task = gyre_domain::Task::new(Id::new("task-f6"), "legacy path task", 1000);
@@ -2949,10 +4667,14 @@ mod tests {
         task.workspace_id = Id::new("ws-1");
         state.tasks.create(&task).await.unwrap();
         let auth = crate::auth::AuthenticatedAgent {
+            auth_mechanism: crate::auth::AuthMechanism::AgentToken,
             agent_id: "spawner".to_string(),
             user_id: None,
             roles: vec![],
             tenant_id: "default".to_string(),
+            workspace_id: None,
+            repo_id: None,
+            scope: Vec::new(),
             jwt_claims: None,
             bearer_token: None,
             deprecated_token_auth: false,
@@ -2965,10 +4687,12 @@ mod tests {
             branch: "feat/f6".to_string(),
             parent_id: None,
             compute_target_id: None,
+            persona_slug: None,
             disconnected_behavior: None,
             loop_config: None,
             agent_type: None,
             conversation_sha: None,
+            persona: None,
         };
         let _resp = spawn_agent_core(&state, req, &auth, "spawn_agent_core (direct test drive)")
             .await
@@ -3036,6 +4760,7 @@ mod tests {
             1000,
         );
         repo.default_branch = "main".to_string();
+        seed_ws1_workspace(&state).await;
         state.repos.create(&repo).await.unwrap();
 
         let mut task = gyre_domain::Task::new(Id::new("task-f9"), "f9 branch task", 1000);
@@ -3043,10 +4768,14 @@ mod tests {
         task.workspace_id = Id::new("ws-1");
         state.tasks.create(&task).await.unwrap();
         let auth = crate::auth::AuthenticatedAgent {
+            auth_mechanism: crate::auth::AuthMechanism::AgentToken,
             agent_id: "spawner".to_string(),
             user_id: None,
             roles: vec![],
             tenant_id: "default".to_string(),
+            workspace_id: None,
+            repo_id: None,
+            scope: Vec::new(),
             jwt_claims: None,
             bearer_token: None,
             deprecated_token_auth: false,
@@ -3059,10 +4788,12 @@ mod tests {
             branch: "feat/brand-new".to_string(),
             parent_id: None,
             compute_target_id: None,
+            persona_slug: None,
             disconnected_behavior: None,
             loop_config: None,
             agent_type: None,
             conversation_sha: None,
+            persona: None,
         };
         let resp = spawn_agent_core(&state, req, &auth, "spawn_agent_core (direct test drive)")
             .await
@@ -3158,16 +4889,21 @@ mod tests {
                 1000,
             );
             repo.default_branch = "main".to_string();
+            seed_ws1_workspace(&state).await;
             state.repos.create(&repo).await.unwrap();
             let mut task = gyre_domain::Task::new(Id::new("task-f1a"), "f1a task", 1000);
             task.task_type = Some(gyre_domain::TaskType::Implementation);
             task.workspace_id = Id::new("ws-1");
             state.tasks.create(&task).await.unwrap();
             let auth = crate::auth::AuthenticatedAgent {
+                auth_mechanism: crate::auth::AuthMechanism::AgentToken,
                 agent_id: "spawner".to_string(),
                 user_id: None,
                 roles: vec![],
                 tenant_id: "default".to_string(),
+                workspace_id: None,
+                repo_id: None,
+                scope: Vec::new(),
                 jwt_claims: None,
                 bearer_token: None,
                 deprecated_token_auth: false,
@@ -3180,10 +4916,12 @@ mod tests {
                 branch: "feat/jj-provisioned".to_string(),
                 parent_id: None,
                 compute_target_id: None,
+                persona_slug: None,
                 disconnected_behavior: None,
                 loop_config: None,
                 agent_type: None,
                 conversation_sha: None,
+                persona: None,
             };
             let resp = spawn_agent_core(&state, req, &auth, "spawn_agent_core (direct test drive)")
                 .await
@@ -3225,16 +4963,21 @@ mod tests {
                 1000,
             );
             repo.default_branch = "main".to_string();
+            seed_ws1_workspace(&state).await;
             state.repos.create(&repo).await.unwrap();
             let mut task = gyre_domain::Task::new(Id::new("task-f1b"), "f1b task", 1000);
             task.task_type = Some(gyre_domain::TaskType::Implementation);
             task.workspace_id = Id::new("ws-1");
             state.tasks.create(&task).await.unwrap();
             let auth = crate::auth::AuthenticatedAgent {
+                auth_mechanism: crate::auth::AuthMechanism::AgentToken,
                 agent_id: "spawner".to_string(),
                 user_id: None,
                 roles: vec![],
                 tenant_id: "default".to_string(),
+                workspace_id: None,
+                repo_id: None,
+                scope: Vec::new(),
                 jwt_claims: None,
                 bearer_token: None,
                 deprecated_token_auth: false,
@@ -3247,10 +4990,12 @@ mod tests {
                 branch: "feat/plain/fallback".to_string(),
                 parent_id: None,
                 compute_target_id: None,
+                persona_slug: None,
                 disconnected_behavior: None,
                 loop_config: None,
                 agent_type: None,
                 conversation_sha: None,
+                persona: None,
             };
             let resp = spawn_agent_core(&state, req, &auth, "spawn_agent_core (direct test drive)")
                 .await
@@ -3316,6 +5061,7 @@ mod tests {
             1000,
         );
         repo.default_branch = "main".to_string();
+        seed_ws1_workspace(&state).await;
         state.repos.create(&repo).await.unwrap();
 
         let mut task = gyre_domain::Task::new(Id::new("task-r19"), "r19 completion task", 1000);
@@ -3323,10 +5069,14 @@ mod tests {
         task.workspace_id = Id::new("ws-1");
         state.tasks.create(&task).await.unwrap();
         let auth = crate::auth::AuthenticatedAgent {
+            auth_mechanism: crate::auth::AuthMechanism::AgentToken,
             agent_id: "spawner".to_string(),
             user_id: None,
             roles: vec![],
             tenant_id: "default".to_string(),
+            workspace_id: None,
+            repo_id: None,
+            scope: Vec::new(),
             jwt_claims: None,
             bearer_token: None,
             deprecated_token_auth: false,
@@ -3339,10 +5089,12 @@ mod tests {
             branch: "feat/r19".to_string(),
             parent_id: None,
             compute_target_id: None,
+            persona_slug: None,
             disconnected_behavior: None,
             loop_config: None,
             agent_type: None,
             conversation_sha: None,
+            persona: None,
         };
         let resp = spawn_agent_core(&state, req, &auth, "spawn_agent_core (direct test drive)")
             .await
@@ -3367,6 +5119,7 @@ mod tests {
             let (code, body) = complete_agent(
                 axum::extract::State(state.clone()),
                 axum::extract::Path(agent_id.clone()),
+                auth.clone(),
                 axum::Json(CompleteAgentRequest {
                     branch: "feat/r19".to_string(),
                     title: "R19 feature".to_string(),
@@ -3635,6 +5388,7 @@ mod tests {
                     .method("POST")
                     .uri(format!("/api/v1/agents/{agent_id}/complete"))
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -3667,6 +5421,7 @@ mod tests {
                     .method("POST")
                     .uri(format!("/api/v1/agents/{agent_id}/complete"))
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -3705,6 +5460,7 @@ mod tests {
                     .method("POST")
                     .uri(format!("/api/v1/agents/{agent_id}/complete"))
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -3724,6 +5480,207 @@ mod tests {
         assert_eq!(agent_json["status"], "idle");
     }
 
+    /// An SSH handle's pid is the REMOTE pid echoed by the remote shell.
+    /// `kill_process_handle` must reconstruct an SshTarget (or refuse) — never
+    /// fall through to a local kill, which would terminate an unrelated local
+    /// process holding that pid while the remote agent survives. The handle
+    /// here carries THIS test process's pid and a malformed destination: a
+    /// regression to local dispatch kills the test runner itself, so the
+    /// guard is proven by survival, not just the error message.
+    #[tokio::test]
+    async fn kill_process_handle_refuses_malformed_ssh_handle() {
+        let handle = gyre_ports::ProcessHandle {
+            id: "no-destination-here".to_string(),
+            target_type: "ssh".to_string(),
+            pid: Some(std::process::id()),
+            options: std::collections::HashMap::new(),
+        };
+        let err = super::kill_process_handle(&handle)
+            .await
+            .expect_err("malformed ssh handle must be refused, not killed locally");
+        assert!(
+            err.to_string().contains("cannot reconstruct ssh target"),
+            "unexpected error: {err:#}"
+        );
+    }
+
+    /// source-control.md §Agent-to-Commit Tracking: the spawn starts an
+    /// open session, and completion terminates it — recording the
+    /// worktree's REAL current branch and dirty state (a real
+    /// `git status --porcelain` query in the agent's worktree, never a
+    /// hardcoded value). Completing with an uncommitted edit in the
+    /// worktree records dirty=true with the file listed.
+    #[tokio::test]
+    async fn complete_agent_ends_session_with_real_dirty_state() {
+        // Pin the launch command for THIS test only (process-global env var;
+        // the guard removes it on scope exit, including panic unwind).
+        struct EnvVarRemove(&'static str);
+        impl Drop for EnvVarRemove {
+            fn drop(&mut self) {
+                std::env::remove_var(self.0);
+            }
+        }
+        let _env_guard = EnvVarRemove("GYRE_AGENT_COMMAND");
+        std::env::set_var("GYRE_AGENT_COMMAND", "/bin/true");
+
+        let jj = std::sync::Arc::new(crate::mem::ConfigurableJjOps::default());
+        let git = std::sync::Arc::new(crate::mem::ConfigurableGitOps::default());
+        let state = crate::mem::test_state_with_jj_and_git_ops(jj, git);
+
+        // A real git repo + a real linked worktree for the agent.
+        let dir = tempfile::tempdir().unwrap();
+        let main = dir.path().join("main");
+        std::fs::create_dir_all(&main).unwrap();
+        let run = |cwd: &std::path::Path, args: &[&str]| {
+            let ok = std::process::Command::new("git")
+                .arg("-C")
+                .arg(cwd)
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@t")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@t")
+                .status()
+                .unwrap()
+                .success();
+            assert!(ok, "git {:?} failed", args);
+        };
+        run(&main, &["init", "-b", "main"]);
+        std::fs::write(main.join("src"), "fn main() {}\n").unwrap();
+        run(&main, &["add", "src"]);
+        run(&main, &["commit", "-m", "init"]);
+        let wt = dir.path().join("wt");
+        run(
+            &main,
+            &["worktree", "add", "-b", "feat/dirty", wt.to_str().unwrap()],
+        );
+
+        seed_ws1_workspace(&state).await;
+        let mut repo = gyre_domain::Repository::new(
+            Id::new("repo-dirty"),
+            Id::new("ws-1"),
+            "dirty-repo",
+            main.to_str().unwrap().to_string(),
+            1000,
+        );
+        repo.default_branch = "main".to_string();
+        state.repos.create(&repo).await.unwrap();
+
+        let mut task = gyre_domain::Task::new(Id::new("task-dirty"), "dirty completion task", 1000);
+        task.task_type = Some(gyre_domain::TaskType::Implementation);
+        task.workspace_id = Id::new("ws-1");
+        state.tasks.create(&task).await.unwrap();
+        let auth = crate::auth::AuthenticatedAgent {
+            auth_mechanism: crate::auth::AuthMechanism::AgentToken,
+            agent_id: "spawner".to_string(),
+            user_id: None,
+            roles: vec![],
+            tenant_id: "default".to_string(),
+            workspace_id: None,
+            repo_id: None,
+            scope: Vec::new(),
+            jwt_claims: None,
+            bearer_token: None,
+            deprecated_token_auth: false,
+            impersonation: None,
+        };
+        let req = SpawnAgentRequest {
+            name: "dirty-worker".to_string(),
+            repo_id: "repo-dirty".to_string(),
+            task_id: "task-dirty".to_string(),
+            branch: "feat/dirty".to_string(),
+            parent_id: None,
+            compute_target_id: None,
+            persona_slug: None,
+            disconnected_behavior: None,
+            loop_config: None,
+            agent_type: None,
+            conversation_sha: None,
+            persona: None,
+        };
+        let resp = spawn_agent_core(&state, req, &auth, "spawn_agent_core (direct test drive)")
+            .await
+            .expect("spawn must succeed");
+        let agent_id = Id::new(resp.agent.id.clone());
+
+        // The spawn started an open session attributed to this agent.
+        let open = state
+            .agent_sessions
+            .find_open_by_agent(&agent_id)
+            .await
+            .unwrap()
+            .expect("spawn must start an open session");
+        assert_eq!(open.initial_branch, "feat/dirty");
+        assert!(open.ended_at.is_none());
+
+        // Point the agent's worktree record at the real git worktree (the
+        // recorded path is the production source of the worktree location
+        // — the termination observation reads exactly this record).
+        for w in state.worktrees.find_by_agent(&agent_id).await.unwrap() {
+            state.worktrees.delete(&w.id).await.unwrap();
+        }
+        state
+            .worktrees
+            .create(&gyre_domain::AgentWorktree::new(
+                Id::new("wt-dirty"),
+                agent_id.clone(),
+                repo.id.clone(),
+                Some(Id::new("task-dirty")),
+                "feat/dirty",
+                wt.to_str().unwrap().to_string(),
+                1000,
+            ))
+            .await
+            .unwrap();
+
+        // The agent moves branches mid-session, and leaves an uncommitted
+        // modification behind.
+        run(&wt, &["switch", "-c", "feat/moved"]);
+        std::fs::write(wt.join("src"), "fn main() { changed }\n").unwrap();
+
+        let (status, _mr) = {
+            let (code, body) = complete_agent(
+                axum::extract::State(state.clone()),
+                axum::extract::Path(agent_id.to_string()),
+                auth.clone(),
+                axum::Json(CompleteAgentRequest {
+                    branch: "feat/moved".to_string(),
+                    title: "D feature".to_string(),
+                    target_branch: "main".to_string(),
+                    conversation_sha: None,
+                }),
+            )
+            .await
+            .expect("complete must succeed");
+            (code, serde_json::to_value(&body.0).unwrap())
+        };
+        assert_eq!(status, StatusCode::CREATED);
+
+        // The session terminated with the REAL observations: dirty=true,
+        // the modified file listed, and the moved branch resolved from the
+        // worktree (not the spawn-time branch copied forward).
+        let sessions = state.agent_sessions.find_by_agent(&agent_id).await.unwrap();
+        assert_eq!(sessions.len(), 1);
+        let s = &sessions[0];
+        assert!(s.ended_at.is_some(), "completion must end the session");
+        assert_eq!(
+            s.dirty,
+            Some(true),
+            "uncommitted edit must record dirty=true"
+        );
+        assert!(
+            s.uncommitted_paths.contains(&"src".to_string()),
+            "modified file must be listed, got {:?}",
+            s.uncommitted_paths
+        );
+        assert_eq!(
+            s.final_branch.as_deref(),
+            Some("feat/moved"),
+            "current branch must be resolved from the worktree at termination"
+        );
+        assert_eq!(s.initial_branch, "feat/dirty");
+    }
+
     #[tokio::test]
     async fn complete_agent_not_found() {
         let body = serde_json::json!({
@@ -3737,12 +5694,938 @@ mod tests {
                     .method("POST")
                     .uri("/api/v1/agents/no-such/complete")
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// AC (task-263, identity-security.md §Task-Scoped JWT Claims): a
+    /// valid, non-expired agent JWT spawned for task A gets 403 on
+    /// POST /agents/{task-B-agent}/complete — task B NOT transitioned to
+    /// Review, no completion MR created — and the same boundary holds for
+    /// /stop and /fail (target agent status unchanged, its Task-scoped
+    /// secrets not revoked). Completing its own agent works and revokes
+    /// the token: replaying the same jti gets 401 while exp is still in
+    /// the future, and the jti is present in the durable revoked_tokens
+    /// table. The operator (global token) keeps the stop right.
+    #[tokio::test]
+    async fn agent_jwt_task_scope_boundary_on_lifecycle_endpoints() {
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let (app, repo_id) = create_repo(app).await;
+        let (app, task_a) = create_task(app, "Boundary task A").await;
+        let (app, task_b) = create_task(app, "Boundary task B").await;
+        let (app, json_a) = do_spawn(app, &repo_id, &task_a, "feat/scope-a").await;
+        let (app, json_b) = do_spawn(app, &repo_id, &task_b, "feat/scope-b").await;
+        let agent_a = json_a["agent"]["id"].as_str().unwrap().to_string();
+        let agent_b = json_b["agent"]["id"].as_str().unwrap().to_string();
+        let token_a = json_a["token"].as_str().unwrap().to_string();
+        let token_b = json_b["token"].as_str().unwrap().to_string();
+
+        // A Task-scoped secret for task B: a successful foreign stop/fail
+        // would revoke it, a 403 must leave it in place.
+        let task_b_secret = gyre_common::Secret {
+            id: Id::new("sec-task-b"),
+            name: "EPHEMERAL_DB".to_string(),
+            scope: gyre_common::SecretScope::Task,
+            scope_id: task_b.clone(),
+            secret_type: gyre_common::SecretType::Ephemeral,
+            created_by: "system".to_string(),
+            created_at: 1000,
+            expires_at: None,
+            last_rotated_at: None,
+            tenant_id: "default".to_string(),
+        };
+        state
+            .secrets
+            .create(&task_b_secret, b"task-b-value")
+            .await
+            .unwrap();
+
+        // ── complete: 403, task B untouched, no MR ──────────────────────
+        let body = serde_json::json!({
+            "branch": "feat/scope-b",
+            "title": "hijacked completion",
+            "target_branch": "main",
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/agents/{agent_b}/complete"))
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {token_a}"))
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let task_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/tasks/{task_b}"))
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(body_json(task_resp).await["status"], "in_progress");
+        let mrs = state.merge_requests.list().await.unwrap();
+        assert!(
+            mrs.iter()
+                .all(|m| m.author_agent_id.as_ref() != Some(&Id::new(&agent_b))),
+            "no completion MR may be created for task B's agent"
+        );
+
+        // ── stop / fail: 403, agent B still Active, secret intact ────────
+        for uri in [
+            format!("/api/v1/agents/{agent_b}/stop"),
+            format!("/api/v1/agents/{agent_b}/fail"),
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(&uri)
+                        .header("authorization", format!("Bearer {token_a}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::FORBIDDEN, "uri: {uri}");
+        }
+        let agent_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/agents/{agent_b}"))
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(body_json(agent_resp).await["status"], "active");
+        let scoped = state
+            .secrets
+            .list_by_scope(gyre_common::SecretScope::Task, &task_b, "default")
+            .await
+            .unwrap();
+        assert_eq!(scoped.len(), 1, "task B's secret must not be revoked");
+
+        // ── self-completion passes the boundary and revokes the token ────
+        let body = serde_json::json!({
+            "branch": "feat/scope-a",
+            "title": "Task A done",
+            "target_branch": "main",
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/agents/{agent_a}/complete"))
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {token_a}"))
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let task_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/tasks/{task_a}"))
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(body_json(task_resp).await["status"], "review");
+
+        // The jti is in the durable revocation table ...
+        let jti = state
+            .agent_signing_key
+            .extract_jti_unverified(&token_a)
+            .expect("spawn-minted token carries a jti");
+        assert!(state.spawn_log.is_token_revoked(&jti).await.unwrap());
+        // ... and replaying the same jti gets 401 even though exp is an
+        // hour out (the default TTL is 3600 s).
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/agents/{agent_a}/complete"))
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {token_a}"))
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        // ── the operator (global token) keeps the stop right ─────────────
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/agents/{agent_b}/stop"))
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        // Agent B's own token is revoked by its legitimate stop — the
+        // boundary denied the FOREIGN caller, not the teardown itself.
+        let jti_b = state
+            .agent_signing_key
+            .extract_jti_unverified(&token_b)
+            .unwrap();
+        assert!(state.spawn_log.is_token_revoked(&jti_b).await.unwrap());
+    }
+
+    /// AC (task-263): POST /api/v1/agents/spawn onto task B is denied for
+    /// an agent principal whose token carries neither a matching task_id
+    /// claim nor a spawn scope covering task B's repo/workspace; spawning
+    /// onto the caller's own task passes the claim boundary.
+    #[tokio::test]
+    async fn agent_jwt_cannot_spawn_onto_foreign_task() {
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let (app, repo_id) = create_repo(app).await;
+        let (app, task_a) = create_task(app, "Spawn boundary A").await;
+        let (app, task_b) = create_task(app, "Spawn boundary B").await;
+        let (app, json_a) = do_spawn(app, &repo_id, &task_a, "feat/spawn-a").await;
+        let token_a = json_a["token"].as_str().unwrap().to_string();
+
+        // Task B, same repo — tier containment alone would allow it; the
+        // task-claim boundary must not.
+        let body = serde_json::json!({
+            "name": "foreign-spawn",
+            "repo_id": repo_id,
+            "task_id": task_b,
+            "branch": "feat/evil",
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/agents/spawn")
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {token_a}"))
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        // Task B was not reassigned nor advanced by the denied spawn.
+        let task_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/tasks/{task_b}"))
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let tj = body_json(task_resp).await;
+        assert_eq!(tj["status"], "backlog");
+        assert!(
+            tj["assigned_to"].is_null(),
+            "task B must not be assigned by the denied spawn"
+        );
+
+        // Spawning onto the caller's own task passes the boundary (the
+        // claim matches).
+        let body = serde_json::json!({
+            "name": "own-task-respawn",
+            "repo_id": repo_id,
+            "task_id": task_a,
+            "branch": "feat/respawn",
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/agents/spawn")
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {token_a}"))
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+    }
+
+    /// AC (task-263): decoding a spawn-minted agent JWT shows the specced
+    /// Task-Scoped JWT Claims — sub='agent:<uuid>', aud='gyre', jti,
+    /// task_id, spawned_by, persona (requested at spawn),
+    /// attestation_level, wl_compute_target (compute_target_id was set on
+    /// the spawn request), and the 3600 s default TTL. Under the Layer-1
+    /// SPIFFE design (task-261, merged with this task) the stack evidence
+    /// is resolved once at spawn (`spiffe::resolve_session_stack_evidence`)
+    /// and the SAME value is bound to the mint's `wl_stack_hash`/
+    /// `stack_hash` claims, the session SVID, and the workload-attestation
+    /// record written at launch — the token therefore carries exactly the
+    /// stored workload-attestation stack fingerprint, on the first mint.
+    #[tokio::test]
+    async fn spawn_minted_jwt_carries_task_scoped_claims() {
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        seed_spawn_persona(&state, "security", "be vigilant").await;
+        let (app, repo_id) = create_repo(app).await;
+        let (app, task_id) = create_task(app, "Claims task").await;
+        let (app, ct_id) = create_compute_target(app, "claims-ct", false).await;
+        let (_app, json) = do_spawn_with_persona(
+            app,
+            "claims-worker",
+            &repo_id,
+            &task_id,
+            "feat/claims",
+            Some(&ct_id),
+            "security",
+        )
+        .await;
+        let agent_id = json["agent"]["id"].as_str().unwrap().to_string();
+        let token = json["token"].as_str().unwrap().to_string();
+
+        let claims = state
+            .agent_signing_key
+            .validate(&token, &state.base_url)
+            .expect("spawn-minted JWT must validate against the forge key");
+        assert_eq!(
+            claims.sub,
+            format!("agent:{agent_id}"),
+            "sub is agent:<uuid>"
+        );
+        assert_eq!(claims.aud, "gyre", "aud is the specced default");
+        assert!(!claims.jti.is_empty(), "jti is minted");
+        assert_eq!(claims.task_id, task_id);
+        assert_eq!(
+            claims.spawned_by, "system",
+            "global-token spawner is 'system'"
+        );
+        assert_eq!(
+            claims.persona.as_deref(),
+            Some("security"),
+            "persona comes from the spawn request's validated persona_slug"
+        );
+        assert_eq!(
+            claims.attestation_level,
+            Some(3),
+            "Container compute target → level 3"
+        );
+        assert_eq!(
+            claims.wl_compute_target.as_deref(),
+            Some(ct_id.as_str()),
+            "wl_compute_target carries the request's compute target id"
+        );
+        assert_eq!(claims.exp - claims.iat, 3600, "default TTL is 3600 s");
+        // Layer-1 stack evidence: both spellings carry the SAME value, and
+        // it equals the fingerprint stored in the agent's workload-
+        // attestation record (written at launch from the SVID-bound
+        // evidence) — the spec-registry stack-pinning consumer's input.
+        let wl_stack_hash = claims
+            .wl_stack_hash
+            .as_deref()
+            .expect("wl_stack_hash is resolved from the session stack evidence");
+        assert_eq!(
+            claims.stack_hash.as_deref(),
+            Some(wl_stack_hash),
+            "stack_hash alias carries the same fingerprint"
+        );
+        assert!(!wl_stack_hash.is_empty());
+        let att_json = state
+            .kv_store
+            .kv_get("workload_attestations", &agent_id)
+            .await
+            .unwrap()
+            .expect("launch wrote the workload-attestation record");
+        let att: crate::workload_attestation::WorkloadAttestation =
+            serde_json::from_str(&att_json).unwrap();
+        assert_eq!(
+            att.stack_fingerprint, wl_stack_hash,
+            "the minted stack hash equals the stored workload-attestation \
+             stack fingerprint"
+        );
+    }
+
+    /// task-263 review repair: `wl_hostname` is the hostname of the
+    /// COMPUTE TARGET (identity-security.md claims table: "Hostname of
+    /// the compute target (present when spawned on remote target)").
+    /// A merge round regressed the mint to read_hostname() — the FORGE
+    /// server's own hostname — for every spawn, so an Ssh spawn's token
+    /// named the forge host instead of the configured remote host,
+    /// fabricating the workload's location. This pins the Ssh arm: the
+    /// minted wl_hostname equals the compute target's configured host.
+    /// The remote is unreachable in the test environment — irrelevant
+    /// here, because the mint precedes the (best-effort) launch and
+    /// reads the CONFIGURED fact, not a live probe.
+    #[tokio::test]
+    async fn ssh_spawn_mints_configured_remote_host_as_wl_hostname() {
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let (app, ws_id) = create_workspace(app, "wl-hostname-ws").await;
+        let (app, repo_id) = create_repo_in_workspace(app, &ws_id).await;
+        let (app, task_id) = create_task(app, "wl_hostname task").await;
+
+        // SSH-typed compute target whose configured host is a remote
+        // worker machine — NOT this forge server.
+        let ct_body = serde_json::json!({
+            "name": "wl-hostname-ssh-target",
+            "target_type": "Ssh",
+            "config": {"user": "agent", "host": "worker-box", "port": 22},
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/compute-targets")
+                    .header("content-type", "application/json")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&ct_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::CREATED,
+            "ssh compute target create should succeed"
+        );
+        let ct_json = body_json(resp).await;
+        let ct_id = ct_json["id"].as_str().unwrap().to_string();
+
+        let body = serde_json::json!({
+            "name": "wl-hostname-worker",
+            "repo_id": repo_id,
+            "task_id": task_id,
+            "branch": "feat/wl-hostname",
+            "compute_target_id": ct_id,
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/agents/spawn")
+                    .header("content-type", "application/json")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::CREATED,
+            "ssh-target spawn should succeed (the mint precedes the \
+             best-effort launch), got {}",
+            resp.status()
+        );
+        let json = body_json(resp).await;
+        let token = json["token"].as_str().unwrap();
+
+        let claims = state
+            .agent_signing_key
+            .validate(token, &state.base_url)
+            .expect("spawn-minted JWT must validate against the forge key");
+        assert_eq!(
+            claims.wl_hostname.as_deref(),
+            Some("worker-box"),
+            "wl_hostname is the Ssh compute target's configured host, not \
+             the forge server's own hostname"
+        );
+    }
+
+    // ─── Auto-emitted analytics events (analytics.md §Auto-Emitted Events) ────
+
+    #[tokio::test]
+    async fn spawn_emits_agent_spawned_analytics_event() {
+        // agent.spawned must carry agent_id, task_id, compute_target, persona.
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let (app, repo_id) = create_repo(app).await;
+        let (app, task_id) = create_task(app, "Spawn analytics").await;
+        let (_, spawn_json) = do_spawn(app, &repo_id, &task_id, "feat/analytics-spawn").await;
+        let agent_id = spawn_json["agent"]["id"].as_str().unwrap().to_string();
+
+        let events = state
+            .analytics
+            .query(Some("agent.spawned"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 1, "one agent.spawned event expected");
+        let ev = &events[0];
+        assert_eq!(ev.agent_id.as_deref(), Some(agent_id.as_str()));
+        assert_eq!(ev.properties["task_id"], task_id);
+        assert!(
+            ev.properties["compute_target"]
+                .as_str()
+                .is_some_and(|t| !t.is_empty()),
+            "compute_target must be a non-empty string"
+        );
+        assert!(
+            ev.properties["persona"]
+                .as_str()
+                .is_some_and(|p| !p.is_empty()),
+            "persona must be a non-empty string"
+        );
+    }
+
+    /// analytics.md §Auto-Emitted Events / §Decision API: the
+    /// `agent.spawned` persona property must report the persona actually
+    /// bound at spawn (platform-model.md §4.3 resolution of
+    /// persona_slug), not a hardcoded bootstrap label — the persona-
+    /// performance decision signals ("Is this agent persona performing
+    /// well?") are keyed on this property. Regression: the emit site
+    /// hardcoded "default-worker" for every spawn.
+    #[tokio::test]
+    async fn spawn_analytics_persona_reports_bound_persona() {
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let (app, ws_id) = create_workspace(app, "persona-analytics-ws").await;
+        let (app, repo_id) = create_repo_in_workspace(app, &ws_id).await;
+        let (app, task_id) = create_task(app, "Persona analytics").await;
+        let persona_id = seed_spawn_persona(
+            &state,
+            "spec-reviewer",
+            "You are the spec-reviewer persona.",
+        )
+        .await;
+        let (_, spawn_json) = do_spawn_with_persona(
+            app,
+            "worker-persona-analytics",
+            &repo_id,
+            &task_id,
+            "feat/persona-analytics",
+            None,
+            "spec-reviewer",
+        )
+        .await;
+
+        // Sanity: the persona really was bound to the agent row — otherwise
+        // the analytics assertion below could pass vacuously.
+        assert_eq!(spawn_json["agent"]["persona_id"], persona_id);
+
+        let events = state
+            .analytics
+            .query(Some("agent.spawned"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 1, "one agent.spawned event expected");
+        assert_eq!(
+            events[0].properties["persona"], "spec-reviewer",
+            "persona property must report the bound persona's slug, not a hardcoded label"
+        );
+    }
+
+    /// analytics.md §Auto-Emitted Events: `task.status_changed` (trigger
+    /// "Task transitions status") must record on the spawn auto-advance
+    /// Backlog→InProgress, not only on the HTTP status endpoint and the MCP
+    /// update_task tool. Regression: the internal auto-advance previously
+    /// persisted the transition with no analytics event.
+    #[tokio::test]
+    async fn spawn_auto_advance_records_task_status_changed() {
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let (app, repo_id) = create_repo(app).await;
+        let (app, task_id) = create_task(app, "Auto-advance analytics").await;
+        let (_, spawn_json) = do_spawn(app, &repo_id, &task_id, "feat/auto-advance").await;
+        let agent_id = spawn_json["agent"]["id"].as_str().unwrap().to_string();
+
+        let events = state
+            .analytics
+            .query(Some("task.status_changed"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            events.len(),
+            1,
+            "spawn auto-advance must record task.status_changed"
+        );
+        let ev = &events[0];
+        assert_eq!(ev.properties["task_id"], task_id);
+        assert_eq!(ev.properties["old_status"], "Backlog");
+        assert_eq!(ev.properties["new_status"], "InProgress");
+        assert_eq!(ev.properties["assigned_to"], agent_id);
+        assert_eq!(ev.agent_id.as_deref(), Some(agent_id.as_str()));
+    }
+
+    /// analytics.md §Auto-Emitted Events: `task.status_changed` must record
+    /// on the completion auto-advance to Review. The spawn auto-advance
+    /// (Backlog→InProgress) records first, so the completion transition is
+    /// the second event. Regression: this internal transition previously
+    /// persisted with no analytics event.
+    #[tokio::test]
+    async fn complete_auto_advance_records_task_status_changed() {
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let (app, repo_id) = create_repo(app).await;
+        let (app, task_id) = create_task(app, "Complete advance analytics").await;
+        let (app, spawn_json) = do_spawn(app, &repo_id, &task_id, "feat/complete-advance").await;
+        let agent_id = spawn_json["agent"]["id"].as_str().unwrap().to_string();
+
+        let body = serde_json::json!({
+            "branch": "feat/complete-advance",
+            "title": "Done",
+            "target_branch": "main",
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/agents/{agent_id}/complete"))
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        let events = state
+            .analytics
+            .query(Some("task.status_changed"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            events.len(),
+            2,
+            "spawn auto-advance and completion auto-advance must each record"
+        );
+        let completion_ev = events
+            .iter()
+            .find(|e| e.properties["new_status"] == "Review")
+            .expect("completion auto-advance must record a →Review event");
+        assert_eq!(completion_ev.properties["task_id"], task_id);
+        assert_eq!(completion_ev.properties["old_status"], "InProgress");
+        assert_eq!(completion_ev.properties["assigned_to"], agent_id);
+    }
+
+    #[tokio::test]
+    async fn complete_agent_emits_analytics_event() {
+        // agent.completed must carry agent_id, task_id, duration_secs.
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let (app, repo_id) = create_repo(app).await;
+        let (app, task_id) = create_task(app, "Complete analytics").await;
+        let (app, spawn_json) = do_spawn(app, &repo_id, &task_id, "feat/analytics-complete").await;
+        let agent_id = spawn_json["agent"]["id"].as_str().unwrap().to_string();
+
+        let body = serde_json::json!({
+            "branch": "feat/analytics-complete",
+            "title": "Done",
+            "target_branch": "main",
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/agents/{agent_id}/complete"))
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let mr_json = body_json(resp).await;
+        let mr_id = mr_json["id"].as_str().unwrap().to_string();
+
+        let events = state
+            .analytics
+            .query(Some("agent.completed"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 1, "one agent.completed event expected");
+        let ev = &events[0];
+        assert_eq!(ev.agent_id.as_deref(), Some(agent_id.as_str()));
+        assert_eq!(ev.properties["task_id"], task_id);
+        assert!(
+            ev.properties["duration_secs"].as_u64().is_some(),
+            "duration_secs must be present"
+        );
+
+        // The pre-existing mr.created event must survive task-146's additions
+        // (contract repair): completing an agent creates an MR, and that MR
+        // creation is still tracked.
+        let created = state
+            .analytics
+            .query(Some("mr.created"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(created.len(), 1, "one mr.created event expected");
+        assert_eq!(created[0].properties["mr_id"], mr_id);
+        assert_eq!(
+            created[0].properties["source_branch"],
+            "feat/analytics-complete"
+        );
+    }
+
+    /// message-bus.md §Delivery Guarantees (Agent completion cleanup):
+    /// POST /agents/:id/complete must bulk-ack the completing agent's
+    /// unacked Directed inbox with reason "agent_completed" — count_unacked
+    /// drops to zero, ?acknowledged=false returns nothing, the rows remain
+    /// stored for audit, and the dead-inbox retention expiry reclaims exactly
+    /// those rows (expire_acked_inboxes matches only the
+    /// agent_completed/agent_orphaned reasons, so the deletion count also
+    /// proves the recorded reason). Fails on the old behavior where the
+    /// completion path never called acknowledge_all.
+    #[tokio::test]
+    async fn complete_agent_bulk_acks_directed_inbox() {
+        use gyre_common::message::{Destination, Message, MessageKind, MessageOrigin};
+
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let (app, repo_id) = create_repo(app).await;
+        let (app, task_id) = create_task(app, "Inbox cleanup complete").await;
+        let (app, spawn_json) = do_spawn(app, &repo_id, &task_id, "feat/inbox-cleanup").await;
+        let agent_id = spawn_json["agent"]["id"].as_str().unwrap().to_string();
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        // Aged past a 1s retention cutoff so the reclamation probe can use a
+        // short dead-inbox window without touching process-global env vars.
+        let created_at = now - 10_000;
+        let directed = |id: &str, agent: &str| Message {
+            id: Id::new(id.to_string()),
+            tenant_id: Id::new("default"),
+            from: MessageOrigin::Server,
+            workspace_id: Some(Id::new("ws-1")),
+            to: Destination::Agent(Id::new(agent.to_string())),
+            kind: MessageKind::TaskAssignment,
+            payload: None,
+            created_at,
+            signature: None,
+            key_id: None,
+            acknowledged: false,
+        };
+
+        // Two unacked Directed messages in the completing agent's inbox.
+        state
+            .messages
+            .store(&directed("cleanup-msg-1", &agent_id))
+            .await
+            .unwrap();
+        state
+            .messages
+            .store(&directed("cleanup-msg-2", &agent_id))
+            .await
+            .unwrap();
+        // A live second agent's unacked inbox — must survive untouched.
+        state
+            .messages
+            .store(&directed("live-agent-msg", "cleanup-live-agent"))
+            .await
+            .unwrap();
+        // An explicitly acked message inside the retention window —
+        // expire_acked_inboxes must not reclaim it (reason "explicit").
+        state
+            .messages
+            .store(&directed("explicit-ack-msg", "cleanup-ack-agent"))
+            .await
+            .unwrap();
+        state
+            .messages
+            .acknowledge(&Id::new("explicit-ack-msg"), &Id::new("cleanup-ack-agent"))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            state
+                .messages
+                .count_unacked(&Id::new(&agent_id))
+                .await
+                .unwrap(),
+            2,
+            "precondition: two unacked Directed messages before completion"
+        );
+
+        let body = serde_json::json!({
+            "branch": "feat/inbox-cleanup",
+            "title": "Done",
+            "target_branch": "main",
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/agents/{agent_id}/complete"))
+                    .header("content-type", "application/json")
+                    // task-263: complete takes an auth extractor now (agent
+                    // task-scope boundary) — the operator token keeps the
+                    // inbox-cleanup behavior under test reachable.
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        // Completion cleanup: zero unacked, nothing redelivered on the
+        // crash-recovery poll.
+        assert_eq!(
+            state
+                .messages
+                .count_unacked(&Id::new(&agent_id))
+                .await
+                .unwrap(),
+            0,
+            "completion must bulk-ack the agent's unacked Directed inbox"
+        );
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/api/v1/agents/{agent_id}/messages?acknowledged=false"
+                    ))
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let poll_json = body_json(resp).await;
+        assert_eq!(
+            poll_json.as_array().unwrap().len(),
+            0,
+            "?acknowledged=false must return nothing after completion"
+        );
+
+        // Audit retention: the rows are still stored, now acknowledged.
+        for msg_id in ["cleanup-msg-1", "cleanup-msg-2"] {
+            let msg = state
+                .messages
+                .find_by_id(&Id::new(msg_id))
+                .await
+                .unwrap()
+                .unwrap_or_else(|| panic!("{msg_id} must remain stored for audit"));
+            assert!(msg.acknowledged, "{msg_id} must be acknowledged");
+        }
+
+        // Reclamation: with the dead-inbox retention window (1s here)
+        // elapsed, expire_acked_inboxes deletes exactly the two
+        // agent_completed rows — the deletion proves the ack_reason, since
+        // the expiry only matches agent_completed/agent_orphaned.
+        let deleted = state
+            .messages
+            .expire_acked_inboxes(now - 1_000)
+            .await
+            .unwrap();
+        assert_eq!(
+            deleted, 2,
+            "dead-inbox retention must reclaim exactly the completed agent's inbox"
+        );
+        assert!(state
+            .messages
+            .find_by_id(&Id::new("cleanup-msg-1"))
+            .await
+            .unwrap()
+            .is_none());
+        assert!(state
+            .messages
+            .find_by_id(&Id::new("cleanup-msg-2"))
+            .await
+            .unwrap()
+            .is_none());
+
+        // Untouched: the live agent's unacked inbox and the explicit-ack
+        // message inside the retention window.
+        let live = state
+            .messages
+            .find_by_id(&Id::new("live-agent-msg"))
+            .await
+            .unwrap()
+            .expect("live agent's unacked Directed message must survive");
+        assert!(!live.acknowledged);
+        assert_eq!(
+            state
+                .messages
+                .count_unacked(&Id::new("cleanup-live-agent"))
+                .await
+                .unwrap(),
+            1
+        );
+        assert!(
+            state
+                .messages
+                .find_by_id(&Id::new("explicit-ack-msg"))
+                .await
+                .unwrap()
+                .is_some(),
+            "explicitly acked message inside the retention window must survive"
+        );
+    }
+
+    #[tokio::test]
+    async fn fail_agent_emits_analytics_event() {
+        // agent.failed must carry agent_id, task_id, reason.
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let (app, repo_id) = create_repo(app).await;
+        let (app, task_id) = create_task(app, "Fail analytics").await;
+        let (app, spawn_json) = do_spawn(app, &repo_id, &task_id, "feat/analytics-fail").await;
+        let agent_id = spawn_json["agent"]["id"].as_str().unwrap().to_string();
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/agents/{agent_id}/fail"))
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let events = state
+            .analytics
+            .query(Some("agent.failed"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 1, "one agent.failed event expected");
+        let ev = &events[0];
+        assert_eq!(ev.agent_id.as_deref(), Some(agent_id.as_str()));
+        assert_eq!(ev.properties["task_id"], task_id);
+        assert!(
+            ev.properties["reason"]
+                .as_str()
+                .is_some_and(|r| !r.is_empty()),
+            "reason must be a non-empty string"
+        );
     }
 
     #[tokio::test]
@@ -3756,6 +6639,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/api/v1/agents")
+                    .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
@@ -3777,6 +6661,7 @@ mod tests {
                     .method("POST")
                     .uri(format!("/api/v1/agents/{agent_id}/complete"))
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -3804,6 +6689,7 @@ mod tests {
                     .method("POST")
                     .uri(format!("/api/v1/agents/{agent_id}/complete"))
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -3831,7 +6717,7 @@ mod tests {
         let ev = &events[0];
         assert_eq!(ev.resource_id.as_deref(), Some(agent_id));
         assert_eq!(ev.agent_id.as_ref().map(|id| id.as_str()), Some(agent_id));
-        assert_eq!(ev.detail["name"], "worker-1");
+        assert_eq!(ev.detail["name"], "worker-feat-audit-spawn");
         assert_eq!(ev.detail["task_id"], task_id);
         assert_eq!(ev.detail["compute_target"], "local");
         assert_eq!(ev.detail["branch"], "feat/audit-spawn");
@@ -3863,6 +6749,7 @@ mod tests {
                     .method("POST")
                     .uri(format!("/api/v1/agents/{agent_id}/complete"))
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -3917,6 +6804,7 @@ mod tests {
                     .method("POST")
                     .uri(format!("/api/v1/agents/{agent_id}/complete"))
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -4039,6 +6927,7 @@ mod tests {
                     .method("POST")
                     .uri(format!("/api/v1/agents/{agent_id}/complete"))
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -4153,6 +7042,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri(format!("/api/v1/agents/{agent_id}/stop"))
+                    .header("authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -4273,6 +7163,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri(format!("/api/v1/agents/{agent_id}/fail"))
+                    .header("authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -4338,6 +7229,7 @@ mod tests {
                     .method("POST")
                     .uri(format!("/api/v1/agents/{agent_id}/complete"))
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -4354,6 +7246,7 @@ mod tests {
                     .method("POST")
                     .uri(format!("/api/v1/agents/{agent_id}/complete"))
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -5000,6 +7893,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/api/v1/tasks")
+                    .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
@@ -5169,6 +8063,7 @@ mod tests {
             id: "fake-container-id".to_string(),
             target_type: "container".to_string(),
             pid: None,
+            options: std::collections::HashMap::new(),
         };
         register_spawned_agent(
             &state,
@@ -5263,6 +8158,7 @@ mod tests {
                     id: pid.to_string(),
                     target_type: "local".to_string(),
                     pid: Some(pid),
+                    options: std::collections::HashMap::new(),
                 },
             )
             .await
@@ -5289,6 +8185,225 @@ mod tests {
             .lock()
             .await
             .contains_key("agt-kill-1"));
+    }
+
+    /// F2 regression (task-206 review): a monitor iteration that finds only
+    /// half of the registration — a handle whose backend was already reaped
+    /// by a kill path, or a backend whose handle was — must purge the other
+    /// half too instead of just breaking. Otherwise one Arc<SpawnBackend>
+    /// (or ProcessHandle) leaks per affected agent for the lifetime of the
+    /// server: the kill paths remove both entries, but any path that removes
+    /// only one used to park the other here forever.
+    #[tokio::test]
+    async fn monitor_iteration_purges_half_registered_entries() {
+        let state = test_state();
+
+        // Handle registered, backend already reaped: the iteration must end
+        // the monitor AND remove the orphaned handle.
+        state.process_registry.lock().await.insert(
+            "agt-half-1".to_string(),
+            gyre_ports::ProcessHandle {
+                id: "half-1".to_string(),
+                target_type: "local".to_string(),
+                pid: None,
+                options: std::collections::HashMap::new(),
+            },
+        );
+        assert!(
+            !monitor_poll_once(&state, "agt-half-1").await,
+            "a missing backend must end the monitor"
+        );
+        assert!(
+            !state
+                .process_registry
+                .lock()
+                .await
+                .contains_key("agt-half-1"),
+            "the orphaned handle entry must be purged, not leaked"
+        );
+
+        // Backend registered, handle already reaped: symmetric.
+        state.spawned_backends.lock().await.insert(
+            "agt-half-2".to_string(),
+            std::sync::Arc::new(SpawnBackend::Local),
+        );
+        assert!(
+            !monitor_poll_once(&state, "agt-half-2").await,
+            "a missing handle must end the monitor"
+        );
+        assert!(
+            !state
+                .spawned_backends
+                .lock()
+                .await
+                .contains_key("agt-half-2"),
+            "the orphaned backend entry must be purged, not leaked"
+        );
+    }
+
+    /// A fully registered, still-alive agent keeps its monitor polling:
+    /// `monitor_poll_once` returns true and touches neither entry. Uses a
+    /// real process so the liveness probe is the production one.
+    #[tokio::test]
+    async fn monitor_iteration_keeps_polling_alive_agent() {
+        let state = test_state();
+        let spawn_cfg = gyre_ports::SpawnConfig {
+            name: "monitor-alive-probe".to_string(),
+            command: "sleep".to_string(),
+            args: vec!["60".to_string()],
+            env: std::collections::HashMap::new(),
+            work_dir: "/tmp".to_string(),
+        };
+        let handle = gyre_adapters::compute::LocalTarget
+            .spawn_process(&spawn_cfg)
+            .await
+            .expect("spawning sleep should work on linux");
+
+        state
+            .process_registry
+            .lock()
+            .await
+            .insert("agt-alive-1".to_string(), handle.clone());
+        state.spawned_backends.lock().await.insert(
+            "agt-alive-1".to_string(),
+            std::sync::Arc::new(SpawnBackend::Local),
+        );
+
+        assert!(
+            monitor_poll_once(&state, "agt-alive-1").await,
+            "an alive agent must keep its monitor polling"
+        );
+        assert!(state
+            .process_registry
+            .lock()
+            .await
+            .contains_key("agt-alive-1"));
+        assert!(state
+            .spawned_backends
+            .lock()
+            .await
+            .contains_key("agt-alive-1"));
+
+        // Cleanup: kill the process and drop both entries so no monitor or
+        // process outlives the test.
+        let _ =
+            gyre_ports::ComputeTarget::kill_process(&gyre_adapters::compute::LocalTarget, &handle)
+                .await;
+        state.process_registry.lock().await.remove("agt-alive-1");
+        state.spawned_backends.lock().await.remove("agt-alive-1");
+    }
+
+    /// Task-206 review F5: a liveness probe that ERRS must not run the exit
+    /// path. `monitor_poll_once` used to map an is_alive error to
+    /// not-alive (`.unwrap_or(false)`), so one transient SSH failure ran
+    /// the full exit path into `finish_preview_agent`'s destructive
+    /// teardown (token revoked, worktree force-removed, budget slot
+    /// released, row Stopped) while the remote process still ran and its
+    /// work was lost. Uses a real SSH-docker backend pointed at a refused
+    /// port — the probe fails at the transport layer ("ssh: connect ...
+    /// Connection refused"), the exact production failure class. When ssh
+    /// is absent the probe fails too, so the test holds either way.
+    #[tokio::test]
+    async fn monitor_iteration_survives_liveness_probe_failure() {
+        let state = test_state();
+
+        // A preview agent row the exit path would destroy: an index entry
+        // in preview_agents routes process exits to finish_preview_agent.
+        let mut agent = gyre_domain::Agent::new(Id::new("agt-probe-1"), "preview-x", 0);
+        agent
+            .transition_status(gyre_domain::AgentStatus::Active)
+            .unwrap();
+        state.agents.create(&agent).await.unwrap();
+        state
+            .kv_store
+            .kv_set(
+                "preview_agents",
+                "agt-probe-1",
+                serde_json::json!({
+                    "preview_id": "pv-probe",
+                    "agent_id": "agt-probe-1",
+                    "repo_id": "r-1",
+                    "workspace_id": "ws-1",
+                    "spec_path": "specs/system/search.md",
+                    "branch": "preview/pv-probe/search",
+                    "base_sha": "0".repeat(40),
+                    "worktree_path": "/nonexistent",
+                    "released": false,
+                })
+                .to_string(),
+            )
+            .await
+            .unwrap();
+
+        // Backend whose probe fails at the SSH transport layer: port 1 on
+        // localhost refuses connections immediately.
+        let backend = SpawnBackend::SshDocker(gyre_adapters::compute::SshDockerTarget::new(
+            gyre_adapters::compute::SshTarget::new("root", "127.0.0.1").with_port(1),
+            "gyre-agent:latest",
+        ));
+        state.process_registry.lock().await.insert(
+            "agt-probe-1".to_string(),
+            gyre_ports::ProcessHandle {
+                id: "probe-failed-container".to_string(),
+                target_type: "ssh-docker".to_string(),
+                pid: None,
+                options: std::collections::HashMap::new(),
+            },
+        );
+        state
+            .spawned_backends
+            .lock()
+            .await
+            .insert("agt-probe-1".to_string(), std::sync::Arc::new(backend));
+
+        // The probe FAILS (transport), it does not confirm death: the
+        // monitor must keep polling and leave every registration — and the
+        // preview agent's Active row — untouched.
+        assert!(
+            monitor_poll_once(&state, "agt-probe-1").await,
+            "a failed liveness probe must keep the monitor polling"
+        );
+        assert!(
+            state
+                .process_registry
+                .lock()
+                .await
+                .contains_key("agt-probe-1"),
+            "a probe failure must not unregister the handle"
+        );
+        assert!(
+            state
+                .spawned_backends
+                .lock()
+                .await
+                .contains_key("agt-probe-1"),
+            "a probe failure must not unregister the backend"
+        );
+        let agent = state
+            .agents
+            .find_by_id(&Id::new("agt-probe-1"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            agent.status,
+            gyre_domain::AgentStatus::Active,
+            "a probe failure must not terminal-ize the preview agent"
+        );
+        // And no teardown side effects fired: the preview index entry is
+        // still unreleased (no token revocation / budget release ran).
+        let raw = state
+            .kv_store
+            .kv_get("preview_agents", "agt-probe-1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            !serde_json::from_str::<serde_json::Value>(&raw).unwrap()["released"]
+                .as_bool()
+                .unwrap(),
+            "a probe failure must not release the preview agent's slot"
+        );
     }
     /// TASK-077 (F6): `create_interrogation_policies` must fail closed — if
     /// a policy cannot be created (e.g. duplicate id), the error propagates
@@ -5730,19 +8845,33 @@ exit 1\n"
     }
 
     #[tokio::test]
-    async fn spawn_unresolvable_workspace_skips_secret_resolution() {
-        // A repo in a nonexistent workspace ("ws-ghost") is accepted by the
-        // create-repo validation (it only rejects `..`/`/`), so the spawn
-        // path sees workspace=None. The F3 fix must skip secret resolution
-        // (warn) rather than fabricate tenant "default" — a tenant-scoped
-        // secret named LEAK in the "default" tenant must NOT leak into the
-        // agent env.
+    async fn spawn_unresolvable_workspace_fails_closed() {
+        // §1 Token Scoping + task-097 F3: a repo whose workspace row is
+        // missing carries a dangling reference — POST /api/v1/repos accepts
+        // any workspace_id, so this state is public-API-reachable (seeded
+        // here directly into the store for determinism). The spawn must
+        // FAIL CLOSED: the tenant scope for the agent JWT cannot be
+        // determined, so no agent may be created, no unscoped legacy token
+        // may be minted (it would bypass the MCP §1 scope gate), and no
+        // tenant-scoped secret may be delivered (the F3 leak: a secret
+        // named LEAK in a fabricated "default" tenant must not reach the
+        // agent env — trivially guaranteed because no container runs).
         let state = test_state();
         let app = crate::api::api_router().with_state(state.clone());
         let temp = tempfile::tempdir().expect("tempdir");
         let dump_path = temp.path().join("env-dump").to_string_lossy().into_owned();
 
-        let (app, repo_id) = create_repo_in_workspace(app, "ws-ghost").await;
+        // Seed the dangling repo directly into the store.
+        let repo = gyre_domain::Repository::new(
+            gyre_common::Id::new("repo-ghost"),
+            gyre_common::Id::new("ws-ghost"),
+            "wt-repo".to_string(),
+            format!("{}/ws-ghost/wt-repo.git", state.repos_root),
+            0,
+        );
+        state.repos.create(&repo).await.unwrap();
+        let repo_id = repo.id.to_string();
+
         let (app, task_id) = create_task(app, "Ghost workspace task").await;
         let (app, ct_id) = create_env_dump_compute_target(app, "env-dump-ghost", &dump_path).await;
 
@@ -5759,26 +8888,51 @@ exit 1\n"
         .await;
 
         create_worktree_dir(&state, "ws-ghost", "wt-repo", "feat/ghost");
-        let (_, json) = do_spawn_with_target(app, &repo_id, &task_id, "feat/ghost", &ct_id).await;
+        let body = serde_json::json!({
+            "name": "ghost-worker",
+            "repo_id": repo_id,
+            "task_id": task_id,
+            "branch": "feat/ghost",
+            "compute_target_id": ct_id,
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/agents/spawn")
+                    .header("content-type", "application/json")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         assert_eq!(
-            json["agent"]["status"], "active",
-            "unresolvable workspace must not fail the spawn"
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "spawn must fail closed when the repo's workspace is unresolvable"
+        );
+        let json = body_json(resp).await;
+        let err = json["error"].as_str().unwrap_or_default();
+        assert!(
+            err.contains("ws-ghost"),
+            "error must name the unresolvable workspace, got: {err}"
         );
 
-        let dump = wait_for_dump(&dump_path)
-            .await
-            .expect("stub kubectl should have captured the applied Pod manifest");
-        let env = pod_env_map(&dump);
-        // GYRE_CRED_PROXY is platform-injected (not a secret); assert no
-        // secret-sourced env var leaked.
+        // Fail-closed guarantees: no agent record, hence no token minted
+        // and no container dispatched (no env dump, no secret delivery).
         assert!(
-            !env.keys().any(|k| k.starts_with("GYRE_CRED_") && k != "GYRE_CRED_PROXY"),
-            "no secret-sourced GYRE_CRED_* may be delivered when the workspace is unresolvable:\n{dump}"
+            state
+                .agents
+                .find_by_name("ghost-worker")
+                .await
+                .unwrap()
+                .is_none(),
+            "no agent record may be created when the tenant scope cannot be determined"
         );
-        assert_eq!(
-            env.get("GYRE_CRED_PROXY").map(String::as_str),
-            Some("http://127.0.0.1:8765"),
-            "platform-injected cred proxy must still be delivered:\n{dump}"
+        assert!(
+            !std::path::Path::new(&dump_path).exists(),
+            "no container may run (env dump must never be written) when the spawn fails closed"
         );
     }
 
@@ -5926,6 +9080,69 @@ exit 1\n"
         );
     }
 
+    // ── MCP Prompts injection at spawn (platform-model.md §4.3) ───────────────
+
+    /// Env-dump compute-target variant capturing the GYRE_PROMPT_* vars the
+    /// spawn handler injects (§4.3 system prompts). Create a
+    /// Kubernetes-typed compute target whose `kubectl_path` config points
+    /// at a test-written stub `kubectl` (same process-boundary double as
+    /// `create_env_dump_compute_target`): the stub captures the Pod
+    /// manifest the REAL kubernetes dispatch applies via stdin
+    /// (`kubectl apply -f -`) to `dump_path`; every other kubectl
+    /// subcommand exits 1. The manifest's `spec.containers[0].env` is the
+    /// environment the agent workload would receive, so the §4.3 prompt
+    /// delivery is observed against real dispatch code with no cluster
+    /// dependency.
+    async fn create_prompt_dump_compute_target(
+        app: Router,
+        name: &str,
+        dump_path: &str,
+    ) -> (Router, String) {
+        let stub_path = format!("{dump_path}.sh");
+        let script = format!(
+            "#!/bin/sh\n\
+# Stub kubectl: capture `apply -f -` manifests, fail everything else.\n\
+if [ \"$1\" = \"apply\" ]; then\n\
+  {{ cat; echo; }} > {dump_path}\n\
+  exit 0\n\
+fi\n\
+exit 1\n"
+        );
+        std::fs::write(&stub_path, script).expect("writing kubectl stub");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&stub_path, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod kubectl stub");
+        }
+        let body = serde_json::json!({
+            "name": name,
+            "target_type": "Kubernetes",
+            "config": {"kubectl_path": stub_path},
+            "is_default": false,
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/compute-targets")
+                    .header("content-type", "application/json")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::CREATED,
+            "prompt-dump compute target create should succeed"
+        );
+        let json = body_json(resp).await;
+        (app, json["id"].as_str().unwrap().to_string())
+    }
+
     /// Env-dump variant for the meta-spec prompt delivery (agent-runtime §2):
     /// the script writes the injected `GYRE_META_SPEC_SET_SHA` on the first
     /// line and the raw multi-line `GYRE_META_SPEC_PROMPT` after it, atomically
@@ -5987,6 +9204,653 @@ exit 1\n"
         );
         let json = body_json(resp).await;
         (app, json["id"].as_str().unwrap().to_string())
+    }
+
+    /// Seed an approved persona at tenant scope (the test caller's tenant).
+    async fn seed_spawn_persona(state: &Arc<AppState>, slug: &str, system_prompt: &str) -> String {
+        let mut persona = gyre_domain::Persona::new(
+            Id::new(format!("persona-{slug}")),
+            format!("Persona {slug}"),
+            slug.to_string(),
+            gyre_domain::PersonaScope::Tenant(Id::new("default")),
+            system_prompt.to_string(),
+            1_700_000_000,
+        );
+        persona.approval_status = gyre_domain::PersonaApprovalStatus::Approved;
+        persona.approved_by = Some("human-admin".to_string());
+        persona.approved_at = Some(1_700_000_000);
+        state.personas.create(&persona).await.unwrap();
+        persona.id.to_string()
+    }
+
+    /// Spawn with a persona_slug, asserting CREATED.
+    async fn do_spawn_with_persona(
+        app: Router,
+        name: &str,
+        repo_id: &str,
+        task_id: &str,
+        branch: &str,
+        compute_target_id: Option<&str>,
+        persona_slug: &str,
+    ) -> (Router, serde_json::Value) {
+        let mut body = serde_json::json!({
+            "name": name,
+            "repo_id": repo_id,
+            "task_id": task_id,
+            "branch": branch,
+            "persona_slug": persona_slug,
+        });
+        if let Some(ct) = compute_target_id {
+            body["compute_target_id"] = serde_json::Value::String(ct.to_string());
+        }
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/agents/spawn")
+                    .header("content-type", "application/json")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED, "spawn should succeed");
+        let json = body_json(resp).await;
+        (app, json)
+    }
+
+    /// platform-model.md §8 / §4.3: all four system prompts are injected
+    /// at spawn. Note on dev mode (§8 "Dev Mode (No OIDC)"): the spawn
+    /// below authenticates with the server's static global token
+    /// (`test-token` = `state.auth_token`) against a state with
+    /// `jwt_config: None` — exactly the dev-mode server configuration
+    /// (static-token-only auth, no OIDC). Prompt injection is therefore
+    /// proven under the dev-mode auth path, not just OIDC/JWT callers.
+    #[tokio::test]
+    async fn spawn_injects_all_four_system_prompts_with_persona() {
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let dump_path = temp
+            .path()
+            .join("prompt-dump")
+            .to_string_lossy()
+            .into_owned();
+
+        let (app, ws_id) = create_workspace(app, "prompts-ws").await;
+        let (app, repo_id) = create_repo_in_workspace(app, &ws_id).await;
+        let (app, task_id) = create_task(app, "Implement prompt injection").await;
+        // Give the task a spec ref + description so the context prompt has
+        // real content to render.
+        {
+            let mut task = state
+                .tasks
+                .find_by_id(&Id::new(&task_id))
+                .await
+                .unwrap()
+                .expect("task must exist");
+            task.spec_path = Some("specs/system/platform-model.md".to_string());
+            task.description = Some("Acceptance: all four prompts injected.".to_string());
+            state.tasks.update(&task).await.unwrap();
+        }
+        // Seed a real workspace budget (config + usage) so the context
+        // prompt's budget snapshot renders real looked-up numbers, not a
+        // hardcoded string (platform-model.md §8: context includes budget
+        // limits — remaining tokens/cost for the day).
+        {
+            let ws_key = crate::api::budget::workspace_key(&ws_id);
+            state
+                .budget_configs
+                .set_config(
+                    &ws_key,
+                    &gyre_domain::BudgetConfig {
+                        max_tokens_per_day: Some(100_000),
+                        max_cost_per_day: Some(10.0),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+            state
+                .budget_usages
+                .set_usage(
+                    &ws_key,
+                    &gyre_domain::BudgetUsage {
+                        entity_type: "workspace".to_string(),
+                        entity_id: Id::new(&ws_id),
+                        tokens_used_today: 40_000,
+                        cost_today: 2.5,
+                        active_agents: 1,
+                        period_start: 0,
+                        compute_minutes: 0,
+                    },
+                )
+                .await
+                .unwrap();
+        }
+        let (app, ct_id) =
+            create_prompt_dump_compute_target(app, "prompt-dump-all", &dump_path).await;
+
+        let persona_id = seed_spawn_persona(
+            &state,
+            "prompt-worker",
+            "You are the prompt-worker persona.",
+        )
+        .await;
+        // Bump the persona to a non-trivial version + content hash so the
+        // attestation env vars are observed against real looked-up values,
+        // not constants (platform-model.md §8: persona prompt served from
+        // the approved persona entity, version + content_hash for
+        // attestation).
+        let expected_version;
+        let expected_hash;
+        {
+            let mut persona = state
+                .personas
+                .find_by_id(&Id::new(&persona_id))
+                .await
+                .unwrap()
+                .expect("seeded persona must exist");
+            persona.version = 4;
+            persona.system_prompt = "You are the prompt-worker persona v4.".to_string();
+            persona.refresh_content_hash();
+            expected_version = persona.version;
+            expected_hash = persona.content_hash.clone();
+            state.personas.update(&persona).await.unwrap();
+        }
+
+        create_worktree_dir(&state, &ws_id, "wt-repo", "feat/prompts");
+        let (_, json) = do_spawn_with_persona(
+            app,
+            "worker-prompts",
+            &repo_id,
+            &task_id,
+            "feat/prompts",
+            Some(&ct_id),
+            "prompt-worker",
+        )
+        .await;
+
+        // The resolved persona is bound to the agent row (§4.3 persona binding).
+        assert_eq!(json["agent"]["persona_id"], persona_id);
+
+        let dump = wait_for_dump(&dump_path)
+            .await
+            .expect("stub kubectl should have captured the applied Pod manifest");
+        let env = pod_env_map(&dump);
+        assert_eq!(
+            env.get("GYRE_PROMPT_PERSONA").map(String::as_str),
+            Some("You are the prompt-worker persona v4."),
+            "persona prompt must be injected verbatim:\n{dump}"
+        );
+        // Persona attestation (platform-model.md §8): version + content_hash
+        // of exactly the approved persona entity whose prompt was injected.
+        assert_eq!(
+            env.get("GYRE_PERSONA_ID").map(String::as_str),
+            Some(persona_id.as_str()),
+            "persona id attestation must be injected:\n{dump}"
+        );
+        assert_eq!(
+            env.get("GYRE_PERSONA_VERSION").map(String::as_str),
+            Some("4"),
+            "persona version attestation must be the looked-up version \
+             (expected {expected_version}):\n{dump}"
+        );
+        assert_eq!(
+            env.get("GYRE_PERSONA_CONTENT_HASH").map(String::as_str),
+            Some(expected_hash.as_str()),
+            "persona content_hash attestation must be the recomputed hash \
+             of the injected prompt:\n{dump}"
+        );
+        assert_eq!(
+            env.get("GYRE_PERSONA_APPROVAL_STATUS").map(String::as_str),
+            Some("Approved"),
+            "persona approval attestation must record the approved status:\n{dump}"
+        );
+        assert!(
+            env.get("GYRE_PROMPT_PROTOCOL")
+                .map(|p| p.starts_with("# Gyre Agent Protocol"))
+                .unwrap_or(false),
+            "protocol prompt must be injected:\n{dump}"
+        );
+        assert!(
+            env.get("GYRE_PROMPT_PROTOCOL")
+                .map(|p| p.contains("Ralph loop"))
+                .unwrap_or(false),
+            "protocol prompt must carry the Ralph loop definition:\n{dump}"
+        );
+        assert!(
+            env.get("GYRE_PROMPT_CONTEXT")
+                .map(|p| p.starts_with("# Agent Context"))
+                .unwrap_or(false),
+            "context prompt must be injected:\n{dump}"
+        );
+        assert!(
+            env.get("GYRE_PROMPT_CONTEXT")
+                .map(|p| p.contains("Title: Implement prompt injection"))
+                .unwrap_or(false),
+            "context prompt must carry the task title:\n{dump}"
+        );
+        assert!(
+            env.get("GYRE_PROMPT_CONTEXT")
+                .map(|p| p.contains("Spec ref: specs/system/platform-model.md"))
+                .unwrap_or(false),
+            "context prompt must carry the task's spec ref:\n{dump}"
+        );
+        assert!(
+            env.get("GYRE_PROMPT_CONTEXT")
+                .map(|p| p.contains("Branch: feat/prompts"))
+                .unwrap_or(false),
+            "context prompt must carry the worktree branch:\n{dump}"
+        );
+        // §8: the context document includes the budget limits — the
+        // snapshot must render the seeded config + usage (real lookups:
+        // 40000 of 100000 tokens, 60000 remaining).
+        assert!(
+            env.get("GYRE_PROMPT_CONTEXT")
+                .map(|p| p.contains("## Budget"))
+                .unwrap_or(false),
+            "context prompt must carry the budget snapshot:\n{dump}"
+        );
+        assert!(
+            env.get("GYRE_PROMPT_CONTEXT")
+                .map(|p| p.contains("40000 used today of 100000 (60000 remaining)"))
+                .unwrap_or(false),
+            "context budget snapshot must render the seeded workspace usage:\n{dump}"
+        );
+        assert!(
+            env.get("GYRE_PROMPT_CONSTRAINTS")
+                .map(|p| p.starts_with("# Agent Constraints"))
+                .unwrap_or(false),
+            "constraints prompt must be injected:\n{dump}"
+        );
+        assert!(
+            env.get("GYRE_PROMPT_CONSTRAINTS")
+                .map(|p| p.contains(&format!("Workspace: {ws_id}")))
+                .unwrap_or(false),
+            "constraints prompt must carry the workspace scope boundary:\n{dump}"
+        );
+        // §8: workspace trust level affects agent autonomy — the fixture
+        // workspace defaults to Supervised.
+        assert!(
+            env.get("GYRE_PROMPT_CONSTRAINTS")
+                .map(|p| p.contains("## Trust Level"))
+                .unwrap_or(false),
+            "constraints prompt must carry the workspace trust level:\n{dump}"
+        );
+        assert!(
+            env.get("GYRE_PROMPT_CONSTRAINTS")
+                .map(|p| p.contains("Workspace trust level: Supervised"))
+                .unwrap_or(false),
+            "constraints prompt must render the workspace's trust level:\n{dump}"
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_without_persona_injects_prompts_but_no_persona() {
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let dump_path = temp
+            .path()
+            .join("prompt-dump")
+            .to_string_lossy()
+            .into_owned();
+
+        let (app, ws_id) = create_workspace(app, "prompts-ws-nopersona").await;
+        let (app, repo_id) = create_repo_in_workspace(app, &ws_id).await;
+        let (app, task_id) = create_task(app, "Prompts without persona").await;
+        let (app, ct_id) =
+            create_prompt_dump_compute_target(app, "prompt-dump-nopersona", &dump_path).await;
+
+        create_worktree_dir(&state, &ws_id, "wt-repo", "feat/nopersona");
+        let (_, json) =
+            do_spawn_with_target(app, &repo_id, &task_id, "feat/nopersona", &ct_id).await;
+        assert_eq!(json["agent"]["status"], "active");
+        assert!(
+            json["agent"]
+                .get("persona_id")
+                .map(|v| v.is_null())
+                .unwrap_or(true),
+            "no persona may be fabricated when none was requested: {}",
+            json["agent"]
+        );
+
+        let dump = wait_for_dump(&dump_path)
+            .await
+            .expect("stub kubectl should have captured the applied Pod manifest");
+        let env = pod_env_map(&dump);
+        for var in [
+            "GYRE_PROMPT_PROTOCOL",
+            "GYRE_PROMPT_CONTEXT",
+            "GYRE_PROMPT_CONSTRAINTS",
+        ] {
+            assert!(env.contains_key(var), "{var} must be injected:\n{dump}");
+        }
+        assert!(
+            !env.contains_key("GYRE_PROMPT_PERSONA"),
+            "no persona prompt may be injected when no persona is bound:\n{dump}"
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_persona_slug_fails_closed() {
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+
+        let (app, ws_id) = create_workspace(app, "prompts-ws-failclosed").await;
+        let (app, repo_id) = create_repo_in_workspace(app, &ws_id).await;
+        let (app, task_id) = create_task(app, "Fail-closed persona").await;
+
+        // Unknown slug: rejected.
+        let body = serde_json::json!({
+            "name": "worker-missing-persona",
+            "repo_id": repo_id,
+            "task_id": task_id,
+            "branch": "feat/missing-persona",
+            "persona_slug": "no-such-persona",
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/agents/spawn")
+                    .header("content-type", "application/json")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "unknown persona slug must reject the spawn"
+        );
+        let json = body_json(resp).await;
+        assert!(
+            json["error"]
+                .as_str()
+                .unwrap()
+                .contains("not found in scope chain"),
+            "error should name the unresolvable persona: {}",
+            json["error"]
+        );
+
+        // Unapproved (Pending) slug: rejected — never inject unapproved behavior.
+        let persona = gyre_domain::Persona::new(
+            Id::new("persona-pending-spawn"),
+            "Persona pending-spawn",
+            "pending-spawn".to_string(),
+            gyre_domain::PersonaScope::Tenant(Id::new("default")),
+            "pending persona prompt".to_string(),
+            1_700_000_000,
+        );
+        // approval_status stays Pending (Persona::new default)
+        state.personas.create(&persona).await.unwrap();
+        let body = serde_json::json!({
+            "name": "worker-pending-persona",
+            "repo_id": repo_id,
+            "task_id": task_id,
+            "branch": "feat/pending-persona",
+            "persona_slug": "pending-spawn",
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/agents/spawn")
+                    .header("content-type", "application/json")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "a Pending persona must reject the spawn"
+        );
+        let json = body_json(resp).await;
+        assert!(
+            json["error"].as_str().unwrap().contains("approve"),
+            "error should demand approval: {}",
+            json["error"]
+        );
+
+        // No orphaned agent rows from the rejected spawns.
+        let agents = state.agents.list().await.unwrap();
+        let rejected: Vec<&gyre_domain::Agent> = agents
+            .iter()
+            .filter(|a| a.name.starts_with("worker-"))
+            .collect();
+        assert!(
+            rejected.is_empty(),
+            "rejected spawns must not leave agent rows behind: {:?}",
+            rejected.iter().map(|a| a.name.clone()).collect::<Vec<_>>()
+        );
+    }
+
+    /// Review repair (manifest gates): the bare `persona` field feeds the
+    /// `agent_personas` KV namespace — the trust source the manifest-gate
+    /// persona check (`evaluate_persona_reviews`) reads. A caller-supplied
+    /// name that does not resolve to an Approved persona must reject the
+    /// spawn BEFORE any state is created, and must never be recorded:
+    /// otherwise any spawn-capable caller (repo orchestrator via
+    /// gyre_spawn_worker, any Developer via REST) could mint a
+    /// gate-satisfiable persona identity and self-approve an MR.
+    #[tokio::test]
+    async fn spawn_bare_persona_fails_closed() {
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+
+        let (app, ws_id) = create_workspace(app, "prompts-ws-bare-failclosed").await;
+        let (app, repo_id) = create_repo_in_workspace(app, &ws_id).await;
+        let (app, task_id) = create_task(app, "Fail-closed bare persona").await;
+
+        // Unknown persona name: rejected.
+        let body = serde_json::json!({
+            "name": "worker-missing-bare-persona",
+            "repo_id": repo_id,
+            "task_id": task_id,
+            "branch": "feat/missing-bare-persona",
+            "persona": "no-such-persona",
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/agents/spawn")
+                    .header("content-type", "application/json")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "unknown bare persona must reject the spawn"
+        );
+        let json = body_json(resp).await;
+        assert!(
+            json["error"]
+                .as_str()
+                .unwrap()
+                .contains("not found in scope chain"),
+            "error should name the unresolvable persona: {}",
+            json["error"]
+        );
+
+        // Unapproved (Pending) persona: rejected — a pending persona is a
+        // human-unapproved behavior definition and must not become a
+        // gate-satisfiable reviewer identity.
+        let persona = gyre_domain::Persona::new(
+            Id::new("persona-pending-bare"),
+            "Persona pending-bare".to_string(),
+            "pending-bare".to_string(),
+            gyre_domain::PersonaScope::Tenant(Id::new("default")),
+            "pending bare persona prompt".to_string(),
+            1_700_000_000,
+        );
+        // approval_status stays Pending (Persona::new default)
+        state.personas.create(&persona).await.unwrap();
+        let body = serde_json::json!({
+            "name": "worker-pending-bare-persona",
+            "repo_id": repo_id,
+            "task_id": task_id,
+            "branch": "feat/pending-bare-persona",
+            "persona": "pending-bare",
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/agents/spawn")
+                    .header("content-type", "application/json")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "a Pending bare persona must reject the spawn"
+        );
+        let json = body_json(resp).await;
+        assert!(
+            json["error"].as_str().unwrap().contains("approve"),
+            "error should demand approval: {}",
+            json["error"]
+        );
+
+        // No orphaned agent rows from the rejected spawns.
+        let agents = state.agents.list().await.unwrap();
+        let rejected: Vec<&gyre_domain::Agent> = agents
+            .iter()
+            .filter(|a| a.name.starts_with("worker-"))
+            .collect();
+        assert!(
+            rejected.is_empty(),
+            "rejected spawns must not leave agent rows behind: {:?}",
+            rejected.iter().map(|a| a.name.clone()).collect::<Vec<_>>()
+        );
+
+        // And nothing was recorded in the persona namespace an unapproved
+        // spawn must never write: `agent_personas` is the exact trust
+        // source the manifest-gate persona check reads.
+        let recorded = state.kv_store.kv_list("agent_personas").await.unwrap();
+        assert!(
+            recorded.is_empty(),
+            "a rejected bare-persona spawn must not record a persona: {:?}",
+            recorded
+        );
+    }
+
+    /// Positive counterpart: an Approved bare persona is recorded in the
+    /// `agent_personas` namespace (the manifest-gate persona source) and
+    /// injected as `GYRE_PERSONA` for the launched runtime.
+    #[tokio::test]
+    async fn spawn_bare_persona_approved_is_recorded() {
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let dump_path = temp
+            .path()
+            .join("prompt-dump-bare")
+            .to_string_lossy()
+            .into_owned();
+
+        let (app, ws_id) = create_workspace(app, "prompts-ws-bare-ok").await;
+        let (app, repo_id) = create_repo_in_workspace(app, &ws_id).await;
+        let (app, task_id) = create_task(app, "Bare persona record").await;
+        let (app, ct_id) =
+            create_prompt_dump_compute_target(app, "prompt-dump-bare-ok", &dump_path).await;
+
+        seed_spawn_persona(&state, "security-probe", "You are the security probe.").await;
+
+        create_worktree_dir(&state, &ws_id, "wt-repo", "feat/bare-persona");
+        let body = serde_json::json!({
+            "name": "worker-bare-persona",
+            "repo_id": repo_id,
+            "task_id": task_id,
+            "branch": "feat/bare-persona",
+            "compute_target_id": ct_id,
+            "persona": "security-probe",
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/agents/spawn")
+                    .header("content-type", "application/json")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED, "spawn should succeed");
+        let json = body_json(resp).await;
+        let agent_id = json["agent"]["id"].as_str().unwrap().to_string();
+
+        // The validated persona name is recorded in the namespace the
+        // manifest-gate persona check reads.
+        let recorded = state
+            .kv_store
+            .kv_get("agent_personas", &agent_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            recorded.as_deref(),
+            Some("security-probe"),
+            "an Approved bare persona must be recorded for the spawned agent"
+        );
+
+        // And delivered to the launched runtime for self-identification.
+        let dump = wait_for_dump(&dump_path)
+            .await
+            .expect("stub kubectl should have captured the applied Pod manifest");
+        let env = pod_env_map(&dump);
+        assert_eq!(
+            env.get("GYRE_PERSONA").map(String::as_str),
+            Some("security-probe"),
+            "the validated bare persona must be injected as GYRE_PERSONA:\n{dump}"
+        );
+    }
+
+    /// Complement of `spawn_delivers_meta_spec_prompt_to_agent_env`: with
+    /// no required meta-specs and no spec bindings, the assembled prompt set
+    /// is empty and the response must NOT fabricate a `meta_spec_set_sha`.
+    #[tokio::test]
+    async fn spawn_omits_meta_spec_set_sha_without_required_meta_specs() {
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // Fresh workspace, no required meta-specs seeded: the field is null.
+        let (app, ws_id) = create_workspace(app, "prompts-ws-metasha").await;
+        let (app, repo_id) = create_repo_in_workspace(app, &ws_id).await;
+        let (app, task_id) = create_task(app, "Meta-spec sha").await;
+        let (_, resp) =
+            try_spawn(app, "worker-metasha-1", &repo_id, &task_id, "feat/metasha").await;
+        assert_eq!(resp.status(), StatusCode::CREATED, "spawn should succeed");
+        let json = body_json(resp).await;
+        assert!(
+            json.get("meta_spec_set_sha")
+                .map(|v| v.is_null())
+                .unwrap_or(true),
+            "no meta_spec_set_sha may be fabricated when the assembled set is empty: {json}"
+        );
     }
 
     /// Agent-runtime §2 server-side delivery (task-116 repair): the
@@ -6089,6 +9953,420 @@ exit 1\n"
         assert!(
             env_prompt.contains(prompt_text),
             "rendered prompt must contain the seeded persona prompt text:\n{env_prompt}"
+        );
+
+        // agent-runtime.md §5: the system-managed PROTOCOL section is
+        // injected at spawn alongside the meta-spec system prompt.
+        let env_protocol = env
+            .get("GYRE_PROTOCOL_PROMPT")
+            .expect("pod manifest must carry GYRE_PROTOCOL_PROMPT");
+        assert!(
+            env_protocol.contains("Ralph loop rules"),
+            "protocol prompt must carry the Ralph loop rules:\n{env_protocol}"
+        );
+        assert!(
+            env_protocol.contains("gyre_agent_complete"),
+            "protocol prompt must carry completion signaling:\n{env_protocol}"
+        );
+        // platform-model.md §8: the protocol norms include the MCP tool
+        // catalog with usage patterns and the handoff protocol.
+        assert!(
+            env_protocol.contains("## MCP tools"),
+            "protocol prompt must carry the MCP tool catalog:\n{env_protocol}"
+        );
+        assert!(
+            env_protocol.contains("## Handoff protocol"),
+            "protocol prompt must carry the handoff protocol:\n{env_protocol}"
+        );
+        // Single source of truth: GYRE_PROTOCOL_PROMPT and
+        // GYRE_PROMPT_PROTOCOL must carry identical protocol norms.
+        assert_eq!(
+            env_protocol,
+            env.get("GYRE_PROMPT_PROTOCOL").expect(
+                "pod manifest must carry GYRE_PROMPT_PROTOCOL alongside GYRE_PROTOCOL_PROMPT"
+            ),
+            "both protocol env injections must serve the identical protocol norms text"
+        );
+    }
+
+    /// Seed a real QualityGate row for a repo (task-268 test fixture —
+    /// the spawn path must read the repo's actual gate configuration,
+    /// never hardcoded commands).
+    async fn seed_quality_gate(
+        state: &Arc<AppState>,
+        id: &str,
+        repo_id: &str,
+        name: &str,
+        gate_type: gyre_domain::GateType,
+        command: Option<&str>,
+        phase: gyre_domain::GatePhase,
+    ) {
+        state
+            .quality_gates
+            .save(&gyre_domain::QualityGate {
+                id: Id::new(id),
+                repo_id: Id::new(repo_id),
+                name: name.to_string(),
+                gate_type,
+                command: command.map(String::from),
+                required_approvals: None,
+                persona: None,
+                validation_type: None,
+                required: true,
+                gate_phase: phase,
+                timeout_secs: None,
+                position: 0,
+                created_at: 1,
+            })
+            .await
+            .expect("seeding quality gate must succeed");
+    }
+
+    /// agent-workflow.md §Immediate Feedback (task-268): pre-PR local
+    /// verification — server-side gate delivery. The spawn path must
+    /// resolve the repo's locally-runnable command gates from the REAL
+    /// QualityGateRepository rows and inject them as machine-readable
+    /// GYRE_LOCAL_GATES JSON: pre-merge TestCommand/LintCommand gates are
+    /// delivered with their configured commands; RequiredApprovals (no
+    /// command — not locally runnable) and PostMerge gates (validation
+    /// against the new default-branch HEAD after merge, not a pre-PR
+    /// check) are excluded. Removing the container_env injection or
+    /// hardcoding commands instead of reading the repository fails this
+    /// test while the runner suite alone stays green.
+    #[tokio::test]
+    async fn spawn_delivers_local_gates_from_repo_gate_config() {
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let dump_path = temp
+            .path()
+            .join("local-gates-dump")
+            .to_string_lossy()
+            .into_owned();
+
+        let (app, ws_id) = create_workspace(app, "local-gates-ws").await;
+        let (app, repo_id) = create_repo_in_workspace(app, &ws_id).await;
+        let (app, task_id) = create_task(app, "Local gates delivery task").await;
+        let (app, ct_id) =
+            create_meta_prompt_dump_compute_target(app, "local-gates-ct", &dump_path).await;
+
+        // Real gate rows for this repo: a TestCommand gate, a LintCommand
+        // gate, a RequiredApprovals gate (no command — not locally
+        // runnable), and a PostMerge TestCommand gate (post-merge
+        // validation, not a pre-PR check).
+        seed_quality_gate(
+            &state,
+            "gate-local-tests",
+            &repo_id,
+            "unit tests",
+            gyre_domain::GateType::TestCommand,
+            Some("cargo test --all"),
+            gyre_domain::GatePhase::PreMerge,
+        )
+        .await;
+        seed_quality_gate(
+            &state,
+            "gate-local-lint",
+            &repo_id,
+            "lint",
+            gyre_domain::GateType::LintCommand,
+            Some("cargo clippy --all-targets"),
+            gyre_domain::GatePhase::PreMerge,
+        )
+        .await;
+        seed_quality_gate(
+            &state,
+            "gate-local-approvals",
+            &repo_id,
+            "approvals",
+            gyre_domain::GateType::RequiredApprovals,
+            None,
+            gyre_domain::GatePhase::PreMerge,
+        )
+        .await;
+        seed_quality_gate(
+            &state,
+            "gate-local-post",
+            &repo_id,
+            "post-merge tests",
+            gyre_domain::GateType::TestCommand,
+            Some("cargo test --release"),
+            gyre_domain::GatePhase::PostMerge,
+        )
+        .await;
+
+        create_worktree_dir(&state, &ws_id, "wt-repo", "feat/local-gates");
+        let (_, json) =
+            do_spawn_with_target(app, &repo_id, &task_id, "feat/local-gates", &ct_id).await;
+        assert_eq!(json["agent"]["status"], "active");
+
+        let dump = wait_for_dump(&dump_path)
+            .await
+            .expect("kubectl stub should have captured the applied Pod manifest");
+        let env = pod_env_map(&dump);
+
+        let raw = env
+            .get("GYRE_LOCAL_GATES")
+            .expect("pod manifest must carry GYRE_LOCAL_GATES");
+        let gates: serde_json::Value =
+            serde_json::from_str(raw).expect("GYRE_LOCAL_GATES must be valid JSON");
+        let arr = gates
+            .as_array()
+            .expect("GYRE_LOCAL_GATES must be a JSON array");
+        assert_eq!(
+            arr.len(),
+            2,
+            "exactly the two pre-merge command gates: {raw}"
+        );
+        let commands: Vec<&str> = arr
+            .iter()
+            .map(|g| g["command"].as_str().unwrap_or(""))
+            .collect();
+        assert!(
+            commands.contains(&"cargo test --all"),
+            "TestCommand gate command must be delivered from the repo's gate row: {raw}"
+        );
+        assert!(
+            commands.contains(&"cargo clippy --all-targets"),
+            "LintCommand gate command must be delivered from the repo's gate row: {raw}"
+        );
+        for g in arr {
+            assert!(
+                g["id"].is_string() && g["name"].is_string(),
+                "each delivered gate carries id and name: {raw}"
+            );
+        }
+        assert!(
+            !raw.contains("cargo test --release"),
+            "PostMerge gates run against the new default-branch HEAD after merge — not pre-PR checks: {raw}"
+        );
+        assert!(
+            !raw.contains("gate-local-approvals"),
+            "RequiredApprovals gates have no command — not locally runnable: {raw}"
+        );
+    }
+
+    /// Complement of `spawn_delivers_local_gates_from_repo_gate_config`: a
+    /// repo that configures no command gates yields an EMPTY list — never
+    /// a missing variable (the runner must see `[]`) and never fabricated
+    /// default commands.
+    #[tokio::test]
+    async fn spawn_local_gates_empty_when_repo_configures_none() {
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let dump_path = temp
+            .path()
+            .join("local-gates-empty-dump")
+            .to_string_lossy()
+            .into_owned();
+
+        let (app, ws_id) = create_workspace(app, "local-gates-empty-ws").await;
+        let (app, repo_id) = create_repo_in_workspace(app, &ws_id).await;
+        let (app, task_id) = create_task(app, "No local gates task").await;
+        let (app, ct_id) =
+            create_meta_prompt_dump_compute_target(app, "local-gates-empty-ct", &dump_path).await;
+
+        // No gate rows seeded for this repo.
+        create_worktree_dir(&state, &ws_id, "wt-repo", "feat/local-gates-empty");
+        let (_, json) =
+            do_spawn_with_target(app, &repo_id, &task_id, "feat/local-gates-empty", &ct_id).await;
+        assert_eq!(json["agent"]["status"], "active");
+
+        let dump = wait_for_dump(&dump_path)
+            .await
+            .expect("kubectl stub should have captured the applied Pod manifest");
+        let env = pod_env_map(&dump);
+        assert_eq!(
+            env.get("GYRE_LOCAL_GATES").map(String::as_str),
+            Some("[]"),
+            "a repo with no command gates must deliver an empty JSON list"
+        );
+    }
+
+    /// agent-runtime.md §5 (task-119 repair, F4): the MCP
+    /// `system://persona` prompt must serve the pinned meta-spec system
+    /// prompt ONLY — not the system-managed protocol section. The record
+    /// stored at spawn is what the prompt serves verbatim, so this test
+    /// fails if the spawn path concatenates the protocol into
+    /// `rendered_prompt` (a client asking for the persona would then also
+    /// receive the protocol text verbatim).
+    #[tokio::test]
+    async fn mcp_persona_prompt_serves_meta_spec_section_only() {
+        use gyre_domain::meta_spec::{MetaSpecApprovalStatus, MetaSpecKind, MetaSpecScope};
+        use sha2::Digest;
+
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // One required, approved, tenant-scoped persona — assembled into
+        // every spawn's prompt set.
+        let prompt_text = "You are the persona-delivery regression persona.";
+        let content_hash = {
+            let mut h = sha2::Sha256::new();
+            h.update(prompt_text.as_bytes());
+            hex::encode(h.finalize())
+        };
+        state
+            .meta_specs
+            .create(&gyre_domain::MetaSpec {
+                id: gyre_common::Id::new("ms-persona-delivery"),
+                kind: MetaSpecKind::Persona,
+                name: "persona-delivery-persona".to_string(),
+                scope: MetaSpecScope::Global,
+                scope_id: None,
+                prompt: prompt_text.to_string(),
+                version: 1,
+                content_hash,
+                required: true,
+                approval_status: MetaSpecApprovalStatus::Approved,
+                approved_by: Some("system".to_string()),
+                approved_content_hash: None,
+                approved_at: Some(1),
+                created_by: "system".to_string(),
+                created_at: 1,
+                updated_at: 1,
+            })
+            .await
+            .expect("seeding required meta-spec must succeed");
+
+        let (app, repo_id) = create_repo(app).await;
+        let (app, task_id) = create_task(app, "Persona prompt delivery task").await;
+        let (_app, spawn_json) = do_spawn(app, &repo_id, &task_id, "feat/persona-prompt").await;
+        let agent_token = spawn_json["token"].as_str().unwrap().to_string();
+
+        // Fetch the persona prompt AS the spawned agent. `/mcp` is served by
+        // the full server router (`build_router`), not `api_router()` — the
+        // spawn/fixture calls above share the same `state`, so the agent
+        // spawned through the bare API router is visible here.
+        let resp = crate::build_router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/mcp")
+                    .header("content-type", "application/json")
+                    .header("Authorization", format!("Bearer {agent_token}"))
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": 91,
+                            "method": "prompts/get",
+                            "params": { "name": "system://persona" }
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let text = json["result"]["messages"][0]["content"]["text"]
+            .as_str()
+            .expect("persona prompt text");
+
+        // The pinned meta-spec section is served verbatim.
+        assert!(
+            text.contains(prompt_text),
+            "system://persona must serve the pinned meta-spec prompt:\n{text}"
+        );
+        // ...and ONLY that: the protocol section is served via
+        // system://protocol, never bundled into the persona prompt.
+        assert!(
+            !text.contains("Ralph loop rules"),
+            "system://persona must not serve the protocol section:\n{text}"
+        );
+    }
+
+    /// platform-model.md §8 (task-101): the MCP `system://persona` prompt
+    /// carries persona-entity attestation metadata — the bound persona's
+    /// slug, version, content_hash, and approval status — so a consumer can
+    /// attest exactly which approved persona content styles the agent.
+    /// Spawn binds the persona fail-closed (Approved only), so the metadata
+    /// must reflect the looked-up persona row, not a fabricated identity.
+    #[tokio::test]
+    async fn mcp_persona_prompt_carries_bound_persona_attestation() {
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+
+        let (app, repo_id) = create_repo(app).await;
+        let (app, task_id) = create_task(app, "Persona attestation task").await;
+
+        let persona_id =
+            seed_spawn_persona(&state, "attest-worker", "You are the attestation persona.").await;
+        // Non-trivial version + refreshed hash: the attested values must be
+        // looked up from the persona row, not constants.
+        let expected_hash = {
+            let mut persona = state
+                .personas
+                .find_by_id(&Id::new(&persona_id))
+                .await
+                .unwrap()
+                .expect("seeded persona must exist");
+            persona.version = 7;
+            persona.system_prompt = "You are the attestation persona v7.".to_string();
+            persona.refresh_content_hash();
+            let hash = persona.content_hash.clone();
+            state.personas.update(&persona).await.unwrap();
+            hash
+        };
+
+        let (_app, spawn_json) = do_spawn_with_persona(
+            app,
+            "worker-attest",
+            &repo_id,
+            &task_id,
+            "feat/attest",
+            None,
+            "attest-worker",
+        )
+        .await;
+        let agent_token = spawn_json["token"].as_str().unwrap().to_string();
+
+        // Fetch the persona prompt AS the spawned agent (same router-sharing
+        // pattern as mcp_persona_prompt_serves_meta_spec_section_only).
+        let resp = crate::build_router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/mcp")
+                    .header("content-type", "application/json")
+                    .header("Authorization", format!("Bearer {agent_token}"))
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": 92,
+                            "method": "prompts/get",
+                            "params": { "name": "system://persona" }
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let meta = &json["result"]["metadata"]["persona"];
+        assert_eq!(
+            meta["slug"].as_str(),
+            Some("attest-worker"),
+            "persona attestation must carry the bound persona's slug: {meta}"
+        );
+        assert_eq!(
+            meta["version"].as_u64(),
+            Some(7),
+            "persona attestation must carry the looked-up version: {meta}"
+        );
+        assert_eq!(
+            meta["content_hash"].as_str(),
+            Some(expected_hash.as_str()),
+            "persona attestation must carry the recomputed content_hash: {meta}"
+        );
+        assert_eq!(
+            meta["approval_status"].as_str(),
+            Some("Approved"),
+            "persona attestation must record the approved status: {meta}"
         );
     }
 

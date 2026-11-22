@@ -1,11 +1,16 @@
 <script>
   import ArchPreviewCanvas from './ArchPreviewCanvas.svelte';
   import ConcurrentEditBanner from './ConcurrentEditBanner.svelte';
+  import SpecChatInput from './SpecChatInput.svelte';
   import SpecConflictDialog from './SpecConflictDialog.svelte';
   import SpecDiffView from './SpecDiffView.svelte';
+  import SpecSuggestion from './SpecSuggestion.svelte';
   import { api } from './api.js';
   import { toastError, toastSuccess, toastInfo } from './toast.svelte.js';
   import { t } from 'svelte-i18n';
+  import { lineDiff, diffSummary } from './lineDiff.js';
+  import { applyDiffOps, streamAssist, suggestionText } from './specAssist.js';
+  import { normalizeGhosts } from './ghostOverlay.js';
 
   /**
    * EditorSplit — full-width editor + architecture preview split layout
@@ -28,14 +33,22 @@
    *   onClose       — () => void — called when user dismisses (Back or Esc)
    *   context       — 'spec' | 'meta-spec' — display label
    *   workspaceId   — string | null — workspace scope for the presence banner (HSI §7)
-   *                   and the meta-spec preview endpoints (§9)
    *   wsStore       — WebSocket store ({ send, sessionId, onMessage }) for live presence
    *   selfUserId    — string | null — current user id (excludes own sessions)
    *   baseSha       — string | null — spec current_sha at load (optimistic concurrency)
-   *   targetSpecs   — array of { path } — selectable preview targets (§9 State 1).
-   *                   When provided (meta-spec context) the right panel shows the
-   *                   target spec selector in the editing state.
+   *   targetSpecs   — array of { path, repo_id } — selectable preview targets
+   *                   (§9 State 1). When provided (meta-spec context) the right
+   *                   panel shows the target spec selector in the editing state;
+   *                   repo_id is required — preview agents spawn per target repo
+   *                   (meta-spec-reconciliation.md §5).
+   *   draftKind     — meta-spec kind sent as the draft's `kind` in the preview
+   *                   POST body (§5: { draft: { kind, content }, targets }).
    *   onpublish     — () => void — Publish hook (meta-spec approval flow, §9 State 3)
+   *   baselineContent — string | null — the published baseline of the content
+   *                   (e.g. the meta-spec registry's stored prompt). While a
+   *                   preview runs, the locked left pane renders the diff of
+   *                   pending changes against this baseline (§9 State 2
+   *                   "shows diff of changes"); null → verbatim draft.
    *   onPreviewStateChange — (state: 'editing' | 'preview_running' | 'preview_complete') => void
    *                   — notified on every preview state transition so the embedding
    *                   page (e.g. MetaSpecs) can lock its own controls while a preview
@@ -54,7 +67,9 @@
     selfUserId = null,
     baseSha = null,
     targetSpecs = [],
+    draftKind = 'meta:persona',
     onpublish = undefined,
+    baselineContent = null,
     onPreviewStateChange = undefined,
   } = $props();
 
@@ -70,13 +85,23 @@
   let graphEdges = $state([]);
   let graphLoading = $state(false);
   let graphLoaded = $state(false);
-  // Ghost overlays derived from graphPredict predictions — same normalization
-  // DetailPanel uses (predictions → { nodeId, type }).
-  let derivedOverlays = $state([]);
+  // Ghost overlays derived from graphPredict predictions (system-explorer.md
+  // §3 fast tier): normalized via the shared ghostOverlay.js model so the
+  // canvas renders the full ghost visual language (action colors,
+  // confidence opacity, tooltips, dotted edges) — the same normalization
+  // DetailPanel uses.
+  let derivedGhosts = $state([]);
+  // Instant tier (§3 "Link graph impact"): connected specs, repos
+  // implementing this spec, governed node count — computed from real link
+  // + graph data the moment editing begins, shown in the impact bar.
+  let impact = $state(null);
 
   // Effective overlays: caller-supplied ghosts (e.g. DetailPanel arch tab)
-  // take precedence; otherwise the locally predicted ones.
-  let overlays = $derived(ghostOverlays.length ? ghostOverlays : derivedOverlays);
+  // take precedence; otherwise the locally predicted ones. Both shapes
+  // normalize through the shared model.
+  let overlays = $derived(
+    normalizeGhosts(ghostOverlays.length ? ghostOverlays : derivedGhosts),
+  );
 
   // ── Preview state machine (ui-layout.md §2/§9) ─────────────────────────────
   // editing → preview_running → preview_complete (Iterate returns to editing
@@ -85,15 +110,37 @@
   // Architecture tab keeps the fast graphPredict overlays) with an error banner.
   let previewState = $state('editing');
   let previewError = $state(null);
-  let selectedSpecPaths = $state([]);
+  let selectedSpecKeys = $state([]);
+
+  // Targets are {repo_id, spec_path} pairs: two workspace repos can expose
+  // the same spec path, so paths alone are not unique keys (keyed each
+  // blocks would collide). Keys and selection use the composite.
+  function specKey(repoId, path) { return `${repoId ?? ''}:${path ?? ''}`; }
   let previewPollTimer = null;
   let previewProgress = $state([]);
   let codeDiffFiles = $state([]); // [{ path, diff: [{op,text}] }]
   let previewRunning = $state(false);
   let activeImpactTab = $state('architecture');
-  // Last meta-spec preview result (real PreviewResponse shape: preview_id,
-  // state, specs, blast_radius, structural_impact) rendered in the right pane.
+  // Agent spawned by the thorough preview (§3 thorough tier) — used to
+  // resolve the completion MR and its real code diff.
+  let previewAgentId = $state(null);
+  // Last meta-spec preview status (real §5 shape: preview_id, state,
+  // agents: [{agent_id, repo_id, spec_path, branch, status, diff}]) rendered
+  // in the right pane.
   let metaPreviewResult = $state(null);
+
+  // Pending-changes diff for the locked editor (§9 State 2 "shows diff of
+  // changes"): the draft against the published baseline. Only meaningful
+  // while locked; null when no baseline is available (verbatim fallback).
+  let lockedDiffRows = $derived.by(() => {
+    if (previewState !== 'preview_running') return null;
+    // No baseline (null/undefined/empty) or an unchanged draft → verbatim.
+    if (!baselineContent || baselineContent === content) return null;
+    return lineDiff(baselineContent, content);
+  });
+  let lockedDiffStats = $derived(
+    lockedDiffRows ? diffSummary(lockedDiffRows) : null,
+  );
 
   const selectableSpecs = $derived(
     Array.isArray(targetSpecs) ? targetSpecs.filter((s) => s?.path) : [],
@@ -105,6 +152,105 @@
       loadGraph();
     }
   });
+
+  // Instant tier (§3 "Link graph impact", milliseconds): the moment spec
+  // editing begins, compute the link-graph impact — connected specs (spec
+  // links API), repos implementing this spec (inbound implements links +
+  // the repos whose graphs govern this spec's nodes), governed node count.
+  // Rendered as the compact info bar above the editor. Best-effort: a
+  // failing segment degrades to the others, never blocks editing.
+  $effect(() => {
+    if (repoId && specPath) loadImpact(repoId, specPath);
+  });
+
+  // ── Fast tier: debounced structural prediction (§3 "Fast (2-5 seconds)") ──
+  // As the user edits, predictions are debounced (PREDICT_DEBOUNCE_MS) and
+  // fired against POST /repos/:id/graph/predict with the current draft;
+  // the response's predictions render as ghost overlays on the canvas.
+  // Suppressed while a thorough preview runs (editor locked, §9 State 2)
+  // and after a save (editing ended — the overlay cleared below).
+  const PREDICT_DEBOUNCE_MS = 1200;
+  let predicting = $state(false);
+  let lastPredictedContent = null;
+
+  $effect(() => {
+    const draft = content;
+    const rid = repoId;
+    const path = specPath;
+    if (!rid || !path) return;
+    if (previewState !== 'editing') return;
+    if (draft === lastPredictedContent) return;
+    const timer = setTimeout(() => {
+      runPrediction(rid, path, draft);
+    }, PREDICT_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  });
+
+  async function runPrediction(rid, path, draft) {
+    predicting = true;
+    try {
+      const result = await api.graphPredict(rid, {
+        spec_path: path,
+        draft_content: draft || undefined,
+      });
+      const predictions = result?.predictions ?? result?.overlays ?? [];
+      derivedGhosts = normalizeGhosts(predictions);
+      lastPredictedContent = draft;
+    } catch {
+      // Best-effort (§3: predictions are probabilistic feedback, not a
+      // gate): keep the previous overlay, clear the loading indicator.
+      lastPredictedContent = draft;
+    } finally {
+      predicting = false;
+    }
+  }
+
+  async function loadImpact(rid, path) {
+    try {
+      // Connected specs: every spec link touching this path (either
+      // direction), from the spec links API.
+      let connectedSpecs = [];
+      let reposImplementing = [];
+      try {
+        const links = await api.specLinks(path, rid);
+        const connected = new Set();
+        const implementing = new Set();
+        for (const link of links ?? []) {
+          const other =
+            link?.source_path === path ? link?.target_path : link?.source_path;
+          if (other) connected.add(other);
+          const lt = String(link?.link_type ?? '').toLowerCase();
+          if (lt === 'implements' && link?.target_path === path && link?.source_repo_id) {
+            implementing.add(link.source_repo_id);
+          }
+        }
+        connectedSpecs = [...connected].sort();
+        reposImplementing = [...implementing];
+      } catch {
+        // links unavailable — governed-node counts below still render
+      }
+
+      // Repos implementing this spec + governed node count, from the
+      // loaded graph(s): the current repo's nodes filtered by spec_path.
+      let governedNodes = null;
+      try {
+        const graph = await api.repoGraph(rid);
+        const specNodes = (graph?.nodes ?? []).filter(
+          (n) => n.spec_path === path && !n.deleted_at,
+        );
+        governedNodes = specNodes.length;
+        if (specNodes.length && !reposImplementing.includes(rid)) {
+          reposImplementing.push(rid);
+        }
+      } catch {
+        // graph unavailable — links segment still renders
+      }
+
+      impact = { connectedSpecs, reposImplementing, governedNodes };
+    } catch {
+      impact = null;
+    }
+  }
 
   // Stop any preview poll when the component is destroyed.
   $effect(() => {
@@ -143,46 +289,8 @@
         }
         nodes = specNodes;
       } catch {
-        // graceful: fall through to predictions only
-      }
-
-      // Fast preview: ask the LLM what the draft would change structurally,
-      // and render those predictions as ghost overlays on the real graph.
-      // Prediction-only nodes (LLM-invented names) are appended so the
-      // canvas isn't empty for specs with no graph linkage yet.
-      try {
-        const result = await api.graphPredict(repoId, {
-          spec_path: specPath,
-          draft_content: content || undefined,
-        });
-        const predictions = result?.predictions ?? result?.overlays ?? [];
-        const predOverlays = predictions
-          .map((p) => ({
-            nodeId: p.node_id ?? p.nodeId ?? p.name ?? p.qualified_name,
-            type: p.change_type ?? p.type ?? 'modified',
-          }))
-          .filter((p) => p.nodeId);
-        derivedOverlays = predOverlays;
-        if (nodes.length) {
-          // Match predictions to existing graph nodes by name; append
-          // synthetic ghost nodes for unmatched predictions.
-          const byName = new Map(nodes.map((n) => [n.name ?? n.label ?? n.id, n]));
-          const synthetic = [];
-          for (const p of predOverlays) {
-            const existing = byName.get(p.nodeId);
-            if (!existing && p.type !== 'removed') {
-              synthetic.push({ id: p.nodeId, name: p.nodeId, node_type: p.node_type ?? 'type' });
-            }
-          }
-          nodes = [...nodes, ...synthetic];
-        } else {
-          nodes = predOverlays
-            .filter((p) => p.type !== 'removed')
-            .map((p) => ({ id: p.nodeId, name: p.nodeId, node_type: 'type' }));
-          edges = [];
-        }
-      } catch {
-        // graceful: show base graph without ghost overlays; user can still edit
+        // graceful: fall through to an empty canvas — the debounced
+        // graphPredict ghosts still render via the ghost overlay layer
       }
 
       graphNodes = nodes;
@@ -195,29 +303,54 @@
 
   // ── Preview workflow (§2/§9) ────────────────────────────────────────────────
 
-  function toggleSpec(path) {
-    if (selectedSpecPaths.includes(path)) {
-      selectedSpecPaths = selectedSpecPaths.filter((p) => p !== path);
+  function toggleSpec(repoId, path) {
+    const key = specKey(repoId, path);
+    if (selectedSpecKeys.includes(key)) {
+      selectedSpecKeys = selectedSpecKeys.filter((k) => k !== key);
     } else {
-      selectedSpecPaths = [...selectedSpecPaths, path];
+      selectedSpecKeys = [...selectedSpecKeys, key];
     }
   }
 
   function selectAllSpecs() {
-    selectedSpecPaths = selectableSpecs.map((s) => s.path);
+    selectedSpecKeys = selectableSpecs.map((s) => specKey(s.repo_id, s.path));
   }
 
   function clearAllSpecs() {
-    selectedSpecPaths = [];
+    selectedSpecKeys = [];
   }
 
   const canRunPreview = $derived.by(() => {
     if (previewState !== 'editing' || previewRunning) return false;
-    // Meta-spec context: at least one target spec must be selected (§9 State 1).
-    if (context === 'meta-spec') return selectedSpecPaths.length > 0;
+    // Meta-spec context: at least one target spec with a repo must be selected
+    // (§9 State 1) — the §5 preview endpoint spawns one agent per { repo_id,
+    // spec_path } target, so a target without repo_id can never run.
+    if (context === 'meta-spec')
+      return selectableSpecs.some((s) => selectedSpecKeys.includes(specKey(s.repo_id, s.path)) && s.repo_id);
     // Spec context: needs a repo + spec path.
     return Boolean(repoId && specPath);
   });
+
+  /**
+   * Whether the §3/§9 LLM chat is usable: the repo-scoped specs/assist in
+   * the spec context (needs a repo), or the workspace-scoped
+   * meta-specs/assist in the §9 meta-spec context (needs a workspace —
+   * the MetaSpecs workspace view always provides one).
+   */
+  const llmChatEnabled = $derived(
+    Boolean(repoId || (context === 'meta-spec' && workspaceId)),
+  );
+
+  /**
+   * Whether the right pane renders the Architecture/Code Diff tabs.
+   * Always true in the spec context and in §9 State 3; in the meta-spec
+   * editing state only when §9 Iterate retained the last preview result —
+   * "Iterate: returns to State 1 with the preview results still visible"
+   * (ui-layout.md §9) — so the tabs stack below the target-spec selector.
+   */
+  const showResultTabs = $derived(
+    context !== 'meta-spec' || previewState !== 'editing' || Boolean(metaPreviewResult),
+  );
 
   /**
    * Start the thorough preview: the server commits the draft to a throwaway
@@ -230,16 +363,19 @@
     previewError = null;
     stopPreviewPoll();
     try {
-      if (context === 'meta-spec' && workspaceId) {
-        // Meta-spec preview loop (§9): preview the persona change against the
-        // selected target specs. Real PreviewResponse shape: { preview_id,
-        // state, specs, blast_radius, structural_impact }.
+      if (context === 'meta-spec') {
+        // Meta-spec preview loop (§9): real agent runs on throwaway preview
+        // branches (meta-spec-reconciliation.md §5) — one agent per selected
+        // target, no gates/MR/provenance. Response 202: { preview_id, agents:
+        // [{ agent_id, repo_id, spec_path, branch }] }.
+        const targets = selectableSpecs
+          .filter((s) => selectedSpecKeys.includes(specKey(s.repo_id, s.path)) && s.repo_id)
+          .map((s) => ({ repo_id: s.repo_id, spec_path: s.path }));
         let res;
         try {
-          res = await api.previewPersona(workspaceId, {
-            persona_id: specPath ?? undefined,
-            content,
-            spec_paths: selectedSpecPaths,
+          res = await api.previewMetaSpec({
+            draft: { kind: draftKind, content },
+            targets,
           });
         } catch (e) {
           // Preview service unavailable — return to editing; never present
@@ -247,20 +383,21 @@
           failPreview($t('editor_split.preview_unavailable'), e);
           return;
         }
-        if (res?.preview_id) {
-          pollPreviewPersona(res.preview_id, res);
-        } else if (res) {
-          applyPreviewResult(res);
-          finishPreview();
+        if (res?.preview_id && Array.isArray(res.agents)) {
+          pollPreviewRun(res.preview_id, res);
         } else {
           failPreview($t('editor_split.preview_unavailable'));
         }
       } else if (repoId && specPath) {
-        // Spec preview: thorough preview on a throwaway branch.
+        // Spec preview: thorough preview on a throwaway branch — the server
+        // creates a preview task and spawns an implementation agent
+        // (§3 thorough tier); we poll the task and render the resulting MR's
+        // real code diff.
         const result = await api.thoroughPreview(repoId, {
           spec_path: specPath,
           draft_content: content,
         });
+        previewAgentId = result?.agent_id ?? null;
         if (result?.task_id) {
           pollPreviewTask(result.task_id);
         } else if (result) {
@@ -281,22 +418,34 @@
 
   function pollPreviewTask(taskId) {
     previewState = 'preview_running';
-    previewProgress = selectedSpecPaths.length
-      ? selectedSpecPaths.map((path) => ({ path, status: 'running' }))
-      : [{ path: specPath ?? '', status: 'running' }];
+    previewProgress = selectedSpecKeys.length
+      ? selectableSpecs
+          .filter((s) => selectedSpecKeys.includes(specKey(s.repo_id, s.path)))
+          .map((s) => ({ path: s.path, repo_id: s.repo_id, status: 'running' }))
+      : [{ path: specPath ?? '', repo_id: repoId ?? null, status: 'running' }];
     let elapsed = 0;
     previewPollTimer = setInterval(async () => {
       elapsed += 10000;
       try {
         const status = await api.taskStatus(taskId);
-        if (status?.status === 'completed') {
+        // A preview task completes when its agent finishes: the task lands
+        // in Review (agent called complete → MR created) or Done. The wire
+        // vocabulary is exactly what GET /api/v1/tasks/{id} serializes via
+        // task_status_str: backlog/in_progress/review/done/blocked/
+        // cancelled — any other value keeps polling until the timeout.
+        const s = status?.status;
+        if (s === 'review' || s === 'done') {
           applyPreviewResult(status);
+          // §3 thorough tier: the agent really implemented the spec on a
+          // throwaway branch — resolve its completion MR and render the
+          // real line-level diff in the Code Diff tab.
+          await loadPreviewMrDiff(taskId);
           finishPreview();
           return;
         }
-        if (status?.status === 'failed') {
+        if (s === 'blocked' || s === 'cancelled') {
           failPreview(
-            $t('editor_split.preview_failed', { values: { error: status?.error ?? 'agent execution failed' } }),
+            $t('editor_split.preview_failed', { values: { error: status?.error ?? s ?? 'agent execution failed' } }),
           );
           return;
         }
@@ -309,28 +458,99 @@
     }, 10000);
   }
 
-  function pollPreviewPersona(previewId, initial) {
-    previewState = 'preview_running';
-    previewProgress = (initial?.specs?.length ? initial.specs : selectedSpecPaths).map?.((pathOrSpec) =>
-      typeof pathOrSpec === 'string' ? { path: pathOrSpec, status: 'running' } : pathOrSpec,
-    ) ?? [];
-    if (!previewProgress.length) {
-      previewProgress = selectedSpecPaths.map((path) => ({ path, status: 'running' }));
+  /**
+   * Resolve the MR the completed preview agent created (author agent or
+   * linked task) and map its real diff — files + hunks from
+   * GET /merge-requests/:id/diff — onto the Code Diff tab's
+   * [{ path, diff: [{op,text}] }] shape. Best-effort: a preview result
+   * that already carries code_diff (or no resolvable MR) keeps what the
+   * task status reported.
+   */
+  async function loadPreviewMrDiff(taskId) {
+    try {
+      const mrs = await api.mergeRequests({ repository_id: repoId });
+      const mr = (mrs ?? []).find(
+        (m) =>
+          m?.task_id === taskId ||
+          (previewAgentId && m?.author_agent_id === previewAgentId),
+      );
+      if (!mr) return;
+      const diff = await api.mrDiff(mr.id);
+      const files = (diff?.files ?? [])
+        .map((f) => ({
+          path: f.path ?? '',
+          diff: (f.hunks ?? []).flatMap((h) =>
+            (h.lines ?? []).map((l) => ({
+              op: l.line_type === 'delete' ? 'remove' : l.line_type === 'add' ? 'add' : 'context',
+              text: l.content ?? '',
+            })),
+          ),
+        }))
+        .filter((f) => f.path);
+      if (files.length) codeDiffFiles = files;
+    } catch {
+      // MR diff unavailable — the completed state still renders whatever
+      // the task status reported; never fabricate a diff.
     }
-    if (initial) applyPreviewResult(initial);
+  }
+
+  // Real agent runs take minutes, not seconds (§5 iteration cycle: "minutes,
+  // not hours") — poll patiently with a bounded wait instead of the 30s cap
+  // that only fit the old instantly-complete estimate endpoint.
+  const META_PREVIEW_POLL_MS = 2000;
+  const META_PREVIEW_TIMEOUT_MS = 600000;
+
+  /** Per-agent status label (§5 status endpoint: running|complete|failed|stopped|dead|unknown). */
+  function agentStatusLabel(status) {
+    if (status === 'complete') return $t('editor_split.status_complete');
+    if (status === 'running') return $t('editor_split.agent_implementing');
+    if (status === 'failed') return $t('editor_split.status_failed');
+    if (status === 'stopped') return $t('editor_split.status_stopped');
+    if (status === 'dead') return $t('editor_split.status_dead');
+    return $t('editor_split.status_unknown');
+  }
+
+  function agentStatusIcon(status) {
+    if (status === 'complete' || status === 'stopped') return '✓';
+    if (status === 'running') return '◐';
+    return '✗';
+  }
+
+  function agentStatusDone(status) {
+    return status === 'complete' || status === 'stopped';
+  }
+
+  function pollPreviewRun(previewId, initial) {
+    previewState = 'preview_running';
+    previewProgress = (Array.isArray(initial?.agents) ? initial.agents : []).map((a) => ({
+      path: a?.spec_path ?? '',
+      repo_id: a?.repo_id ?? null,
+      status: 'running',
+    }));
+    metaPreviewResult = initial ?? null;
     let elapsed = 0;
     previewPollTimer = setInterval(async () => {
-      elapsed += 1500;
+      elapsed += META_PREVIEW_POLL_MS;
       try {
-        const status = await api.previewPersonaStatus(workspaceId, previewId);
-        previewProgress = status.specs ?? previewProgress;
-        if (status.state === 'complete') {
+        const status = await api.previewMetaSpecStatus(previewId);
+        if (Array.isArray(status?.agents)) {
+          previewProgress = status.agents.map((a) => ({
+            path: a?.spec_path ?? '',
+            repo_id: a?.repo_id ?? null,
+            status: a?.status ?? 'unknown',
+          }));
+          metaPreviewResult = status;
+          // §5 iteration step 4: "The diff viewer updates as each preview
+          // agent completes" — surface each finished agent's diff on the
+          // Code Diff tab DURING the run, not only after every agent is
+          // terminal (a slow second agent must not hide a finished first
+          // agent's diff for the rest of the run).
+          const midRunFiles = metaAgentDiffFiles(status);
+          if (midRunFiles.length) codeDiffFiles = midRunFiles;
+        }
+        if (status?.state === 'complete') {
           applyPreviewResult(status);
           finishPreview();
-          return;
-        }
-        if (status.state === 'failed' || status.state === 'error') {
-          failPreview($t('editor_split.preview_failed', { values: { error: status.state } }));
           return;
         }
       } catch (e) {
@@ -339,53 +559,69 @@
         failPreview($t('editor_split.preview_unavailable'), e);
         return;
       }
-      if (elapsed >= 30000) {
+      if (elapsed >= META_PREVIEW_TIMEOUT_MS) {
         failPreview($t('editor_split.preview_timeout'));
       }
-    }, 1500);
+    }, META_PREVIEW_POLL_MS);
+  }
+
+  /**
+   * Map the §5 preview status's per-agent diffs onto the Code Diff tab's
+   * [{ path, diff: [{op,text}] }] shape. Shared by the mid-run poll updates
+   * and the final applyPreviewResult so both render the same files.
+   */
+  function metaAgentDiffFiles(result) {
+    return Array.isArray(result?.agents)
+      ? result.agents
+          .filter((a) => Array.isArray(a?.diff?.patches))
+          .map((a) => ({
+            path: a.spec_path ?? '',
+            repo_id: a.repo_id ?? null,
+            diff: a.diff.patches
+              .flatMap((p) => String(p?.patch ?? '').split('\n'))
+              .filter((line) => line.length > 0)
+              .map((line) => ({
+                op:
+                  line.startsWith('+') && !line.startsWith('+++')
+                    ? 'add'
+                    : line.startsWith('-') && !line.startsWith('---')
+                      ? 'remove'
+                      : 'context',
+                text: line,
+              })),
+          }))
+      : [];
   }
 
   /**
    * Map a completed preview result onto the Architecture (ghost overlays /
    * node delta) and Code Diff tabs. Accepts the shapes returned by
-   * thoroughPreview/taskStatus ({predictions, code_diff}) and the real
-   * previewPersona PreviewResponse ({preview_id, state, specs,
-   * blast_radius, structural_impact}) — the meta-spec result is kept whole
+   * thoroughPreview/taskStatus ({predictions, code_diff}) and the real §5
+   * preview status ({preview_id, state, agents: [{agent_id, repo_id,
+   * spec_path, branch, status, diff}]}) — the meta-spec result is kept whole
    * for the right-pane summary (§9 State 3).
    */
   function applyPreviewResult(result) {
     if (!result) return;
     // Meta-spec preview results (real server shape) are stored for the
-    // Architecture pane summary and per-spec Code Diff listing.
+    // Architecture pane summary; each agent's diff.patches carry the
+    // unified-diff text its preview branch produced (§5 iteration step 4).
     if (result.preview_id) {
       metaPreviewResult = result;
+      const agentFiles = metaAgentDiffFiles(result);
+      if (agentFiles.length) codeDiffFiles = agentFiles;
     }
     // Structural delta → ghost overlays on the Architecture tab.
     const preds = result.predictions ?? [];
     if (Array.isArray(preds) && preds.length) {
-      derivedOverlays = preds
-        .map((p) => ({
-          nodeId: p.node_id ?? p.nodeId ?? p.name ?? p.qualified_name,
-          type: p.change_type ?? p.type ?? p.action ?? 'modified',
-        }))
-        .filter((p) => p.nodeId);
-      // Unmatched prediction-only nodes get appended in loadGraph; for the
-      // thorough result, append synthetic nodes so the delta is visible even
-      // without a graph linkage.
-      if (graphNodes.length) {
-        const byName = new Set(graphNodes.map((n) => n.name ?? n.id));
-        const synthetic = derivedOverlays
-          .filter((p) => p.type !== 'removed' && !byName.has(p.nodeId))
-          .map((p) => ({ id: p.nodeId, name: p.nodeId, node_type: 'type' }));
-        if (synthetic.length) graphNodes = [...graphNodes, ...synthetic];
-      } else {
-        graphNodes = derivedOverlays
-          .filter((p) => p.type !== 'removed')
-          .map((p) => ({ id: p.nodeId, name: p.nodeId, node_type: 'type' }));
-      }
+      // §3 ghost model: normalized predictions keep action, confidence and
+      // reason so the overlay renders the full visual language. The ghost
+      // layer positions prediction-only nodes itself (near the predicted
+      // parent or in free space) — no synthetic graph nodes needed.
+      derivedGhosts = normalizeGhosts(preds);
     }
     // Line-level diff → Code Diff tab.
-    const files = result.code_diff ?? result.specs_diff ?? [];
+    const files = result.code_diff ?? [];
     if (Array.isArray(files) && files.length) {
       codeDiffFiles = files.map((f) => ({
         path: f.path ?? f.spec_path ?? '',
@@ -394,7 +630,13 @@
           : [{ op: 'context', text: String(f.diff ?? '') }],
       }));
     }
-    if (result.specs?.length) previewProgress = result.specs;
+    if (Array.isArray(result.agents)) {
+      previewProgress = result.agents.map((a) => ({
+        path: a?.spec_path ?? '',
+        repo_id: a?.repo_id ?? null,
+        status: a?.status ?? 'unknown',
+      }));
+    }
   }
 
   function finishPreview() {
@@ -437,75 +679,56 @@
     }
   }
 
-  // ── LLM chat ───────────────────────────────────────────────────────────────
-  let llmInstruction = $state('');
+  // ── LLM chat (§3 LLM-Assisted Spec Editing) ────────────────────────────────
   let llmStreaming = $state(false);
   let llmExplanation = $state('');
-  let llmSuggestion = $state(null); // { diff: [...], explanation: string } | null
+  // Multiple suggestions can be requested (§3 "Multiple suggestions..."):
+  // every completed assist request appends one block; the human curates
+  // them — the LLM never writes directly.
+  let llmSuggestions = $state([]); // [{ id, diff: [...], explanation }]
+  let suggestionSeq = 0;
   let saving = $state(false);
 
-  async function sendLlmInstruction() {
-    if (!llmInstruction.trim() || llmStreaming) return;
-    if (!repoId) return;
-    const instruction = llmInstruction.trim();
-    llmInstruction = '';
+  async function sendLlmInstruction(instruction) {
+    if (!instruction || llmStreaming) return;
+    if (!llmChatEnabled) return;
     llmStreaming = true;
     llmExplanation = '';
-    llmSuggestion = null;
 
     try {
-      const resp = await api.specsAssist(repoId, {
-        spec_path: specPath,
-        instruction,
-        draft_content: content || undefined,
+      // Repo context: repo-scoped specs/assist. §9 meta-spec context
+      // (no repo): workspace-scoped meta-specs/assist against the in-editor
+      // draft — same SSE {diff, explanation} wire protocol, so the shared
+      // parser and Accept/Edit/Dismiss suggestion blocks work unchanged.
+      const resp = repoId
+        ? await api.specsAssist(repoId, {
+            spec_path: specPath,
+            instruction,
+            draft_content: content || undefined,
+          })
+        : await api.metaSpecsAssist(workspaceId, {
+            instruction,
+            draft_content: content || undefined,
+            meta_spec_id: specPath || undefined,
+          });
+      // Shared SSE consumer (specAssist.js): `partial` events stream the
+      // explanation progressively; `complete` carries the suggestion diff;
+      // `error` throws. A truncated stream must never masquerade as done.
+      await streamAssist(resp, {
+        onPartial: (text) => {
+          llmExplanation += text;
+        },
+        onComplete: ({ diff, explanation }) => {
+          llmSuggestions = [
+            ...llmSuggestions,
+            {
+              id: `suggestion-${++suggestionSeq}`,
+              diff,
+              explanation: explanation || llmExplanation,
+            },
+          ];
+        },
       });
-      if (!resp.ok) throw new Error(`LLM request failed: ${resp.status}`);
-
-      const reader = resp.body?.getReader();
-      if (!reader) throw new Error('No response body');
-      const decoder = new TextDecoder();
-      let buf = '';
-      let done = false;
-
-      while (!done) {
-        const { value, done: streamDone } = await reader.read();
-        done = streamDone;
-        if (value) {
-          buf += decoder.decode(value, { stream: true });
-          const lines = buf.split('\n');
-          buf = lines.pop() ?? '';
-          let currentEvent = '';
-          for (const line of lines) {
-            // Track the SSE event type from `event:` lines (server format:
-            // `event: partial\ndata: {...}\n\n` — see specs_assist.rs).
-            if (line.startsWith('event:')) {
-              currentEvent = line.slice(6).trim();
-              continue;
-            }
-            if (!line.startsWith('data: ') && !line.startsWith('data:')) continue;
-            const raw = line.startsWith('data: ') ? line.slice(6) : line.slice(5);
-            if (raw === '[DONE]') { done = true; break; }
-            try {
-              const parsed = JSON.parse(raw);
-              const evtType = parsed.event ?? parsed.type ?? currentEvent;
-              if (evtType === 'partial' || (!evtType && parsed.text != null)) {
-                llmExplanation += parsed.text ?? parsed.explanation ?? '';
-              } else if (evtType === 'complete') {
-                llmSuggestion = {
-                  diff: parsed.diff ?? [],
-                  explanation: parsed.explanation ?? llmExplanation,
-                };
-                done = true; break;
-              } else if (evtType === 'error') {
-                throw new Error(parsed.error ?? parsed.message ?? 'LLM error');
-              }
-            } catch (pe) {
-              if (pe.message && !pe.message.startsWith('Unexpected token')) throw pe;
-            }
-            currentEvent = '';
-          }
-        }
-      }
     } catch (e) {
       toastError($t('editor_split.llm_assist_failed', { values: { error: e.message } }));
     } finally {
@@ -514,65 +737,39 @@
   }
 
   /**
-   * Apply the LLM's diff ops to the editor content (in-memory only — the
-   * human must still Save; ui-layout.md §3 step 4).
+   * Accept (§3 step 4): apply this suggestion's diff ops to the editor
+   * content — in-memory only, the human must still Save. Shared
+   * `applyDiffOps` (specAssist.js) resolves header paths with the
+   * "L15-L22" line-range fallback.
    */
-  function applyDiffOps(c, diff) {
-    let out = c;
-    for (const op of diff ?? []) {
-      if (op.op === 'add') {
-        const idx = out.indexOf(op.path);
-        if (idx !== -1) {
-          const lineEnd = out.indexOf('\n', idx + op.path.length);
-          const insertAt = lineEnd !== -1 ? lineEnd + 1 : out.length;
-          out = out.slice(0, insertAt) + op.content + '\n' + out.slice(insertAt);
-        } else {
-          out += '\n' + op.content;
-        }
-      } else if (op.op === 'replace') {
-        const idx = out.indexOf(op.path);
-        if (idx !== -1) {
-          const end = findSectionEnd(out, idx + op.path.length);
-          out = out.slice(0, idx) + op.path + '\n' + op.content + out.slice(end);
-        }
-      } else if (op.op === 'remove') {
-        const idx = out.indexOf(op.path);
-        if (idx !== -1) {
-          const end = findSectionEnd(out, idx + op.path.length);
-          out = out.slice(0, idx) + out.slice(end);
-        }
-      }
-    }
-    return out;
-  }
-
-  function acceptSuggestion() {
-    if (!llmSuggestion) return;
-    const c = applyDiffOps(content, llmSuggestion.diff);
+  function acceptSuggestion(suggestion) {
+    const c = applyDiffOps(content, suggestion.diff);
     content = c;
     onChange?.(c);
-    llmSuggestion = null;
+    removeSuggestion(suggestion);
   }
 
-  // Edit: copy the suggested text into the editor for manual refinement
-  // (ui-layout.md §3 LLM-Assisted Spec Editing step 5).
-  function editSuggestion() {
-    if (!llmSuggestion) return;
-    if (llmSuggestion.diff?.length) {
-      const c = content + '\n\n' + llmSuggestion.diff.map((d) => d.content).filter(Boolean).join('\n\n');
+  /**
+   * Edit (§3 step 5): copy the suggested text into the editor for manual
+   * refinement.
+   */
+  function editSuggestion(suggestion) {
+    const text = suggestionText(suggestion);
+    if (text) {
+      const c = content + '\n\n' + text;
       content = c;
       onChange?.(c);
     }
-    llmSuggestion = null;
+    removeSuggestion(suggestion);
   }
 
-  function dismissSuggestion() { llmSuggestion = null; }
+  /** Dismiss (§3 step 6): remove the suggestion block. */
+  function dismissSuggestion(suggestion) {
+    removeSuggestion(suggestion);
+  }
 
-  function findSectionEnd(c, from) {
-    const rest = c.slice(from);
-    const match = rest.match(/\n(#{1,6} )/);
-    if (match?.index !== undefined) return from + match.index + 1;
-    return c.length;
+  function removeSuggestion(suggestion) {
+    llmSuggestions = llmSuggestions.filter((s) => s.id !== suggestion.id);
   }
 
   async function saveSpec({ overwrite = false } = {}) {
@@ -592,6 +789,10 @@
         return;
       }
       specConflict = null;
+      // §3: "Ghost overlay clears when the spec is saved" — editing ended;
+      // suppress re-prediction of the unchanged draft until the next edit.
+      derivedGhosts = [];
+      lastPredictedContent = content;
       toastSuccess($t('editor_split.spec_saved', { values: { mr_id: result.mr_id } }));
     } catch (e) {
       toastError($t('editor_split.save_failed', { values: { error: e.message } }));
@@ -770,14 +971,59 @@
       {#if context === 'spec' && specPath && workspaceId}
         <ConcurrentEditBanner {specPath} {workspaceId} {wsStore} {selfUserId} />
       {/if}
+      {#if context === 'spec' && specPath}
+        <!-- Instant tier (§3 "Link graph impact"): connected specs, repos
+             implementing this spec, governed node count — computed the
+             moment editing begins, before any prediction returns. -->
+        <div
+          class="impact-bar"
+          role="status"
+          aria-label={$t('editor_split.impact_bar_aria')}
+          data-testid="impact-bar">
+          {#if impact}
+            <span class="impact-seg" data-testid="impact-connected-specs">
+              {$t('editor_split.impact_connected_specs', { values: { count: impact.connectedSpecs.length } })}
+            </span>
+            <span class="impact-seg" data-testid="impact-repos">
+              {$t('editor_split.impact_repos_implementing', { values: { count: impact.reposImplementing.length } })}
+            </span>
+            <span class="impact-seg" data-testid="impact-governed-nodes">
+              {#if impact.governedNodes == null}
+                {$t('editor_split.impact_governed_nodes_unknown')}
+              {:else}
+                {$t('editor_split.impact_governed_nodes', { values: { count: impact.governedNodes } })}
+              {/if}
+            </span>
+          {:else}
+            <span class="impact-seg impact-loading">{$t('editor_split.impact_loading')}</span>
+          {/if}
+        </div>
+      {/if}
       {#if previewState === 'preview_running'}
-        <!-- Editor locked during preview (§9 State 2): the draft is shown
-             read-only — verbatim, no diff styling (the draft is markdown,
-             not a diff). -->
+        <!-- Editor locked during preview (§9 State 2). With a baseline
+             available the pane shows the diff of pending changes (draft vs.
+             published); without one, the draft verbatim. -->
         <div class="locked-editor" role="region" aria-label={$t('editor_split.editor_locked_aria')} data-testid="editor-locked">
-          {#each content.split('\n') as line}
-            <div class="locked-line">{line}</div>
-          {/each}
+          {#if lockedDiffRows}
+            <div class="locked-diff" data-testid="locked-diff">
+              <div class="locked-diff-header">
+                <span class="locked-diff-title">{$t('editor_split.pending_changes')}</span>
+                <span class="locked-diff-summary" data-testid="locked-diff-summary" aria-live="polite">
+                  +{lockedDiffStats.added} -{lockedDiffStats.removed}
+                </span>
+              </div>
+              {#each lockedDiffRows as row}
+                <div class="locked-line locked-diff-line locked-diff-{row.op}">
+                  <span class="locked-diff-marker" aria-hidden="true">{row.op === 'add' ? '+' : row.op === 'remove' ? '-' : ' '}</span>
+                  <span class="locked-diff-text">{row.text}</span>
+                </div>
+              {/each}
+            </div>
+          {:else}
+            {#each content.split('\n') as line}
+              <div class="locked-line">{line}</div>
+            {/each}
+          {/if}
         </div>
       {:else}
         <div class="md-toolbar" role="toolbar" aria-label={$t('editor_split.md_toolbar_aria')} data-testid="md-toolbar">
@@ -804,86 +1050,34 @@
         ></textarea>
       {/if}
 
-      {#if llmSuggestion}
-        <div class="suggestion-block" role="region" aria-label={$t('editor_split.llm_suggestion')} data-testid="llm-suggestion">
-          <div class="suggestion-hdr">
-            <span class="suggestion-lbl">{$t('editor_split.suggested_change')}</span>
-            <button class="dismiss-btn" onclick={dismissSuggestion} aria-label={$t('editor_split.dismiss_suggestion')}>✕</button>
-          </div>
-          {#if llmSuggestion.explanation}
-            <p class="suggestion-expl">{llmSuggestion.explanation}</p>
-          {/if}
-          {#if llmSuggestion.diff?.length}
-            <div class="suggestion-diff">
-              {#each llmSuggestion.diff as op}
-                <div class="diff-op diff-op-{op.op}">
-                  <span class="diff-badge">{op.op}</span>
-                  <span class="diff-path">{op.path}</span>
-                  {#if op.content}
-                    <pre class="diff-content">{op.content}</pre>
-                  {/if}
-                </div>
-              {/each}
-            </div>
-          {/if}
-          <div class="suggestion-btns">
-            <button class="accept-btn" onclick={acceptSuggestion} data-testid="accept-suggestion">{$t('editor_split.accept')}</button>
-            {#if llmSuggestion.diff?.length}
-              <button class="dismiss-btn-sm" onclick={editSuggestion} data-testid="edit-suggestion">{$t('editor_split.edit')}</button>
-            {/if}
-            <button class="dismiss-btn-sm" onclick={dismissSuggestion} data-testid="dismiss-suggestion">{$t('common.dismiss')}</button>
-          </div>
-        </div>
-      {/if}
+      <!-- Each suggestion renders as its own inline "Suggested Change"
+           diff block (§3 "Multiple suggestions... Each appears as a separate
+           inline diff block") with the Accept/Edit/Dismiss curation actions.
+           Accept applies in-memory only; the human saves explicitly. -->
+      {#each llmSuggestions as suggestion (suggestion.id)}
+        <SpecSuggestion
+          {suggestion}
+          onaccept={() => acceptSuggestion(suggestion)}
+          onedit={() => editSuggestion(suggestion)}
+          ondismiss={() => dismissSuggestion(suggestion)}
+        />
+      {/each}
 
-      {#if llmStreaming && llmExplanation}
-        <div class="llm-streaming" aria-live="polite">
-          <span class="streaming-lbl">{$t('editor_split.thinking')}</span>
-          <p class="streaming-txt">{llmExplanation}<span class="blink-cursor" aria-hidden="true"></span></p>
-        </div>
-      {/if}
-
-      <div class="llm-input-area">
-        <div class="recipient-line">
-          {$t('editor_split.edit_label')} {context === 'meta-spec' ? $t('editor_split.meta_spec') : $t('editor_split.spec')}{specPath ? `: "${specPath}" ▸` : ' ▸'}
-        </div>
-        <div class="llm-row">
-          <textarea
-            class="llm-textarea"
-            bind:value={llmInstruction}
-            placeholder={$t('editor_split.llm_placeholder')}
-            rows="2"
-            disabled={llmStreaming || !repoId}
-            onkeydown={(e) => { if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); sendLlmInstruction(); } }}
-            aria-label={$t('editor_split.llm_instruction')}
-            data-testid="llm-input"
-          ></textarea>
-          <button
-            class="llm-send"
-            onclick={sendLlmInstruction}
-            disabled={!llmInstruction.trim() || llmStreaming || !repoId}
-            aria-label={$t('editor_split.send_to_llm')}
-            aria-busy={llmStreaming}
-            data-testid="llm-send-btn"
-          >
-            {#if llmStreaming}
-              <svg class="spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true">
-                <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/>
-              </svg>
-            {:else}
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true">
-                <line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/>
-              </svg>
-            {/if}
-            <span class="sr-only">{$t('editor_split.send')}</span>
-          </button>
-        </div>
-        {#if !repoId}
-          <p class="llm-hint warn">{$t('editor_split.llm_requires_repo')}</p>
-        {:else}
-          <p class="llm-hint">{$t('editor_split.llm_hint')}</p>
-        {/if}
-      </div>
+      <!-- Shared §3 chat input: "Edit spec: ..." recipient indicator,
+           progressive `partial` explanation rendering, loading state. -->
+      <SpecChatInput
+        recipient={`${$t('editor_split.edit_label')} ${context === 'meta-spec' ? $t('editor_split.meta_spec') : $t('editor_split.spec')}${specPath ? `: "${specPath}" ▸` : ' ▸'}`}
+        enabled={llmChatEnabled}
+        streaming={llmStreaming}
+        streamingText={llmExplanation}
+        placeholder={$t('editor_split.llm_placeholder')}
+        instructionAria={$t('editor_split.llm_instruction')}
+        sendAria={$t('editor_split.send_to_llm')}
+        thinking={$t('editor_split.thinking')}
+        hint={llmChatEnabled ? $t('editor_split.llm_hint') : null}
+        warnHint={llmChatEnabled ? null : $t('editor_split.llm_requires_repo')}
+        onsubmit={sendLlmInstruction}
+      />
     </div>
 
     <!-- Divider -->
@@ -899,11 +1093,35 @@
           <strong>{$t('editor_split.preview_error_label')}:</strong> {previewError}
         </div>
       {/if}
+      {#if previewState === 'preview_running'}
+        <!-- Preview Running (§9 State 2): per-agent progress indicators,
+             rendered as a strip ABOVE the Architecture/Code Diff tabs (not
+             instead of them) so the §3 ghost overlays stay on the canvas
+             while the agent runs — pulsing borders (GhostOverlay
+             mode="previewing"). Statuses are the real §5 per-agent states
+             (running|complete|failed|stopped|dead|unknown). -->
+        <div class="preview-progress" data-testid="preview-running" aria-live="polite">
+          <div class="progress-header" role="status">{$t('editor_split.preview_running')}</div>
+          <div class="progress-list">
+            {#each previewProgress as item (specKey(item.repo_id, item.path))}
+              <div class="progress-item">
+                <span class="progress-icon" aria-hidden="true">{agentStatusIcon(item.status)}</span>
+                <span class="progress-path">{item.path}</span>
+                <span class="progress-status">{agentStatusLabel(item.status)}</span>
+              </div>
+            {/each}
+          </div>
+          <div class="progress-summary">{$t('editor_split.progress_label', { values: { done: previewProgress.filter((p) => agentStatusDone(p.status)).length, total: previewProgress.length } })}</div>
+          <button class="dismiss-btn-sm cancel-preview" onclick={cancelPreview} data-testid="cancel-preview">{$t('editor_split.cancel_preview')}</button>
+        </div>
+      {/if}
       {#if context === 'meta-spec' && previewState === 'editing'}
         <!-- Target spec selector (§9 State 1) — always shown in the meta-spec
              editing state, with an empty-state message when the workspace
-             has no non-meta specs. -->
-        <div class="spec-selector" data-testid="spec-selector">
+             has no non-meta specs. After §9 Iterate the last preview result
+             is retained, so the selector stacks above the Architecture /
+             Code Diff tabs (showResultTabs) instead of replacing them. -->
+        <div class="spec-selector" class:stacked={Boolean(metaPreviewResult)} data-testid="spec-selector">
           <div class="spec-selector-header">
             <span class="pane-title">{$t('editor_split.preview_against')}</span>
             <div class="spec-selector-shortcuts">
@@ -912,12 +1130,12 @@
             </div>
           </div>
           <div class="spec-checklist">
-            {#each selectableSpecs as spec (spec.path)}
+            {#each selectableSpecs as spec (specKey(spec.repo_id, spec.path))}
               <label class="spec-check-item">
                 <input
                   type="checkbox"
-                  checked={selectedSpecPaths.includes(spec.path)}
-                  onchange={() => toggleSpec(spec.path)}
+                  checked={selectedSpecKeys.includes(specKey(spec.repo_id, spec.path))}
+                  onchange={() => toggleSpec(spec.repo_id, spec.path)}
                 />
                 <span class="spec-check-path">{spec.path}</span>
               </label>
@@ -926,24 +1144,10 @@
             {/each}
           </div>
         </div>
-      {:else if previewState === 'preview_running'}
-        <!-- Preview Running (§9 State 2): per-spec progress indicators -->
-        <div class="preview-progress" data-testid="preview-running" aria-live="polite">
-          <div class="progress-header" role="status">{$t('editor_split.preview_running')}</div>
-          <div class="progress-list">
-            {#each previewProgress as item (item.path)}
-              <div class="progress-item">
-                <span class="progress-icon" aria-hidden="true">{item.status === 'complete' ? '✓' : '◐'}</span>
-                <span class="progress-path">{item.path}</span>
-                <span class="progress-status">{item.status === 'complete' ? $t('editor_split.status_complete') : $t('editor_split.agent_implementing')}</span>
-              </div>
-            {/each}
-          </div>
-          <div class="progress-summary">{$t('editor_split.progress_label', { values: { done: previewProgress.filter((p) => p.status === 'complete').length, total: previewProgress.length } })}</div>
-          <button class="dismiss-btn-sm cancel-preview" onclick={cancelPreview} data-testid="cancel-preview">{$t('editor_split.cancel_preview')}</button>
-        </div>
-      {:else}
-        <!-- Preview Complete / spec context: Architecture (default) + Code Diff tabs -->
+      {/if}
+      {#if showResultTabs}
+        <!-- Preview Complete / spec context, or the retained results after
+             §9 Iterate: Architecture (default) + Code Diff tabs -->
         <div class="pane-header">
           <div class="impact-tabs" role="tablist" aria-label={$t('editor_split.impact_view_aria')}>
             <button
@@ -971,8 +1175,12 @@
           </div>
           {#if graphLoading}
             <span class="loading-chip" aria-live="polite">{$t('editor_split.loading_graph')}</span>
+          {:else if predicting}
+            <!-- Fast tier in flight (§3): the debounced graphPredict call is
+                 running — subtle indicator, never blocking. -->
+            <span class="loading-chip" aria-live="polite" data-testid="predicting-chip">{$t('editor_split.predicting')}</span>
           {:else if overlays.length}
-            <span class="overlay-chip">{$t('editor_split.predicted_changes', { values: { count: overlays.length } })}</span>
+            <span class="overlay-chip" data-testid="overlay-chip">{$t('editor_split.predicted_changes', { values: { count: overlays.length } })}</span>
           {/if}
         </div>
         {#if activeImpactTab === 'architecture'}
@@ -983,39 +1191,34 @@
             aria-labelledby="editor-split-tab-arch"
           >
             {#if context === 'meta-spec' && metaPreviewResult}
-              <!-- Meta-spec preview (§9 State 3): the real PreviewResponse —
-                   structural impact + blast radius the server computed. -->
+              <!-- Meta-spec preview (§9 State 3): the real §5 status — one
+                   agent per target spec, its preview branch and produced
+                   diff stats. -->
               <div class="meta-impact" data-testid="meta-impact">
                 <div class="meta-impact-section">
-                  <h4 class="meta-impact-title">{$t('editor_split.architecture')}</h4>
-                  <dl class="meta-impact-list">
-                    <div class="meta-impact-row"><dt>{$t('editor_split.impact_scope')}</dt><dd>{metaPreviewResult.structural_impact?.scope ?? '—'}</dd></div>
-                    <div class="meta-impact-row"><dt>{$t('editor_split.impact_affected_spec_count')}</dt><dd>{metaPreviewResult.structural_impact?.affected_spec_count ?? '—'}</dd></div>
-                    <div class="meta-impact-row"><dt>{$t('editor_split.impact_affected_workspaces')}</dt><dd>{metaPreviewResult.blast_radius?.affected_workspace_count ?? metaPreviewResult.blast_radius?.affected_workspaces?.length ?? 0}</dd></div>
-                    <div class="meta-impact-row"><dt>{$t('editor_split.impact_affected_repos')}</dt><dd>{metaPreviewResult.blast_radius?.affected_repos?.length ?? 0}</dd></div>
-                  </dl>
+                  <h4 class="meta-impact-title">{$t('editor_split.preview_agents_title')}</h4>
+                  <ul class="meta-repo-list">
+                    {#each metaPreviewResult.agents ?? [] as a (a.agent_id ?? specKey(a.repo_id, a.spec_path))}
+                      <li class="meta-repo-item">
+                        <span class="meta-repo-id">{a.spec_path}</span>
+                        <span class="meta-repo-reason">
+                          {agentStatusLabel(a.status)}{a.branch ? ` · ${a.branch}` : ''}{#if a.diff && typeof a.diff.files_changed === 'number'} · +{a.diff.insertions ?? 0}/-{a.diff.deletions ?? 0} ({a.diff.files_changed} {$t('editor_split.diff_files')}){/if}
+                        </span>
+                      </li>
+                    {/each}
+                  </ul>
                 </div>
-                {#if metaPreviewResult.blast_radius?.affected_repos?.length}
-                  <div class="meta-impact-section">
-                    <h4 class="meta-impact-title">{$t('editor_split.impact_affected_repos')}</h4>
-                    <ul class="meta-repo-list">
-                      {#each metaPreviewResult.blast_radius.affected_repos as repo (repo.id)}
-                        <li class="meta-repo-item">
-                          <span class="meta-repo-id">{repo.id}</span>
-                          {#if repo.reason}
-                            <span class="meta-repo-reason">{$t('editor_split.impact_reason')}: {repo.reason}</span>
-                          {/if}
-                        </li>
-                      {/each}
-                    </ul>
-                  </div>
-                {/if}
               </div>
             {:else}
               <ArchPreviewCanvas
                 nodes={graphNodes}
                 edges={graphEdges}
                 ghostOverlays={overlays}
+                ghostMode={previewState === 'preview_running'
+                  ? 'previewing'
+                  : previewState === 'preview_complete'
+                    ? 'confirmed'
+                    : 'predicted'}
                 size="full"
               />
             {/if}
@@ -1029,21 +1232,21 @@
             data-testid="code-diff-panel"
           >
             {#if codeDiffFiles.length}
-              {#each codeDiffFiles as file (file.path)}
+              {#each codeDiffFiles as file (specKey(file.repo_id, file.path))}
                 <div class="code-diff-file">
                   <div class="code-diff-path">{file.path}</div>
                   <SpecDiffView diff={file.diff} />
                 </div>
               {/each}
-            {:else if context === 'meta-spec' && previewState === 'preview_complete'}
-              <!-- Meta-spec previews report per-spec completion; the endpoint
-                   produces no line-level diff, so list the spec statuses. -->
-              {#if metaPreviewResult?.specs?.length}
+            {:else if context === 'meta-spec' && metaPreviewResult}
+              <!-- No agent produced a diff for this preview — list the
+                   per-agent statuses so the outcome is still visible. -->
+              {#if metaPreviewResult?.agents?.length}
                 <div class="meta-spec-statuses" data-testid="meta-spec-statuses">
-                  {#each metaPreviewResult.specs as s (s.path)}
+                  {#each metaPreviewResult.agents as s (s.agent_id ?? specKey(s.repo_id, s.spec_path))}
                     <div class="meta-spec-status">
-                      <span class="meta-spec-path">{s.path}</span>
-                      <span class="meta-spec-state">{s.status}</span>
+                      <span class="meta-spec-path">{s.spec_path}</span>
+                      <span class="meta-spec-state">{agentStatusLabel(s.status)}</span>
                     </div>
                   {/each}
                 </div>
@@ -1238,6 +1441,58 @@
 
   .locked-line { white-space: pre-wrap; color: var(--color-text-secondary); }
 
+  /* Pending-changes diff in the locked editor (§9 State 2) */
+  .locked-diff { display: flex; flex-direction: column; min-height: 100%; }
+  .locked-diff-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-3);
+    padding: var(--space-1) var(--space-2);
+    margin-bottom: var(--space-2);
+    border-bottom: 1px solid var(--color-border);
+  }
+  .locked-diff-title {
+    font-size: var(--text-xs);
+    font-weight: 600;
+    color: var(--color-text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  .locked-diff-summary { font-family: var(--font-mono, monospace); font-size: var(--text-xs); color: var(--color-text-muted); }
+  .locked-diff-line { display: flex; gap: var(--space-2); }
+  .locked-diff-marker { flex-shrink: 0; width: 1ch; font-family: var(--font-mono, monospace); }
+  .locked-diff-text { min-width: 0; }
+  .locked-diff-add .locked-diff-marker { color: var(--color-success, #2e9e5b); font-weight: 600; }
+  .locked-diff-add .locked-diff-text { color: var(--color-success, #2e9e5b); }
+  .locked-diff-remove .locked-diff-marker { color: var(--color-danger, #cc3340); font-weight: 600; }
+  .locked-diff-remove .locked-diff-text { color: var(--color-danger, #cc3340); text-decoration: line-through; }
+
+  /* Instant tier impact bar (§3 "Link graph impact") */
+  .impact-bar {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    padding: var(--space-1) var(--space-3);
+    border-bottom: 1px solid var(--color-border);
+    background: color-mix(in srgb, var(--color-primary, #60a5fa) 4%, transparent);
+    flex-shrink: 0;
+    min-height: 26px;
+  }
+
+  .impact-seg {
+    font-size: 10px;
+    color: var(--color-text-muted);
+    font-family: var(--font-mono, monospace);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .impact-loading {
+    font-style: italic;
+  }
+
   /* Markdown toolbar (ui-layout.md §2) */
   .md-toolbar {
     display: flex;
@@ -1285,10 +1540,6 @@
     gap: var(--space-4);
   }
   .meta-impact-title { margin: 0 0 var(--space-2); font-size: 12px; font-weight: 600; color: var(--color-text-secondary); text-transform: uppercase; letter-spacing: 0.04em; }
-  .meta-impact-list { margin: 0; display: flex; flex-direction: column; gap: var(--space-2); }
-  .meta-impact-row { display: flex; justify-content: space-between; gap: var(--space-3); font-size: 13px; }
-  .meta-impact-row dt { color: var(--color-text-secondary); }
-  .meta-impact-row dd { margin: 0; font-family: var(--font-mono, monospace); }
   .meta-repo-list { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: var(--space-2); }
   .meta-repo-item { display: flex; flex-direction: column; gap: 2px; font-size: 13px; }
   .meta-repo-id { font-family: var(--font-mono, monospace); }
@@ -1298,117 +1549,9 @@
   .meta-spec-path { font-family: var(--font-mono, monospace); }
   .meta-spec-state { color: var(--color-text-secondary); }
 
-  /* LLM suggestion block */
-  .suggestion-block {
-    margin: var(--space-2) var(--space-3);
-    border: 1px solid var(--color-primary);
-    border-radius: var(--radius);
-    background: color-mix(in srgb, var(--color-primary) 5%, transparent);
-  }
-
-  .suggestion-hdr {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: var(--space-2) var(--space-3);
-    background: color-mix(in srgb, var(--color-primary) 10%, transparent);
-    border-bottom: 1px solid color-mix(in srgb, var(--color-primary) 20%, transparent);
-  }
-
-  .suggestion-lbl {
-    font-size: var(--text-xs);
-    font-weight: 600;
-    color: var(--color-primary);
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-  }
-
-  .suggestion-expl {
-    padding: var(--space-2) var(--space-3);
-    font-size: var(--text-xs);
-    color: var(--color-text-secondary);
-    margin: 0;
-    line-height: 1.5;
-  }
-
-  .suggestion-diff {
-    padding: 0 var(--space-3);
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-1);
-  }
-
-  .diff-op {
-    display: flex;
-    align-items: baseline;
-    gap: var(--space-2);
-    font-family: var(--font-mono);
-    font-size: var(--text-xs);
-    flex-wrap: wrap;
-  }
-
-  .diff-badge {
-    padding: 0 var(--space-1);
-    border-radius: var(--radius-sm);
-    font-size: 10px;
-    text-transform: uppercase;
-    font-weight: 600;
-    flex-shrink: 0;
-  }
-
-  .diff-op-add .diff-badge { background: color-mix(in srgb, var(--color-success, #2e9e5b) 20%, transparent); color: var(--color-success, #2e9e5b); }
-  .diff-op-remove .diff-badge { background: color-mix(in srgb, var(--color-danger, #cc3340) 20%, transparent); color: var(--color-danger, #cc3340); }
-  .diff-op-replace .diff-badge { background: color-mix(in srgb, var(--color-warning) 20%, transparent); color: var(--color-warning); }
-
-  .diff-path {
-    color: var(--color-text-muted);
-    flex-shrink: 0;
-  }
-
-  .diff-content {
-    margin: 0;
-    flex: 1;
-    min-width: 0;
-    white-space: pre-wrap;
-    color: var(--color-text);
-    font-family: var(--font-mono);
-    font-size: var(--text-xs);
-    background: var(--color-surface-elevated);
-    border-radius: var(--radius-sm);
-    padding: var(--space-1) var(--space-2);
-  }
-
-  .suggestion-btns {
-    display: flex;
-    gap: var(--space-2);
-    padding: var(--space-2) var(--space-3);
-  }
-
-  .accept-btn {
-    padding: var(--space-1) var(--space-3);
-    background: var(--color-primary);
-    border: none;
-    border-radius: var(--radius-sm);
-    color: var(--color-text-inverse);
-    cursor: pointer;
-    font-size: var(--text-xs);
-    font-family: var(--font-body);
-  }
-
-  .accept-btn:hover { opacity: 0.9; }
-  .accept-btn:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
-
-  .dismiss-btn {
-    background: none;
-    border: none;
-    color: var(--color-text-muted);
-    cursor: pointer;
-    padding: 0 var(--space-1);
-    font-size: var(--text-xs);
-  }
-
-  .dismiss-btn:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
-
+  /* Suggestion / LLM-chat visuals live in the shared SpecSuggestion and
+     SpecChatInput components (task-185). Only the small ghost button used
+     by the preview progress list stays here. */
   .dismiss-btn-sm {
     padding: var(--space-1) var(--space-3);
     background: var(--color-surface-elevated);
@@ -1421,127 +1564,6 @@
   }
 
   .dismiss-btn-sm:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
-
-  /* LLM streaming */
-  .llm-streaming {
-    margin: var(--space-2) var(--space-3);
-    padding: var(--space-2) var(--space-3);
-    background: var(--color-surface-elevated);
-    border: 1px solid var(--color-border);
-    border-radius: var(--radius);
-  }
-
-  .streaming-lbl {
-    font-size: var(--text-xs);
-    color: var(--color-text-muted);
-    font-weight: 500;
-    display: block;
-    margin-bottom: var(--space-1);
-  }
-
-  .streaming-txt {
-    font-size: var(--text-xs);
-    color: var(--color-text-secondary);
-    margin: 0;
-    line-height: 1.5;
-    white-space: pre-wrap;
-  }
-
-  .blink-cursor {
-    display: inline-block;
-    width: 2px;
-    height: 1em;
-    background: var(--color-primary);
-    margin-left: 2px;
-    vertical-align: text-bottom;
-    animation: blink 1s step-end infinite;
-  }
-
-  @keyframes blink {
-    0%, 100% { opacity: 1; }
-    50%       { opacity: 0; }
-  }
-
-  /* LLM input */
-  .llm-input-area {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-1);
-    padding: var(--space-3) var(--space-4);
-    border-top: 1px solid var(--color-border);
-    flex-shrink: 0;
-  }
-
-  .recipient-line {
-    font-size: var(--text-xs);
-    color: var(--color-text-muted);
-    font-weight: 500;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .llm-row {
-    display: flex;
-    gap: var(--space-2);
-    align-items: flex-end;
-  }
-
-  .llm-textarea {
-    flex: 1;
-    min-height: 44px;
-    max-height: 90px;
-    padding: var(--space-2) var(--space-3);
-    background: var(--color-surface-elevated);
-    border: 1px solid var(--color-border-strong);
-    border-radius: var(--radius);
-    color: var(--color-text);
-    font-family: var(--font-body);
-    font-size: var(--text-sm);
-    resize: vertical;
-    box-sizing: border-box;
-    transition: border-color var(--transition-fast);
-  }
-
-  .llm-textarea:focus:not(:focus-visible) { outline: none; }
-  .llm-textarea:focus-visible {
-    outline: 2px solid var(--color-focus);
-    outline-offset: -2px;
-    border-color: var(--color-focus);
-  }
-
-  .llm-textarea:disabled { opacity: 0.6; cursor: not-allowed; }
-
-  .llm-send {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 34px;
-    height: 34px;
-    padding: 0;
-    background: var(--color-primary);
-    border: none;
-    border-radius: var(--radius);
-    color: var(--color-text-inverse);
-    cursor: pointer;
-    flex-shrink: 0;
-    transition: background var(--transition-fast);
-  }
-
-  .llm-send:hover:not(:disabled) { background: var(--color-primary-hover); }
-  .llm-send:disabled { opacity: 0.4; cursor: not-allowed; }
-  .llm-send:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
-
-  .llm-hint {
-    font-size: var(--text-xs);
-    color: var(--color-text-muted);
-    margin: 0;
-  }
-
-  .llm-hint.warn { color: var(--color-warning); }
-
-  .spin { animation: spin 1s linear infinite; }
-  @keyframes spin { to { transform: rotate(360deg); } }
 
   /* Right pane */
   .pane-header {
@@ -1619,6 +1641,14 @@
     gap: var(--space-2);
   }
 
+  /* §9 Iterate: with a retained preview result the selector stacks above
+     the Architecture/Code Diff tabs instead of taking the whole pane. */
+  .spec-selector.stacked {
+    flex: 0 1 auto;
+    max-height: 40%;
+    border-bottom: 1px solid var(--color-border);
+  }
+
   .spec-selector-header {
     display: flex;
     align-items: center;
@@ -1678,8 +1708,14 @@
     display: flex;
     flex-direction: column;
     gap: var(--space-3);
-    padding: var(--space-4);
+    padding: var(--space-3);
     overflow: auto;
+    /* §3: a strip above the Architecture/Code Diff tabs — the canvas (and
+       its pulsing ghost overlays) stays visible below while the preview
+       agent runs. */
+    flex-shrink: 0;
+    max-height: 40%;
+    border-bottom: 1px solid var(--color-border);
   }
 
   .progress-header {
@@ -1742,21 +1778,7 @@
     margin: 0;
   }
 
-  .sr-only {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    padding: 0;
-    margin: -1px;
-    overflow: hidden;
-    clip: rect(0, 0, 0, 0);
-    white-space: nowrap;
-    border-width: 0;
-  }
-
   @media (prefers-reduced-motion: reduce) {
-    .spin { animation: none; }
-    .blink-cursor { animation: none; }
-    .back-btn, .save-btn, .llm-send, .llm-textarea { transition: none; }
+    .back-btn, .save-btn { transition: none; }
   }
 </style>

@@ -897,6 +897,173 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn deactivating_target_revokes_impersonation_token() {
+        let (state, admin_key, _target_key, _request_id, token) = run_full_flow().await;
+
+        // Before deactivation the impersonation JWT authenticates as the
+        // target (this assertion is what makes the later 401 meaningful:
+        // it proves the token itself works).
+        let resp = app(&state)
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me")
+                    .header("Authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let me = body_json(resp).await;
+        assert_eq!(me["id"].as_str().unwrap(), "target-1");
+        assert_eq!(me["username"].as_str().unwrap(), "Target User");
+
+        // The impersonator (a TenantAdmin by role) deactivates the target.
+        let resp = app(&state)
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/users/target-1/deactivate")
+                    .header("Authorization", format!("Bearer {admin_key}"))
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"reason": "offboarded"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // The unexpired impersonation JWT no longer authenticates (401,
+        // not 200-until-exp): the deactivation cascade ends the session
+        // and the resolver rejects the deactivated target account.
+        let resp = app(&state)
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me")
+                    .header("Authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        // The session was ended as part of the cascade, with the
+        // deactivation reason on the audit trail.
+        let events = state
+            .audit
+            .query(&audit_filter("impersonation_ended"))
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].detail["reason"], "user_deactivated");
+        assert_eq!(events[0].detail["target_user_id"], "target-1");
+    }
+
+    #[tokio::test]
+    async fn deactivating_impersonator_revokes_impersonation_token() {
+        let (state, _admin_key, _target_key, _request_id, token) = run_full_flow().await;
+
+        // Before deactivation the impersonation JWT authenticates as the
+        // target.
+        let resp = app(&state)
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me")
+                    .header("Authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // A second TenantAdmin deactivates the impersonator (the
+        // self-deactivation guard means the impersonator cannot do it
+        // themselves).
+        let admin2_key =
+            seed_user(&state, "admin-2", "Admin Two", vec![UserRole::Admin], false).await;
+        let resp = app(&state)
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/users/admin-1/deactivate")
+                    .header("Authorization", format!("Bearer {admin2_key}"))
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"reason": "rogue"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // The deactivated impersonator's unexpired JWT no longer grants
+        // API access as the target user.
+        let resp = app(&state)
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me")
+                    .header("Authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        // The session was ended as part of the cascade.
+        let events = state
+            .audit
+            .query(&audit_filter("impersonation_ended"))
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].detail["reason"], "user_deactivated");
+        assert_eq!(events[0].detail["impersonator_id"], "admin-1");
+    }
+
+    /// Belt-and-suspenders for the resolver check itself: even if a
+    /// session record survives deactivation un-ended (e.g. the cascade's
+    /// session write failed), `resolve_impersonation_auth` must reject on
+    /// the account state alone. The target is deactivated directly on the
+    /// user record (bypassing the endpoint cascade), so the session stays
+    /// un-ended and unexpired — only the resolver's account-state check
+    /// can reject the token.
+    #[tokio::test]
+    async fn resolver_rejects_deactivated_accounts_even_with_unended_session() {
+        let (state, _admin_key, _target_key, _request_id, token) = run_full_flow().await;
+
+        // Deactivate the target on the user record only — the session
+        // record stays active (un-ended, unexpired).
+        let mut user = state
+            .users
+            .find_by_id(&Id::new("target-1"))
+            .await
+            .unwrap()
+            .unwrap();
+        user.deactivate(crate::api::now_secs());
+        state.users.update(&user).await.unwrap();
+
+        // The still-unended, unexpired session does not rescue the token:
+        // the resolver rejects the deactivated target account.
+        let resp = app(&state)
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me")
+                    .header("Authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
     async fn non_impersonator_admin_cannot_end_session() {
         let (state, _admin_key, _target_key, request_id, _token) = run_full_flow().await;
         let other_admin = seed_user(

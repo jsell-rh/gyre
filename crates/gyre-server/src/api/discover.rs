@@ -117,6 +117,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/api/v1/agents")
+                    .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
@@ -133,6 +134,7 @@ mod tests {
                 Request::builder()
                     .method("PUT")
                     .uri(format!("/api/v1/agents/{id}/status"))
+                    .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&status_body).unwrap()))
                     .unwrap(),

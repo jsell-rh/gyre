@@ -10,7 +10,7 @@
   import ArchPreviewCanvas from './ArchPreviewCanvas.svelte';
   import ConstraintEditor from './ConstraintEditor.svelte';
   import InlineChat from './InlineChat.svelte';
-  import { api } from './api.js';
+  import { api, selfReviewerId } from './api.js';
   import { entityName as sharedEntityName, shortId as sharedShortId, formatSha, formatId as sharedFormatId } from './entityNames.svelte.js';
   import { relativeTime, absoluteTime, formatDuration, formatDate } from './timeFormat.js';
   import { mrStatusJourney } from './statusTooltips.js';
@@ -22,6 +22,10 @@
   import ImpactAnalysisModal from '../components/ImpactAnalysisModal.svelte';
   import ConcurrentEditBanner from './ConcurrentEditBanner.svelte';
   import SpecConflictDialog from './SpecConflictDialog.svelte';
+  import SpecChatInput from './SpecChatInput.svelte';
+  import SpecSuggestion from './SpecSuggestion.svelte';
+  import { applyDiffOps, streamAssist, suggestionText } from './specAssist.js';
+  import { normalizeGhosts } from './ghostOverlay.js';
   import { sendEditingPresence, specEditingEntity } from './presence.js';
 
   const goToRepoTab = getContext('goToRepoTab') ?? null;
@@ -977,10 +981,13 @@
 
   // Edit tab
   let editContent = $state('');
-  let llmInstruction = $state('');
   let llmStreaming = $state(false);
   let llmExplanation = $state('');
-  let llmSuggestion = $state(null); // { diff: [...], explanation: string } | null
+  // Multiple suggestions can be requested (ui-layout.md §3 "Multiple
+  // suggestions..."): every completed assist request appends one block;
+  // the human curates them — the LLM never writes directly.
+  let llmSuggestions = $state([]); // [{ id, diff: [...], explanation }]
+  let suggestionSeq = 0;
   let saving = $state(false);
 
   // ── Concurrent spec editing (HSI §7 Conflict Prevention) ────────────────
@@ -1118,7 +1125,7 @@
       specLinks = null;
       specHistory = null;
       editContent = '';
-      llmSuggestion = null;
+      llmSuggestions = [];
       llmExplanation = '';
       archNodes = [];
       archEdges = [];
@@ -1321,10 +1328,10 @@
           draft_content: content,
         });
         const overlays = result?.predictions ?? result?.overlays ?? [];
-        archGhostOverlays = overlays.map((p) => ({
-          nodeId: p.node_id ?? p.nodeId,
-          type: p.change_type ?? p.type ?? 'modified',
-        }));
+        // Shared §3 ghost model (ghostOverlay.js): keeps action, confidence
+        // and reason so the Editor Split / arch tab ghost layer renders the
+        // full ghost visual language — same normalization EditorSplit uses.
+        archGhostOverlays = normalizeGhosts(overlays);
       } catch {
         // Silent failure — predictions are best-effort
       }
@@ -1339,16 +1346,17 @@
     goToRepoTab('architecture', { highlight_spec: entity.id });
   }
 
-  // LLM-assisted spec editing
-  async function sendLlmInstruction() {
-    if (!llmInstruction.trim() || llmStreaming) return;
+  // LLM-assisted spec editing (ui-layout.md §3). The SSE consumption, diff
+  // application, and suggestion/chat-input rendering are the shared
+  // production implementations from specAssist.js / SpecChatInput /
+  // SpecSuggestion — the same ones EditorSplit uses — so both §3 surfaces
+  // cannot diverge.
+  async function sendLlmInstruction(instruction) {
+    if (!instruction || llmStreaming) return;
     const repoId = entity?.data?.repo_id;
     if (!repoId) return;
-    const instruction = llmInstruction.trim();
-    llmInstruction = '';
     llmStreaming = true;
     llmExplanation = '';
-    llmSuggestion = null;
 
     try {
       const resp = await api.specsAssist(repoId, {
@@ -1356,55 +1364,24 @@
         instruction,
         draft_content: editContent || undefined,
       });
-      if (!resp.ok) throw new Error(`LLM request failed: ${resp.status}`);
-
-      const reader = resp.body?.getReader();
-      if (!reader) throw new Error('No response body');
-      const decoder = new TextDecoder();
-      let buf = '';
-      let done = false;
-
-      while (!done) {
-        const { value, done: streamDone } = await reader.read();
-        done = streamDone;
-        if (value) {
-          buf += decoder.decode(value, { stream: true });
-          const lines = buf.split('\n');
-          buf = lines.pop() ?? '';
-          let currentEvent = '';
-          for (const line of lines) {
-            // Track SSE event type from `event:` lines
-            if (line.startsWith('event:')) {
-              currentEvent = line.slice(6).trim();
-              continue;
-            }
-            if (!line.startsWith('data: ') && !line.startsWith('data:')) continue;
-            const raw = line.startsWith('data: ') ? line.slice(6) : line.slice(5);
-            if (raw === '[DONE]') { done = true; break; }
-            try {
-              const parsed = JSON.parse(raw);
-              // Use event type from either SSE event: line or from JSON payload
-              const evtType = parsed.event ?? parsed.type ?? currentEvent;
-              if (evtType === 'partial' || (!evtType && parsed.text != null)) {
-                llmExplanation += parsed.text ?? parsed.explanation ?? '';
-              } else if (evtType === 'complete') {
-                // Complete event: if it has a full text field, use it as the suggestion
-                const fullText = parsed.text ?? parsed.explanation ?? llmExplanation;
-                llmSuggestion = {
-                  diff: parsed.diff ?? [],
-                  explanation: fullText,
-                };
-                done = true; break;
-              } else if (evtType === 'error') {
-                throw new Error(parsed.message ?? 'LLM error');
-              }
-            } catch (pe) {
-              if (pe.message && !pe.message.startsWith('Unexpected token')) throw pe;
-            }
-            currentEvent = '';
-          }
-        }
-      }
+      // Shared SSE consumer (specAssist.js): `partial` events stream the
+      // explanation progressively; `complete` carries the suggestion diff;
+      // `error` throws. A truncated stream must never masquerade as done.
+      await streamAssist(resp, {
+        onPartial: (text) => {
+          llmExplanation += text;
+        },
+        onComplete: ({ diff, explanation }) => {
+          llmSuggestions = [
+            ...llmSuggestions,
+            {
+              id: `suggestion-${++suggestionSeq}`,
+              diff,
+              explanation: explanation || llmExplanation,
+            },
+          ];
+        },
+      });
     } catch (e) {
       toastError($t('detail_panel.llm_assist_failed', { values: { error: e.message } }));
     } finally {
@@ -1412,51 +1389,31 @@
     }
   }
 
-  function acceptSuggestion() {
-    if (!llmSuggestion) return;
-    let content = editContent;
-    for (const op of llmSuggestion.diff) {
-      if (op.op === 'add') {
-        const idx = content.indexOf(op.path);
-        if (idx !== -1) {
-          const lineEnd = content.indexOf('\n', idx + op.path.length);
-          const insertAt = lineEnd !== -1 ? lineEnd + 1 : content.length;
-          content = content.slice(0, insertAt) + op.content + '\n' + content.slice(insertAt);
-        } else {
-          content += '\n' + op.content;
-        }
-      } else if (op.op === 'replace') {
-        const idx = content.indexOf(op.path);
-        if (idx !== -1) {
-          const end = findSectionEnd(content, idx + op.path.length);
-          content = content.slice(0, idx) + op.path + '\n' + op.content + content.slice(end);
-        }
-      } else if (op.op === 'remove') {
-        const idx = content.indexOf(op.path);
-        if (idx !== -1) {
-          const end = findSectionEnd(content, idx + op.path.length);
-          content = content.slice(0, idx) + content.slice(end);
-        }
-      }
-    }
-    editContent = content;
-    llmSuggestion = null;
+  /**
+   * Accept (§3 step 4): apply this suggestion's diff ops to the edit-tab
+   * content — in-memory only, the human must still Save. Shared
+   * `applyDiffOps` (specAssist.js) resolves header paths with the
+   * "L15-L22" line-range fallback.
+   */
+  function acceptSuggestion(suggestion) {
+    editContent = applyDiffOps(editContent, suggestion.diff);
+    removeSuggestion(suggestion);
   }
 
-  function editSuggestion() {
-    if (llmSuggestion?.diff?.[0]?.content) {
-      editContent += '\n\n' + llmSuggestion.diff.map((d) => d.content).join('\n\n');
-    }
-    llmSuggestion = null;
+  /** Edit (§3 step 5): copy the suggested text into the editor. */
+  function editSuggestion(suggestion) {
+    const text = suggestionText(suggestion);
+    if (text) editContent += '\n\n' + text;
+    removeSuggestion(suggestion);
   }
 
-  function dismissSuggestion() { llmSuggestion = null; }
+  /** Dismiss (§3 step 6): remove the suggestion block. */
+  function dismissSuggestion(suggestion) {
+    removeSuggestion(suggestion);
+  }
 
-  function findSectionEnd(content, from) {
-    const rest = content.slice(from);
-    const match = rest.match(/\n(#{1,6} )/);
-    if (match?.index !== undefined) return from + match.index + 1;
-    return content.length;
+  function removeSuggestion(suggestion) {
+    llmSuggestions = llmSuggestions.filter((s) => s.id !== suggestion.id);
   }
 
   async function saveSpec({ overwrite = false } = {}) {
@@ -1581,7 +1538,7 @@
     submittingReview = true;
     try {
       await api.submitReview(entity.id, {
-        reviewer_agent_id: 'human-reviewer',
+        reviewer_agent_id: await selfReviewerId(),
         decision: newReviewDecision,
         body: newReviewBody.trim() || undefined,
       });
@@ -3574,85 +3531,34 @@
               spellcheck="false"
             ></textarea>
 
-            {#if llmSuggestion}
-              <div class="suggestion-block" role="region" aria-label={$t('detail_panel.suggested_change')}>
-                <div class="suggestion-hdr">
-                  <span class="suggestion-lbl">{llmSuggestion.diff?.length > 0 ? $t('detail_panel.suggested_change') : 'LLM Response'}</span>
-                </div>
-                {#if llmSuggestion.explanation}
-                  <div class="suggestion-expl">{@html renderMarkdown(llmSuggestion.explanation)}</div>
-                {/if}
-                {#if llmSuggestion.diff?.length > 0}
-                  <div class="suggestion-diff">
-                    {#each llmSuggestion.diff as op}
-                      <div class="diff-op diff-op-{op.op}">
-                        <span class="diff-badge">{op.op}</span>
-                        <span class="diff-path">{op.path}</span>
-                        {#if op.content}
-                          <pre class="diff-content">{op.content}</pre>
-                        {/if}
-                      </div>
-                    {/each}
-                  </div>
-                {/if}
-                <div class="suggestion-btns">
-                  {#if llmSuggestion.diff?.length > 0}
-                    <Button variant="primary" onclick={acceptSuggestion}>{$t('detail_panel.accept')}</Button>
-                    <Button variant="secondary" onclick={editSuggestion}>{$t('detail_panel.edit_btn')}</Button>
-                  {/if}
-                  <Button variant="secondary" onclick={dismissSuggestion}>{$t('detail_panel.dismiss')}</Button>
-                </div>
-              </div>
-            {/if}
+            <!-- Each suggestion renders as its own inline "Suggested Change"
+                 diff block (§3 "Multiple suggestions...") with the shared
+                 Accept/Edit/Dismiss curation component. Accept applies
+                 in-memory only; the human saves explicitly. -->
+            {#each llmSuggestions as suggestion (suggestion.id)}
+              <SpecSuggestion
+                {suggestion}
+                onaccept={() => acceptSuggestion(suggestion)}
+                onedit={() => editSuggestion(suggestion)}
+                ondismiss={() => dismissSuggestion(suggestion)}
+              />
+            {/each}
 
-            {#if llmStreaming}
-              <div class="llm-streaming" aria-live="polite">
-                <span class="streaming-lbl">{$t('detail_panel.thinking')}</span>
-                {#if llmExplanation}
-                  <p class="streaming-txt">{llmExplanation}<span class="blink-cursor" aria-hidden="true"></span></p>
-                {:else}
-                  <p class="streaming-txt"><span class="blink-cursor" aria-hidden="true"></span></p>
-                {/if}
-              </div>
-            {/if}
-
-            <div class="llm-input-area">
-              <div class="recipient-line">{$t('detail_panel.edit_spec_recipient', { values: { name: entity.data?.title || entity.id } })}</div>
-              <div class="llm-row">
-                <textarea
-                  class="llm-textarea"
-                  bind:value={llmInstruction}
-                  placeholder={$t('detail_panel.llm_placeholder')}
-                  rows="2"
-                  disabled={llmStreaming}
-                  onkeydown={(e) => { if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); sendLlmInstruction(); } }}
-                  aria-label={$t('detail_panel.llm_instruction')}
-                ></textarea>
-                <button
-                  class="llm-send"
-                  onclick={sendLlmInstruction}
-                  disabled={!llmInstruction.trim() || llmStreaming || !entity.data?.repo_id}
-                  aria-label={$t('detail_panel.send_to_llm')}
-                  aria-busy={llmStreaming}
-                >
-                  {#if llmStreaming}
-                    <svg class="spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true">
-                      <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/>
-                    </svg>
-                  {:else}
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true">
-                      <line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/>
-                    </svg>
-                  {/if}
-                  <span class="sr-only">{$t('detail_panel.send')}</span>
-                </button>
-              </div>
-              {#if !entity.data?.repo_id}
-                <p class="llm-hint warn">{$t('detail_panel.llm_requires_repo')}</p>
-              {:else}
-                <p class="llm-hint">{$t('detail_panel.llm_hint')}</p>
-              {/if}
-            </div>
+            <!-- Shared §3 chat input: "Edit spec: ..." recipient indicator,
+                 progressive `partial` explanation rendering, loading state. -->
+            <SpecChatInput
+              recipient={$t('detail_panel.edit_spec_recipient', { values: { name: entity.data?.title || entity.id } })}
+              enabled={Boolean(entity.data?.repo_id)}
+              streaming={llmStreaming}
+              streamingText={llmExplanation}
+              placeholder={$t('detail_panel.llm_placeholder')}
+              instructionAria={$t('detail_panel.llm_instruction')}
+              sendAria={$t('detail_panel.send_to_llm')}
+              thinking={$t('detail_panel.thinking')}
+              hint={entity.data?.repo_id ? $t('detail_panel.llm_hint') : null}
+              warnHint={entity.data?.repo_id ? null : $t('detail_panel.llm_requires_repo')}
+              onsubmit={sendLlmInstruction}
+            />
 
             {#if entity.data?.repo_id}
               <div class="save-bar">
@@ -3774,7 +3680,7 @@
                 {#if inbound.length > 0}
                   <div class="link-column link-column-inbound">
                     {#each inbound as link}
-                      {@const target = typeof link === 'string' ? link : (link.target_path ?? link.target)}
+                      {@const target = typeof link === 'string' ? link : (link.source_path ?? link.target_path ?? link.target)}
                       {@const kind = typeof link === 'object' ? (link.kind ?? link.link_type ?? link.type) : null}
                       <button class="link-node link-node-inbound" onclick={() => navigateTo('spec', target, { path: target, repo_id: entity?.data?.repo_id })} title={target}>
                         <span class="link-node-name">{target?.split('/').pop()}</span>
@@ -3818,7 +3724,11 @@
               <span class="progress-section-label" style="margin-top: var(--space-4)">All Links ({linkArray.length})</span>
               <ul class="links-list">
                 {#each linkArray as link}
-                  {@const target = typeof link === 'string' ? link : (link.target_path ?? link.target ?? JSON.stringify(link))}
+                  {@const target = typeof link === 'string'
+                    ? link
+                    : link.direction === 'inbound'
+                      ? (link.source_path ?? link.target_path ?? link.target ?? JSON.stringify(link))
+                      : (link.target_path ?? link.target ?? JSON.stringify(link))}
                   {@const kind = typeof link === 'object' ? (link.kind ?? link.link_type ?? link.type) : null}
                   {@const direction = typeof link === 'object' ? link.direction : null}
                   {@const isConflict = kind === 'conflicts_with' || kind === 'conflicts'}
@@ -6030,225 +5940,8 @@
     border-color: var(--color-focus);
   }
 
-  /* LLM suggestion block */
-  .suggestion-block {
-    margin: var(--space-3) var(--space-4);
-    border: 1px solid var(--color-primary);
-    border-radius: var(--radius);
-    background: color-mix(in srgb, var(--color-primary) 5%, transparent);
-  }
-
-  .suggestion-hdr {
-    padding: var(--space-2) var(--space-3);
-    background: color-mix(in srgb, var(--color-primary) 10%, transparent);
-    border-bottom: 1px solid color-mix(in srgb, var(--color-primary) 20%, transparent);
-  }
-
-  .suggestion-lbl {
-    font-size: var(--text-xs);
-    font-weight: 600;
-    color: var(--color-primary);
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-  }
-
-  .suggestion-expl {
-    padding: var(--space-2) var(--space-3);
-    font-size: var(--text-xs);
-    color: var(--color-text-secondary);
-    margin: 0;
-    line-height: 1.5;
-  }
-
-  .suggestion-diff {
-    padding: 0 var(--space-3) var(--space-2);
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-1);
-  }
-
-  .diff-op {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-1);
-  }
-
-  .diff-badge {
-    font-size: var(--text-xs);
-    font-weight: 600;
-    text-transform: uppercase;
-    padding: var(--space-1);
-    border-radius: var(--radius-sm);
-    background: var(--color-surface-elevated);
-    color: var(--color-text-muted);
-    display: inline-block;
-    width: fit-content;
-  }
-
-  .diff-op-add .diff-badge    { color: var(--color-success); }
-  .diff-op-remove .diff-badge { color: var(--color-danger); }
-  .diff-op-replace .diff-badge { color: var(--color-warning); }
-
-  .diff-path {
-    font-family: var(--font-mono);
-    font-size: var(--text-xs);
-    color: var(--color-text-secondary);
-  }
-
-  .diff-content {
-    font-family: var(--font-mono);
-    font-size: var(--text-xs);
-    line-height: 1.5;
-    color: var(--color-text);
-    background: var(--color-surface-elevated);
-    border: 1px solid var(--color-border);
-    border-radius: var(--radius-sm);
-    padding: var(--space-2);
-    margin: 0;
-    white-space: pre-wrap;
-    word-break: break-word;
-    max-height: 100px;
-    overflow-y: auto;
-  }
-
-  .suggestion-btns {
-    display: flex;
-    gap: var(--space-2);
-    padding: var(--space-2) var(--space-3);
-    border-top: 1px solid color-mix(in srgb, var(--color-primary) 15%, transparent);
-  }
-
-  /* LLM streaming */
-  .llm-streaming {
-    margin: var(--space-2) var(--space-4);
-    padding: var(--space-2) var(--space-3);
-    background: var(--color-surface-elevated);
-    border: 1px solid var(--color-border);
-    border-radius: var(--radius);
-  }
-
-  .streaming-lbl {
-    font-size: var(--text-xs);
-    color: var(--color-text-muted);
-    font-weight: 500;
-    display: block;
-    margin-bottom: var(--space-1);
-  }
-
-  .streaming-txt {
-    font-size: var(--text-xs);
-    color: var(--color-text-secondary);
-    margin: 0;
-    line-height: 1.5;
-    white-space: pre-wrap;
-  }
-
-  .blink-cursor {
-    display: inline-block;
-    width: 2px;
-    height: 1em;
-    background: var(--color-primary);
-    margin-left: 2px;
-    vertical-align: text-bottom;
-    animation: blink 1s step-end infinite;
-  }
-
-  @keyframes blink {
-    0%, 100% { opacity: 1; }
-    50%       { opacity: 0; }
-  }
-
-  /* LLM input area */
-  .llm-input-area {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-1);
-    padding: var(--space-3) var(--space-4);
-    border-top: 1px solid var(--color-border);
-  }
-
-  .recipient-line {
-    font-size: var(--text-xs);
-    color: var(--color-text-muted);
-    font-weight: 500;
-  }
-
-  .llm-row {
-    display: flex;
-    gap: var(--space-2);
-    align-items: flex-end;
-  }
-
-  .llm-textarea {
-    flex: 1;
-    min-height: 44px;
-    max-height: 90px;
-    padding: var(--space-2) var(--space-3);
-    background: var(--color-surface-elevated);
-    border: 1px solid var(--color-border-strong);
-    border-radius: var(--radius);
-    color: var(--color-text);
-    font-family: var(--font-body);
-    font-size: var(--text-sm);
-    resize: vertical;
-    box-sizing: border-box;
-    transition: border-color var(--transition-fast);
-  }
-
-  .llm-textarea:focus:not(:focus-visible) {
-    outline: none;
-  }
-
-  .llm-textarea:focus-visible {
-    outline: 2px solid var(--color-focus);
-    outline-offset: -2px;
-  }
-
-  .llm-textarea:focus-visible {
-    border-color: var(--color-focus);
-  }
-
-  .llm-textarea:disabled { opacity: 0.6; cursor: not-allowed; }
-
-  .llm-send {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 34px;
-    height: 34px;
-    padding: 0;
-    background: var(--color-primary);
-    border: none;
-    border-radius: var(--radius);
-    color: var(--color-text-inverse);
-    cursor: pointer;
-    flex-shrink: 0;
-    transition: background var(--transition-fast);
-  }
-
-  .llm-send:hover:not(:disabled) { background: var(--color-primary-hover); }
-  .llm-send:disabled { opacity: 0.4; cursor: not-allowed; }
-
-  .llm-send:focus-visible {
-    outline: 2px solid var(--color-focus);
-    outline-offset: 2px;
-  }
-
-  .llm-hint {
-    font-size: var(--text-xs);
-    color: var(--color-text-muted);
-    margin: 0;
-  }
-
-  .llm-hint.warn { color: var(--color-warning); }
-
-  .spin { animation: spin 1s linear infinite; }
-  @keyframes spin { to { transform: rotate(360deg); } }
-
-  @media (prefers-reduced-motion: reduce) {
-    .spin { animation: none; }
-    .blink-cursor { animation: none; }
-  }
+  /* LLM suggestion / chat-input visuals live in the shared SpecSuggestion
+     and SpecChatInput components (task-185) — no local copies here. */
 
   /* Save bar */
   .save-bar {

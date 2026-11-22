@@ -2,7 +2,9 @@
 
 The Svelte SPA at `GET /*` is served from `web/dist/`. Access at `http://localhost:3000`.
 
-> **Nav rework (PRs #589-#599):** The UI was restructured from a sidebar-driven 6-view model to a **two-mode** model — Workspace Home (dashboard) and Repo Mode (horizontal tabs). See `specs/system/ui-navigation.md` for that spec. The permanent sidebar described by `human-system-interface.md` §1.3 is **not shipped** — the canonical navigation is `specs/system/ui-navigation.md` (Principle 5: no persistent sidebar). On narrow viewports a hamburger toggles a drawer that links to the workspace-home sections.
+> **Nav rework (PRs #589-#599):** The UI was restructured from a sidebar-driven 6-view model to a **two-mode** model — Workspace Home (dashboard) and Repo Mode (horizontal tabs). See `specs/system/ui-navigation.md` for that spec. The permanent sidebar described by `human-system-interface.md` §1.3 is **not shipped** — the canonical navigation is `specs/system/ui-navigation.md` (Principle 5: no *permanent* sidebar). On narrow viewports a hamburger toggles a drawer that offers the per-mode navigation-rail item set.
+>
+> **Spec amendment (2026-11-16, decision `16871182b1370b61693fc691`):** `ui-navigation.md` §1a specifies (and the UI now ships) an optional, collapsible, scope-labelled **navigation rail** on navigation-heavy screens (workspace home and repo mode): per-mode item sets mirroring the dashboard sections / repo tab strip, stable ordering within each mode, collapsed (icon-only) by default, and a narrow-viewport drawer. `web/src/__tests__/NoSidebar.test.js` still guards the absence of a *permanent* sidebar; `web/src/__tests__/NavRail.test.js` covers the rail.
 
 ---
 
@@ -10,7 +12,18 @@ The Svelte SPA at `GET /*` is served from `web/dist/`. Access at `http://localho
 
 ### Shell Layout (no persistent sidebar)
 
-There is **no persistent sidebar** (`specs/system/ui-navigation.md` Principle 5). The shell is: Top Bar + content area + Status Bar. Navigation is via the top bar (workspace selector, search, decisions badge), the workspace-home sections, and the repo-mode horizontal tabs. On narrow viewports, the hamburger (`[≡]`) opens a drawer linking to the workspace-home sections.
+There is **no persistent sidebar** (`specs/system/ui-navigation.md` Principle 5: no *permanent* sidebar). The shell is: Top Bar + content area + Status Bar. Navigation is via the top bar (workspace selector, search, notification bell), the workspace-home sections, and the repo-mode horizontal tabs. On narrow viewports, the hamburger (`[≡]`) opens a drawer offering the per-mode navigation-rail item set (workspace-home sections / repo tab strip).
+
+#### Navigation Rail (optional, collapsible — `ui-navigation.md` §1a)
+
+On navigation-heavy screens an optional **navigation rail** renders as a narrow left panel (`web/src/components/NavRail.svelte`, task-082):
+
+- **Where:** workspace home and repo mode (without an open entity detail) only. It is never rendered on focused editor/canvas surfaces — Editor Split, popped-out (full-page) detail panels, full-screen modals — and never becomes a global fixed menu.
+- **Scope-labelled per mode:** the rail header shows the workspace name at workspace home, and the `workspace / repo` path in repo mode. Item sets are per-mode; there is no global menu shared across modes.
+- **Item sets:** the workspace-home rail mirrors the dashboard sections in canonical order — Decisions, Specs, Architecture, Repos, Briefing, Agent Rules — then Settings (navigates to workspace settings). The repo-mode rail mirrors the repo tab strip exactly (Specs, Tasks, MRs, Agents, Architecture, Dependencies, Decisions, Code, Settings); selecting an item activates the corresponding tab, same route as clicking the tab. Item order is stable within each mode.
+- **Collapsed by default:** icon-only at 48px; the toggle expands it to the labelled 240px form. The preference is persisted per user per mode in `localStorage` (key `gyre_nav_rail_expanded.<mode>.<user-id>`); first use defaults to collapsed.
+- **Never load-bearing:** every rail destination remains reachable without the rail — dashboard sections, repo tab strip, `⌘K` search, and the `g`-prefixed shortcuts all keep working with the rail collapsed or absent.
+- **Narrow viewports (<768px):** no persistent rail; the hamburger drawer offers the same per-mode item set (workspace-home sections / repo tab strip) and dismisses on selection or `Esc`.
 
 ### Top Bar (always visible)
 
@@ -20,8 +33,8 @@ There is **no persistent sidebar** (`specs/system/ui-navigation.md` Principle 5)
 
 - **Workspace selector** (`Payments ▾`): Clicking the name navigates to Workspace Home; the arrow opens the workspace switcher dropdown.
 - **Search** (`⌘K`): Global command palette — specs, types, agents, repos, concepts.
-- **Decisions badge** (`🔔 3`): Count of unresolved items requiring human judgment. Clicking navigates to Workspace Home with the Decisions section expanded.
-- **User avatar**: Profile (notification prefs, API tokens, judgment ledger) and sign-out.
+- **Notification bell** (`🔔 3`): Unread notification count (user-management.md §In-App Notification UI). Clicking opens the notification drawer — recent active notifications grouped by priority with deep links. The workspace home's Decisions section still shows the active-decisions count.
+- **User avatar**: Profile (notification prefs, API tokens, active sessions with revoke, judgment ledger) and sign-out.
 
 **In Repo Mode**, the top bar adds context:
 
@@ -30,7 +43,7 @@ There is **no persistent sidebar** (`specs/system/ui-navigation.md` Principle 5)
 ```
 
 - **Back arrow**: Returns to Workspace Home.
-- **Decisions badge**: Shows count for this repo only in repo mode.
+- **Notification bell**: Same unread count and drawer behavior as workspace mode (repo-scoped unread filtering is not yet supported).
 
 ### Status Bar (bottom, always visible)
 
@@ -92,6 +105,10 @@ The workspace home is a **dashboard** — the landing page after selecting a wor
 
 Gear icon (⚙) in the workspace header opens a full-page settings view with tabs: General, Trust & Policies, Teams, Budget, Compute, Audit.
 
+### Analytics
+
+Chart icon in the workspace top bar (next to the settings gear) or `/workspaces/:slug/analytics` opens the full-page product analytics dashboard (`AnalyticsView.svelte`, analytics.md §Analytics Dashboard): event-volume bar chart (last 30 days), paginated/filterable recent-events list with expandable properties, interactive decision evaluator for the six built-in decisions, funnel view with drop-off rates and custom funnel definitions, and top agents ranked by events, completion rate, and average duration.
+
 ---
 
 ## Mode 2: Repo Mode
@@ -118,15 +135,20 @@ Clicking a repo from Workspace Home enters Repo Mode. The top bar shows `[←] W
 - 9 node type shapes with distinct colors (package/module/type/interface/function/endpoint/component/table/constant).
 - **Edge type labels**: hover-to-show labels on edges (calls, contains, imports, implements, etc.).
 - Click node to open `DetailPanel` with file path, spec linkage, visibility, doc comment, complexity, churn.
+- **Moldable views** (system-explorer.md §2): `NodeDetailPanel.svelte` routes each node type to a tailored detail view component — **Type View** (`MoldableTypeView.svelte`: spec linkage, last-modified agent + time, fields with clickable types, Implements / Used by, Story, risk footer), **Trait View** (`MoldableTraitView.svelte`: crate, methods with signatures + per-method call counts, implementations with crate attribution, dependents with call-site counts), **Endpoint View** (`MoldableEndpointView.svelte`: route method + path from RoutesTo edge metadata, handler file:line, request/response shapes, call-flow diagram, gates, test count), and **Spec View** (`MoldableSpecView.svelte`: spec content fetched from the ledger and rendered as markdown alongside implementation realization — ✓ realized / ✗ removed nodes, completeness %, stored assertion results, Edit (opens the inline spec editor with the Preview / Publish workflow) and inline History actions). Every type reference navigates to that type, every spec reference opens the spec inline, and every agent reference opens the agent's provenance (app-level agent detail). Shared computation lives in `lib/moldable/model.js`.
 - **Bidirectional nav**: clicking a node with a `spec_path` shows a "Go to spec" button that opens the Specs tab with that spec's detail panel. Spec → Architecture nav is via the Architecture mini canvas in the spec detail.
 - **Sub-tabs: Graph | Briefing** — the Briefing sub-tab is the repo-scoped narrative (same shape as the workspace Briefing section, narrowed server-side via `?repo_id=` on `GET /api/v1/workspaces/:id/briefing` and `POST .../briefing/ask`); deep-linkable via `?subTab=briefing`.
 - `POST /api/v1/repos/{id}/graph/predict` — structural predictions surfaced in canvas and mini canvas.
-- **Default views** (HSI §3, view-selector tabs in the Explorer control bar; Boundary is the default):
+- **Default views** (HSI §3 / ui-navigation.md §3; the view selector is a **dropdown** in the Explorer control bar listing built-in views, then the workspace's saved views, then a "Generate view…" option that focuses the Ask/generate chat and an "Ask the graph…" option that opens the conversational exploration panel; Boundary is the default):
   - **Boundary** — C4 progressive drill-down: Level 1 = the workspace-scope realized-architecture graph (ui-layout.md §5: repos as nodes with type/endpoint count sub-labels from the workspace knowledge graph, cross-repo dependencies as edges, double-click drills to the repo's crate level); Levels 2–4 = the canvas drill-down (packages → modules → code items) with breadcrumb drill-up.
   - **Spec Realization** — two-panel view: spec list (status badge, linked-node count, task progress) ↔ graph nodes linked via GovernedBy edges / `spec_path`. "Read / Edit Spec" opens the inline spec editor; clicking a node navigates to it in Boundary.
   - **Change** — architectural deltas since your last visit (`GET /repos/{id}/graph/timeline?since=…`, `since` from the client-cached `X-Gyre-Last-Seen` response header; 24h fallback on first visit). Added (+) / Modified (~) / Removed (−) entries with type, containing module, spec ref, authoring agent; entries navigate to the node in Boundary.
   - **System Trace** — MR SDLC timeline from `GET /api/v1/merge-requests/{id}/timeline`: MR selector, typed event rows, expandable gate pass/fail, and View Conversation / View Diff / View Attestation inline sections.
+- **Lens selector** (ui-navigation.md §3): a **checkbox group** in the canvas toolbar — Structural (checked + locked, always the base layer), Evaluative (additive overlay toggle: gate outcomes, spec-coverage badges, trace particles, and a **Risk** heat metric from `GET /repos/{id}/graph/risks`, churn × complexity), Observable (locked off until production telemetry integration; clicking surfaces the notice banner). Selecting the Risk metric opens the **Risk Map overlay** (system-explorer.md §7): a metric selector (Churn, Coupling, Complexity, Spec Coverage, Test Coverage) recolors node fills on a continuous blue → yellow → red heat scale (layout untouched; coverage metrics invert so red = uncovered), a color-scale legend sits in the canvas corner, and dismissible **anomaly callouts** (high complexity + low test coverage, co-changing modules with no shared spec, agent-created types without a governing spec, traits with partially tested implementations, dead-code orphans) are listed in a collapsible panel whose entries pan/zoom the canvas onto the offending node.
+- **In-view filter panel** (ui-navigation.md §3): a collapsible 200px left panel inside the Architecture content area (toggled by the filter icon in the control bar, `NOT` the app sidebar). Category checkboxes — Boundaries, Interfaces, Data, Specs (with counts) — plus a **Concepts** section listing both mechanisms (system-explorer.md §4 "Data source distinction"): **Predefined** concepts from the repo's spec manifest (`GET /repos/{id}/graph/concepts`, projection-backed via `GET /repos/{id}/graph/concept/{name}`) and **Discovered** concepts (cross-cutting name tokens, substring matched). Selecting either fades the canvas to the concept's nodes (concept elements keep full opacity with a highlighted border; everything else fades to background — drawn, never removed), shown as a clearable control-bar chip; right-clicking a multi-selection offers "Create concept", saved as an explorer view. Nodes hidden by the category checkboxes and their edges are skipped by the canvas draw loop.
+- **View spec editor** (ui-navigation.md §3): an "Edit view spec" button (code icon) in the control bar opens a collapsible JSON editor for the view spec grammar (data/layout/encoding/highlight). Apply translates the spec via `viewSpecToViewQuery` and re-renders the canvas live; invalid JSON shows an inline error.
 - **Generated views** (HSI §3, task-089): the Explorer chat column has two modes — *Explorer* (the repo-scoped WS agent chat) and *Generated Views* (`GeneratedViewChat.svelte`). The Generated Views mode sends a natural-language question to `POST /api/v1/workspaces/{id}/explorer-views/generate`; the LLM (a read-only query translator) answers with a ViewSpec (graph query + layout + explanation). The view is applied to the ExplorerCanvas immediately, with the LLM's explanation rendered as the canvas query annotation (sidebar annotation). Layout follows question intent: data-movement questions get a `"flow"` layout that replays the `trace_source` MR's captured trace as animated particles on the evaluative lens (server-enforced: no trace data → `"graph"` fallback with an explanatory note); structural questions get `"graph"`/`"hierarchical"`. Each generated view has a **Save this view** button (`POST /api/v1/workspaces/{id}/explorer-views`, preserving query + layout + explanation), and follow-up questions refine the current view (the previous view definition is sent as refinement context).
+- **Conversational exploration** (system-explorer.md §8, task-187): the Explorer chat column's third mode — *Ask the graph* (`ConversationalExplorer.svelte`, also opened from the view selector's "Ask the graph…" option). Questions go to `POST /api/v1/workspaces/{id}/explorer-views/ask` with the conversation history (client-owned, capped at 20 turns) and are answered from the knowledge graph: the server grounds the LLM prompt in node provenance (spec linkage, creation/last-modified commits and agents), edges, and the architectural timeline, then validates every `[entity:<kind>:<id>]` citation against the real graph before the client sees it — only resolvable references render as clickable links (node → detail panel + canvas focus, spec → inline editor, commit → git remote or copied SHA, agent → highlight the nodes it modified). "Show me X" answers carry a validated view spec applied to the canvas; "what would happen if…" answers trigger a structural prediction rendered as ghost overlays; node references in an answer highlight the referenced nodes on the canvas.
 
 ### Decisions Tab
 
@@ -149,17 +171,23 @@ Clicking a repo from Workspace Home enters Repo Mode. The top bar shows `[←] W
 |---|---|
 | `App.svelte` | Application shell — top bar, two-mode routing, mobile drawer, keyboard shortcuts (no persistent sidebar) |
 | `WorkspaceHome.svelte` | Workspace home dashboard — 5 section cards |
+| `AnalyticsView.svelte` | Product analytics dashboard — daily event volume chart, recent events, decision evaluator, funnel, top agents |
 | `RepoMode.svelte` | Repo mode shell — horizontal tab routing |
 | `ExplorerCanvas.svelte` | Unified architecture canvas — semantic zoom treemap, lens toggle (structural/evaluative/observable), filter presets, view query rendering, minimap (replaces the former Graph/Flow tabs) |
 | `explorer/SpecRealizationView.svelte` | Explorer default view — spec ↔ realization two-panel (GovernedBy linkage) |
 | `explorer/ChangeView.svelte` | Explorer default view — architectural deltas since last visit |
 | `explorer/SystemTraceView.svelte` | Explorer default view — MR SDLC timeline with gate expansion and conversation/diff/attestation sections |
 | `GeneratedViewChat.svelte` | Explorer chat column, Generated Views mode — natural-language → LLM-generated ViewSpec via the workspace generate endpoint; apply / save / refine generated views (HSI §3) |
+| `ConversationalExplorer.svelte` | Explorer chat column, Ask-the-graph mode — knowledge-graph-grounded Q&A with clickable entity references, canvas view specs, prediction ghost overlays, and node highlighting (system-explorer.md §8) |
 | `ArchPreviewCanvas.svelte` | Architecture mini canvas in spec detail panel |
 | `EditorSplit.svelte` | Side-by-side spec editor + architecture canvas |
 | `DetailPanel.svelte` | Slide-in right panel for entity drill-in |
+| `NodeDetailPanel.svelte` | Explorer node detail panel — routes node types to the moldable views (system-explorer.md §2) |
+| `moldable/Moldable{Type,Trait,Endpoint,Spec}View.svelte` | Moldable views — tailored detail views per entity type; shared computation in `moldable/model.js` |
 | `InlineChat.svelte` | SSE-driven LLM chat widget |
 | `PresenceAvatars.svelte` | Live presence avatars in status bar |
+| `UserProfile.svelte` | Private profile/settings surface (`/profile`) — info, tokens, memberships, judgment ledger, notification preferences (HSI §12) |
+| `PublicUserProfile.svelte` | Tenant-scoped public user profile (`/@{username}`) — identity header (avatar, display name, handle, timezone), workspace memberships with roles, teams, public-action activity feed, and stats (MRs reviewed / specs approved / agents spawned) (user-management.md §User Profile Page) |
 | `ScopeBreadcrumb.svelte` | Top bar workspace/repo context breadcrumb |
 
 ---

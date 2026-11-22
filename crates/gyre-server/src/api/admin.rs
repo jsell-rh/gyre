@@ -7,7 +7,10 @@ use axum::{
     http::StatusCode,
     Json,
 };
-use gyre_common::{AgEventType, Id};
+use gyre_common::{
+    message::{Destination, MessageKind},
+    AgEventType, Id,
+};
 use gyre_domain::{AgentStatus, TaskStatus};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -55,6 +58,24 @@ pub async fn admin_health(
         repo_count: repos.len(),
         version: env!("CARGO_PKG_VERSION"),
     }))
+}
+
+// ── Orphaned Workspaces (user-management.md §Ownership Transfer & Reclamation) ─
+
+/// GET /api/v1/admin/orphaned-workspaces — workspaces with no active Owner
+/// for at least the configured period (`GYRE_ORPHANED_WORKSPACE_DAYS`,
+/// default 30 days). This is the admin dashboard "orphaned" flag.
+pub async fn admin_orphaned_workspaces(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let threshold_days = crate::workspace_ownership::orphaned_threshold_days();
+    let orphaned = crate::workspace_ownership::orphaned_workspaces_with(&state, threshold_days)
+        .await
+        .map_err(ApiError::Internal)?;
+    Ok(Json(serde_json::json!({
+        "threshold_days": threshold_days,
+        "workspaces": orphaned,
+    })))
 }
 
 // ── Background Jobs ───────────────────────────────────────────────────────────
@@ -110,10 +131,19 @@ pub async fn admin_jobs(State(state): State<Arc<AppState>>) -> Json<Vec<JobInfo>
 }
 
 /// POST /api/v1/admin/jobs/{name}/run — manually trigger a job (Admin only).
+///
+/// By-effect task-scope surface: the triggered jobs mutate task rows
+/// (stale_agent_detector blocks the stale agent's task, reconciliation
+/// jobs reassign/cancel tasks), so a task-bound agent principal is denied
+/// (see `deny_task_bound_agent`). The extractor adds no new authentication
+/// requirement — the ABAC middleware already authenticates this mapped,
+/// non-exempt route — it exposes the verified claims to the handler check.
 pub async fn admin_run_job(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
+    auth: crate::auth::AuthenticatedAgent,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    deny_task_bound_agent(&auth)?;
     state
         .job_registry
         .trigger(&name, state.clone())
@@ -150,10 +180,18 @@ pub struct RestoreRequest {
 }
 
 /// POST /api/v1/admin/restore — restore from snapshot (Admin only).
+///
+/// By-effect task-scope surface: restore replaces task (and agent) state
+/// wholesale across the deployment — no task claim can cover it, so a
+/// task-bound agent principal is denied (see `deny_task_bound_agent`).
+/// The extractor adds no new authentication requirement — the ABAC
+/// middleware already authenticates this mapped, non-exempt route.
 pub async fn admin_restore_snapshot(
     State(state): State<Arc<AppState>>,
+    auth: crate::auth::AuthenticatedAgent,
     Json(req): Json<RestoreRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    deny_task_bound_agent(&auth)?;
     let warning = crate::snapshot::restore_snapshot(&state, &req.snapshot_id)
         .await
         .map_err(|e| ApiError::NotFound(e.to_string()))?;
@@ -207,15 +245,55 @@ pub async fn admin_list_retention(
 
 /// PUT /api/v1/admin/retention — update retention policies (Admin only).
 ///
-/// The body must be a complete, valid policy list: all 7 spec data types
-/// (`validate_policies`); an omitted type would silently disable
-/// enforcement for it. The store persists durably before the 204 is
-/// returned — a KV write failure fails the request instead of acking a
-/// change that would be silently lost on restart.
+/// Two body forms are accepted:
+///
+/// - The complete policy list (business-continuity.md §5): all 7 spec
+///   data types (`validate_policies`); an omitted type would silently
+///   disable enforcement for it.
+/// - The analytics-scoped form `{ "retention_days": N }`
+///   (analytics.md §Data Retention): updates only the `analytics_events`
+///   policy, leaving every other data type's policy untouched.
+///
+/// The store persists durably before the 204 is returned — a KV write
+/// failure fails the request instead of acking a change that would be
+/// silently lost on restart.
 pub async fn admin_update_retention(
     State(state): State<Arc<AppState>>,
-    Json(policies): Json<Vec<RetentionPolicy>>,
+    Json(body): Json<serde_json::Value>,
 ) -> Result<StatusCode, ApiError> {
+    if let Some(days) = body.get("retention_days").and_then(|v| v.as_u64()) {
+        // analytics.md §Data Retention form: `{ retention_days: u32 }`.
+        if days < 1 {
+            return Err(ApiError::BadRequest(
+                "retention_days must be >= 1 (0 would purge every analytics event on the \
+                 next nightly run)"
+                    .to_string(),
+            ));
+        }
+        let mut policies = state.retention_store.list();
+        let analytics = policies
+            .iter_mut()
+            .find(|p| p.data_type == "analytics_events")
+            .ok_or_else(|| {
+                ApiError::Internal(anyhow::anyhow!(
+                    "analytics_events retention policy is missing from the store",
+                ))
+            })?;
+        analytics.max_age_days = days;
+        state.retention_store.update(policies).await?;
+        return Ok(StatusCode::NO_CONTENT);
+    }
+
+    if !body.is_array() {
+        return Err(ApiError::BadRequest(
+            "body must be a complete policy list (all 7 data types) or the analytics form \
+             { \"retention_days\": <days> }"
+                .to_string(),
+        ));
+    }
+
+    let policies: Vec<RetentionPolicy> = serde_json::from_value(body)
+        .map_err(|e| ApiError::BadRequest(format!("invalid retention policy list: {e}")))?;
     validate_policies(&policies).map_err(ApiError::BadRequest)?;
     state.retention_store.update(policies).await?;
     Ok(StatusCode::NO_CONTENT)
@@ -264,26 +342,57 @@ pub async fn admin_audit(
 
 // ── Agent Kill ────────────────────────────────────────────────────────────────
 
-/// POST /api/v1/admin/agents/{id}/kill — force-kill an agent (Admin only).
-pub async fn admin_kill_agent(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-    auth: crate::auth::AuthenticatedAgent,
-) -> Result<StatusCode, ApiError> {
-    let mut agent = state
-        .agents
-        .find_by_id(&Id::new(&id))
-        .await?
-        .ok_or_else(|| ApiError::NotFound(format!("agent {id} not found")))?;
-
+/// Kill an agent: transition to `Dead`, stop its process, handle worktrees,
+/// emit `AgentStatusChanged` telemetry, emit the container-crashed audit
+/// event, revoke the agent's auth token, emit the `AgentKilled` audit event,
+/// clean up interrogation state, and release the budget active-agent slot
+/// when the agent held one.
+///
+/// Kill path for the admin kill route. Budget enforcement uses its own
+/// `budget_stop_agent` (api/budget.rs) with materially different terminal
+/// semantics mandated by agent-runtime.md §4 / platform-model.md §5:
+/// status `Stopped` (not Dead — the run is recoverable), task left
+/// InProgress (not Blocked), worktree preserved, compute minutes charged.
+/// The two paths are deliberately distinct; do not funnel budget stops
+/// through this admin-terminal helper.
+///
+/// `preserve_worktree`: preserve the agent's in-progress work (worktree,
+/// branch, partial MR); admin kills clean up.
+///
+/// `killed_by`: identity attributed in the `AgentKilled` audit event (the
+/// admin's user/agent id on admin kills).
+///
+/// `revoke_reason`: short cause tag recorded on the `AgentTokenRevoked`
+/// audit event ("admin_kill").
+pub(crate) async fn kill_agent(
+    state: &Arc<AppState>,
+    agent: &gyre_domain::Agent,
+    reason: &str,
+    preserve_worktree: bool,
+    killed_by: &str,
+    revoke_reason: &str,
+) -> Result<(), ApiError> {
+    let id = agent.id.to_string();
     if agent.status == AgentStatus::Dead {
-        return Ok(StatusCode::NO_CONTENT);
+        return Ok(());
     }
+    // Only an Active agent holds a budget active-agent slot (incremented at
+    // spawn, released on Idle/Failed/Stopped) — never double-release.
+    let was_active = agent.status == AgentStatus::Active;
 
     let now = now_secs();
 
+    let mut agent = agent.clone();
     let _ = agent.transition_status(AgentStatus::Dead);
     state.agents.update(&agent).await?;
+
+    // source-control.md §Agent-to-Commit Tracking: the Dead transition
+    // terminates the agent's open session — records the worktree's real
+    // current branch and dirty state, and stamps ended_at. Must run
+    // BEFORE the worktree cleanup below, while the worktree still exists
+    // for the real `git status --porcelain` query. Best-effort: never
+    // fails the kill path.
+    crate::agent_sessions::end_session(state, &agent).await;
 
     // Kill the actual process/container/Pod if it is running. The backend
     // recorded at spawn time decides how: a container ID goes to
@@ -312,28 +421,54 @@ pub async fn admin_kill_agent(
     }
     // Fall back to the attested PID when no live process handle exists.
     if killed_pid.is_none() {
-        killed_pid = crate::agent_audit::attested_pid(&state, &id).await;
+        killed_pid = crate::agent_audit::attested_pid(state, &id).await;
     }
 
-    // Clean up worktrees.
-    if let Ok(worktrees) = state.worktrees.find_by_agent(&agent.id).await {
-        for wt in worktrees {
-            if let Ok(Some(repo)) = state.repos.find_by_id(&wt.repository_id).await {
-                let _ = state.git_ops.remove_worktree(&repo.path, &wt.path).await;
-            }
-            let _ = state.worktrees.delete(&wt.id).await;
-        }
+    // Worktrees: preserved on budget kills (in-progress work must survive
+    // for reassignment), cleaned up on admin kills — via the shared
+    // terminal teardown (`cleanup_agent_worktrees`: jj workspace forget +
+    // plain-git worktree removal + agent_worktrees record delete; the
+    // pre-helper inline block skipped the jj forget, leaking the workspace
+    // registration in `jj workspace list`).
+    if !preserve_worktree {
+        crate::api::spawn::cleanup_agent_worktrees(state, &agent.id).await;
     }
 
     // Block the agent's current task.
     if let Some(task_id) = &agent.current_task_id {
         if let Ok(Some(mut task)) = state.tasks.find_by_id(task_id).await {
             if task.status == TaskStatus::InProgress {
+                let pre_block_status = task.status.clone();
                 let _ = task.transition_status(TaskStatus::Blocked);
                 task.updated_at = now;
                 let _ = state.tasks.update(&task).await;
+                // task.status_changed analytics event (analytics.md
+                // §Auto-Emitted Events: "Task transitions status") — the
+                // kill auto-block is a production transition.
+                if task.status != pre_block_status {
+                    crate::api::analytics::record_task_status_changed(
+                        state,
+                        &task,
+                        &pre_block_status,
+                    )
+                    .await;
+                }
             }
         }
+    }
+
+    // M22.2: release the budget active-agent slot this agent held.
+    if was_active {
+        crate::api::budget::decrement_active_agents(state, &agent.workspace_id.to_string()).await;
+        // Preview-agent slot bookkeeping: this kill released the slot AND
+        // consumed the process registry handle, so the agent's process is
+        // dying — its exit routes through finish_preview_agent, and the
+        // human's preview DELETE (or the GC sweep) runs teardown later.
+        // Both preview-owned paths must see the flag this writes or each
+        // of them releases the same slot a second time (exactly-once;
+        // decrement_active is MAX(0, n-1) — a double release permanently
+        // biases the counter down). No-op for normal agents.
+        crate::api::meta_specs::mark_preview_slot_released(state, &agent.id.to_string()).await;
     }
 
     let ws_id = agent.workspace_id.clone();
@@ -345,7 +480,7 @@ pub async fn admin_kill_agent(
                 "event_id": uuid::Uuid::new_v4().to_string(),
                 "agent_id": agent.id.to_string(),
                 "status": "dead",
-                "description": format!("Agent {} force-killed by admin", agent.name),
+                "description": format!("Agent {}: {}", agent.name, reason),
                 "timestamp": now,
             })),
         )
@@ -356,37 +491,119 @@ pub async fn admin_kill_agent(
         let ctx = crate::container_audit::AuditCtx {
             audit: state.audit.as_ref(),
             broadcast_tx: &state.audit_broadcast_tx,
+            search: state.search.as_ref(),
         };
-        crate::container_audit::emit_crashed(&ctx, &id, &rec.container_id, "force-killed by admin")
-            .await;
+        crate::container_audit::emit_crashed(&ctx, &id, &rec.container_id, reason).await;
     }
 
-    // HSI §4: Clean up interrogation ABAC policies on admin kill.
-    crate::api::spawn::cleanup_interrogation_policies(&state, &id).await;
+    // HSI §4: Clean up interrogation ABAC policies on kill.
+    crate::api::spawn::cleanup_interrogation_policies(state, &id).await;
     let _ = state.kv_store.kv_remove("interrogation_context", &id).await;
 
     // Revoke the agent's token — killed agents must not continue to
     // authenticate. Revocation is audited as an AgentTokenRevoked event.
-    crate::agent_audit::revoke_agent_token(&state, &agent, "admin_kill").await;
+    crate::agent_audit::revoke_agent_token(state, &agent, revoke_reason).await;
 
     // Platform Model §7: revoke task-scoped ephemeral secrets on kill
     // ("Secrets access revoked" at teardown) — deletes Task-scoped secrets
     // for the agent's task and logs `secret.revoked` per secret.
-    crate::secret_rotation::revoke_agent_task_secrets(&state, &agent).await;
+    crate::secret_rotation::revoke_agent_task_secrets(state, &agent).await;
 
-    // Agent lifecycle audit event (observability.md §Audit Event Types).
+    // Agent lifecycle audit event (observability.md §Audit Event Types):
+    // attributes who ordered the kill and which PID was terminated.
+    crate::agent_audit::emit_killed(state, &agent, reason, killed_by, killed_pid).await;
+
+    Ok(())
+}
+
+/// By-effect task-scope gate for the admin control surfaces (identity-
+/// security.md §Task-Scoped JWT Claims, task-263 review repair).
+///
+/// The admin surfaces gated here mutate task rows and/or terminate other
+/// tasks' workloads deployment-wide: kill blocks the target agent's current
+/// task and tears down its workload, reassign moves every task assigned to
+/// an agent (with a generation bump), job triggers run stale-agent/
+/// reconciliation jobs that mutate task rows, snapshot restore replaces
+/// task state wholesale, and seed creates task/agent/MR rows outside any
+/// task claim. No task claim can cover a cross-task,
+/// deployment-wide effect, so a task-bound agent principal is denied
+/// outright — mirroring `archive_repo`'s outright denial — and the boundary
+/// holds regardless of ABAC policy configuration: the middleware
+/// `builtin-admin-only-deny` (priority 850) is the role gate for non-agent
+/// principals under the default configuration, but a policy that Allows
+/// Agent-role subjects on `admin` resources (priority > 850) must not let
+/// one task's agent terminate another task's workload. Non-agent
+/// principals (Admin users, the system token, orchestrators) keep their
+/// existing rights — `agent_task_claim()` is `None` for them.
+fn deny_task_bound_agent(auth: &crate::auth::AuthenticatedAgent) -> Result<(), ApiError> {
+    if auth.agent_task_claim().is_some() {
+        return Err(ApiError::Forbidden(
+            "agent tokens cannot trigger admin control surfaces that mutate tasks across the deployment"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// POST /api/v1/admin/agents/{id}/kill — force-kill an agent (Admin only).
+pub async fn admin_kill_agent(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    auth: crate::auth::AuthenticatedAgent,
+) -> Result<StatusCode, ApiError> {
+    deny_task_bound_agent(&auth)?;
+    let agent = state
+        .agents
+        .find_by_id(&Id::new(&id))
+        .await?
+        .ok_or_else(|| ApiError::NotFound(format!("agent {id} not found")))?;
+
+    if agent.status == AgentStatus::Dead {
+        return Ok(StatusCode::NO_CONTENT);
+    }
+
+    // Admin identity for the AgentKilled audit event.
     let killed_by = auth
         .user_id
         .map(|u| u.to_string())
         .unwrap_or_else(|| auth.agent_id.clone());
-    crate::agent_audit::emit_killed(
+    kill_agent(
         &state,
         &agent,
         "force-killed by admin",
+        false,
         &killed_by,
-        killed_pid,
+        "admin_kill",
     )
-    .await;
+    .await?;
+
+    // Auto-track agent kill (analytics.md §Auto-Emitted Events: agent.failed
+    // covers "fails or is killed").
+    let now = now_secs();
+    let ev = gyre_domain::AnalyticsEvent::new(
+        crate::api::new_id(),
+        "agent.failed",
+        Some(agent.id.to_string()),
+        serde_json::json!({
+            "task_id": agent.current_task_id.as_ref().map(|id| id.to_string()),
+            "reason": "force-killed by admin",
+            "duration_secs": now.saturating_sub(agent.spawned_at),
+        }),
+        now,
+    )
+    .with_scope(
+        None,
+        None,
+        Some(&agent.workspace_id),
+        agent.repo_id.as_ref(),
+    );
+    let _ = state.analytics.record(&ev).await;
+
+    // The kill ended the run — charge the wall-clock compute minutes
+    // (spawn → kill, agent-runtime.md §4 What's Tracked). The budget
+    // active-agent slot is already released inside `kill_agent` (exactly
+    // once — only an Active agent ever held one).
+    crate::api::budget::record_compute_minutes_for_agent(&state, &agent).await;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -405,6 +622,7 @@ pub async fn admin_reassign_agent(
     auth: crate::auth::AuthenticatedAgent,
     Json(req): Json<ReassignRequest>,
 ) -> Result<StatusCode, ApiError> {
+    deny_task_bound_agent(&auth)?;
     let agent = state
         .agents
         .find_by_id(&Id::new(&id))
@@ -479,10 +697,15 @@ pub struct SeedResponse {
 /// ("seed-repo-1", workspace "default") are global, only ONE tenant can own
 /// the demo seed — a caller from a different tenant gets a 409 naming the
 /// collision, never a success response for data outside its scope.
+///
+/// By-effect task-scope surface: seeding creates task rows, agent rows and
+/// task-linked MRs (demo fixtures) outside any task claim, so a task-bound
+/// agent principal is denied (see `deny_task_bound_agent`).
 pub async fn admin_seed(
     State(state): State<Arc<AppState>>,
     auth: crate::auth::AuthenticatedAgent,
 ) -> Result<Json<SeedResponse>, ApiError> {
+    deny_task_bound_agent(&auth)?;
     use gyre_domain::{
         Agent, AgentStatus, MergeQueueEntry, MergeRequest, MrStatus, Repository, Task,
         TaskPriority, TaskStatus, Tenant, Workspace,
@@ -704,6 +927,7 @@ pub async fn admin_seed(
     let mr_open = MergeRequest::new(
         Id::new("seed-mr-1"),
         Id::new("seed-repo-1"),
+        seed_workspace_id.clone(),
         "feat: add agent spawn endpoint",
         "feat/agent-spawn",
         "main",
@@ -712,6 +936,7 @@ pub async fn admin_seed(
     let mut mr_merged = MergeRequest::new(
         Id::new("seed-mr-2"),
         Id::new("seed-repo-1"),
+        seed_workspace_id.clone(),
         "feat: add Prometheus metrics",
         "feat/metrics",
         "main",
@@ -779,6 +1004,22 @@ pub async fn admin_seed(
             )
             .await;
     }
+
+    // message-bus.md §Broadcast-only kinds: a DataSeeded broadcast is emitted
+    // when workspace data seeding completes — server origin,
+    // Destination::Broadcast, workspace_id: None, payload: none. It is a
+    // broadcast-only kind, so the kind-based storage short-circuit keeps it
+    // out of MessageRepository::store() (in-memory broadcast channel only).
+    // The tenant scope is the seeding caller's tenant (the same scope every
+    // seeded record was created in), never fabricated.
+    state
+        .emit_tenant_event(
+            Id::new(&tenant_id),
+            Destination::Broadcast,
+            MessageKind::DataSeeded,
+            None,
+        )
+        .await;
 
     Ok(Json(SeedResponse {
         projects: 2,
@@ -872,7 +1113,6 @@ mod tests {
     fn admin_jwt() -> String {
         sign_test_jwt(
             &serde_json::json!({
-                "tenant_id": "default",
                 "sub": "admin-sub",
                 "preferred_username": "admin-user",
                 "realm_access": { "roles": ["admin"] }
@@ -884,7 +1124,6 @@ mod tests {
     fn developer_jwt() -> String {
         sign_test_jwt(
             &serde_json::json!({
-                "tenant_id": "default",
                 "sub": "dev-sub",
                 "preferred_username": "dev-user",
                 "realm_access": { "roles": ["developer"] }
@@ -1006,23 +1245,28 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
     }
 
+    /// Create a workspace in the test state and return its id, so emitted
+    /// telemetry carries a resolvable scope (its tenant is loaded from the
+    /// workspace record — never fabricated).
+    async fn test_workspace(state: &std::sync::Arc<crate::AppState>) -> gyre_common::Id {
+        let ws = gyre_domain::Workspace::new(
+            gyre_common::Id::new("ws-test"),
+            gyre_common::Id::new("tenant-test"),
+            "Test Workspace",
+            "ws-test",
+            1000,
+        );
+        state.workspaces.create(&ws).await.unwrap();
+        ws.id.clone()
+    }
+
     #[tokio::test]
     async fn admin_audit_returns_events() {
         let state = test_state();
-        // emit_telemetry resolves the tenant scope from the workspace
-        // record (task-099 F1) and skips the emission when the workspace
-        // does not exist — seed it so the event is actually emitted.
-        let ws = gyre_domain::Workspace::new(
-            gyre_common::Id::new("default"),
-            gyre_common::Id::new("default"),
-            "Default",
-            "default",
-            0,
-        );
-        state.workspaces.create(&ws).await.unwrap();
+        let ws_id = test_workspace(&state).await;
         state
             .emit_telemetry(
-                gyre_common::Id::new("default"),
+                ws_id,
                 gyre_common::message::MessageKind::StateChanged,
                 Some(serde_json::json!({
                     "event_id": "test-event-1",
@@ -1052,21 +1296,48 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn admin_audit_filters_by_agent_id() {
+    async fn admin_audit_drops_telemetry_with_unresolvable_scope() {
+        // The workspace does not exist, so its tenant cannot be resolved: the
+        // telemetry must be dropped (skip-and-log), never re-targeted to a
+        // fabricated "default" identity (task-099 F1 flaw class).
         let state = test_state();
-        // Same as admin_audit_returns_events: seed the workspace so the
-        // telemetry emission resolves a tenant scope (task-099 F1).
-        let ws = gyre_domain::Workspace::new(
-            gyre_common::Id::new("default"),
-            gyre_common::Id::new("default"),
-            "Default",
-            "default",
-            0,
-        );
-        state.workspaces.create(&ws).await.unwrap();
         state
             .emit_telemetry(
-                gyre_common::Id::new("default"),
+                gyre_common::Id::new("ghost-workspace"),
+                gyre_common::message::MessageKind::StateChanged,
+                Some(serde_json::json!({
+                    "event_id": "ghost-event",
+                    "agent_id": "agent-1",
+                    "event_type": "state_changed",
+                    "description": "Must not be recorded",
+                    "timestamp": 1000u64,
+                })),
+            )
+            .await;
+
+        let app = api_router().with_state(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/admin/audit")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["count"], 0, "telemetry with an unresolvable workspace scope must be dropped, not recorded under a fabricated tenant");
+    }
+
+    #[tokio::test]
+    async fn admin_audit_filters_by_agent_id() {
+        let state = test_state();
+        let ws_id = test_workspace(&state).await;
+        state
+            .emit_telemetry(
+                ws_id.clone(),
                 gyre_common::message::MessageKind::StateChanged,
                 Some(serde_json::json!({
                     "event_id": "e1",
@@ -1079,7 +1350,7 @@ mod tests {
             .await;
         state
             .emit_telemetry(
-                gyre_common::Id::new("default"),
+                ws_id,
                 gyre_common::message::MessageKind::StateChanged,
                 Some(serde_json::json!({
                     "event_id": "e2",
@@ -1143,6 +1414,130 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(killed.status, gyre_domain::AgentStatus::Dead);
+
+        // analytics.md §Auto-Emitted Events: agent.failed covers "fails or
+        // is killed" — the admin force-kill path must record it with the
+        // kill reason.
+        let events = state
+            .analytics
+            .query(Some("agent.failed"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 1, "one agent.failed event expected");
+        assert_eq!(events[0].agent_id.as_deref(), Some("agent-kill-1"));
+        assert_eq!(events[0].properties["reason"], "force-killed by admin");
+        assert!(
+            events[0].properties["duration_secs"].as_u64().is_some(),
+            "duration_secs must be present"
+        );
+    }
+
+    #[tokio::test]
+    async fn kill_agent_terminates_open_session_before_worktree_cleanup() {
+        // Regression (task-258 review): the admin kill path transitions the
+        // agent to Dead — that termination must end the agent's open
+        // session, capturing the worktree's real dirty state BEFORE the
+        // worktree cleanup removes it, so "did the agent leave uncommitted
+        // work when it terminated?" stays answerable for killed agents.
+        use crate::api::now_secs;
+        use gyre_common::Id;
+        use gyre_domain::{Agent, AgentWorktree, Repository};
+
+        let state = test_state();
+        let now = now_secs();
+
+        // Real git repo + linked worktree with an uncommitted edit.
+        let dir = tempfile::tempdir().unwrap();
+        let main = dir.path().join("main");
+        std::fs::create_dir_all(&main).unwrap();
+        let git = |args: &[&str]| {
+            let ok = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&main)
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@t")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@t")
+                .status()
+                .unwrap()
+                .success();
+            assert!(ok, "git {args:?} failed");
+        };
+        git(&["init", "-b", "main"]);
+        std::fs::write(main.join("src"), "fn main() {}\n").unwrap();
+        git(&["add", "src"]);
+        git(&["commit", "-m", "init"]);
+        let wt_path = dir.path().join("wt");
+        git(&[
+            "worktree",
+            "add",
+            "-b",
+            "feat/spawn",
+            wt_path.to_str().unwrap(),
+        ]);
+
+        let mut agent = Agent::new(Id::new("agent-kill-sess"), "kill-sess", now);
+        agent
+            .transition_status(gyre_domain::AgentStatus::Active)
+            .ok();
+        state.agents.create(&agent).await.unwrap();
+        let repo = Repository::new(
+            Id::new("repo-kill-sess"),
+            Id::new("ws-1"),
+            "r-kill-sess".to_string(),
+            main.to_str().unwrap().to_string(),
+            now,
+        );
+        state.repos.create(&repo).await.unwrap();
+        let wt = AgentWorktree::new(
+            Id::new("wt-kill-sess"),
+            agent.id.clone(),
+            repo.id.clone(),
+            None,
+            "feat/spawn",
+            wt_path.to_str().unwrap().to_string(),
+            now,
+        );
+        state.worktrees.create(&wt).await.unwrap();
+        crate::agent_sessions::start_session(&state, &agent.id, &repo.id, "feat/spawn").await;
+
+        // Uncommitted modification present in the worktree at kill time.
+        std::fs::write(wt_path.join("src"), "fn main() { changed }\n").unwrap();
+
+        super::kill_agent(
+            &state,
+            &agent,
+            "force-killed by admin",
+            false,
+            "admin-t",
+            "admin_kill",
+        )
+        .await
+        .unwrap();
+
+        let sessions = state.agent_sessions.find_by_agent(&agent.id).await.unwrap();
+        assert_eq!(sessions.len(), 1);
+        let s = &sessions[0];
+        assert!(s.ended_at.is_some(), "kill must stamp ended_at");
+        assert_eq!(
+            s.dirty,
+            Some(true),
+            "uncommitted edit must be captured before worktree cleanup, got dirty={:?}",
+            s.dirty
+        );
+        assert!(
+            s.uncommitted_paths.contains(&"src".to_string()),
+            "modified file must be listed, got {:?}",
+            s.uncommitted_paths
+        );
+        // No session remains open after the Dead transition.
+        assert!(state
+            .agent_sessions
+            .find_open_by_agent(&agent.id)
+            .await
+            .unwrap()
+            .is_none());
     }
 
     #[tokio::test]
@@ -1281,6 +1676,25 @@ mod tests {
 
         let blocked_task = state.tasks.find_by_id(&task_id).await.unwrap().unwrap();
         assert_eq!(blocked_task.status, TaskStatus::Blocked);
+
+        // analytics.md §Auto-Emitted Events: task.status_changed (trigger
+        // "Task transitions status") — the admin force-kill auto-block is a
+        // production transition and must record. Regression: previously only
+        // the HTTP status endpoint and MCP update_task recorded.
+        let events = state
+            .analytics
+            .query(Some("task.status_changed"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            events.len(),
+            1,
+            "admin force-kill auto-block must record task.status_changed"
+        );
+        let ev = &events[0];
+        assert_eq!(ev.properties["task_id"], "task-for-kill");
+        assert_eq!(ev.properties["old_status"], "InProgress");
+        assert_eq!(ev.properties["new_status"], "Blocked");
     }
 
     #[tokio::test]
@@ -1297,6 +1711,315 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    // ── task-263 by-effect boundary: admin task-mutating surfaces ──────────
+
+    async fn boundary_workspace(app: Router) -> (Router, String) {
+        let body = serde_json::json!({"name": "admin-boundary-ws"});
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces")
+                    .header("content-type", "application/json")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let json = body_json(resp).await;
+        (app, json["id"].as_str().unwrap().to_string())
+    }
+
+    async fn boundary_repo(app: Router, ws_id: &str) -> (Router, String) {
+        let body = serde_json::json!({"workspace_id": ws_id, "name": "admin-boundary-repo"});
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/repos")
+                    .header("content-type", "application/json")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let json = body_json(resp).await;
+        (app, json["id"].as_str().unwrap().to_string())
+    }
+
+    async fn boundary_task(app: Router, title: &str) -> (Router, String) {
+        let body = serde_json::json!({"title": title, "task_type": "implementation"});
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/tasks")
+                    .header("content-type", "application/json")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let json = body_json(resp).await;
+        (app, json["id"].as_str().unwrap().to_string())
+    }
+
+    /// Spawn through the real POST /api/v1/agents/spawn path so the caller
+    /// holds a genuine task-scoped agent JWT (the same route production
+    /// workers authenticate with).
+    async fn boundary_spawn(
+        app: Router,
+        repo_id: &str,
+        task_id: &str,
+        branch: &str,
+    ) -> (Router, serde_json::Value) {
+        let body = serde_json::json!({
+            "name": format!("worker-{}", branch.replace('/', "-")),
+            "repo_id": repo_id,
+            "task_id": task_id,
+            "branch": branch,
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/agents/spawn")
+                    .header("content-type", "application/json")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED, "spawn should succeed");
+        let json = body_json(resp).await;
+        (app, json)
+    }
+
+    /// task-263 review repair (by-effect sweep completion): the admin
+    /// control surfaces whose execution mutates task rows or terminates
+    /// other tasks' workloads — kill (blocks the target agent's task and
+    /// tears down its workload), reassign (moves every assigned task with
+    /// a generation bump), job trigger (stale-agent/reconciliation jobs
+    /// mutate tasks), and snapshot restore — deny task-bound agent
+    /// principals in the handler. The probe runs under a policy
+    /// configuration that ALLOWS Agent-role subjects on `admin` resources
+    /// (priority 860, above the 850 builtin-admin-only-deny), so without
+    /// the handler gate every call below would succeed; the denial
+    /// message is asserted to name the handler gate, proving the 403
+    /// comes from the code boundary and not middleware policy.
+    #[tokio::test]
+    async fn agent_jwt_denied_on_admin_task_mutating_surfaces() {
+        use gyre_common::Id;
+        use gyre_domain::policy::{Policy, PolicyEffect, PolicyScope};
+        use gyre_domain::{AgentStatus, TaskStatus};
+
+        let state = test_state();
+        let app = api_router().with_state(state.clone());
+
+        // Permissive policy above the builtin admin-only-deny (850).
+        state
+            .policies
+            .create(&Policy {
+                id: Id::new("test-agent-admin-allow"),
+                name: "test-agent-admin-allow".to_string(),
+                description: "allows subjects on admin resources (boundary probe)".to_string(),
+                scope: PolicyScope::Tenant,
+                scope_id: None,
+                priority: 860,
+                effect: PolicyEffect::Allow,
+                conditions: vec![],
+                actions: vec!["*".to_string()],
+                resource_types: vec!["admin".to_string()],
+                enabled: true,
+                built_in: false,
+                immutable: false,
+                created_by: Id::new("test"),
+                created_at: crate::api::now_secs(),
+                updated_at: crate::api::now_secs(),
+            })
+            .await
+            .unwrap();
+
+        let (app, ws_id) = boundary_workspace(app).await;
+        let (app, repo_id) = boundary_repo(app, &ws_id).await;
+        let (app, task_a) = boundary_task(app, "Admin boundary A").await;
+        let (app, task_b) = boundary_task(app, "Admin boundary B").await;
+        let (app, json_a) = boundary_spawn(app, &repo_id, &task_a, "feat/admin-a").await;
+        let (app, json_b) = boundary_spawn(app, &repo_id, &task_b, "feat/admin-b").await;
+        let agent_a = json_a["agent"]["id"].as_str().unwrap().to_string();
+        let agent_b = json_b["agent"]["id"].as_str().unwrap().to_string();
+        let token_a = json_a["token"].as_str().unwrap().to_string();
+
+        // Spawn auto-advances Backlog→InProgress: a successful foreign kill
+        // would block task B, a successful foreign reassign would move it.
+        let task_b_row = state
+            .tasks
+            .find_by_id(&Id::new(&task_b))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(task_b_row.status, TaskStatus::InProgress);
+
+        // ── kill: 403 from the handler gate, agent B and task B untouched ──
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/admin/agents/{agent_b}/kill"))
+                    .header("Authorization", format!("Bearer {token_a}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let json = body_json(resp).await;
+        assert!(
+            json["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("admin control surfaces"),
+            "denial must come from the handler task-scope gate, not middleware policy: {json}"
+        );
+        let agent_b_row = state
+            .agents
+            .find_by_id(&Id::new(&agent_b))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(agent_b_row.status, AgentStatus::Active);
+        let task_b_row = state
+            .tasks
+            .find_by_id(&Id::new(&task_b))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            task_b_row.status,
+            TaskStatus::InProgress,
+            "task B must not be blocked by a foreign agent's admin kill"
+        );
+
+        // ── reassign: 403, agent A's tasks not moved ──────────────────────
+        let body = serde_json::json!({ "target_agent_id": agent_b });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/admin/agents/{agent_a}/reassign"))
+                    .header("Authorization", format!("Bearer {token_a}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let json = body_json(resp).await;
+        assert!(
+            json["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("admin control surfaces"),
+            "reassign denial must come from the handler gate: {json}"
+        );
+        let task_a_row = state
+            .tasks
+            .find_by_id(&Id::new(&task_a))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            task_a_row.assigned_to.as_ref().map(|id| id.as_str()),
+            Some(agent_a.as_str()),
+            "task A must not be reassigned by an agent-principal admin call"
+        );
+
+        // ── job trigger: 403 (stale-agent/reconciliation jobs mutate tasks) ─
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/admin/jobs/stale_agent_detector/run")
+                    .header("Authorization", format!("Bearer {token_a}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let json = body_json(resp).await;
+        assert!(
+            json["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("admin control surfaces"),
+            "job-trigger denial must come from the handler gate: {json}"
+        );
+
+        // ── snapshot restore: 403 (replaces task state wholesale) ─────────
+        let body = serde_json::json!({ "snapshot_id": "no-such-snap" });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/admin/restore")
+                    .header("Authorization", format!("Bearer {token_a}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let json = body_json(resp).await;
+        assert!(
+            json["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("admin control surfaces"),
+            "restore denial must come from the handler gate: {json}"
+        );
+
+        // ── the operator (global system token) keeps the same right under
+        // the same permissive policy — enforcement targets agent
+        // task-boundaries only. The kill succeeds and blocks task B.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/admin/agents/{agent_b}/kill"))
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let task_b_row = state
+            .tasks
+            .find_by_id(&Id::new(&task_b))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(task_b_row.status, TaskStatus::Blocked);
     }
 
     #[tokio::test]
@@ -1575,6 +2298,15 @@ mod tests {
             .map(|p| p["data_type"].as_str().unwrap())
             .collect();
         assert!(types.contains(&"activity_events"));
+        // analytics.md §Data Retention: analytics events default to 365
+        // days.
+        let analytics = json
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["data_type"] == "analytics_events")
+            .unwrap();
+        assert_eq!(analytics["max_age_days"], 365);
     }
 
     #[tokio::test]
@@ -1655,6 +2387,113 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 
         // Policies unchanged — the rejected list was not applied.
+        assert_eq!(state.retention_store.list(), before);
+    }
+
+    #[tokio::test]
+    async fn admin_update_retention_analytics_form_updates_analytics_only() {
+        // analytics.md §Data Retention: `PUT /api/v1/admin/retention` with
+        // `{ "retention_days": N }` re-configures the analytics event
+        // retention without touching the other data types' policies.
+        let state = test_state();
+        let app = api_router().with_state(state.clone());
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/admin/retention")
+                    .header("Authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({ "retention_days": 30 })).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+        let policies = state.retention_store.list();
+        assert_eq!(
+            policies
+                .iter()
+                .find(|p| p.data_type == "analytics_events")
+                .unwrap()
+                .max_age_days,
+            30
+        );
+        // Sibling policies are untouched — the analytics form must not
+        // silently reset the rest of the retention configuration.
+        assert_eq!(
+            policies
+                .iter()
+                .find(|p| p.data_type == "audit_events")
+                .unwrap()
+                .max_age_days,
+            365
+        );
+        assert_eq!(
+            policies
+                .iter()
+                .find(|p| p.data_type == "notifications")
+                .unwrap()
+                .max_age_days,
+            365
+        );
+
+        // The change is visible through the GET (the configured value,
+        // not just the in-memory store).
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/admin/retention")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let analytics = json
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["data_type"] == "analytics_events")
+            .unwrap();
+        assert_eq!(analytics["max_age_days"], 30);
+    }
+
+    #[tokio::test]
+    async fn admin_update_retention_rejects_invalid_analytics_form() {
+        let state = test_state();
+        let app = api_router().with_state(state.clone());
+        let before = state.retention_store.list();
+
+        // 0 days would purge every analytics event on the next nightly
+        // run — rejected, policies untouched.
+        for body in [
+            serde_json::json!({ "retention_days": 0 }),
+            serde_json::json!({ "retention_days": "30" }),
+            serde_json::json!({ "something_else": 30 }),
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("PUT")
+                        .uri("/api/v1/admin/retention")
+                        .header("Authorization", "Bearer test-token")
+                        .header("content-type", "application/json")
+                        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "body was {body}");
+        }
         assert_eq!(state.retention_store.list(), before);
     }
 
@@ -1827,6 +2666,80 @@ mod tests {
         assert_eq!(agents.len(), 4);
         let tasks = state.tasks.list().await.unwrap();
         assert_eq!(tasks.len(), 6);
+    }
+
+    /// message-bus.md §Broadcast-only kinds: completing the workspace
+    /// data-seed flow emits a `DataSeeded` broadcast observable by a
+    /// subscribed client — server origin, `Destination::Broadcast`,
+    /// `workspace_id: None`, payload none — and the kind's storage exemption
+    /// means no row is ever persisted. Before task-249 the kind had zero
+    /// production emitters, so this assertion could never pass.
+    #[tokio::test]
+    async fn admin_seed_broadcasts_data_seeded() {
+        use gyre_common::message::{Destination, MessageKind, MessageOrigin};
+
+        let state = test_state();
+        let mut rx = state.message_broadcast_tx.subscribe();
+        let app = api_router().with_state(state.clone());
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/admin/seed")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Drain: the seed flow also emits StateChanged telemetry on the same
+        // channel, so scan for the DataSeeded broadcast.
+        let mut found = None;
+        for _ in 0..32 {
+            match rx.try_recv() {
+                Ok(m) if m.kind == MessageKind::DataSeeded => {
+                    found = Some(m);
+                    break;
+                }
+                Ok(_) => continue,
+                Err(_) => break,
+            }
+        }
+        let msg = found.expect("seed completion must broadcast DataSeeded to subscribers");
+        assert!(matches!(msg.from, MessageOrigin::Server));
+        assert_eq!(msg.to, Destination::Broadcast);
+        assert_eq!(
+            msg.workspace_id, None,
+            "broadcast-only kinds carry no workspace scope"
+        );
+        assert!(
+            msg.payload.is_none(),
+            "DataSeeded payload is (none) per spec"
+        );
+        // Storage exemption is kind-based: no DataSeeded row, ever.
+        assert!(
+            state.messages.find_by_id(&msg.id).await.unwrap().is_none(),
+            "DataSeeded is storage-exempt: it must never hit MessageRepository::store()"
+        );
+        let listed = state
+            .messages
+            .list_by_workspace(
+                &gyre_common::Id::new("default"),
+                None,
+                None,
+                None,
+                None,
+                Some(100),
+            )
+            .await
+            .unwrap();
+        assert!(
+            listed.iter().all(|m| m.kind != MessageKind::DataSeeded),
+            "DataSeeded must never hit MessageRepository::store()"
+        );
     }
 
     #[tokio::test]

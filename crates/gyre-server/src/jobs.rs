@@ -416,17 +416,20 @@ pub async fn start_job_registry(state: Arc<AppState>) {
         )
         .await;
 
-    // Register spawn budget reset job at midnight UTC
+    // Register the budget rolling-window job (agent-runtime.md §4 Budget
+    // Reset): hourly re-sync of the token/cost counters to the per-call
+    // records inside the last 24 hours (rolling window, not calendar day).
     registry
         .register(
             JobDefinition {
                 name: "spawn_budget_reset".to_string(),
-                description: "Resets daily spawn budget counters at midnight UTC".to_string(),
-                interval_secs: 86400,
+                description: "Applies the rolling 24h budget window: re-syncs token/cost                      counters from per-call records inside the window (hourly)"
+                    .to_string(),
+                interval_secs: 3600,
                 enabled: true,
-                run_at_utc_hour: Some(0),
+                run_at_utc_hour: None,
             },
-            |state| async move { crate::api::budget::reset_daily_counters(&state).await },
+            |state| async move { crate::api::budget::apply_rolling_24h_window(&state).await },
         )
         .await;
 
@@ -491,6 +494,24 @@ pub async fn start_job_registry(state: Arc<AppState>) {
         )
         .await;
 
+    // Register orphaned workspace check job (runs daily,
+    // user-management.md §Ownership Transfer & Reclamation)
+    registry
+        .register(
+            JobDefinition {
+                name: "orphaned_workspace_check".to_string(),
+                description: "Tracks workspaces with no active Owner: notifies TenantAdmins \
+             on the transition and flags workspaces ownerless beyond the configured period \
+             (default 30 days) in the admin dashboard"
+                    .to_string(),
+                interval_secs: 86400,
+                enabled: true,
+                run_at_utc_hour: None,
+            },
+            |state| async move { crate::workspace_ownership::run_once(&state).await },
+        )
+        .await;
+
     // Register trust_suggestion_check job (runs daily, HSI §2)
     registry
         .register(
@@ -505,6 +526,26 @@ pub async fn start_job_registry(state: Arc<AppState>) {
                 run_at_utc_hour: None,
             },
             |state| async move { crate::trust_suggestion::run_once(&state).await },
+        )
+        .await;
+
+    // Register message expiry job (hourly, message-bus.md §Implementation Notes)
+    registry
+        .register(
+            JobDefinition {
+                name: "message_expiry".to_string(),
+                description: "Deletes expired Event-tier messages and acked dead-agent \
+             inboxes (message-bus.md TTL)"
+                    .to_string(),
+                interval_secs: 3600,
+                enabled: true,
+                run_at_utc_hour: None,
+            },
+            |state| async move {
+                crate::message_dispatcher::run_message_expiry(&state)
+                    .await
+                    .map(|_| ())
+            },
         )
         .await;
 
@@ -541,6 +582,22 @@ pub async fn start_job_registry(state: Arc<AppState>) {
                 run_at_utc_hour: None,
             },
             |state| async move { crate::dep_staleness::run_once(&state).await },
+        )
+        .await;
+
+    // Register code-search file indexing (search.md §Index Updates: file
+    // content is indexed asynchronously on push; also runs on a fixed interval
+    // so the index stays consistent after restarts without a manual reindex).
+    registry
+        .register(
+            JobDefinition {
+                name: "search_code_index".to_string(),
+                description: "Indexes repo file content for code search (search.md)".to_string(),
+                interval_secs: 3600,
+                enabled: true,
+                run_at_utc_hour: None,
+            },
+            |state| async move { crate::search_indexer::run_code_index_job(&state).await },
         )
         .await;
 
@@ -621,6 +678,66 @@ pub async fn start_job_registry(state: Arc<AppState>) {
                     .await
                     .map(|_| ())
             },
+        )
+        .await;
+
+    // Register the email digest drain (user-management.md §Email
+    // Notifications): every 60 s it drains the durable email outbox at
+    // each user's configured digest frequency — Immediate sends
+    // individually, Hourly/Daily aggregate once per window. With no SMTP
+    // relay configured (GYRE_SMTP_HOST) it holds the queue untouched.
+    registry
+        .register(
+            JobDefinition {
+                name: "email_digest".to_string(),
+                description: "Drains the durable email outbox: renders per-type \
+                     templates + digest aggregates in the user's locale and delivers \
+                     via the configured SMTP relay (user-management.md §Email Notifications)"
+                    .to_string(),
+                interval_secs: 60,
+                enabled: true,
+                run_at_utc_hour: None,
+            },
+            |state| async move { crate::email::run_digest_once(&state).await },
+        )
+        .await;
+
+    // Register meta_spec_preview_gc job (§5 of meta-spec-reconciliation.md)
+    registry
+        .register(
+            JobDefinition {
+                name: "meta_spec_preview_gc".to_string(),
+                description: "Tears down meta-spec preview runs past their TTL: kills agents, \
+             removes worktrees, deletes preview branches, revokes tokens, releases \
+             budget slots"
+                    .to_string(),
+                interval_secs: crate::api::meta_specs::preview_gc_interval_secs_from_env(),
+                enabled: true,
+                run_at_utc_hour: None,
+            },
+            |state| async move { crate::api::meta_specs::run_once(&state).await },
+        )
+        .await;
+
+    // Register PR hygiene job (specs/development/agent-workflow.md §PRs as
+    // the Collaboration Primitive, task-270): continuously (minutes-scale
+    // interval, NOT the daily abandoned_branch_check cadence) monitors open
+    // MRs for stale classes — unreviewed, conflicted, long-open, abandoned —
+    // and acts: nudge reviewers, rebase, escalate, or close with
+    // explanation. Interval configurable via GYRE_PR_HYGIENE_INTERVAL_SECS.
+    registry
+        .register(
+            JobDefinition {
+                name: crate::pr_hygiene::JOB_NAME.to_string(),
+                description: "Nudges reviewers, rebases, escalates, or closes stale \
+                     open merge requests (agent-workflow.md §PRs as the Collaboration \
+                     Primitive)"
+                    .to_string(),
+                interval_secs: crate::pr_hygiene::interval_secs(),
+                enabled: true,
+                run_at_utc_hour: None,
+            },
+            |state| async move { crate::pr_hygiene::run_once(&state).await },
         )
         .await;
 
@@ -768,5 +885,73 @@ mod tests {
 
         let all = registry.all_history().await;
         assert_eq!(all.len(), 2);
+    }
+
+    /// §5 preview GC registration: `start_job_registry` must register the
+    /// `meta_spec_preview_gc` job (name, default interval, enabled) with the
+    /// handler bound to the real preview GC sweep — triggering it runs
+    /// `meta_specs::run_once` and records a successful cycle, not a stub.
+    #[tokio::test]
+    async fn meta_spec_preview_gc_job_registered() {
+        let state = test_state();
+        start_job_registry(Arc::clone(&state)).await;
+
+        let jobs = state.job_registry.list_jobs().await;
+        let job = jobs
+            .iter()
+            .find(|j| j.name == "meta_spec_preview_gc")
+            .expect("meta_spec_preview_gc must be registered by start_job_registry");
+        assert!(job.enabled, "the preview GC job must be enabled");
+        assert_eq!(
+            job.interval_secs, 3600,
+            "default GC interval must be 1 hour (GYRE_META_SPEC_PREVIEW_GC_INTERVAL_SECS unset)"
+        );
+
+        // Handler binding: the trigger must execute the real sweep against
+        // the state (an empty store sweeps cleanly and records success).
+        state
+            .job_registry
+            .trigger("meta_spec_preview_gc", Arc::clone(&state))
+            .await
+            .unwrap();
+        let history = state.job_registry.history("meta_spec_preview_gc").await;
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].status, "success");
+    }
+
+    /// task-270 (agent-workflow.md §PRs as the Collaboration Primitive):
+    /// the PR hygiene job must be registered on a minutes-scale interval —
+    /// "continuously monitors" — never as a run_at_utc_hour daily job like
+    /// abandoned_branch_check, and its handler must be wired so a manual
+    /// trigger runs a real evaluation.
+    #[tokio::test]
+    async fn pr_hygiene_check_registered_on_interval_not_daily() {
+        let state = test_state();
+        start_job_registry(Arc::clone(&state)).await;
+
+        let jobs = state.job_registry.list_jobs().await;
+        let job = jobs
+            .iter()
+            .find(|j| j.name == "pr_hygiene_check")
+            .expect("pr_hygiene_check must be registered");
+        assert_eq!(
+            job.run_at_utc_hour, None,
+            "continuous cadence, not a run_at_utc_hour daily schedule"
+        );
+        assert!(
+            job.interval_secs > 0 && job.interval_secs < 86400,
+            "minutes-scale interval, got {}",
+            job.interval_secs
+        );
+
+        // The registered handler runs a real evaluation.
+        state
+            .job_registry
+            .trigger("pr_hygiene_check", Arc::clone(&state))
+            .await
+            .unwrap();
+        let history = state.job_registry.history("pr_hygiene_check").await;
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].status, "success");
     }
 }

@@ -236,6 +236,7 @@ mod tests {
         let mr = MergeRequest::new(
             Id::new(mr_id),
             Id::new("r1"),
+            Id::new("default"),
             "MR title",
             "feat/x",
             "main",
@@ -267,7 +268,15 @@ mod tests {
     async fn next_pending_returns_highest_priority() {
         let (_tmp, s) = setup();
         setup_mr(&s, "mr1").await;
-        let mr2 = MergeRequest::new(Id::new("mr2"), Id::new("r1"), "MR2", "feat/y", "main", 1000);
+        let mr2 = MergeRequest::new(
+            Id::new("mr2"),
+            Id::new("r1"),
+            Id::new("default"),
+            "MR2",
+            "feat/y",
+            "main",
+            1000,
+        );
         MergeRequestRepository::create(&s, &mr2).await.unwrap();
 
         let low = make_entry("e-low", "mr1", 25);
@@ -286,7 +295,15 @@ mod tests {
     async fn next_pending_same_priority_oldest_first() {
         let (_tmp, s) = setup();
         setup_mr(&s, "mr1").await;
-        let mr2 = MergeRequest::new(Id::new("mr2"), Id::new("r1"), "MR2", "feat/y", "main", 1000);
+        let mr2 = MergeRequest::new(
+            Id::new("mr2"),
+            Id::new("r1"),
+            Id::new("default"),
+            "MR2",
+            "feat/y",
+            "main",
+            1000,
+        );
         MergeRequestRepository::create(&s, &mr2).await.unwrap();
 
         let old = MergeQueueEntry::new(Id::new("e-old"), Id::new("mr1"), 50, 1000);
@@ -353,8 +370,24 @@ mod tests {
     async fn list_queue_excludes_terminal() {
         let (_tmp, s) = setup();
         setup_mr(&s, "mr1").await;
-        let mr2 = MergeRequest::new(Id::new("mr2"), Id::new("r1"), "MR2", "feat/y", "main", 1000);
-        let mr3 = MergeRequest::new(Id::new("mr3"), Id::new("r1"), "MR3", "feat/z", "main", 1000);
+        let mr2 = MergeRequest::new(
+            Id::new("mr2"),
+            Id::new("r1"),
+            Id::new("default"),
+            "MR2",
+            "feat/y",
+            "main",
+            1000,
+        );
+        let mr3 = MergeRequest::new(
+            Id::new("mr3"),
+            Id::new("r1"),
+            Id::new("default"),
+            "MR3",
+            "feat/z",
+            "main",
+            1000,
+        );
         MergeRequestRepository::create(&s, &mr2).await.unwrap();
         MergeRequestRepository::create(&s, &mr3).await.unwrap();
 

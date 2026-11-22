@@ -125,7 +125,17 @@ async fn evaluate_workspace(
         // Suppress if an active TrustSuggestion already exists for this user/workspace.
         let existing = state
             .notifications
-            .list_for_user(&member.user_id, Some(&ws.id), Some(8), Some(8), None, 20, 0)
+            .list_for_user(
+                &member.user_id,
+                Some(&ws.id),
+                Some(8),
+                Some(8),
+                None,
+                None,
+                &[],
+                20,
+                0,
+            )
             .await
             .unwrap_or_default();
 
@@ -167,7 +177,7 @@ async fn evaluate_workspace(
         notif.source.entity_type = "workspace".to_string();
         notif.source.entity_id = ws.id.to_string();
 
-        if let Err(e) = state.notifications.create(&notif).await {
+        if let Err(e) = state.create_notification(&notif).await {
             warn!(
                 workspace = %ws.slug,
                 user = %member.user_id,
@@ -180,6 +190,8 @@ async fn evaluate_workspace(
                 user = %member.user_id,
                 "trust_suggestion: notification created"
             );
+            // Channel fan-out per user-management.md §Delivery Channels.
+            crate::notification_dispatcher::dispatch_to_channels(state, &notif).await;
         }
     }
 
@@ -340,7 +352,9 @@ mod tests {
                 Some(&Id::new(ws_id)),
                 None,
                 None,
-                Some(NotificationType::TrustSuggestion.as_str()),
+                Some(&[NotificationType::TrustSuggestion.as_str()]),
+                None,
+                &[],
                 50,
                 0,
             )

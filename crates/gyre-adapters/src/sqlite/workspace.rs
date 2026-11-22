@@ -1,9 +1,10 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use diesel::prelude::*;
+use diesel::sqlite::SqliteConnection;
 use gyre_common::Id;
 use gyre_domain::{
-    BudgetConfig, Persona, PersonaApprovalStatus, PersonaScope, Policy, TrustLevel, Workspace,
+    BudgetConfig, Persona, PersonaApprovalStatus, PersonaScope, Policy, Task, TrustLevel, Workspace,
 };
 use gyre_ports::{PersonaRepository, WorkspaceRepository};
 use std::sync::Arc;
@@ -143,10 +144,13 @@ impl WorkspaceRepository for SqliteStorage {
     async fn find_by_id(&self, id: &Id) -> Result<Option<Workspace>> {
         let pool = Arc::clone(&self.pool);
         let id = id.clone();
+        let tenant = self.tenant_id.clone();
         tokio::task::spawn_blocking(move || -> Result<Option<Workspace>> {
             let mut conn = pool.get().context("get db connection")?;
+            // Spec hierarchy-enforcement.md §3: id lookups must verify tenant.
             let result = workspaces::table
                 .find(id.as_str())
+                .filter(workspaces::tenant_id.eq(&tenant))
                 .first::<WorkspaceRow>(&mut *conn)
                 .optional()
                 .context("find workspace by id")?;
@@ -157,9 +161,11 @@ impl WorkspaceRepository for SqliteStorage {
 
     async fn list(&self) -> Result<Vec<Workspace>> {
         let pool = Arc::clone(&self.pool);
+        let tenant = self.tenant_id.clone();
         tokio::task::spawn_blocking(move || -> Result<Vec<Workspace>> {
             let mut conn = pool.get().context("get db connection")?;
             let rows = workspaces::table
+                .filter(workspaces::tenant_id.eq(&tenant))
                 .order(workspaces::created_at.asc())
                 .load::<WorkspaceRow>(&mut *conn)
                 .context("list workspaces")?;
@@ -560,6 +566,81 @@ impl PersonaRepository for SqliteStorage {
         })
         .await?
     }
+
+    async fn apply_approval_reset_with_task(&self, persona: &Persona, task: &Task) -> Result<()> {
+        let pool = Arc::clone(&self.pool);
+        let p = persona.clone();
+        let t = task.clone();
+        let tenant = self.tenant_id.clone();
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let mut conn = pool.get().context("get db connection")?;
+            conn.transaction::<_, anyhow::Error, _>(|conn| {
+                upsert_persona_txn(conn, &p)?;
+                crate::sqlite::task::upsert_task_txn(conn, &t, &tenant)?;
+                Ok(())
+            })
+            .context("apply persona approval reset with approval task")?;
+            Ok(())
+        })
+        .await?
+    }
+}
+
+/// Insert-or-update a persona row on an existing connection — the write
+/// half of `PersonaRepository::create`, shared with the transactional
+/// `apply_approval_reset_with_task` (the persona approval reset and its
+/// human-approval task persist in ONE transaction).
+fn upsert_persona_txn(conn: &mut SqliteConnection, p: &Persona) -> Result<()> {
+    let approval_status = serde_json::to_string(&p.approval_status)?
+        .trim_matches('"')
+        .to_string();
+    let row = NewPersonaRow {
+        id: p.id.as_str().to_string(),
+        name: p.name.clone(),
+        slug: p.slug.clone(),
+        scope: serde_json::to_string(&p.scope)?,
+        system_prompt: p.system_prompt.clone(),
+        capabilities: serde_json::to_string(&p.capabilities)?,
+        protocols: serde_json::to_string(&p.protocols)?,
+        model: p.model.clone(),
+        temperature: p.temperature,
+        max_tokens: p.max_tokens.map(|v| v as i32),
+        budget: p.budget.as_ref().map(serde_json::to_string).transpose()?,
+        created_at: p.created_at as i64,
+        version: p.version as i32,
+        content_hash: p.content_hash.clone(),
+        owner: p.owner.clone(),
+        approval_status,
+        approved_by: p.approved_by.clone(),
+        approved_at: p.approved_at.map(|v| v as i64),
+        updated_at: p.updated_at as i64,
+    };
+    diesel::insert_into(personas::table)
+        .values(&row)
+        .on_conflict(personas::id)
+        .do_update()
+        .set((
+            personas::name.eq(&row.name),
+            personas::slug.eq(&row.slug),
+            personas::scope.eq(&row.scope),
+            personas::system_prompt.eq(&row.system_prompt),
+            personas::capabilities.eq(&row.capabilities),
+            personas::protocols.eq(&row.protocols),
+            personas::model.eq(&row.model),
+            personas::temperature.eq(row.temperature),
+            personas::max_tokens.eq(row.max_tokens),
+            personas::budget.eq(&row.budget),
+            personas::version.eq(row.version),
+            personas::content_hash.eq(&row.content_hash),
+            personas::owner.eq(&row.owner),
+            personas::approval_status.eq(&row.approval_status),
+            personas::approved_by.eq(&row.approved_by),
+            personas::approved_at.eq(row.approved_at),
+            personas::updated_at.eq(row.updated_at),
+        ))
+        .execute(conn)
+        .context("upsert persona")?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -647,5 +728,116 @@ mod persona_tests {
         }
         let after = storage.list_by_scope(&scope).await.unwrap();
         assert_eq!(after.len(), 4, "re-seed must not duplicate rows");
+    }
+
+    /// Port contract (PersonaRepository::apply_approval_reset_with_task):
+    /// the persona approval reset and its human-approval task land in ONE
+    /// transaction — both rows are visible after the call, through the
+    /// normal repositories. (The rollback half of the contract is enforced
+    /// by the diesel transaction; the mem adapter's test hook exercises the
+    /// rollback behavior directly.)
+    #[tokio::test]
+    async fn persona_approval_reset_with_task_persists_both_rows() {
+        let (_tmp, storage) = tmp_storage();
+        let ws_id = Id::new("ws-persona-push");
+        let scope = PersonaScope::Workspace(ws_id.clone());
+
+        let mut persona = gyre_domain::Persona::new(
+            Id::new("persona-sqlite-atomic"),
+            "backend-dev".to_string(),
+            "backend-dev".to_string(),
+            scope.clone(),
+            "system prompt".to_string(),
+            1000,
+        );
+        persona.approval_status = gyre_domain::PersonaApprovalStatus::Pending;
+        let task = gyre_domain::Task::new(
+            Id::new("task-sqlite-atomic"),
+            "Persona change requires human approval: backend-dev",
+            1000,
+        );
+
+        PersonaRepository::apply_approval_reset_with_task(&storage, &persona, &task)
+            .await
+            .unwrap();
+
+        // Both halves are readable through the normal repositories.
+        let found_persona = storage
+            .find_by_slug_and_scope("backend-dev", &scope)
+            .await
+            .unwrap()
+            .expect("persona row must persist");
+        assert_eq!(
+            found_persona.approval_status,
+            gyre_domain::PersonaApprovalStatus::Pending
+        );
+        let found_task = gyre_ports::TaskRepository::find_by_id(&storage, &task.id)
+            .await
+            .unwrap()
+            .expect("approval task row must persist");
+        assert!(found_task.title.contains("backend-dev"));
+    }
+}
+
+#[cfg(test)]
+mod workspace_tests {
+    use super::*;
+    use tempfile::NamedTempFile;
+
+    /// hierarchy-enforcement.md §3: workspace id lookups must verify tenant.
+    /// `find_by_id` filters by the storage handle's tenant scope, so a row
+    /// filed under another tenant is invisible to it — a `find(id)` without
+    /// the tenant filter would leak cross-tenant workspace records (and the
+    /// per-handler caller-vs-record tenant comparison in the API layer would
+    /// never run, because the row would already be loaded). Also pins the
+    /// seeding rule `build_state`-backed tests rely on: a workspace must be
+    /// created under the tenant its storage handle is scoped to, or scoped
+    /// lookups (e.g. GET /workspaces/:id/dependency-graph) 404 on it.
+    #[tokio::test]
+    async fn find_by_id_verifies_tenant_scope() {
+        let tmp = NamedTempFile::new().unwrap();
+        let path = tmp.path().to_str().unwrap();
+        let default = SqliteStorage::new(path).unwrap();
+        let other = default.with_tenant("t-other");
+
+        // Row filed under the handle's own tenant: visible to it.
+        let ws_default = Workspace::new(
+            Id::new("ws-d"),
+            Id::new("default"),
+            "Default WS",
+            "default-ws",
+            1,
+        );
+        WorkspaceRepository::create(&default, &ws_default)
+            .await
+            .unwrap();
+        assert!(WorkspaceRepository::find_by_id(&default, &ws_default.id)
+            .await
+            .unwrap()
+            .is_some());
+
+        // Row filed under a different tenant: invisible to the "default"
+        // handle's id lookup, visible to a handle scoped to that tenant.
+        let ws_other = Workspace::new(
+            Id::new("ws-o"),
+            Id::new("t-other"),
+            "Other WS",
+            "other-ws",
+            1,
+        );
+        WorkspaceRepository::create(&other, &ws_other)
+            .await
+            .unwrap();
+        assert!(
+            WorkspaceRepository::find_by_id(&default, &ws_other.id)
+                .await
+                .unwrap()
+                .is_none(),
+            "id lookup must not return a workspace filed under another tenant"
+        );
+        assert!(WorkspaceRepository::find_by_id(&other, &ws_other.id)
+            .await
+            .unwrap()
+            .is_some());
     }
 }
