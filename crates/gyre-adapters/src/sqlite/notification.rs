@@ -505,6 +505,24 @@ impl NotificationRepository for SqliteStorage {
         .await?
     }
 
+    async fn list_since(&self, since: i64, limit: usize) -> Result<Vec<Notification>> {
+        let pool = Arc::clone(&self.pool);
+        let tenant = self.tenant_id.clone();
+        tokio::task::spawn_blocking(move || -> Result<Vec<Notification>> {
+            let mut conn = pool.get().context("get db connection")?;
+            let rows: Vec<NotificationRow> = notifications::table
+                .filter(notifications::tenant_id.eq(&tenant))
+                .filter(notifications::created_at.ge(since))
+                .order(notifications::created_at.desc())
+                .limit(limit as i64)
+                .select(NotificationRow::as_select())
+                .load(&mut *conn)
+                .context("list_since")?;
+            rows.into_iter().map(|r| r.into_notification()).collect()
+        })
+        .await?
+    }
+
     async fn list_by_workspace_type_since(
         &self,
         workspace_id: &Id,
