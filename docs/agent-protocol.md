@@ -103,7 +103,7 @@ When spawning an agent into a container compute target, the server pre-mints the
 | `ANTHROPIC_BASE_URL` | `http://127.0.0.1:8765` | Routes Anthropic SDK calls through cred-proxy; raw API key never exposed to agent process (M27) |
 | `ANTHROPIC_API_KEY` | `proxy-managed` | Placeholder so Anthropic SDK initialises; cred-proxy injects the real `x-api-key` header per request (M27) |
 
-The `docker/gyre-agent/` directory contains a reference `Dockerfile` (Node 22 Alpine + git + curl) and `entrypoint.sh` that validates these vars, configures git credentials via a credential helper (token not embedded in the clone URL), clones the branch, sends an initial heartbeat (carrying the session's X.509-SVID from `GYRE_SVID_PEM` — identity-security.md Layer 1), then `exec`s `GYRE_AGENT_COMMAND` or -- if unset -- `node /gyre/agent-runner.mjs` for fully autonomous operation. `agent-runner.mjs` connects to the Gyre MCP server, reads the assigned task, implements it, commits, and pushes — holding an authenticated WebSocket connection for the whole session (see **WebSocket primary transport** below).
+The `docker/gyre-agent/` directory contains the Nix flake that builds the agent image (the single image definition — there is no Dockerfile; agent-runtime.md §3 Nix-Based Image Build) and `entrypoint.sh` that validates these vars, configures git credentials via a credential helper (token not embedded in the clone URL), clones the branch, sends an initial heartbeat (carrying the session's X.509-SVID from `GYRE_SVID_PEM` — identity-security.md Layer 1), then `exec`s `GYRE_AGENT_COMMAND` or -- if unset -- `node /gyre/agent-runner.mjs` for fully autonomous operation. `agent-runner.mjs` connects to the Gyre MCP server, reads the assigned task, implements it, commits, and pushes — holding an authenticated WebSocket connection for the whole session (see **WebSocket primary transport** below).
 
 **Pre-PR local verification (agent-workflow.md §Immediate Feedback):** before any completion call (which creates the MR), `agent-runner.mjs` mechanically executes every `GYRE_LOCAL_GATES` command in the agent's working directory as a real subprocess with a bounded timeout (the gate's `timeout_secs`, default 300s; a hanging command is killed and reported as a failure — slow or absent feedback is a platform bug). On failure the runner does NOT complete and does NOT open an MR: it feeds the failing gate's name and captured output back to the agent as a follow-up SDK query for remediation and re-runs the gates; completion happens only when every gate passes. If the retry cap (`GYRE_LOCAL_GATE_MAX_RETRIES`, default 2) is exhausted with gates still failing, the runner terminates with a nonzero exit and no completion call — an unambiguous failure, never a knowingly-broken MR. A runner error before local verification passes likewise never completes. The runner also reads `GYRE_PROTOCOL_PROMPT` into the LLM query prompt (alongside `GYRE_META_SPEC_PROMPT`) so the protocol's "run the repo's quality gates" instruction reaches the model; the subprocess execution above — not the prompt text — is the enforcement.
 
@@ -117,7 +117,11 @@ The `docker/gyre-agent/` directory contains a reference `Dockerfile` (Node 22 Al
 
 Build and register:
 ```bash
-docker build -t gyre-agent:latest docker/gyre-agent/
+# Build the agent image from the Nix flake (single definition, no Dockerfile).
+# Run in docker/gyre-agent/:
+nix build .#agent-image-docker
+docker load < result           # tags gyre-agent:latest
+# Air-gapped transfer: nix build .#agent-image-tar
 
 # M25 zero-config: start server with API key -- gyre-agent-default is auto-registered
 GYRE_SECRET_ENCRYPTION_KEY=<64-hex-chars> cargo run -p gyre-server  # secrets encrypted at rest
