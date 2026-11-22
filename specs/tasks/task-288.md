@@ -2,7 +2,7 @@
 title: "Spec Links — stored link statuses: broken when the target leaves the manifest, conflicted when both endpoints are approved, with reversion when the defining conditions cease"
 spec_ref: "Spec gap spec-10bdced21a063f819b1baabd / spec-links-status-lifecycle / 5a915155d9bc"
 depends_on: [task-287]
-progress: ready-for-review
+progress: complete
 commits: ["763671fd7aa165044b9e6c92ed148b15e7be459b", "92850243a262fabad6609d7bc95e89a22aeb33ca", "6a4b091b4e0949090c5931d072e576869e06da32"]
 ---
 
