@@ -81,6 +81,14 @@ async fn start_server_with_state() -> (
     let port = listener.local_addr().unwrap().port();
     let base_url = format!("http://127.0.0.1:{port}");
 
+    // Explicit in-memory opt-in (architecture.md §Storage): the default
+    // (unset) backend is now durable SQLite at the platform default
+    // data path — a test run must never touch the operator's real
+    // database file (and concurrent test processes sharing that one
+    // file corrupt each other's writes). Idempotent and race-free
+    // (Once-guarded); this state-returning variant was missed when the
+    // durable default landed (start_server opted in from the start).
+    gyre_server::select_in_memory_storage();
     let state = build_state(GLOBAL_TOKEN, &base_url, None);
     abac_middleware::seed_builtin_policies(&state)
         .await

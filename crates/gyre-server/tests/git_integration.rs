@@ -70,6 +70,14 @@ async fn start_server_with_state(
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let base_url = format!("http://127.0.0.1:{port}");
+    // Explicit in-memory opt-in (architecture.md §Storage): the default
+    // (unset) backend is now durable SQLite at the platform default
+    // data path — a test run must never touch the operator's real
+    // database file (and concurrent test processes sharing that one
+    // file corrupt each other's writes). Idempotent and race-free
+    // (Once-guarded). Mirrors `start_server` below; this variant was
+    // missed when the durable default landed.
+    gyre_server::select_in_memory_storage();
     let state = build_state(auth_token, &base_url, None);
     abac_middleware::seed_builtin_policies(&state)
         .await
