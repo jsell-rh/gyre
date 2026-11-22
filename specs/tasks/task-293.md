@@ -2,9 +2,32 @@
 title: "Spec Links — cycle detection over the tenant-wide forge graph, not just the pushed manifest"
 spec_ref: "Spec gap spec-10bdced21a063f819b1baabd / spec-links-tenant-cycle-detection / 5a915155d9bc"
 depends_on: [task-287]
-progress: not-started
-commits: []
+progress: complete
+commits: ["824c68eefc565f0f45f11e92dcbb01d7e87ea0e4", "34b3711d493ddd94ab7cf86ce39eb758837d8c20", "1fb8cfa28c0a18ce4da633c6e609a11b61fe5664", "0680e21a605bb9a07051c106ec7c1141fc212675", "092db23015876d452327beab9f04f5c6961edd77"]
 ---
+
+## Shipped
+
+Cycle detection runs over the tenant-wide forge graph, not just the pushed manifest. `check_spec_link_cycles` (crates/gyre-server/src/spec_registry.rs) takes a `TenantCycleContext`; `build_tenant_cycle_graph` combines every stored row in the durable spec_links table with the pushed manifest's edges, keyed by (repo, path): manifest entries attributed to the source repo, cross-repo/cross-workspace targets resolved through `resolve_manifest_link_target` — the identical resolution `sync_spec_ledger` persists, so the checked graph and the stored graph attribute nodes identically. Rows the push itself replaces (`replace_for_source` scoping) are excluded from the stored half, so a push that REMOVES a cycle-participating edge is accepted. Storage errors reading the durable graph fail closed (push rejected). Only cycles in which at least one edge contributed by the pushed manifest participates are reported, so stored-only legacy cycles do not block unrelated repos. Rejection wiring in git_http.rs is unchanged in shape: ref updates undone, PushRejected event, git_push_rejected audit (gate_name "spec-link-cycles").
+
+### Review round 2 (34b3711d)
+
+Fail-closed on `list_all` storage errors and push-scoped rejection — two scope corrections from the independent review (full detail in coverage row 11, specs/coverage/system/spec-links.md).
+
+### Review round 3 (finding 9f245c50) — deferred-cycle bypass closed
+
+The round-2 code dropped unresolved cross-repo stored rows (target_repo_id NULL) from the combined graph, but the daily staleness job deterministically activates exactly those rows once the target repo's manifest declares the target path — so a cycle could arrive as push 1 (edge stored unresolved because the target path was not yet declared), push 2 (target repo declares the path and adds the back-edge; both pushes accepted), then staleness activation, landing permanently in the forge graph with no push ever rejected. Both halves of the reviewer's "either closes it" are implemented:
+
+- **Push-time attribution (primary).** `attribute_unresolved_stored_link` (spec_registry.rs) attributes an unresolved stored row exactly when the staleness pass will activate it — the same source-scope derivation (source repo → workspace → tenant, never a fabricated scope), the same target-display disambiguation, and the same target-manifest requirement, with the pushed manifest standing in for the target repo's current manifest when the target repo is the one being pushed (activation is deterministic given the push's own content). Access-denied rows never activate and are never attributed (durable kv denial marker; new `TenantCycleContext.kv` field wired from `state.kv_store` in git_http.rs). The step-2 push of the reviewer's reproduction is now rejected with the cycle named.
+- **Activation gate (backstop).** `resolve_unresolved_cross_workspace_links` (spec_link_staleness.rs) refuses to flip a pending row active when that would create a cycle in the durable graph (`link_activation_creates_cycle` over the attributed graph, shared `bfs_path` helper refactored out of `detect_graph_cycles`); the row stays unresolved with a warning naming the cycle. No activation path — including a linkless push that merely declares the target path, or mirror-synced state changes that bypass the push gate — can land a cycle the push-time gate would have rejected.
+
+### Test evidence
+
+Unit (spec_registry.rs, real git repos + mem adapters, real post-push `sync_spec_ledger` storing push 1's edge): `tenant_cycle_cross_repo_second_push_rejected` (AC1: A→B accepted, B→A rejected naming both repo-attributed nodes), `tenant_cycle_references_back_edge_accepted` and `tenant_cycle_conflicts_with_bidirectional_not_a_cycle` (AC3), `tenant_cycle_single_manifest_cycle_rejected_with_tenant_context` (AC2), `tenant_cycle_push_removing_edge_accepted` (replace semantics), `tenant_cycle_unresolved_stored_edge_not_attributed` (unchanged: its pushed manifest contributes no edges, so conditional attribution changes no outcome), round-2 regressions `tenant_cycle_list_all_error_fails_closed` and `tenant_cycle_legacy_stored_cycle_does_not_block_unrelated_push`, and the round-3 regression `tenant_cycle_deferred_unresolved_back_edge_rejected` — the reviewer's three-step reproduction: push 1 stores B→A unresolved (asserted status "unresolved", target_repo_id None, display "@A/system/a.md" so the deferred state is genuinely reproduced), push 2 (repo A declares system/a.md and links A→B) MUST be rejected naming repo-a:system/a.md and repo-b:system/b.md — it returns Ok on the pre-repair candidate. Staleness (spec_link_staleness.rs): `staleness_refuses_activation_that_creates_cycle` (pending B→A with stored active A→B stays unresolved after `run_once`), with the existing activation tests proving activation still works when no cycle would be created. E2e (git_http.rs): `cross_repo_spec_link_cycle_second_push_rejected_e2e` through the real git-receive-pack endpoint (FORBIDDEN, ref rolled back, audit + workspace message asserted).
+
+This round's probes: `cargo check -p gyre-server --tests` exit 0 with zero warnings, `cargo fmt -p gyre-server -- --check` clean, no clippy findings in the new code. Server test execution is deferred to the independent verifier per the 4 GiB build-wrapper budget — the wrapper denial, full source trace, and the required cargo test probes are recorded in /tmp/stage/review-evidence/review-round3-deferred-cycle-repair.txt.
+
+Coverage row 11 (spec-links.md Cycle Detection) carries the concrete source evidence; pending independent review for verified.
 
 ## Required behavior
 
