@@ -45,6 +45,11 @@ impl WsCtx {
         let port = listener.local_addr().unwrap().port();
         let base_url = format!("http://127.0.0.1:{port}");
 
+        // Explicit in-memory opt-in (architecture.md §Storage): the default
+        // (unset) backend is now durable SQLite at the platform default
+        // data path — a test run must never touch the operator's real
+        // database file. Idempotent and race-free (Once-guarded).
+        gyre_server::select_in_memory_storage();
         let base_state = build_state(TOKEN, &base_url, None);
         let state = match llm {
             Some(factory) => {

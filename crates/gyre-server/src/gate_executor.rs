@@ -3871,6 +3871,11 @@ mod tests {
     use gyre_ports::GitOpsPort;
 
     fn test_state() -> Arc<AppState> {
+        // Explicit in-memory opt-in (architecture.md §Storage): the default
+        // (unset) backend is now durable SQLite at the platform default
+        // data path — a unit test must never touch the operator's real
+        // database file.
+        crate::select_in_memory_storage();
         crate::build_state("gyre-test-token", "http://localhost:0", None)
     }
 
@@ -5279,7 +5284,11 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         let base_url = format!("http://127.0.0.1:{port}");
 
-        let state = crate::build_state("gyre-test-token", &base_url, None);
+        let state = {
+            // Explicit in-memory opt-in: see test_state().
+            crate::select_in_memory_storage();
+            crate::build_state("gyre-test-token", &base_url, None)
+        };
         // Seed builtin ABAC policies: build_state wires an empty policy
         // store, and evaluation with zero policies is default-deny, so the
         // driver's review POST would 403. main.rs seeds at startup; a test
@@ -5365,7 +5374,11 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         let base_url = format!("http://127.0.0.1:{port}");
 
-        let state = crate::build_state("gyre-test-token", &base_url, None);
+        let state = {
+            // Explicit in-memory opt-in: see test_state().
+            crate::select_in_memory_storage();
+            crate::build_state("gyre-test-token", &base_url, None)
+        };
         // Same as the approved-path test: seed builtin policies or the
         // driver's review POST default-denies (review F1).
         crate::abac_middleware::seed_builtin_policies(&state)
