@@ -92,17 +92,18 @@ use gyre_ports::{
     AgentCommitRepository, AgentRepository, AgentSessionRepository, AnalyticsRepository,
     ApiKeyRepository, AttestationRepository, AttestationStorage, AuditRepository,
     BreakingChangeRepository, BudgetCallRepository, BudgetRepository, BudgetUsageRepository,
-    ComputeTargetRepository, ContainerAuditRepository, ConversationRepository, CostRepository,
-    DependencyPolicyRepository, DependencyRepository, GateResultRepository, GitOpsPort, GraphPort,
-    JjOpsPort, KvJsonStore, LlmConfigRepository, MergeQueueRepository, MergeRequestRepository,
-    MetaSpecBindingRepository, MetaSpecRepository, MetaSpecSetRepository, NetworkPeerRepository,
-    NotificationRepository, PersonaRepository, PolicyRepository, PreAcceptGate, ProcessHandle,
-    PushGateRepository, QualityGateRepository, RekorClient, RepoAccessOverrideRepository,
-    RepoRepository, ReviewRepository, RolloutPolicyRepository, SpawnLogRepository,
-    SpecApprovalEventRepository, SpecApprovalRepository, SpecLedgerRepository,
-    SpecLifecycleRepository, SpecPolicyRepository, TaskRepository, TeamRepository,
-    TenantMetaSpecSetRepository, TraceRepository, UserRepository, UserWorkspaceStateRepository,
-    WorkspaceMembershipRepository, WorkspaceRepository, WorktreeRepository,
+    CascadeTestResultRepository, ComputeTargetRepository, ContainerAuditRepository,
+    ConversationRepository, CostRepository, DependencyPolicyRepository, DependencyRepository,
+    GateResultRepository, GitOpsPort, GraphPort, JjOpsPort, KvJsonStore, LlmConfigRepository,
+    MergeQueueRepository, MergeRequestRepository, MetaSpecBindingRepository, MetaSpecRepository,
+    MetaSpecSetRepository, NetworkPeerRepository, NotificationRepository, PersonaRepository,
+    PolicyRepository, PreAcceptGate, ProcessHandle, PushGateRepository, QualityGateRepository,
+    RekorClient, RepoAccessOverrideRepository, RepoRepository, ReviewRepository,
+    RolloutPolicyRepository, SpawnLogRepository, SpecApprovalEventRepository,
+    SpecApprovalRepository, SpecLedgerRepository, SpecLifecycleRepository, SpecPolicyRepository,
+    TaskRepository, TeamRepository, TenantMetaSpecSetRepository, TraceRepository, UserRepository,
+    UserWorkspaceStateRepository, WorkspaceMembershipRepository, WorkspaceRepository,
+    WorktreeRepository,
 };
 use jobs::JobRegistry;
 use retention::RetentionStore;
@@ -342,6 +343,11 @@ pub struct AppState {
     pub breaking_changes: Arc<dyn BreakingChangeRepository>,
     /// Per-workspace dependency enforcement policies (M22.4 — TASK-020).
     pub dependency_policies: Arc<dyn DependencyPolicyRepository>,
+    /// Durable cascade test results (dependency-graph.md §Cascade Testing,
+    /// task-280): the persisted outcome of each cascade test run, surviving
+    /// server restarts — the durable counterpart of the one-shot
+    /// cascade_test_passed/failed workspace events.
+    pub cascade_test_results: Arc<dyn CascadeTestResultRepository>,
     /// Request rate limiter (requests/sec).
     pub rate_limiter: Arc<rate_limit::RateLimiter>,
     /// Running agent processes: agent_id -> ProcessHandle.
@@ -2060,6 +2066,10 @@ pub fn build_state(
         dependency_policies: store!(
             dyn DependencyPolicyRepository,
             mem::MemDependencyPolicyRepository::default()
+        ),
+        cascade_test_results: store!(
+            dyn CascadeTestResultRepository,
+            mem::MemCascadeTestResultRepository::default()
         ),
         rate_limiter: rate_limit::RateLimiter::new(rate_per_sec),
         process_registry: Arc::new(Mutex::new(HashMap::new())),
