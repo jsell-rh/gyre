@@ -574,8 +574,7 @@ mod tests {
         // The pids-limit=512 equivalent rides the created Pod object as
         // the container resource limit.
         assert_eq!(
-            c["resources"]["limits"]["pids"],
-            "512",
+            c["resources"]["limits"]["pids"], "512",
             "default manifest must carry the 512 pids limit: {m}"
         );
         // Env vars injected into the container.
@@ -592,7 +591,10 @@ mod tests {
     fn manifest_pids_limit_override_replaces_default() {
         let t = KubernetesTarget::new("gyre-agent:test").with_pids_limit(256);
         let m = build_pod_manifest(&t, &spawn_config("agent-1"));
-        assert_eq!(m["spec"]["containers"][0]["resources"]["limits"]["pids"], "256");
+        assert_eq!(
+            m["spec"]["containers"][0]["resources"]["limits"]["pids"],
+            "256"
+        );
     }
 
     /// The default-deny NetworkPolicy is the --network=none equivalent:
@@ -607,8 +609,7 @@ mod tests {
         assert_eq!(p["kind"], "NetworkPolicy");
         assert_eq!(p["metadata"]["name"], "agent-1-net-isolate");
         assert_eq!(
-            p["spec"]["podSelector"]["matchLabels"]["gyre-agent"],
-            "agent-1",
+            p["spec"]["podSelector"]["matchLabels"]["gyre-agent"], "agent-1",
             "policy must select exactly the agent Pod"
         );
         assert_eq!(
@@ -641,7 +642,11 @@ mod tests {
         let isolated = KubernetesTarget::new("gyre-agent:test");
         let stream = build_apply_stream(&isolated, &spawn_config("agent-1")).unwrap();
         let docs: Vec<&str> = stream.split("\n---\n").collect();
-        assert_eq!(docs.len(), 2, "default stream: Pod + NetworkPolicy\n{stream}");
+        assert_eq!(
+            docs.len(),
+            2,
+            "default stream: Pod + NetworkPolicy\n{stream}"
+        );
         let pod: serde_json::Value = serde_json::from_str(docs[0]).unwrap();
         let policy: serde_json::Value = serde_json::from_str(docs[1]).unwrap();
         assert_eq!(pod["kind"], "Pod");
@@ -650,7 +655,11 @@ mod tests {
         let bridged = KubernetesTarget::new("gyre-agent:test").with_network("bridge");
         let stream = build_apply_stream(&bridged, &spawn_config("agent-1")).unwrap();
         let docs: Vec<&str> = stream.split("\n---\n").collect();
-        assert_eq!(docs.len(), 1, "bridge opt-in must apply the Pod only\n{stream}");
+        assert_eq!(
+            docs.len(),
+            1,
+            "bridge opt-in must apply the Pod only\n{stream}"
+        );
         let pod: serde_json::Value = serde_json::from_str(docs[0]).unwrap();
         assert_eq!(pod["kind"], "Pod");
     }
@@ -857,7 +866,11 @@ mod tests {
     #[tokio::test]
     async fn kill_deletes_pod_and_network_policy() {
         let dir = tempfile::tempdir().unwrap();
-        let log = dir.path().join("kubectl.log").to_string_lossy().into_owned();
+        let log = dir
+            .path()
+            .join("kubectl.log")
+            .to_string_lossy()
+            .into_owned();
         let stub = dir
             .path()
             .join("kubectl-stub")

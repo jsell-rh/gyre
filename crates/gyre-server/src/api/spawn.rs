@@ -8895,8 +8895,7 @@ exit 1\n"
             .expect("stub kubectl should have captured the applied stream");
         let pod = pod_doc_from_dump(&dump);
         assert_eq!(
-            pod["spec"]["containers"][0]["resources"]["limits"]["pids"],
-            "512",
+            pod["spec"]["containers"][0]["resources"]["limits"]["pids"], "512",
             "applied Pod must carry the 512 pids limit:\n{dump}"
         );
         let pod_name = pod["metadata"]["name"].as_str().expect("pod name");
@@ -8919,8 +8918,7 @@ exit 1\n"
         });
         assert_eq!(policy["apiVersion"], "networking.k8s.io/v1");
         assert_eq!(
-            policy["spec"]["podSelector"]["matchLabels"]["gyre-agent"],
-            pod_name,
+            policy["spec"]["podSelector"]["matchLabels"]["gyre-agent"], pod_name,
             "policy must select exactly the spawned Pod:\n{dump}"
         );
         assert_eq!(
