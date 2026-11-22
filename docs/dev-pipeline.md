@@ -8,9 +8,11 @@ Python scheduling loop has been removed.
 
 The extracted source, license, and pinned provenance live in
 `tools/fullsend-dispatcher/`. It supports an adapter backend so Gyre retains
-`pipeline.sqlite3` as its single workflow authority; it does not create a second
-jobs database or import HyperShell's state. The original SQLite backend remains
-available to the source integration.
+`pipeline.sqlite3` as its stage/attempt/work telemetry ledger; it does not
+create a second jobs database or import HyperShell's state. Development
+task state and dependency sequencing are held by the Gyre platform itself
+(see "Platform task ledger and sequencing authority" below). The original
+SQLite backend remains available to the source integration.
 
 Admission reserves one shared compute slot atomically with a stage claim, before
 starting a worker, cloning source, creating providers, or invoking fullsend.
@@ -45,6 +47,59 @@ Manual task pauses, 6 GiB OOMs, storage failures, spec conflicts and unrelated
 stalled repairs remain held. Recovery records the original reason and policy;
 source receipts, historical attempts and exact-source review/verification stay
 intact. Desired slots remain an upper bound on useful dependency-ready work.
+
+## Platform task ledger and sequencing authority
+
+Gyre's own development dogfoods the platform product as its task-state and
+sequencing authority (specs/development/dogfooding.md, progression stage 1).
+`python3 scripts/dev-platform.py start` builds (`SKIP_WEB_BUILD=1`) and runs
+a gyre-server instance on a dedicated port with its own SQLite data
+directory, provisions the `gyre-dev` workspace and repo records plus a
+Developer-role service principal with an API token, and registers the
+endpoint and token as pipeline settings (`platform_endpoint`,
+`platform_token`, `platform_workspace`, `platform_repo`) - the same
+`store.setting` mechanism the gateway setting uses. The bootstrap is
+idempotent: a healthy instance with valid settings is left untouched.
+`stop` and `status` manage the instance.
+
+`pipeline.sqlite3` remains the stage/attempt/work telemetry ledger and the
+dispatcher adapter backend; the platform holds the development task records
+(shared state), their lifecycle, and dependency sequencing:
+
+- Registration: catalog sync (the source refresh) upserts every
+  specs/tasks/*.md task into the platform as an untyped record carrying
+title, spec_ref, priority, order, and depends_on edges resolved through the
+persisted task-NNN to platform-id mapping (`platform_tasks`). Records are
+untyped (no task_type) so the platform's mechanical scheduler never spawns
+agents for development tasks; the bridge uses no orchestrator-spawn route
+and no gyre_spawn_worker.
+- Lifecycle write-back: first implement admission of a task sets its
+  platform record `in_progress`; publication (the code path that records
+`progress: complete`) sets it `done`; a structural hold (structural-fault
+guard or exhausted repair budget) sets it `blocked`. Sync reconciles
+transitions whose push failed. Each transition is pushed once: an operator
+resetting a non-terminal platform status is respected, and reopened work
+gets a fresh record (the platform's `done` is terminal).
+- Authoritative sequencing: the implement-stage dependency gate consults
+  the platform over the authenticated REST API. A task is admitted for
+implementation only if the platform reports every depends_on task done; a
+dependency the platform reports as not done blocks admission even when
+local pipeline state satisfies it. Platform unavailability fails closed -
+a durable `platform_unavailable` event is recorded in the pipeline ledger
+and no new implement work is admitted - while already-claimed in-flight
+work proceeds. A checkout that never ran the bootstrap keeps running on
+local state alone.
+
+All bridge HTTP goes through the authenticated REST surface under real ABAC
+policy evaluation (the Developer role is required for task writes); there is
+no direct platform-storage access and no privileged bypass.
+
+Staged progression: this stage moves shared task state and sequencing into
+the platform while worker dispatch stays with the pipeline's own scheduler.
+The next stage routes worker dispatch through the platform's mechanical
+task-to-agent scheduler (the amended specs/system/agent-runtime.md contract,
+in which the scheduler is the only task-to-agent path), contingent on
+platform maturity.
 
 ## Thin workers and runtime recovery
 

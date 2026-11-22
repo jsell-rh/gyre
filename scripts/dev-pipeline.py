@@ -99,8 +99,14 @@ def run_one(store, stage, task=None):
 def run_claim(store, claim):
     stage = claim['stage']
     execution = Execution(store, claim)
+    from pipeline import platform
     try:
         with execution.heartbeat():
+            # Dogfooding stage 1 lifecycle write-back: first implement
+            # admission sets the platform record in_progress. Best effort;
+            # sync reconciles. Runs under the lease heartbeat so a slow
+            # platform cannot eat the claim lease.
+            platform.admitted(store, claim)
             item = store.task(claim['task'])
             if item['data'].get('task_override'):
                 from pipeline.catalog import contract
@@ -141,6 +147,10 @@ def run_claim(store, claim):
                     item['data'].get('triaged') if generation == item['generation'] else None)
             receipt = {key: value for key, value in result.items() if key != 'task_body'}
             store.finish(claim['id'], claim['token'], receipt, updates, findings, body, generation)
+            # Publication (the progress: complete code path) sets the
+            # platform record done. Best effort; sync reconciles.
+            if updates.get('progress') == 'complete' or updates.get('delivered'):
+                platform.completed(store, claim)
             phase = 'Merged' if updates.get('delivered') else 'NeedsRevision' if updates.get('repair') else 'Completed'
             (execution.directory / 'phase.json').write_text(json.dumps({'phase': phase, 'at': time.time()}))
     except StaleClaim:
@@ -189,6 +199,10 @@ def run_claim(store, claim):
             except StaleClaim:
                 pass
         action='needs attention' if getattr(exc,'attention',False) else 'retry scheduled'
+        # A structural hold (structural-fault guard or exhausted repair
+        # budget) leaves the task held: the platform record goes blocked.
+        if store.setting(store.runtime_hold_key(claim['task'], stage, claim['generation'])):
+            platform.blocked(store, claim)
         print(f'{stage}/{claim["task"]}: {action}: {exc}', file=sys.stderr)
     finally:
         store.resource_state(store.admission_name(claim['id'], claim['token']), 'absent')

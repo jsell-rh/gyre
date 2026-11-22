@@ -50,6 +50,8 @@ def configuration(store):
     for key, label, value, help in [
         ('model', 'Pinned model', 'gateway/rits/zai-org/glm-5-3', 'Read-only: model selection must agree with the gateway route and inference admission probe.'),
         ('gateway', 'Gateway registration', store.setting('gateway', 'gyre-gyre'), 'Read-only: gateway identity and credentials are managed by gateway setup and automatic login refresh.'),
+        ('platform_endpoint', 'Platform task ledger', store.setting('platform_endpoint') or 'Not bootstrapped', 'Read-only: the Gyre platform instance that holds the development task ledger and serves authoritative dependency sequencing (scripts/dev-platform.py).'),
+        ('platform_workspace', 'Platform workspace', store.setting('platform_workspace') or 'Not bootstrapped', 'Read-only: the dogfooding workspace holding the development task records.'),
         ('gateway_auth', 'Last successful gateway check', auth_status, 'Read-only: last successful provider/authentication health check, not a guarantee of current connectivity. Automatic refresh remains enabled.'),
         ('repository', 'Repository', store.setting('repository', 'jsell-rh/gyre'), 'Read-only: changing repository would invalidate the task ledger and source identities.'),
         ('ledger', 'Settings ledger', str(store.directory / 'pipeline.sqlite3'), 'Shared with the browser and CLI; separate from every other dispatcher instance.'),
