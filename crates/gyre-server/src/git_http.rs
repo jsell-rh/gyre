@@ -1148,6 +1148,7 @@ pub async fn git_receive_pack(
             tenant_id: cycle_tenant_id.as_ref(),
             memberships: Some(&state.workspace_memberships),
             principal: Some(&cycle_principal),
+            kv: Some(&state.kv_store),
         };
         for update in ref_updates.iter().filter(|u| u.refname == default_ref) {
             if let Err(rejection) = crate::spec_registry::check_spec_link_cycles(

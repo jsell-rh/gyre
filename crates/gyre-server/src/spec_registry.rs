@@ -1709,6 +1709,11 @@ pub struct TenantCycleContext<'a> {
     /// read resolve unresolved and therefore never become graph edges,
     /// exactly as `sync_spec_ledger` stores them.
     pub principal: Option<&'a LinkPrincipal>,
+    /// KV store holding durable link access-denial markers. An unresolved
+    /// cross-repo row denied at push time never activates (the staleness
+    /// pass skips it), so it must not contribute an edge to the combined
+    /// graph. `None` skips the denial check.
+    pub kv: Option<&'a Arc<dyn gyre_ports::KvJsonStore>>,
 }
 
 /// Check the pushed manifest's spec links for cycles over the TENANT-WIDE
@@ -1780,6 +1785,21 @@ impl SpecCycleGraph {
 ///    target node — the sync stores them unresolved, so they are not edges
 ///    in the stored graph either.
 ///
+/// Unresolved cross-repo STORED rows (target_repo_id NULL, target_display
+/// `@…`) are attributed exactly when the staleness pass
+/// (`resolve_unresolved_cross_workspace_links`) will activate them — the
+/// same source-scope derivation and the same target-manifest requirement,
+/// with the pushed manifest standing in for the target repo's current
+/// manifest when the target repo is the one being pushed (review repair,
+/// round 3: a pending row the daily job will deterministically flip into
+/// an active attributed edge already belongs in the graph this push is
+/// checked against, otherwise a cycle whose edges arrive as an unresolved
+/// row plus a later declaring push lands permanently with no push ever
+/// rejected). Rows that cannot activate (denied at push time, scope
+/// underivable, target repo missing, target path still undeclared) stay
+/// unattributed — the graph must not fabricate edges that will never
+/// exist.
+///
 /// FAILS CLOSED (review repair, round 2): a `list_all` storage error is
 /// propagated as `Err` — the push is rejected when the durable graph
 /// cannot be read, mirroring the task-264 signing-gate contract
@@ -1819,9 +1839,17 @@ async fn build_tenant_cycle_graph(
                 Some(r) => r.to_string(),
                 // Same-repo link: the target lives in the source repo.
                 None if link.target_display.is_none() => link_repo_key.to_string(),
-                // Unresolved cross-repo link: no attributable target
-                // node — the stored graph has no edge here either.
-                None => continue,
+                // Unresolved cross-repo row (review repair, round 3):
+                // attributed exactly when the staleness pass will activate
+                // it — see `attribute_unresolved_stored_link`.
+                None => {
+                    let Some(attributed) =
+                        attribute_unresolved_stored_link(&link, manifest, repo_scope, ctx).await
+                    else {
+                        continue; // cannot activate — not an edge in the graph
+                    };
+                    attributed
+                }
             };
             graph.add_edge(
                 spec_graph_key(link_repo_key, &link.source_path),
@@ -1869,6 +1897,208 @@ async fn build_tenant_cycle_graph(
     Ok(graph)
 }
 
+/// Attribute an unresolved cross-repo stored row to its target repo for
+/// the combined cycle graph (review repair, round 3): the row is counted
+/// as an edge exactly when the staleness pass
+/// (`resolve_unresolved_cross_workspace_links`) will activate it — the
+/// same source-scope derivation (source repo → workspace → tenant, never
+/// a fabricated scope identity), the same target-display disambiguation,
+/// and the same target-manifest requirement. When the target repo is the
+/// repo being pushed, its "current manifest" is the pushed manifest
+/// itself, so the activation (and therefore the edge) is deterministic
+/// given this push's own content.
+///
+/// Returns the resolved target repo id, or `None` when the row cannot
+/// activate — denied at push time, scope underivable, target repo
+/// missing, or target path not declared in the target repo's current
+/// manifest — in which case it must not contribute an edge.
+async fn attribute_unresolved_stored_link(
+    link: &SpecLinkEntry,
+    manifest: &SpecManifest,
+    repo_scope: &str,
+    ctx: &TenantCycleContext<'_>,
+) -> Option<String> {
+    // Only rows the staleness pass considers for activation: unresolved
+    // status with a composite cross-repo display target.
+    if link.status != "unresolved" {
+        return None;
+    }
+    let display = link.target_display.as_deref()?;
+    if !display.starts_with('@') {
+        return None;
+    }
+    // Access-denied at push time: the denial stands until the source
+    // manifest is pushed again by a principal with read access — the row
+    // never activates, so it is not an edge in the graph.
+    if let Some(kv) = ctx.kv {
+        if link_denial(kv, &link.id).await.is_some() {
+            return None;
+        }
+    }
+    let repos = ctx.repos?;
+    let workspaces = ctx.workspaces?;
+    // Source scope: source repo → workspace (→ tenant). Skip when
+    // underivable — never fabricate a scope identity (the same rule the
+    // staleness pass follows).
+    let source_repo_id = link.source_repo_id.as_deref()?;
+    let source_repo = repos
+        .find_by_id(&gyre_common::Id::new(source_repo_id))
+        .await
+        .ok()??;
+    let source_ws = workspaces
+        .find_by_id(&source_repo.workspace_id)
+        .await
+        .ok()??;
+
+    let parsed = parse_cross_workspace_target(display);
+    let target_repo = match &parsed {
+        CrossWorkspaceTarget::CrossWorkspace {
+            workspace_slug,
+            repo_name,
+            ..
+        } => {
+            // Tenant-scoped workspace lookup under the SOURCE link's
+            // tenant — the same disambiguation the staleness pass uses.
+            match workspaces
+                .find_by_slug(&source_ws.tenant_id, workspace_slug)
+                .await
+            {
+                Ok(Some(target_ws)) => repos
+                    .find_by_name_and_workspace(&target_ws.id, repo_name)
+                    .await
+                    .ok()
+                    .flatten(),
+                // No workspace with that slug in the source tenant: the
+                // ambiguous three-segment form — the first segment is a
+                // repo name in the source link's workspace.
+                Ok(None) => repos
+                    .find_by_name_and_workspace(&source_ws.id, workspace_slug)
+                    .await
+                    .ok()
+                    .flatten(),
+                // Lookup failed — cannot disambiguate; leave unattributed.
+                Err(_) => None,
+            }
+        }
+        CrossWorkspaceTarget::CrossRepo { repo_name, .. } => {
+            // Same-workspace cross-repo: the source link's repo →
+            // workspace gives the scope the repo name resolves within.
+            repos
+                .find_by_name_and_workspace(&source_ws.id, repo_name)
+                .await
+                .ok()
+                .flatten()
+        }
+        CrossWorkspaceTarget::SameRepo { .. } => return None,
+    }?;
+
+    let target_repo_id = target_repo.id.to_string();
+    if target_repo_id == repo_scope {
+        // The pushed manifest IS the target repo's new manifest: the row
+        // activates after this push lands iff the pushed manifest
+        // declares the target path (the same normalization
+        // `target_manifest_declares_path` applies).
+        let declared = manifest.specs.iter().any(|e| {
+            normalize_spec_rel_path(&e.path) == normalize_spec_rel_path(&link.target_path)
+        });
+        if !declared {
+            return None;
+        }
+    } else if !target_manifest_declares_path(&target_repo, &link.target_path).await {
+        // Same manifest-declaration requirement as the staleness pass: a
+        // target path absent from the target repo's current manifest
+        // leaves the row unresolved.
+        return None;
+    }
+    Some(target_repo_id)
+}
+
+/// Would activating the pending link `link` — attributing its target to
+/// `target_repo_id` — create a cycle in the given spec-link graph rows?
+/// Returns `Some(cycle)` with the repo-attributed cycle nodes joined by
+/// ` → ` when it would, `None` when the activation is safe. Used by the
+/// staleness pass's activation gate (task-293 round 3): the durable graph
+/// the push-time cycle gate protects must not acquire a cycle through
+/// unresolved-link activation either.
+pub(crate) fn link_activation_creates_cycle(
+    graph_rows: &[SpecLinkEntry],
+    link: &SpecLinkEntry,
+    target_repo_id: &str,
+) -> Option<String> {
+    let mut adj: std::collections::HashMap<SpecGraphKey, Vec<SpecGraphKey>> =
+        std::collections::HashMap::new();
+    for row in graph_rows {
+        if row.id == link.id {
+            continue; // the candidate itself is not an edge yet
+        }
+        if !participates_in_cycle_detection(&row.link_type) {
+            continue;
+        }
+        let source_repo = row.source_repo_id.as_deref().unwrap_or("");
+        let row_target_repo = match row.target_repo_id.as_deref() {
+            Some(r) => r,
+            // Same-repo link: the target lives in the source repo.
+            None if row.target_display.is_none() => source_repo,
+            // Unresolved cross-repo row: no attributed edge yet.
+            None => continue,
+        };
+        adj.entry(spec_graph_key(source_repo, &row.source_path))
+            .or_default()
+            .push(spec_graph_key(row_target_repo, &row.target_path));
+    }
+    // The activated edge is u → v (u = source node, v = target node); it
+    // closes a cycle exactly when u is reachable from v through the graph.
+    let source_repo = link.source_repo_id.as_deref().unwrap_or("");
+    let u = spec_graph_key(source_repo, &link.source_path);
+    let v = spec_graph_key(target_repo_id, &link.target_path);
+    let chain = bfs_path(&adj, &v, &u)?;
+    let mut named: Vec<String> = vec![display_spec_graph_key(&u)];
+    named.extend(chain.iter().map(|k| display_spec_graph_key(k)));
+    Some(named.join(" → "))
+}
+
+/// BFS shortest path from `start` to `goal` through `adj`; returns the
+/// node chain start → … → goal (inclusive, in walk order) when reachable.
+/// Shared by the push-time cycle check and the staleness activation gate.
+fn bfs_path<'a>(
+    adj: &'a std::collections::HashMap<SpecGraphKey, Vec<SpecGraphKey>>,
+    start: &'a SpecGraphKey,
+    goal: &'a SpecGraphKey,
+) -> Option<Vec<&'a SpecGraphKey>> {
+    use std::collections::{HashMap, HashSet, VecDeque};
+    let mut visited: HashSet<&SpecGraphKey> = HashSet::new();
+    let mut parent: HashMap<&SpecGraphKey, &SpecGraphKey> = HashMap::new();
+    let mut queue: VecDeque<&SpecGraphKey> = VecDeque::new();
+    queue.push_back(start);
+    visited.insert(start);
+    while let Some(node) = queue.pop_front() {
+        if node == goal {
+            // Reconstruct the chain: walk the parent links from the goal
+            // back to the BFS root, then reverse.
+            let mut chain: Vec<&SpecGraphKey> = Vec::new();
+            let mut cur = node;
+            loop {
+                chain.push(cur);
+                match parent.get(cur) {
+                    Some(&p) => cur = p,
+                    None => break,
+                }
+            }
+            chain.reverse();
+            return Some(chain);
+        }
+        if let Some(targets) = adj.get(node) {
+            for next in targets {
+                if visited.insert(next) {
+                    parent.insert(next, node);
+                    queue.push_back(next);
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Detect cycles the PUSHED MANIFEST would create in the (repo, path)-keyed
 /// spec link graph (review repair, round 2: only cycles in which at least
 /// one edge contributed by the pushed manifest participates are reported —
@@ -1881,42 +2111,13 @@ async fn build_tenant_cycle_graph(
 /// edges by [`participates_in_cycle_detection`]). The error message names
 /// the cycle with repo-attributed nodes joined by ` → `.
 fn detect_graph_cycles(graph: &SpecCycleGraph) -> Result<(), String> {
-    use std::collections::{HashMap, HashSet, VecDeque};
-
     for (u, v) in &graph.pushed {
         // BFS from v back to u: if u is reachable, the pushed edge u → v
         // closes a cycle u → v → … → u.
-        let mut visited: HashSet<&SpecGraphKey> = HashSet::new();
-        let mut parent: HashMap<&SpecGraphKey, &SpecGraphKey> = HashMap::new();
-        let mut queue: VecDeque<&SpecGraphKey> = VecDeque::new();
-        queue.push_back(v);
-        visited.insert(v);
-        while let Some(node) = queue.pop_front() {
-            if node == u {
-                // Reconstruct the cycle: walk the parent chain from u back
-                // to the BFS root v, reverse it, and prepend u.
-                let mut chain: Vec<&SpecGraphKey> = Vec::new();
-                let mut cur = node;
-                loop {
-                    chain.push(cur);
-                    match parent.get(cur) {
-                        Some(&p) => cur = p,
-                        None => break,
-                    }
-                }
-                chain.reverse(); // v → … → u
-                let mut named: Vec<String> = vec![display_spec_graph_key(u)];
-                named.extend(chain.iter().map(|k| display_spec_graph_key(k)));
-                return Err(format!("spec link cycle detected: {}", named.join(" → ")));
-            }
-            if let Some(targets) = graph.adj.get(node) {
-                for next in targets {
-                    if visited.insert(next) {
-                        parent.insert(next, node);
-                        queue.push_back(next);
-                    }
-                }
-            }
+        if let Some(chain) = bfs_path(&graph.adj, v, u) {
+            let mut named: Vec<String> = vec![display_spec_graph_key(u)];
+            named.extend(chain.iter().map(|k| display_spec_graph_key(k)));
+            return Err(format!("spec link cycle detected: {}", named.join(" → ")));
         }
     }
 
@@ -5083,6 +5284,7 @@ specs:
             tenant_id: Some(&tenant),
             memberships: None,
             principal: None,
+            kv: None,
         };
         check_spec_link_cycles(dir_a.path().to_str().unwrap(), &sha_a, Some(&ctx_a))
             .await
@@ -5137,6 +5339,7 @@ specs:
             tenant_id: Some(&tenant),
             memberships: None,
             principal: None,
+            kv: None,
         };
         let err = check_spec_link_cycles(dir_b.path().to_str().unwrap(), &sha_b2, Some(&ctx_b))
             .await
@@ -5207,6 +5410,7 @@ specs:
             tenant_id: Some(&tenant),
             memberships: None,
             principal: None,
+            kv: None,
         };
         check_spec_link_cycles(dir_b.path().to_str().unwrap(), &sha_b2, Some(&ctx_b))
             .await
@@ -5270,6 +5474,7 @@ specs:
             tenant_id: Some(&tenant),
             memberships: None,
             principal: None,
+            kv: None,
         };
         check_spec_link_cycles(dir_b.path().to_str().unwrap(), &sha_b2, Some(&ctx_b))
             .await
@@ -5309,6 +5514,7 @@ specs:
             tenant_id: Some(&tenant),
             memberships: None,
             principal: None,
+            kv: None,
         };
         let err = check_spec_link_cycles(dir_b.path().to_str().unwrap(), &sha_b1, Some(&ctx))
             .await
@@ -5390,6 +5596,7 @@ specs:
             tenant_id: Some(&tenant),
             memberships: None,
             principal: None,
+            kv: None,
         };
         check_spec_link_cycles(dir_a.path().to_str().unwrap(), &sha_a2, Some(&ctx_a))
             .await
@@ -5482,10 +5689,142 @@ specs:
             tenant_id: Some(&tenant),
             memberships: None,
             principal: None,
+            kv: None,
         };
         check_spec_link_cycles(dir_a.path().to_str().unwrap(), &sha_a, Some(&ctx_a))
             .await
             .expect("an unresolved stored cross-repo row must not fabricate a cycle");
+    }
+
+    /// Review repair (round 3), deferred cross-repo cycle bypass: a push
+    /// whose cross-repo edge is stored UNRESOLVED (the target repo does
+    /// not declare the target path yet — the documented purpose of
+    /// unresolved links) is activated later by the staleness pass once the
+    /// target repo's manifest declares the path. The pending row's edge
+    /// therefore belongs in the combined cycle graph exactly when that
+    /// activation is deterministic — otherwise the A→B→A cycle arrives as
+    /// push 1 (unresolved B→A) + push 2 (A→B) + staleness activation, and
+    /// lands permanently in the forge graph with no push ever rejected.
+    /// Against the round-2 candidate this fails: the pending B→A row was
+    /// dropped from the graph, so the step-2 check returned Ok.
+    #[tokio::test]
+    async fn tenant_cycle_deferred_unresolved_back_edge_rejected() {
+        use crate::mem::{MemSpecLedgerRepository, MemSpecLinkRepository};
+
+        // Step 1 fixture: repo B declares system/b.md and links it to
+        // @A/system/a.md; repo A does NOT declare system/a.md yet, so the
+        // edge can only be stored unresolved (target_repo_id NULL).
+        let (dir_b, sha_b1) = make_test_repo(&[
+            (
+                "specs/manifest.yaml",
+                "version: 1\nspecs:\n  - path: system/b.md\n    title: B\n    owner: user:test\n    links:\n      - type: depends_on\n        target: \"@A/system/a.md\"\n",
+            ),
+            ("specs/system/b.md", "# B\n"),
+        ])
+        .await;
+        let (dir_a, _sha_a1) = make_test_repo(&[
+            (
+                "specs/manifest.yaml",
+                "version: 1\nspecs:\n  - path: system/other.md\n    title: Other\n    owner: user:test\n",
+            ),
+            ("specs/system/other.md", "# Other\n"),
+        ])
+        .await;
+
+        let (ws_ctx, repos_ctx, tenant) = two_repo_workspace(&dir_a, &dir_b).await;
+        let link_repo: Arc<dyn gyre_ports::SpecLinkRepository> =
+            Arc::new(MemSpecLinkRepository::default());
+
+        // Step 1 (push to repo B): the pushed edge is unresolved (repo A
+        // does not declare system/a.md), so the push is accepted — the
+        // documented purpose of unresolved links.
+        let ctx_b = TenantCycleContext {
+            link_repo: Some(&link_repo),
+            source_repo_id: Some("repo-b"),
+            source_workspace_id: Some("ws-1"),
+            workspaces: Some(&ws_ctx),
+            repos: Some(&repos_ctx),
+            tenant_id: Some(&tenant),
+            memberships: None,
+            principal: None,
+            kv: None,
+        };
+        check_spec_link_cycles(dir_b.path().to_str().unwrap(), &sha_b1, Some(&ctx_b))
+            .await
+            .expect("push 1 (unresolved B depends_on @A/a) must be accepted");
+
+        // The accepted push lands: the sync stores B's edge UNRESOLVED —
+        // the exact deferred state the staleness pass later activates.
+        let ledger: Arc<dyn gyre_ports::SpecLedgerRepository> =
+            Arc::new(MemSpecLedgerRepository::default());
+        let links_store: SpecLinksStore = Arc::new(Mutex::new(Vec::new()));
+        sync_spec_ledger(
+            &ledger,
+            &links_store,
+            &link_repo,
+            dir_b.path().to_str().unwrap(),
+            &sha_b1,
+            1_700_000_000,
+            Some("repo-b"),
+            Some("ws-1"),
+            Some(&ws_ctx),
+            Some(&repos_ctx),
+            Some(&tenant),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+        let stored = link_repo.list_all().await.unwrap();
+        assert_eq!(stored.len(), 1, "push 1 must store exactly one link");
+        assert_eq!(
+            stored[0].status, "unresolved",
+            "the deferred state must be reproduced: {:?}",
+            stored[0]
+        );
+        assert_eq!(stored[0].target_repo_id, None);
+        assert_eq!(stored[0].target_display.as_deref(), Some("@A/system/a.md"));
+
+        // Step 2 (push to repo A): the manifest now declares system/a.md
+        // and links it to @B/system/b.md. The pending B→A row activates
+        // deterministically given this push's own content (target repo =
+        // the pushed repo, path declared by the pushed manifest), so its
+        // edge is in the combined graph — the push must be rejected with
+        // the cycle named. Against the round-2 candidate this returns Ok
+        // and the staleness pass then lands the A→B→A cycle permanently.
+        let sha_a2 = add_commit(
+            &dir_a,
+            &[(
+                "specs/manifest.yaml",
+                "version: 1\nspecs:\n  - path: system/a.md\n    title: A\n    owner: user:test\n    links:\n      - type: depends_on\n        target: \"@B/system/b.md\"\n",
+            )],
+        );
+        let ctx_a = TenantCycleContext {
+            link_repo: Some(&link_repo),
+            source_repo_id: Some("repo-a"),
+            source_workspace_id: Some("ws-1"),
+            workspaces: Some(&ws_ctx),
+            repos: Some(&repos_ctx),
+            tenant_id: Some(&tenant),
+            memberships: None,
+            principal: None,
+            kv: None,
+        };
+        let err = check_spec_link_cycles(dir_a.path().to_str().unwrap(), &sha_a2, Some(&ctx_a))
+            .await
+            .expect_err(
+                "the step-2 push must be rejected: the pending B→A row activates deterministically \
+                 given this push, closing the A→B→A cycle",
+            );
+        assert!(
+            err.contains("spec link cycle detected"),
+            "rejection must name the cycle: {err}"
+        );
+        assert!(
+            err.contains("repo-a:system/a.md") && err.contains("repo-b:system/b.md"),
+            "cycle message must name both cross-repo nodes with repo attribution: {err}"
+        );
     }
 
     /// Test-only SpecLinkRepository whose `list_all` fails, modeling the
@@ -5561,6 +5900,7 @@ specs:
             tenant_id: Some(&tenant),
             memberships: None,
             principal: None,
+            kv: None,
         };
         let err = check_spec_link_cycles(dir_b.path().to_str().unwrap(), &sha_b2, Some(&ctx_b))
             .await
@@ -5671,6 +6011,7 @@ specs:
             tenant_id: Some(&tenant),
             memberships: None,
             principal: None,
+            kv: None,
         };
         check_spec_link_cycles(dir_c.path().to_str().unwrap(), &sha_c1, Some(&ctx_c))
             .await
@@ -5696,6 +6037,7 @@ specs:
             tenant_id: Some(&tenant),
             memberships: None,
             principal: None,
+            kv: None,
         };
         let err = check_spec_link_cycles(dir_a.path().to_str().unwrap(), &sha_a2, Some(&ctx_a))
             .await
