@@ -377,16 +377,43 @@ pub struct HeartbeatBody {
     pub stack_fingerprint: String,
 }
 
-pub async fn agent_heartbeat(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-    body: axum::body::Bytes,
-) -> Result<StatusCode, ApiError> {
+/// Why a liveness heartbeat was refused. Shared by every heartbeat
+/// surface (REST `PUT /agents/{id}/heartbeat` and the agent WebSocket
+/// transport's `Heartbeat` message) so the domain liveness path — and
+/// its failure semantics — is one code path, not one per transport.
+#[derive(Debug)]
+pub(crate) enum HeartbeatFailure {
+    NotFound(String),
+    /// Workload-identity verification failed (identity-security.md
+    /// Layer 1) — the agent's liveness is NOT advanced.
+    Verification(String),
+    /// The agent store rejected the read/update.
+    Storage(String),
+}
+
+/// Record one agent liveness heartbeat through the shared domain path:
+/// fail-closed SVID workload verification, `Agent::heartbeat`,
+/// persistence, WireGuard peer `last_seen`, and the agent-heartbeat
+/// audit trail. This is the single liveness entry point behind
+/// `PUT /api/v1/agents/{id}/heartbeat` and the agent WebSocket channel
+/// (architecture.md §API: "WebSocket as the primary transport for
+/// agent ↔ server communication") — stale-agent detection behaves
+/// identically whichever channel delivered the heartbeat.
+///
+/// `agent_id` MUST be the verified connection/caller identity, never a
+/// client-supplied value (forged-scope invariant).
+pub(crate) async fn record_agent_heartbeat(
+    state: &Arc<AppState>,
+    agent_id: &str,
+    svid: &str,
+    stack_fingerprint: &str,
+) -> Result<(), HeartbeatFailure> {
     let mut agent = state
         .agents
-        .find_by_id(&Id::new(&id))
-        .await?
-        .ok_or_else(|| ApiError::NotFound(format!("agent {id} not found")))?;
+        .find_by_id(&Id::new(agent_id))
+        .await
+        .map_err(|e| HeartbeatFailure::Storage(e.to_string()))?
+        .ok_or_else(|| HeartbeatFailure::NotFound(format!("agent {agent_id} not found")))?;
 
     // Layer 1 workload-identity verification (identity-security.md): the
     // heartbeat carries the session's SVID, verified fail-closed against
@@ -395,32 +422,28 @@ pub async fn agent_heartbeat(
     // an invalid SVID, or a tampered/empty stack fingerprint is rejected:
     // there is no bypass path for unattested workloads on this surface.
     // (Liveness of the agent record itself is still recorded on success.)
-    let hb: HeartbeatBody = if body.is_empty() {
-        HeartbeatBody::default()
-    } else {
-        serde_json::from_slice(&body)
-            .map_err(|e| ApiError::BadRequest(format!("heartbeat body: {e}")))?
-    };
     let verification =
-        crate::spiffe::attest_session(&state, &id, &hb.svid, &hb.stack_fingerprint).await;
+        crate::spiffe::attest_session(state, agent_id, svid, stack_fingerprint).await;
     if let Err(reason) = &verification {
         tracing::warn!(
-            agent_id = %id,
+            agent_id = %agent_id,
             reason = %reason,
             "heartbeat rejected: workload-identity verification failed"
         );
         // Rejected heartbeats are audited (Failure) — the workload identity
         // did not verify; the agent record's liveness is NOT advanced.
-        let (audited_pid, _) = attestation_pid_and_status(&state, &id).await;
-        crate::agent_audit::emit_heartbeat_rejected(&state, &agent, audited_pid, reason).await;
-        return Err(ApiError::Forbidden(format!(
-            "workload-identity verification failed: {reason}"
-        )));
+        let (audited_pid, _) = attestation_pid_and_status(state, agent_id).await;
+        crate::agent_audit::emit_heartbeat_rejected(state, &agent, audited_pid, reason).await;
+        return Err(HeartbeatFailure::Verification(reason.clone()));
     }
 
     let now = now_secs();
     agent.heartbeat(now);
-    state.agents.update(&agent).await?;
+    state
+        .agents
+        .update(&agent)
+        .await
+        .map_err(|e| HeartbeatFailure::Storage(e.to_string()))?;
 
     // M26.4: Update WireGuard peer last_seen on each agent heartbeat.
     if let Ok(Some(peer)) = state.network_peers.find_by_agent(&agent.id).await {
@@ -430,10 +453,36 @@ pub async fn agent_heartbeat(
     // Agent lifecycle audit event (observability.md §Audit Event Types).
     // pid is the attestation record's metadata (null when none was
     // recorded); pid_alive carries the SVID verification result.
-    let (audited_pid, audited_pid_alive) = attestation_pid_and_status(&state, &id).await;
-    crate::agent_audit::emit_heartbeat(&state, &agent, audited_pid, audited_pid_alive).await;
+    let (audited_pid, audited_pid_alive) = attestation_pid_and_status(state, agent_id).await;
+    crate::agent_audit::emit_heartbeat(state, &agent, audited_pid, audited_pid_alive).await;
 
-    Ok(StatusCode::NO_CONTENT)
+    Ok(())
+}
+
+pub async fn agent_heartbeat(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    body: axum::body::Bytes,
+) -> Result<StatusCode, ApiError> {
+    let hb: HeartbeatBody = if body.is_empty() {
+        HeartbeatBody::default()
+    } else {
+        serde_json::from_slice(&body)
+            .map_err(|e| ApiError::BadRequest(format!("heartbeat body: {e}")))?
+    };
+
+    // The REST path addresses the agent by URL; route scoping for agent
+    // principals is the middleware's job (same as every /agents/{id}
+    // route). The shared liveness path below records the heartbeat or
+    // refuses it with the same semantics as every other channel.
+    match record_agent_heartbeat(&state, &id, &hb.svid, &hb.stack_fingerprint).await {
+        Ok(()) => Ok(StatusCode::NO_CONTENT),
+        Err(HeartbeatFailure::NotFound(m)) => Err(ApiError::NotFound(m)),
+        Err(HeartbeatFailure::Verification(reason)) => Err(ApiError::Forbidden(format!(
+            "workload-identity verification failed: {reason}"
+        ))),
+        Err(HeartbeatFailure::Storage(e)) => Err(ApiError::Internal(anyhow::anyhow!(e))),
+    }
 }
 
 /// Read the attestation record's PID (metadata) and the verification
