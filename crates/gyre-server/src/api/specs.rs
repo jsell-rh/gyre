@@ -968,6 +968,14 @@ pub async fn approve_spec(
         }
     }
 
+    // task-288 (spec-links.md §Link Status): an approval change can create
+    // or dissolve a both-approved conflicts_with pair — reconcile the
+    // stored `conflicted` status for every link touching this spec (set on
+    // both-approved, revert to the active/stale/broken rules when the
+    // condition has ceased) so the stored graph agrees with the endpoint
+    // without waiting for the daily pass.
+    crate::spec_link_staleness::refresh_conflicts_for_spec(&state, &spec_path).await;
+
     // TASK-016: Supersedes side-effect — mark target specs as Deprecated when
     // the superseding spec is approved (spec-links.md §Approval Gates).
     {
@@ -988,6 +996,15 @@ pub async fn approve_spec(
                     target_entry.approval_status = ApprovalStatus::Deprecated;
                     target_entry.updated_at = now;
                     let _ = state.spec_ledger.save(&target_entry).await;
+
+                    // task-288: the target losing Approved status can cease
+                    // a both-approved conflicts_with pair involving it —
+                    // reconcile the stored conflicted status for its links.
+                    crate::spec_link_staleness::refresh_conflicts_for_spec(
+                        &state,
+                        &link.target_path,
+                    )
+                    .await;
 
                     // Emit deprecation event on the message bus. Skipped (and
                     // logged) when the target entry has no workspace scope —
@@ -1319,6 +1336,12 @@ pub async fn revoke_spec_approval(
             let _ = state.spec_ledger.save(&entry).await;
         }
     }
+
+    // task-288 (spec-links.md §Link Status): the revoked approval can cease
+    // a both-approved conflicts_with pair — reconcile the stored
+    // `conflicted` status for every link touching this spec so
+    // GET /api/v1/specs/conflicts stops listing the resolved conflict.
+    crate::spec_link_staleness::refresh_conflicts_for_spec(&state, &spec_path).await;
 
     Ok(Json(serde_json::json!({
         "spec_path": spec_path,
@@ -1890,28 +1913,29 @@ pub async fn get_conflicts(State(state): State<Arc<AppState>>) -> Json<Vec<SpecL
             .collect()
     };
 
-    // An "active conflict" is a conflicts_with link where both specs are approved.
-    // spec-links.md §Link Status: conflicted = both specs approved (violation).
-    let mut result: Vec<SpecLinkResponse> = Vec::new();
-    for link in candidate_links {
-        let source_approved = state
-            .spec_ledger
-            .find_by_path(&link.source_path)
-            .await
-            .ok()
-            .flatten()
-            .map_or(false, |e| e.approval_status == ApprovalStatus::Approved);
-        let target_approved = state
-            .spec_ledger
-            .find_by_path(&link.target_path)
-            .await
-            .ok()
-            .flatten()
-            .map_or(false, |e| e.approval_status == ApprovalStatus::Approved);
-        if source_approved && target_approved {
-            result.push(link.into());
-        }
-    }
+    // task-288 (spec-links.md §Link Status): the endpoint returns exactly
+    // the links currently in the conflicted state, and its computed notion
+    // must agree with the stored graph — no drift. Reconcile every
+    // conflicts_with link's stored status against current conditions
+    // (both endpoints Approved → "conflicted"; condition ceased → revert
+    // to the active/stale/broken rules) before reading the stored state,
+    // so the response and the graph can never disagree.
+    let now = now_secs();
+    let reconciled = crate::spec_registry::reconcile_conflict_statuses(
+        &state.spec_ledger,
+        Some(&state.repos),
+        &state.spec_links_store,
+        &state.spec_link_repo,
+        candidate_links,
+        now,
+    )
+    .await;
+
+    let mut result: Vec<SpecLinkResponse> = reconciled
+        .into_iter()
+        .filter(|l| l.status == "conflicted")
+        .map(Into::into)
+        .collect();
     result.sort_by(|a, b| a.id.cmp(&b.id));
     Json(result)
 }
@@ -7108,6 +7132,174 @@ specs:
         let arr = json.as_array().unwrap();
         // The link should be excluded because beta is Pending, not Approved.
         assert_eq!(arr.len(), 0);
+    }
+
+    /// task-288 (spec-links.md §Link Status): the stored graph and the
+    /// conflicts endpoint must agree, with reversion. Approving the second
+    /// endpoint of a conflicts_with pair marks the stored link "conflicted"
+    /// (visible via GET /specs/{path}/links, listed by GET /specs/conflicts);
+    /// revoking that approval delists the link and reverts its stored status
+    /// to the active/stale/broken rules — a resolved conflict is not
+    /// misreported as active forever.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn conflicted_status_set_on_approval_and_reverted_on_revoke() {
+        use crate::spec_registry::{SpecLinkEntry, SpecLinkType};
+
+        let state = test_state();
+
+        // a.md already Approved, b.md Pending. The conflicts_with link runs
+        // FROM a.md TO b.md, so approving b.md passes the approval-time
+        // gate (the gate only inspects the approved spec's OWN outbound
+        // links) — creating the both-approved violation.
+        let mut b_entry = make_ledger_entry("system/b.md", ApprovalStatus::Pending);
+        b_entry.current_sha = "b".repeat(40);
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                state
+                    .spec_ledger
+                    .save(&make_ledger_entry("system/a.md", ApprovalStatus::Approved))
+                    .await
+                    .unwrap();
+                state.spec_ledger.save(&b_entry).await.unwrap();
+
+                state.spec_links_store.lock().await.push(SpecLinkEntry {
+                    id: "link-cw".to_string(),
+                    source_path: "system/a.md".to_string(),
+                    source_repo_id: Some("repo1".to_string()),
+                    source_sha: "src-sha".to_string(),
+                    link_type: SpecLinkType::ConflictsWith,
+                    target_path: "system/b.md".to_string(),
+                    target_repo_id: None,
+                    target_display: None,
+                    target_sha: None,
+                    reason: Some("overlapping requirements".to_string()),
+                    status: "active".to_string(),
+                    created_at: 1700000000,
+                    stale_since: None,
+                });
+            })
+        });
+
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // Approve b.md — the pair becomes both-approved.
+        let body = serde_json::json!({ "sha": "b".repeat(40) });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/specs/system%2Fb.md/approve")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        // The stored link status is "conflicted" (approval-time hook, not
+        // just the on-the-fly endpoint computation).
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/specs/system%2Fa.md/links")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let arr = json.as_array().unwrap();
+        let link = arr
+            .iter()
+            .find(|l| l["id"] == "link-cw")
+            .expect("link must be listed for its source spec");
+        assert_eq!(
+            link["status"], "conflicted",
+            "a both-approved conflicts_with link must hold stored status conflicted"
+        );
+
+        // GET /specs/conflicts lists exactly the conflicted links.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/specs/conflicts")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let arr = json.as_array().unwrap();
+        assert_eq!(
+            arr.len(),
+            1,
+            "conflicts must list exactly the conflicted link"
+        );
+        assert_eq!(arr[0]["id"], "link-cw");
+        assert_eq!(arr[0]["status"], "conflicted");
+
+        // Revoke b.md's approval — the both-approved condition ceases.
+        let revoke_body = serde_json::json!({ "reason": "conflict resolved" });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/specs/system%2Fb.md/revoke")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&revoke_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // The link is delisted and its stored status reverted (active per
+        // the SHA rules: target present, unpinned).
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/specs/conflicts")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let arr = json.as_array().unwrap();
+        assert_eq!(arr.len(), 0, "a ceased conflict must be delisted");
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/specs/system%2Fa.md/links")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let arr = json.as_array().unwrap();
+        let link = arr.iter().find(|l| l["id"] == "link-cw").unwrap();
+        assert_eq!(
+            link["status"], "active",
+            "the stored status must revert to the active/stale/broken rules"
+        );
     }
 
     // -----------------------------------------------------------------------
