@@ -2,7 +2,7 @@
 title: "Implement tenant-scope meta-spec changes"
 spec_ref: "meta-spec-reconciliation.md §8"
 depends_on: [task-156]
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "meta-spec-reconciliation.md §8 Tenant-Scope Meta-Spec Changes"
 commits: ["17fc6bf7a3a3a5a3775340e392c420e2c3fe4fcd", "b7eaa775ceb61c3da7b9802e1b1c17a627b74ace", "5ef42f5c3cef7360a801154841399d98b49b5fc7", "381962ab9cedd8ed2c574adf2d7a09e7878310e8", "3c22bfa874c70968192207603815adbddec5f6df"]
