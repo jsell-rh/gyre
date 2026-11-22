@@ -300,11 +300,7 @@ impl ResourceResolver {
                 ),
                 RouteResourceMapping::api("/api/v1/repos/:id/dependents", "dependency", None),
                 RouteResourceMapping::api("/api/v1/repos/:id/blast-radius", "repo", None),
-                RouteResourceMapping::api(
-                    "/api/v1/repos/:id/cascade-test-results",
-                    "repo",
-                    None,
-                ),
+                RouteResourceMapping::api("/api/v1/repos/:id/cascade-test-results", "repo", None),
                 RouteResourceMapping::api(
                     "/api/v1/repos/:id/cascade-tests/trigger",
                     "repo",

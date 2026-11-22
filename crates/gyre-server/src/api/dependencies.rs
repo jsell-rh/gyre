@@ -255,7 +255,7 @@ pub struct BlastRadiusDependent {
 /// `report_cascade_test_result` (task-280) — per-dependent outcome, merged
 /// repo, merge SHA, and timestamp, served from the durable store rather
 /// than one-shot workspace events.
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 pub struct CascadeTestResultResponse {
     pub id: String,
     /// The dependent repo whose test suite ran against the new version.
@@ -624,7 +624,7 @@ pub struct TriggerCascadeTestsRequest {
     pub merge_commit_sha: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 pub struct TriggerCascadeTestsResponse {
     pub repo_id: String,
     /// Cascade-test tasks created (one per dependent whose workspace allows
@@ -717,18 +717,17 @@ pub async fn trigger_cascade_tests(
         .filter(|sha| !sha.is_empty())
     {
         Some(sha) => sha,
-        None => crate::git_refs::resolve_ref(
-            &repo.path,
-            &format!("refs/heads/{}", repo.default_branch),
-        )
-        .await
-        .ok_or_else(|| {
-            ApiError::InvalidInput(format!(
-                "cannot resolve HEAD of the default branch '{}' for repo {id} — pass an \
+        None => {
+            crate::git_refs::resolve_ref(&repo.path, &format!("refs/heads/{}", repo.default_branch))
+                .await
+                .ok_or_else(|| {
+                    ApiError::InvalidInput(format!(
+                        "cannot resolve HEAD of the default branch '{}' for repo {id} — pass an \
                  explicit merge_commit_sha or push at least one commit",
-                repo.default_branch
-            ))
-        })?,
+                        repo.default_branch
+                    ))
+                })?
+        }
     };
 
     let outcome = crate::merge_processor::trigger_cascade_tests(
@@ -3212,7 +3211,10 @@ import "google/protobuf/empty.proto";
         let r = &resp.cascade_test_results[0];
         assert_eq!(r.dependent_repo_id, a.as_str());
         assert_eq!(r.merged_repo_id, b.as_str());
-        assert_eq!(r.merge_commit_sha, "ct-br-1-sha-0123456789abcdef0123456789abcdef");
+        assert_eq!(
+            r.merge_commit_sha,
+            "ct-br-1-sha-0123456789abcdef0123456789abcdef"
+        );
         assert!(r.passed);
         assert_eq!(r.recorded_at, 5000);
     }
@@ -3313,10 +3315,9 @@ import "google/protobuf/empty.proto";
         record_cascade_result(&state, &a, &b, "ct-endpoint-1", true, 5000).await;
         record_cascade_result(&state, &a, &b, "ct-endpoint-2", false, 6000).await;
 
-        let Json(results) =
-            list_cascade_test_results(State(state.clone()), Path(b.to_string()))
-                .await
-                .expect("cascade results handler");
+        let Json(results) = list_cascade_test_results(State(state.clone()), Path(b.to_string()))
+            .await
+            .expect("cascade results handler");
 
         assert_eq!(results.len(), 2);
         // Newest first.
