@@ -3,7 +3,7 @@ title: "Gate all implementation work on approved specs"
 spec_ref: "Spec gap spec-41a92c20354c6a108e6074e3 / approval-single-trigger / 4a3f940495a8"
 depends_on: []
 progress: ready-for-review
-commits: ["6c7ce4091376fc85d674281dc7559842a3bed04e", "569ea13821554e618ee7446aecd69c72a35a8ce7", "d5662b9e702f3691db12a406b3d9e8b5c4363e6f"]
+commits: ["d5662b9e702f3691db12a406b3d9e8b5c4363e6f", "569ea13821554e618ee7446aecd69c72a35a8ce7", "6c7ce4091376fc85d674281dc7559842a3bed04e", "52397d1622d72bfe9f63fe42ca85484a124c1ae5", "57485c70ffd5ce8d013fdcbda216d157372ec1e6"]
 ---
 
 ## Required behavior
@@ -64,114 +64,75 @@ Canonical spec: `specs/system/agent-runtime.md`. Source: `678a8ac3e3bfeafeb66cdb
 
 ## Shipped
 
-Commits `d5662b9e` (pipeline checkpoint: the three gates, the shared
-verifier, the scheduler tests) and `569ea138` (gate-hardening repair
-and test-fixture migration) implement agent-runtime.md §1's
-single-trigger property at the task layer; `6c7ce409` repairs the one
-retained verification finding (clippy::question_mark at gates.rs:875)
-without behavior change. The approval side (ledger row, SpecApproved
-emission, modified-spec invalidation to Pending) is untouched.
+agent-runtime.md §1's single-trigger property is enforced at the task
+layer by three gates (commits `d5662b9e` + `569ea138`, clippy repair
+`6c7ce409`); this round repaired the one retained verification failure
+(`52397d16`) and reconciled the branch with main (merge `57485c70`,
+coverage-row conflict resolved by keeping both the task-297 row-7 gate
+note and the incoming task-299 row-8 note).
 
 ### Behavior
 
 - **Shared verifier** — `verify_implementation_spec_ref`
   (crates/gyre-server/src/api/gates.rs) resolves a `path@sha` against
-  BOTH the durable per-SHA approval row (`verify_spec_ref`, the same
-  ledger query the merge gates use) and the registry entry for the path
-  (must still be `Approved` with `current_sha` exactly the pinned SHA,
-  so an approval invalidated by a later push fails even if a row
-  revocation was ever missed). Fail-closed on both.
-- **Task-creation gate** — the REST handler (api/tasks.rs
-  `create_task`) and the MCP `gyre_create_task` handler (mcp.rs) reject
-  `task_type: implementation` unless the gate passes: 400
-  `InvalidInput` naming the single-trigger requirement (HTTP) /
-  `SPEC_APPROVAL_REQUIRED` tool error (MCP), no task row written.
-  Delegation/Coordination and untyped tasks are unaffected. MCP
-  `gyre_decompose_spec` sub-tasks now pin the parent's spec_path +
-  spec_ref so the legitimate chain passes the gate.
+  BOTH the durable per-SHA approval row (`verify_spec_ref`, the ledger
+  query the merge gates use) and the registry entry (must still be
+  Approved with `current_sha` exactly the pinned SHA, so an approval
+  invalidated by a later push fails). Fail-closed on both.
+- **Task-creation gate** — REST `create_task` (api/tasks.rs) and MCP
+  `gyre_create_task` (mcp.rs) reject `task_type: implementation` unless
+  the gate passes: 400 InvalidInput naming the single-trigger
+  requirement (HTTP) / `SPEC_APPROVAL_REQUIRED` tool error (MCP), no
+  task row written. Delegation/Coordination and untyped tasks are
+  unaffected; MCP `gyre_decompose_spec` sub-tasks pin the parent's
+  spec_ref so the legitimate chain passes.
 - **Scheduler gate (defense in depth)** — the Phase-4 scan
   (signal_chain.rs `spawn_implementation_workers`) re-verifies the
   spec_ref before claiming; on failure the task stays Backlog with the
   observable `spec-approval-missing` label and a logged reason — no
-  agent record, no InProgress transition. The label is cleared on a
-  later successful spawn (e.g. after re-approval), alongside the
-  existing `budget-exhausted` flag.
-- **Direct-spawn gate** — POST /api/v1/agents/spawn rejects
-  (403, naming the requirement) any request that would create a worker
-  bound to an Implementation task from a non-scheduler caller
-  (human/agent principals; the genuine system principal and
-  `agent_type: interrogation` Phase-8 spawns are exempt). The
-  in-process scheduler spawns through `spawn_agent_core` directly and
-  is unaffected.
+  agent record, no InProgress transition.
+- **Direct-spawn gate** — POST /api/v1/agents/spawn rejects (403) any
+  request that would create a worker bound to an Implementation task
+  from a non-scheduler caller; system-principal and
+  `agent_type: interrogation` spawns are exempt.
+- The approval side (ledger row, SpecApproved emission, modified-spec
+  invalidation to Pending) is untouched.
 
-### Verification-repair commit `6c7ce409`
+### Verification repair `52397d16`
 
-The retained verification run (checks.sh, exit 1) flagged exactly one
-finding: `clippy::question_mark` at gates.rs:875 on
-`verify_implementation_spec_ref`'s first ledger check. Rewriting that
-branch as a bare `verify_spec_ref(...)?;` statement would trade the
-lint for a `check-inert-enforcement.sh` failure (statement-position
-`verify_*` call), so the result is now bound and its reason re-wrapped
-with the spec_ref context (`"spec approval ledger check for
-'<spec_ref>' failed: {reason}"`) — same fail-closed rejection, same
-caller-visible messages (the REST/MCP/scheduler wrappers already name
-the single-trigger requirement; no test asserts the inner reason
-text). Probes: `cargo clippy -p gyre-server --lib` → api/gates.rs
-emits zero warnings (the lib's remaining 112 are pre-existing in
-untouched files); `rustfmt --check` and
-`check-inert-enforcement.sh` (repo-wide) both pass.
+The retained full-suite run (`cargo test --all` on candidate
+`d6f85599`, exit 101) failed exactly one test:
+`api::search::tests::search_emits_analytics_event` (400 vs 201 at
+search.rs:342). Root cause — fixture drift, not a gate defect: the
+task-297 fixture migration seeded a 40-hex-char approval SHA but typed
+one extra `efabcd` repetition into the request body's `spec_ref`
+literal (46 chars); `verify_spec_ref` correctly rejects a non-40-char
+SHA, so the gate returned 400. Fix: the body's `spec_ref` is now
+derived from the same `FIXTURE_SPEC_PATH`/`FIXTURE_SPEC_SHA` constants
+the seed writes (the spawn.rs fixture idiom), so the pair cannot drift.
+A repo-wide scan of every `seed_approved_spec` pair against every
+`path@sha` literal in the same file found no other mismatch
+(/tmp/stage/review-evidence/search-test-400-rootcause.txt). No
+production behavior changed.
 
 ### Test evidence
 
-Tests live with the implementation commits (type-checked in-sandbox;
-server test execution is deferred to the independent verifier per the
-build-budget constraint — commands recorded in
-/tmp/stage/review-evidence):
-
-- `tasks_create_implementation_requires_approved_spec`
-  (tests/api_integration.rs) — AC 1 over the real approve endpoint:
-  unapproved spec_ref → 400 + no task; after
-  POST /api/v1/specs/:path/approve the identical request → 201,
-  Backlog, spec_ref pinned. Delegation task creation unaffected.
-- `mcp_create_task_implementation_requires_approved_spec` (mcp.rs) —
-  AC 1 for the MCP surface: tool error naming
-  `SPEC_APPROVAL_REQUIRED`/single trigger, no task row; succeeds after
-  approval.
-- `scheduler_skips_unapproved_spec_and_spawns_approved_twin` and
-  `scheduler_stops_spawn_when_approval_invalidated_by_push`
-  (signal_chain.rs) — AC 2 / verification intent: a Backlog
-  Implementation task inserted directly into storage against a Pending
-  (or push-invalidated) registry entry produces zero agent records and
-  stays Backlog with the `spec-approval-missing` label, while the
-  approved twin spawns exactly one worker.
-- `spawn_rejects_implementation_worker_for_external_callers`
-  (api/spawn.rs) — AC 3: human principal (verified Keycloak user JWT)
-  → 403 naming the requirement, no agent record, task untouched;
-  interrogation spawn from a non-system (agent JWT) principal still
-  201s.
-- `agent_jwt_cannot_spawn_onto_foreign_task` updated for the new
-  contract: the agent-principal spawn is 403 at the direct-spawn gate,
-  and the core task-claim boundary keeps a direct
-  `spawn_agent_core` probe asserting the `scoped to task` rejection so
-  the boundary is not silently untested.
-
-### Fixture migration (behavior-preserving)
-
-Existing suites that created `task_type: implementation` tasks through
-the now-gated surfaces were migrated to seed the durable approved-spec
-state (the same state POST /api/v1/specs/:path/approve records) and pin
-it in the task body: spawn.rs (async `app()` fixture + 39 custom-state
-tests), mcp.rs (signal-chain-fields, search/update analytics), admin.rs
-(`boundary_task`), search.rs, tests/e2e_ralph_loop.rs,
-tests/git_integration.rs, tests/auth_integration.rs,
-tests/m18_oidc_integration.rs. `mem::seed_approved_spec` (cfg(test))
-seeds the production-parity state.
-
-### Deferred verification (verifier must run)
-
-`cargo test -p gyre-server --lib` (signal_chain, mcp, api::spawn,
-api::tasks, api::admin, api::search suites) and
-`cargo test -p gyre-server --test api_integration --test e2e_ralph_loop
---test git_integration --test auth_integration --test m18_oidc_integration`
-— full command list and evidence in
-/tmp/stage/review-evidence/deferred-server-tests.txt.
+The gate behavior is covered by
+`tasks_create_implementation_requires_approved_spec`
+(tests/api_integration.rs — real approve flow: 400 before, 201 after
+POST /api/v1/specs/:path/approve),
+`mcp_create_task_implementation_requires_approved_spec` (mcp.rs),
+`scheduler_skips_unapproved_spec_and_spawns_approved_twin` and
+`scheduler_stops_spawn_when_approval_invalidated_by_push`
+(signal_chain.rs — direct-storage Backlog task, zero agent records,
+`spec-approval-missing` label, approved twin spawns one worker), and
+`spawn_rejects_implementation_worker_for_external_callers`
+(api/spawn.rs — 403 for human/agent principals, interrogation spawn
+still 201). In-sandbox probes this round: `cargo check -p gyre-server
+--lib` and `cargo check -p gyre-server --tests` both clean (test-module
+compile of the fixed fixture included); rustfmt changed-lines clean;
+root-cause scan evidence saved under /tmp/stage/review-evidence. Server
+test execution exceeds this sandbox's build budget — the verifier must
+run `cargo test -p gyre-server --lib api::search::tests::search_emits_analytics_event`
+plus the suites listed above (full `cargo test --all` remains the
+deterministic gate).
