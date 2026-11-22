@@ -3956,6 +3956,17 @@ async fn notify_escalation(
     .await;
 }
 
+/// Label marking a task as a forge-filed cascade-test execution task
+/// (dependency-graph.md §Cascade Testing). Set only by
+/// `trigger_cascade_tests` — the completion path (api/spawn.rs) and the
+/// Phase-4 scheduler's spec-approval gate exemption (signal_chain.rs)
+/// read it. It is a system-filed discriminator, not an authorization:
+/// both task-creation surfaces reject `task_type: implementation`
+/// without an approved spec_ref regardless of labels, and task_type is
+/// immutable after creation, so an Implementation task carrying this
+/// label and no spec_ref is reachable only through the merge processor.
+pub(crate) const CASCADE_TEST_LABEL: &str = "cascade-test";
+
 /// KV namespace for the per-task cascade context (task-280): the merged
 /// repo identity and merge SHA a cascade-test task was triggered for,
 /// keyed by cascade task id. Written at trigger time so
@@ -4122,7 +4133,7 @@ pub(crate) async fn trigger_cascade_tests(
         );
         task.task_type = Some(gyre_domain::TaskType::Implementation);
         task.priority = TaskPriority::High;
-        task.labels = vec!["cascade-test".to_string(), "auto-created".to_string()];
+        task.labels = vec![CASCADE_TEST_LABEL.to_string(), "auto-created".to_string()];
         // The description is the spawned agent's instruction set: it is
         // rendered into the agent's `system://context` prompt (prompts.rs
         // `format_context_prompt` → "Description / Acceptance Criteria"),

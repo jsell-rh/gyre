@@ -2,8 +2,8 @@
 title: "Gate all implementation work on approved specs"
 spec_ref: "Spec gap spec-41a92c20354c6a108e6074e3 / approval-single-trigger / 4a3f940495a8"
 depends_on: []
-progress: not-started
-commits: []
+progress: complete
+commits: ["e167709b15091b9d50d4eb4be0fa60360cabe2c1", "f6a061eb4e0408cbdb7cf7a28bdda2ca12d8ff99", "69394abf5b8cd8913144f1f3cd84b1a03c57045b", "bb42b05c13f78e387cd5fa3d3f41ac17d4979124", "611bc5ffae121a96eb1becf6c233901e541d881f", "ae87cf5bb64387c932c827b613d3c8d99afaf2b0", "52397d1622d72bfe9f63fe42ca85484a124c1ae5", "6c7ce4091376fc85d674281dc7559842a3bed04e", "569ea13821554e618ee7446aecd69c72a35a8ce7", "d5662b9e702f3691db12a406b3d9e8b5c4363e6f"]
 ---
 
 ## Required behavior
@@ -61,3 +61,75 @@ Canonical spec: `specs/system/agent-runtime.md`. Source: `678a8ac3e3bfeafeb66cdb
     ]
   }
 ]
+
+## Shipped
+
+The single-trigger gates shipped in earlier rounds of this task are
+unchanged in behavior:
+
+- **Task-creation gate** — POST /api/v1/tasks and MCP `gyre_create_task`
+  reject `task_type=implementation` unless the `spec_ref` resolves to a
+  spec currently Approved in the approval ledger at exactly the pinned
+  path@sha; unapproved, Pending, invalidated, or unresolvable refs yield
+  4xx / `SPEC_APPROVAL_REQUIRED` before any task row is written.
+  Delegation/Coordination tasks and untyped push-hook tasks are
+  unaffected.
+- **Scheduler gate (defense in depth)** — the Phase-4 scan in
+  signal_chain.rs re-verifies each Backlog Implementation task's
+  spec_ref against the Approved ledger before spawning; on failure the
+  task stays Backlog with the `spec-approval-missing` skip label and a
+  logged reason (no agent record, no InProgress transition). The one
+  documented non-spec class — forge-filed cascade-test tasks
+  (cascade-test label AND no spec_ref, per agent-runtime.md §1 as
+  amended in round 69394abf) — is exempt; a task pinning any spec_ref is
+  always gated.
+- **Direct-spawn gate** — POST /api/v1/agents/spawn returns 403 for
+  non-scheduler callers requesting a worker bound to an Implementation
+  task; interrogation and other system-initiated spawns still succeed.
+
+### This round: CI repair after the task-304 merge (e167709b)
+
+CI run 45049475667 (PR 918, head 7d53fd22, checked on the GitHub merge
+result) failed one test:
+`api::spawn::tests::kubernetes_spawn_applies_default_deny_network_policy_and_pids_limit`.
+Root cause is a merge fixture conflict, not a gate defect: task-304
+added that test on a branch that never carried the task-297 gate, so it
+builds its app via `test_state()` without seeding the approved-spec
+fixture, while the gated `create_task` helper pins `spec_ref` and
+asserts CREATED — the gate correctly rejects the unapproved
+implementation task and the helper's assertion fails (the run-log
+backtrace matches: `create_task::{closure#0}` spawn.rs:4603 ← k8s test
+spawn.rs:9177). Commit e167709b adds the same
+`seed_approved_spec(&state, FIXTURE_SPEC_PATH, FIXTURE_SPEC_SHA)` call
+the sibling `kubernetes_pod_working_dir` test uses — 5 inserted lines,
+test-fixture only, zero production-code change.
+
+Audit that this was the only merge-introduced gap: `git diff a2bd3eb0
+8546a781 -- crates/gyre-server/src` touches only api/spawn.rs (two new
+functions: `pod_doc_from_dump` and the k8s isolation test), and every
+`create_task` / `create_task_with_type(..., Some("implementation"))`
+call site in the merged tree was verified to seed the fixture (via
+`app().await` or an explicit seed after `test_state()`); other
+gate-relevant test surfaces (api/search.rs, api/admin.rs, mcp.rs,
+merge_processor.rs, tests/api_integration.rs) already seed and are
+untouched by the merge.
+
+### Test evidence
+
+- `rustfmt --check` on api/spawn.rs: clean (exit 0).
+- `cargo check -p gyre-server`: exit 0 (via /tmp/stage/bin/cargo).
+- gyre-server test compilation exceeds this sandbox's 4 GiB budget —
+  the independent verifier must run:
+  `cargo nextest run -p gyre-server kubernetes_spawn_applies_default_deny_network_policy_and_pids_limit`
+  (the repaired failure),
+  `cargo nextest run -p gyre-server kubernetes_pod_working_dir_is_workspace_not_local_worktree`
+  (sibling, same seed pattern),
+  `cargo nextest run -p gyre-server api::spawn::tests`,
+  `cargo nextest run -p gyre-server signal_chain::`, and
+  `cargo nextest run -p gyre-server tasks_create_implementation_requires_approved_spec mcp_create_task_implementation_requires_approved_spec spawn_rejects_implementation_worker_for_external_callers`
+  (gate behavior, prior rounds: `scheduler_skips_unapproved_spec_and_spawns_approved_twin`,
+  `scheduler_stops_spawn_when_approval_invalidated_by_push`,
+  `cascade_label_does_not_bypass_spec_approval_gate`,
+  `scheduler_spawns_agent_for_cascade_test_task`).
+- Probe evidence saved under /tmp/stage/review-evidence (audit.md,
+  fix.diff, probes.md).

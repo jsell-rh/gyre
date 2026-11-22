@@ -5500,6 +5500,47 @@ pub fn test_state() -> Arc<crate::AppState> {
     )
 }
 
+/// Seed an approved spec version — the durable state POST
+/// /api/v1/specs/:path/approve leaves behind in production: a registry
+/// entry Approved at `sha` (approval mode "single") plus an active
+/// approval ledger row for the exact (path, sha) version. Task-creation
+/// and scheduler gates (agent-runtime.md §1 single-trigger) resolve
+/// implementation tasks' spec_refs against exactly this state.
+#[cfg(test)]
+pub async fn seed_approved_spec(state: &Arc<crate::AppState>, path: &str, sha: &str) {
+    use gyre_domain::{ApprovalStatus, SpecApproval, SpecLedgerEntry};
+    let entry = SpecLedgerEntry {
+        path: path.to_string(),
+        title: path.to_string(),
+        owner: "test".to_string(),
+        kind: None,
+        current_sha: sha.to_string(),
+        approval_mode: "single".to_string(),
+        approval_status: ApprovalStatus::Approved,
+        linked_tasks: vec![],
+        linked_mrs: vec![],
+        drift_status: "clean".to_string(),
+        created_at: 0,
+        updated_at: 0,
+        repo_id: None,
+        workspace_id: None,
+    };
+    state.spec_ledger.save(&entry).await.unwrap();
+    let approval = SpecApproval::new(
+        gyre_common::Id::new(uuid::Uuid::new_v4().to_string()),
+        path,
+        sha,
+        "user:test",
+    );
+    state.spec_approvals.create(&approval).await.unwrap();
+    state
+        .spec_approvals
+        .approve(&approval.id, 0)
+        .await
+        .unwrap()
+        .expect("freshly created approval row must transition to Approved");
+}
+
 /// Build an AppState with a custom JjOpsPort for tests that need to
 /// control/observe jj behavior (e.g., programmed rebase outcomes).
 #[cfg(test)]
