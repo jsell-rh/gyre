@@ -3913,7 +3913,10 @@ import "google/protobuf/empty.proto";
         .unwrap();
         assert_eq!(all.edges.len(), 2, "tenant-wide graph has both edges");
 
-        // Workspace-scoped via the spec's query-parameter form.
+        // Workspace-scoped via the spec's query-parameter form. Both
+        // edges touch ws-dg-x: a→b entirely inside it, and a→c via its
+        // source repo `a` — the dedicated route's committed semantics
+        // ("edges where at least one endpoint is in the workspace").
         let Json(scoped) = get_graph(
             State(state.clone()),
             axum::extract::Query(GraphQuery {
@@ -3922,8 +3925,31 @@ import "google/protobuf/empty.proto";
         )
         .await
         .unwrap();
-        assert_eq!(scoped.edges.len(), 1, "ws-dg-x graph has only a→b");
-        assert_eq!(scoped.edges[0].target, b.to_string());
+        let mut scoped_targets: Vec<String> =
+            scoped.edges.iter().map(|e| e.target.clone()).collect();
+        scoped_targets.sort();
+        let mut expected_targets = vec![b.to_string(), c.to_string()];
+        expected_targets.sort();
+        assert_eq!(
+            scoped_targets, expected_targets,
+            "ws-dg-x graph has every edge touching a ws-dg-x repo"
+        );
+
+        // The spec's query-parameter form must deliver the SAME
+        // workspace-scoped graph as the dedicated
+        // /workspaces/{id}/dependency-graph route (task-282), so the two
+        // forms are asserted equivalent on identical fixtures.
+        let Json(dedicated) =
+            get_workspace_dependency_graph(State(state.clone()), Path("ws-dg-x".to_string()))
+                .await
+                .unwrap();
+        let mut dedicated_targets: Vec<String> =
+            dedicated.edges.iter().map(|e| e.target.clone()).collect();
+        dedicated_targets.sort();
+        assert_eq!(
+            scoped_targets, dedicated_targets,
+            "?workspace= form and dedicated route must agree"
+        );
 
         // Scoped to the workspace holding only the far endpoint: the
         // crossing edge a→c is included (at least one endpoint in scope).
