@@ -2,8 +2,8 @@
 title: "Gate all implementation work on approved specs"
 spec_ref: "Spec gap spec-41a92c20354c6a108e6074e3 / approval-single-trigger / 4a3f940495a8"
 depends_on: []
-progress: complete
-commits: ["52397d1622d72bfe9f63fe42ca85484a124c1ae5", "6c7ce4091376fc85d674281dc7559842a3bed04e", "569ea13821554e618ee7446aecd69c72a35a8ce7", "d5662b9e702f3691db12a406b3d9e8b5c4363e6f"]
+progress: ready-for-review
+commits: ["ae87cf5bb64387c932c827b613d3c8d99afaf2b0", "52397d1622d72bfe9f63fe42ca85484a124c1ae5", "6c7ce4091376fc85d674281dc7559842a3bed04e", "569ea13821554e618ee7446aecd69c72a35a8ce7", "d5662b9e702f3691db12a406b3d9e8b5c4363e6f"]
 ---
 
 ## Required behavior
@@ -64,75 +64,49 @@ Canonical spec: `specs/system/agent-runtime.md`. Source: `678a8ac3e3bfeafeb66cdb
 
 ## Shipped
 
-agent-runtime.md §1's single-trigger property is enforced at the task
-layer by three gates (commits `d5662b9e` + `569ea138`, clippy repair
-`6c7ce409`); this round repaired the one retained verification failure
-(`52397d16`) and reconciled the branch with main (merge `57485c70`,
-coverage-row conflict resolved by keeping both the task-297 row-7 gate
-note and the incoming task-299 row-8 note).
+The single-trigger gates shipped in the earlier rounds of this task
+(`d5662b9e` + `569ea138`, clippy repair `6c7ce409`, verification repair
+`52397d16`) are unchanged. This round (`ae87cf5b`) repaired the one
+retained CI failure on the reconciled candidate head `759f075b`
+(PR 918, run 44992526304): `signal_chain::tests::
+scheduler_decomposes_delegation_into_ordered_subtasks` failed
+nondeterministically — Backlog vs InProgress at the Phase-4 assertion.
 
-### Behavior
+### Root cause
 
-- **Shared verifier** — `verify_implementation_spec_ref`
-  (crates/gyre-server/src/api/gates.rs) resolves a `path@sha` against
-  BOTH the durable per-SHA approval row (`verify_spec_ref`, the ledger
-  query the merge gates use) and the registry entry (must still be
-  Approved with `current_sha` exactly the pinned SHA, so an approval
-  invalidated by a later push fails). Fail-closed on both.
-- **Task-creation gate** — REST `create_task` (api/tasks.rs) and MCP
-  `gyre_create_task` (mcp.rs) reject `task_type: implementation` unless
-  the gate passes: 400 InvalidInput naming the single-trigger
-  requirement (HTTP) / `SPEC_APPROVAL_REQUIRED` tool error (MCP), no
-  task row written. Delegation/Coordination and untyped tasks are
-  unaffected; MCP `gyre_decompose_spec` sub-tasks pin the parent's
-  spec_ref so the legitimate chain passes.
-- **Scheduler gate (defense in depth)** — the Phase-4 scan
-  (signal_chain.rs `spawn_implementation_workers`) re-verifies the
-  spec_ref before claiming; on failure the task stays Backlog with the
-  observable `spec-approval-missing` label and a logged reason — no
-  agent record, no InProgress transition.
-- **Direct-spawn gate** — POST /api/v1/agents/spawn rejects (403) any
-  request that would create a worker bound to an Implementation task
-  from a non-scheduler caller; system-principal and
-  `agent_type: interrogation` spawns are exempt.
-- The approval side (ledger row, SpecApproved emission, modified-spec
-  invalidation to Pending) is untouched.
+After the test's first scheduler cycle the fixture holds two
+Implementation tasks: the delegation's sub-task in r-1, whose spec_ref is
+pinned to the seeded approved SHA and passes the scheduler gate, and the
+coordination review sub-task in r-2, which `assess_coordination` creates
+with `spec_ref: None` (the Coordination task row carries only
+`spec_path`). The gate correctly holds the coordination twin Backlog
+with the `spec-approval-missing` label — that is the specced
+single-trigger behavior, not a defect. But the test selected the sub-task
+with an unscoped `find` over `task_type == Implementation`, and
+`MemTaskRepository::list` iterates a HashMap, so the selection flipped
+between the two twins per process seed: about half of test processes
+picked the gated coordination twin and failed the InProgress assert.
 
-### Verification repair `52397d16`
+### Repair
 
-The retained full-suite run (`cargo test --all` on candidate
-`d6f85599`, exit 101) failed exactly one test:
-`api::search::tests::search_emits_analytics_event` (400 vs 201 at
-search.rs:342). Root cause — fixture drift, not a gate defect: the
-task-297 fixture migration seeded a 40-hex-char approval SHA but typed
-one extra `efabcd` repetition into the request body's `spec_ref`
-literal (46 chars); `verify_spec_ref` correctly rejects a non-40-char
-SHA, so the gate returned 400. Fix: the body's `spec_ref` is now
-derived from the same `FIXTURE_SPEC_PATH`/`FIXTURE_SPEC_SHA` constants
-the seed writes (the spawn.rs fixture idiom), so the pair cannot drift.
-A repo-wide scan of every `seed_approved_spec` pair against every
-`path@sha` literal in the same file found no other mismatch
-(/tmp/stage/review-evidence/search-test-400-rootcause.txt). No
-production behavior changed.
+`crates/gyre-server/src/signal_chain.rs`: the Phase-4 selection in the
+test is now scoped to `parent_task_id == delegation.id`, with a comment
+documenting why the coordination twin is intentionally Backlog and why
+the mem list order cannot be relied on. Test-only, behavior-preserving;
+no assertion was weakened — the test still requires the just-decomposed
+approved-spec sub-task to be claimed InProgress, assigned to a spawned
+worker agent record, and to record `task.status_changed` analytics.
 
 ### Test evidence
 
-The gate behavior is covered by
-`tasks_create_implementation_requires_approved_spec`
-(tests/api_integration.rs — real approve flow: 400 before, 201 after
-POST /api/v1/specs/:path/approve),
-`mcp_create_task_implementation_requires_approved_spec` (mcp.rs),
-`scheduler_skips_unapproved_spec_and_spawns_approved_twin` and
-`scheduler_stops_spawn_when_approval_invalidated_by_push`
-(signal_chain.rs — direct-storage Backlog task, zero agent records,
-`spec-approval-missing` label, approved twin spawns one worker), and
-`spawn_rejects_implementation_worker_for_external_callers`
-(api/spawn.rs — 403 for human/agent principals, interrogation spawn
-still 201). In-sandbox probes this round: `cargo check -p gyre-server
---lib` and `cargo check -p gyre-server --tests` both clean (test-module
-compile of the fixed fixture included); rustfmt changed-lines clean;
-root-cause scan evidence saved under /tmp/stage/review-evidence. Server
-test execution exceeds this sandbox's build budget — the verifier must
-run `cargo test -p gyre-server --lib api::search::tests::search_emits_analytics_event`
-plus the suites listed above (full `cargo test --all` remains the
-deterministic gate).
+- `cargo check -p gyre-server --tests` — exit 0 on this branch
+  (includes the edited test code); log retained at
+  /tmp/stage/review-evidence/cargo-check.log.
+- `rustfmt --check` on the edited file — clean.
+- Server test execution is mechanically deferred to the independent
+  verifier (the build wrapper bars gyre-server codegen in this sandbox
+  to fit the 4 GiB budget). Required probes:
+  `cargo nextest run -p gyre-server signal_chain::tests`, then the full
+  `cargo nextest run --all` (run 44992526304 cancelled 553 tests via
+  fail-fast, so the full suite must be re-run to green).
+- Analysis and probe records: /tmp/stage/review-evidence/task-297-ci-repair.md.
