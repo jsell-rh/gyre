@@ -95,19 +95,26 @@ Canonical spec: `specs/system/explorer-canvas.md`. Source: `678a8ac3e3bfeafeb66c
 
 **Status: blocked-on-external-implementation — no closure claimed; section `c3a39b320325eff390c4b56c` remains open.**
 
-Round 68. Re-verification ran from the checkpoint head `6c87f2c3` (merge of base `88202d67` into this branch; no merge/rebase pending; only the executor's round-reset of this task file was unstaged). This round `origin/main` **moved** for the first time since round 61: `73c504f2` → `88202d67` (task-310 WebSocket agent↔server transport). The new commits were probed and are **irrelevant to this task's watched surfaces**: `git diff 678a8ac3 origin/main --stat` over the four extractors, `sqlite/graph.rs`, and `graph_extraction.rs` is still **empty** — byte-identical to the discovery base. Deterministic evidence saved to `/tmp/stage/review-evidence/task306-round68-probe.txt`.
+Round 69. Re-verification ran from the checkpoint head `de240b15` (branch already contains the merge of base `88202d67` as `6c87f2c3`; no merge/rebase pending; only the executor's round-reset of this task file was unstaged). `origin/main` is **unchanged** since round 68 at `88202d67` — no new merge was needed. Deterministic evidence saved to `/tmp/stage/review-evidence/task306-round69-probe.txt`.
 
-### Realized-model graph-node-metrics backend — NOT landed
+### Realized-model graph-node-metrics backend — NOT landed (anywhere reachable)
 
-All four extractors still hardcode `complexity: None, churn_count_30d: 0` at `origin/main` (rust_extractor.rs:160-161, go_extractor.rs:135-136, python_extractor.rs:136-137, typescript_extractor.rs:129-130); zero `cyclomatic` matches in any Rust at origin/main (`git grep -i cyclomatic origin/main -- crates` exits 1); the SQLite upsert still sets `graph_nodes::complexity.eq(row.complexity)` / `graph_nodes::churn_count_30d.eq(row.churn_count_30d)` (sqlite/graph.rs:366-367), overwriting stored values with the extractor defaults on every re-extraction; only `origin/main` and `origin/HEAD` exist remotely, and no reachable ref contains any graph-node-metrics implementation commit (the only `graph-node-metrics` matches in `git log --all` are this task's own docs re-verification commits). Ordering guard applies — no local backend work permitted; the end-to-end indicator verification cannot run against populated metrics.
+This round's probe was **broader than prior rounds**: the remote now carries hundreds of additional heads (devloop/*, worker/*, uix/*, pipeline/* — 6656 non-main remote refs after fetching all of `refs/heads/*`), so beyond the usual `origin/main` checks the probe scanned **every remote branch tip** for the backend implementation:
+
+- `git diff 678a8ac3 origin/main --stat` over the four extractors, `sqlite/graph.rs`, and `graph_extraction.rs` is still **empty** — byte-identical to the discovery base.
+- All four extractors still hardcode `complexity: None` / `churn_count_30d: 0` at the exact discovery lines (rust:160-161, go:135-136, python:136-137, typescript:129-130); `git grep -ic cyclomatic origin/main -- crates` exits 1 (zero matches).
+- **New:** tip-level `git grep -I -l -i cyclomatic -- crates/gyre-domain/src` across all 6656 non-main remote refs — **zero hits**. No graph-node-metrics implementation (extractor cyclomatic complexity) exists at any remote tip, merged or unmerged. (The many devloop branches that show diffs on the watched files vs `origin/main` do so only because they are based on older main commits where those files differed historically; the content grep is the decisive check. A full-history pickaxe over all refs was abandoned on timeout — any implementation awaiting merge sits at a tip, so the tip scan is sufficient.)
+- The SQLite upsert still writes `graph_nodes::complexity.eq(row.complexity)` / `graph_nodes::churn_count_30d.eq(row.churn_count_30d)` (sqlite/graph.rs:366-367), overwriting stored values with the extractor defaults on every re-extraction.
+
+Ordering guard applies — no local backend work is permitted, so the end-to-end indicator verification cannot run against populated metrics.
 
 ### ui-layout d3-force rerouting — NOT landed
 
-`getLayout('graph')` still resolves to ExplorerCanvas (Canvas 2D; layoutRegistry.js 'graph' entry :46-48 maps `component: ExplorerCanvas` with no `engine` selector), and ExplorerView still defaults `activeLayout = $state('graph')` at :455 with `CANVAS_LAYOUTS = Set(['graph','flow','timeline'])` at :454 rendering through the unified ExplorerCanvas branch. SvgGraphCanvas still carries zero complexity/churn encoding but is not served for 'graph', so the SVG-path case (b) does not trigger.
+`getLayout('graph')` still resolves to ExplorerCanvas (Canvas 2D; layoutRegistry.js 'graph' entry maps `component: ExplorerCanvas` with no `engine` selector — the registry's SVG engines serve only hierarchical/layered), and ExplorerView still defaults `activeLayout = $state('graph')` at :455. SvgGraphCanvas still carries zero complexity/churn encoding but is not served for 'graph', so the SVG-path case (b) does not trigger.
 
 ### No narrow frontend defect under permitted work (a)
 
-Canvas indicator formulas (ExplorerCanvas.svelte:1814 nodeWeight = `Math.max(1, n.complexity || 1)`; :3717 churnThickness = `Math.min(4, 1 + (n?.churn_count_30d || 0) * 0.3)`) and the API→renderer field plumbing (api/graph.rs:65-66/:104-105 serializes `complexity`/`churn_count_30d` per node; ExplorerView passes the raw API graph nodes unmodified into the live renderer) verified intact at this head — once the backend populates the metrics, the live Canvas-2D path activates the formulas with zero frontend changes.
+Canvas indicator formulas (ExplorerCanvas.svelte:1814 `nodeWeight = Math.max(1, n.complexity || 1)`; :3717 `churnThickness = Math.min(4, 1 + (n?.churn_count_30d || 0) * 0.3)`) and the API→renderer field plumbing (api/graph.rs serializes `complexity`/`churn_count_30d` per node; ExplorerView passes the raw API graph nodes unmodified into the live renderer) verified intact at this head — once the backend populates the metrics, the live Canvas-2D path activates the formulas with zero frontend changes.
 
 ### Spec-vs-spec conflict escalation (acceptance criterion 5, recorded for the spec lifecycle)
 
@@ -115,7 +122,7 @@ There is a genuine, unresolved conflict between two canonical specs over the ren
 
 ### Round output
 
-Task file updated to round 68 with truthful `blocked-on-external-implementation` progress; coverage row round reference updated (row stays open); 0/7 acceptance criteria ticked. Only `specs/` files changed — no Rust, no web, so no formatting or build work was needed (no cold build of an unchanged crate). Per the assignment constraint, large gyre-server builds/test compilation run in the independent verifier; this round runs no server tests, so nothing is deferred beyond that standing constraint.
+Task file at round 69 with truthful `blocked-on-external-implementation`; coverage row round reference updated (row stays open); 0/7 acceptance criteria ticked. Only `specs/` files changed — no Rust, no web, so no formatting or build work was needed (no cold build of an unchanged crate). Per the assignment constraint, large gyre-server builds/test compilation run in the independent verifier; this round runs no server tests, so nothing is deferred beyond that standing constraint.
 
 ### Remaining work to unblock
 
