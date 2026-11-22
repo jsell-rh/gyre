@@ -2,7 +2,7 @@
 title: "Provision the Pass 2 toolchains in the server container image: rust-analyzer, typescript-language-server + typescript, and the ts-callgraph driver script"
 spec_ref: "Spec gap spec-b89674dbcb695eb34e8d5e15 / server-image-pass2-toolchains / d96599f10659"
 depends_on: []
-progress: not-started
+progress: ready-for-review
 commits: []
 ---
 
@@ -53,8 +53,67 @@ Canonical spec: `specs/system/lsp-call-graph.md`. Source: `8546a781f772f05c823bb
       {
         "file": "crates/gyre-adapters/src/call_graph_rust.rs",
         "quote": "extract_with_binary(repo_path, find_rust_analyzer()).await",
-        "detail": "The Rust driver resolves the rust-analyzer binary only via RUST_ANALYZER_BIN/PATH discovery; with no rust-analyzer in the server image and no RUST_ANALYZER_BIN set, find_rust_analyzer returns None and the run degrades to zero edges — the prerequisite is genuinely load-bearing, not hypothetical."
+        "detail": "The Rust driver resolves the rust-analyzer binary only via RUST_ANALYZER_BIN/PATH discovery; with no rust-analyzer in the server image and no RUST_ANALYZER_BIN set, find_rust_analyzer returns None and the run degrades to zero edges - the prerequisite is genuinely load-bearing, not hypothetical."
       }
     ]
   }
 ]
+
+## Shipped
+
+The server container image (root Dockerfile) now ships all four specced Pass 2
+toolchains; no driver code or adapter discovery logic was changed — the image
+satisfies the existing discovery contracts.
+
+### Behavior shipped (Dockerfile)
+
+- New `rust-analyzer` stage: `FROM rust:1.87-slim` (same pinned base as the
+  builder stage) + `rustup component add rust-analyzer`, binary copied to
+  `/usr/local/bin/rust-analyzer`; runtime sets `ENV
+  RUST_ANALYZER_BIN=/usr/local/bin/rust-analyzer` (the first branch of
+  `find_rust_analyzer()` in crates/gyre-adapters/src/call_graph_rust.rs).
+  Pinned via the toolchain image — no floating tag.
+- New `ts-tools` stage: `FROM node:22-bookworm-slim` +
+  `npm install -g typescript@5.8.3 typescript-language-server@4.3.4`
+  (explicit pins, pyright@1.1.414 stage pattern). Runtime copies both
+  `node_modules` packages, symlinks
+  `/usr/local/bin/typescript-language-server` ->
+  `.../typescript-language-server/lib/cli.mjs`, and sets
+  `TS_CALLGRAPH_SERVER=/usr/local/bin/typescript-language-server` and
+  `TS_CALLGRAPH_TSSERVER=/usr/local/lib/node_modules/typescript/lib` — the
+  authoritative env-override branch of scripts/ts-callgraph.mjs discovery
+  (the lib dir contains tsserver.js, which the driver validates).
+- `scripts/ts-callgraph.mjs` is now COPYed to `/app/scripts/` alongside the
+  Python drivers, so the server's `find_script` workspace discovery (cwd
+  /app) resolves all three Pass 2 drivers inside the container.
+- The stale "Rust/TS toolchains are task-073/075 scope" comment is replaced
+  with the shipped state; Go/pyright wiring and the non-root user are
+  unchanged.
+
+### Test evidence
+
+- TypeScript Pass 2 executed end-to-end in this sandbox with the exact image
+  wiring (pinned npm -g install of typescript@5.8.3 +
+  typescript-language-server@4.3.4, bin symlink to lib/cli.mjs,
+  TS_CALLGRAPH_SERVER/TS_CALLGRAPH_TSSERVER set to the Dockerfile's values):
+  the real driver `scripts/ts-callgraph.mjs` on a fixture repo with one known
+  call site returned the expected non-zero edge
+  `{"from":"src/app.compute","to":"src/math.add"}` (exit 0). npm's own
+  global layout was confirmed identical to the Dockerfile's symlink/lib-dir
+  wiring, and `typescript-language-server --version` -> 4.3.4,
+  `tsc --version` -> 5.8.3. Probe transcript and the fixture are in
+  /tmp/stage/review-evidence (README.md, probes.log, ts-probe-out.json).
+- Docker build and the in-image rust-analyzer/TS executions are deferred to
+  remote verification: docker is not installed in this sandbox and its
+  network allowlist blocks static.rust-lang.org, crates.io and
+  release-assets.githubusercontent.com (a real rust-analyzer binary could
+  not be fetched locally; the system rustup home is root-owned without the
+  component). These are infrastructure restrictions, not code defects. Exact
+  remote probe commands — including the docker build, `--version` checks at
+  the ENV paths, `/app/scripts` listing, the in-image TS driver run, and the
+  in-image Rust Pass 2 run (server push path or `cargo test -p gyre-adapters
+  real_rust_analyzer_extracts_known_call_edges` with RUST_ANALYZER_BIN from
+  the built image) — are recorded in /tmp/stage/review-evidence/README.md.
+- The graceful-degradation contract is untouched: where a toolchain is
+  absent (e.g. bare-metal hosts), Pass 2 still warns and returns zero edges
+  rather than failing a push.
