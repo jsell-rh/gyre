@@ -2,7 +2,7 @@
 title: "Spec Links — cycle detection over the tenant-wide forge graph, not just the pushed manifest"
 spec_ref: "Spec gap spec-10bdced21a063f819b1baabd / spec-links-tenant-cycle-detection / 5a915155d9bc"
 depends_on: [task-287]
-progress: ready-for-review
+progress: complete
 commits: ["824c68eefc565f0f45f11e92dcbb01d7e87ea0e4", "34b3711d493ddd94ab7cf86ce39eb758837d8c20", "1fb8cfa28c0a18ce4da633c6e609a11b61fe5664", "0680e21a605bb9a07051c106ec7c1141fc212675", "092db23015876d452327beab9f04f5c6961edd77"]
 ---
 
