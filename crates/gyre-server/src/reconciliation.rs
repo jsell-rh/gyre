@@ -1957,10 +1957,14 @@ pub fn parse_meta_spec_drift_warning(output: &str) -> Option<MetaSpecDrift> {
         list.split(", ")
             .filter(|l| !l.is_empty())
             .filter_map(|label| {
-                // {kind}:{meta_spec_id}@v{version}
+                // {kind}:{meta_spec_id}@v{version}. Kinds carry a colon
+                // themselves ("meta:persona") while meta-spec ids do not,
+                // so the kind/id split runs from the RIGHT — a left split
+                // would eat the kind's namespace prefix into the id and
+                // break the round-trip.
                 let (kind_id, version) = label.rsplit_once("@v")?;
                 let version: u32 = version.parse().ok()?;
-                let (kind, id) = kind_id.split_once(':')?;
+                let (kind, id) = kind_id.rsplit_once(':')?;
                 Some(gyre_domain::MetaSpecSnapshot {
                     meta_spec_id: id.to_string(),
                     kind: kind.to_string(),
@@ -2202,6 +2206,21 @@ mod tests {
         .await
     }
 
+    /// A required APPROVED Global meta-spec — the registry-model form of
+    /// the workspace-level binding the §6/§7 mechanics tests exercise.
+    /// The retired set-PUT bound optional specs via path pins; under the
+    /// amendments row only REQUIRED meta-specs reconcile workspaces
+    /// (optional ones reach code exclusively through spec-level bindings,
+    /// whose drift the stale-pin cascade owns), so these tests bind via
+    /// the required flag instead.
+    async fn make_required_global_spec(
+        state: &Arc<AppState>,
+        name: &str,
+        version: u32,
+    ) -> MetaSpec {
+        make_required_spec(state, MetaSpecScope::Global, None, name, version, "admin").await
+    }
+
     /// The workspace's current effective-set SHA (registry model): the
     /// SHA over the required, approved, visible snapshots.
     async fn active_set_sha(state: &Arc<AppState>, ws_id: &str) -> String {
@@ -2269,7 +2288,7 @@ mod tests {
         let state = test_state();
         let ws = make_workspace(&state, "ws-recon-1").await;
         let _repo = make_repo(&state, "repo-1", "ws-recon-1").await;
-        let ms = make_meta_spec(&state, "backend-developer", 4).await;
+        let ms = make_required_global_spec(&state, "backend-developer", 4).await;
 
         let summary = run_reconciliation(&state, &ws.id, std::slice::from_ref(&ms.name)).await;
 
@@ -2331,7 +2350,7 @@ mod tests {
         let state = test_state();
         let ws = make_workspace(&state, "ws-recon-dup").await;
         let _repo = make_repo(&state, "repo-d", "ws-recon-dup").await;
-        let ms = make_meta_spec(&state, "backend-developer", 4).await;
+        let ms = make_required_global_spec(&state, "backend-developer", 4).await;
 
         let first = run_reconciliation(&state, &ws.id, std::slice::from_ref(&ms.name)).await;
         assert_eq!(first.tasks_created, 1);
@@ -2469,7 +2488,7 @@ mod tests {
         for i in 0..3 {
             make_repo(&state, &format!("repo-imm-{i}"), "ws-imm").await;
         }
-        let ms = make_meta_spec(&state, "backend-developer", 4).await;
+        let ms = make_required_global_spec(&state, "backend-developer", 4).await;
         set_policy(
             &state,
             "ws-imm",
@@ -2501,7 +2520,7 @@ mod tests {
         for i in 0..3 {
             make_repo(&state, &format!("repo-roll-{i}"), "ws-roll").await;
         }
-        let ms = make_meta_spec(&state, "backend-developer", 4).await;
+        let ms = make_required_global_spec(&state, "backend-developer", 4).await;
         set_policy(
             &state,
             "ws-roll",
@@ -2605,7 +2624,7 @@ mod tests {
         for i in 0..2 {
             make_repo(&state, &format!("repo-bg-{i}"), "ws-bg").await;
         }
-        let ms = make_meta_spec(&state, "backend-developer", 4).await;
+        let ms = make_required_global_spec(&state, "backend-developer", 4).await;
         set_policy(
             &state,
             "ws-bg",
@@ -2640,7 +2659,7 @@ mod tests {
         let state = test_state();
         let ws = make_workspace(&state, "ws-prio").await;
         make_repo(&state, "repo-prio", "ws-prio").await;
-        let ms = make_meta_spec(&state, "backend-developer", 4).await;
+        let ms = make_required_global_spec(&state, "backend-developer", 4).await;
         set_policy(
             &state,
             "ws-prio",
@@ -2669,7 +2688,7 @@ mod tests {
         for i in 0..3 {
             make_repo(&state, &format!("repo-sw-{i}"), "ws-switch").await;
         }
-        let ms = make_meta_spec(&state, "backend-developer", 4).await;
+        let ms = make_required_global_spec(&state, "backend-developer", 4).await;
         set_policy(
             &state,
             "ws-switch",
@@ -2726,7 +2745,7 @@ mod tests {
         for i in 0..4 {
             make_repo(&state, &format!("repo-bs-{i}"), "ws-bsize").await;
         }
-        let ms = make_meta_spec(&state, "backend-developer", 4).await;
+        let ms = make_required_global_spec(&state, "backend-developer", 4).await;
         set_policy(
             &state,
             "ws-bsize",
@@ -2783,7 +2802,7 @@ mod tests {
         for i in 0..3 {
             make_repo(&state, &format!("repo-swb-{i}"), "ws-sw-bg").await;
         }
-        let ms = make_meta_spec(&state, "backend-developer", 4).await;
+        let ms = make_required_global_spec(&state, "backend-developer", 4).await;
         set_policy(
             &state,
             "ws-sw-bg",
@@ -2861,7 +2880,7 @@ mod tests {
             make_repo(&state, &format!("repo-bg-hist-{i}"), "ws-bg-hist").await;
         }
         // Background wave parks 3 inert Backlog tasks (no task_type).
-        let bg_spec = make_meta_spec(&state, "backend-developer", 4).await;
+        let bg_spec = make_required_global_spec(&state, "backend-developer", 4).await;
         set_policy(
             &state,
             "ws-bg-hist",
@@ -2893,7 +2912,7 @@ mod tests {
             },
         )
         .await;
-        let roll_spec = make_meta_spec(&state, "code-reviewer", 2).await;
+        let roll_spec = make_required_global_spec(&state, "code-reviewer", 2).await;
         let summary =
             run_reconciliation(&state, &ws.id, std::slice::from_ref(&roll_spec.name)).await;
         assert_eq!(summary.tasks_created, 1);
@@ -3033,8 +3052,8 @@ mod tests {
         for i in 0..4 {
             make_repo(&state, &format!("repo-kv-{i}"), "ws-kvfail").await;
         }
-        let persona = make_meta_spec(&state, "backend-developer", 4).await;
-        let reviewer = make_meta_spec(&state, "code-reviewer", 2).await;
+        let persona = make_required_global_spec(&state, "backend-developer", 4).await;
+        let reviewer = make_required_global_spec(&state, "code-reviewer", 2).await;
         set_policy(
             &state,
             "ws-kvfail",
@@ -3118,8 +3137,8 @@ mod tests {
         for i in 0..4 {
             make_repo(&state, &format!("repo-ov-{i}"), "ws-overlap").await;
         }
-        let persona = make_meta_spec(&state, "backend-developer", 4).await;
-        let reviewer = make_meta_spec(&state, "code-reviewer", 2).await;
+        let persona = make_required_global_spec(&state, "backend-developer", 4).await;
+        let reviewer = make_required_global_spec(&state, "code-reviewer", 2).await;
         set_policy(
             &state,
             "ws-overlap",
@@ -3215,7 +3234,7 @@ mod tests {
         for i in 0..3 {
             make_repo(&state, &format!("repo-rt-{i}"), "ws-retrig").await;
         }
-        let ms = make_meta_spec(&state, "backend-developer", 4).await;
+        let ms = make_required_global_spec(&state, "backend-developer", 4).await;
         set_policy(
             &state,
             "ws-retrig",
@@ -3973,7 +3992,7 @@ mod tests {
         let _r1 = make_repo(&state, "repo-m1", "ws-recon-multi").await;
         let _r2 = make_repo(&state, "repo-m2", "ws-recon-multi").await;
         let _r3 = make_repo(&state, "repo-m3", "ws-recon-multi").await;
-        let ms = make_meta_spec(&state, "backend-developer", 4).await;
+        let ms = make_required_global_spec(&state, "backend-developer", 4).await;
 
         let s = run_reconciliation(&state, &ws.id, std::slice::from_ref(&ms.name)).await;
         let tasks = open_tasks_with_label(&state, RECONCILIATION_LABEL).await;
@@ -4002,7 +4021,7 @@ mod tests {
         let _repo1 = make_repo(&state, "repo-pa", "ws-recon-w1").await;
         let ws2 = make_workspace(&state, "ws-recon-w2").await;
         let _repo2 = make_repo(&state, "repo-pb", "ws-recon-w2").await;
-        let ms = make_meta_spec(&state, "backend-developer", 4).await;
+        let ms = make_required_global_spec(&state, "backend-developer", 4).await;
 
         let s1 = run_reconciliation(&state, &ws1.id, std::slice::from_ref(&ms.name)).await;
         assert_eq!(s1.tasks_created, 1);
@@ -4043,7 +4062,7 @@ mod tests {
         let ws = make_workspace(&state, "ws-wave").await;
         make_repo(&state, "repo-w1", "ws-wave").await;
         make_repo(&state, "repo-w2", "ws-wave").await;
-        let ms = make_meta_spec(&state, "backend-developer", 4).await;
+        let ms = make_required_global_spec(&state, "backend-developer", 4).await;
 
         // Member so the completion notification path is exercised end-to-end.
         let membership = WorkspaceMembership {
@@ -4198,7 +4217,7 @@ mod tests {
         let state = test_state();
         let ws = make_workspace(&state, "ws-wave2").await;
         make_repo(&state, "repo-w2", "ws-wave2").await;
-        let ms = make_meta_spec(&state, "backend-developer", 4).await;
+        let ms = make_required_global_spec(&state, "backend-developer", 4).await;
 
         let count_completed = || {
             let state = state.clone();
@@ -4465,20 +4484,44 @@ mod tests {
         .unwrap();
         let ws_id = ws_json["id"].as_str().unwrap().to_string();
 
-        // Bind a set — changed_paths is non-empty (new binding) → event fires.
+        // Registry model (amendments row): the retired set-PUT's binding
+        // change is a required-flag flip on a Workspace-scoped meta-spec —
+        // false→true is the transition that emits meta_spec_set_updated to
+        // the meta-spec's own workspace. Seed an APPROVED optional
+        // Workspace-scoped entry for that workspace (the state a set
+        // binding used to start from).
+        let prompt = "prompt for setevent-backend v1";
+        let ms = MetaSpec {
+            id: Id::new(uuid::Uuid::new_v4().to_string()),
+            kind: MetaSpecKind::Persona,
+            name: "setevent-backend".to_string(),
+            scope: MetaSpecScope::Workspace,
+            scope_id: Some(ws_id.clone()),
+            prompt: prompt.to_string(),
+            version: 1,
+            content_hash: sha256_hex(prompt),
+            required: false,
+            approval_status: MetaSpecApprovalStatus::Approved,
+            approved_by: Some("admin".to_string()),
+            approved_at: Some(now()),
+            approved_content_hash: Some(sha256_hex(prompt)),
+            created_by: "admin".to_string(),
+            created_at: now(),
+            updated_at: now(),
+        };
+        state.meta_specs.create(&ms).await.unwrap();
+
+        // Flip required → the binding-change event fires (changed_paths is
+        // non-empty: the meta-spec newly binds the workspace).
         let resp = app
             .oneshot(
                 Request::builder()
                     .method("PUT")
-                    .uri(format!("/api/v1/workspaces/{ws_id}/meta-spec-set"))
+                    .uri(format!("/api/v1/meta-specs/{}", ms.id.as_str()))
                     .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        serde_json::json!({
-                            "personas": { "backend": { "path": "backend-developer", "sha": "a1" } },
-                            "principles": [], "standards": [], "process": []
-                        })
-                        .to_string(),
+                        serde_json::json!({"required": true}).to_string(),
                     ))
                     .unwrap(),
             )
@@ -4501,7 +4544,7 @@ mod tests {
         assert_eq!(
             msgs.len(),
             1,
-            "set binding change must emit meta_spec_set_updated"
+            "required flip (the set-binding change) must emit meta_spec_set_updated"
         );
         let payload = msgs[0].payload.as_ref().unwrap();
         assert_eq!(
@@ -4509,22 +4552,20 @@ mod tests {
             1,
             "event payload must name the changed spec"
         );
+        assert_eq!(payload["changed"][0], ms.name);
 
-        // Identical re-PUT: no version change → no additional event.
+        // Identical re-PUT (already required — no false→true transition):
+        // no additional event.
         let app2: Router = crate::api::api_router().with_state(state.clone());
         let resp = app2
             .oneshot(
                 Request::builder()
                     .method("PUT")
-                    .uri(format!("/api/v1/workspaces/{ws_id}/meta-spec-set"))
+                    .uri(format!("/api/v1/meta-specs/{}", ms.id.as_str()))
                     .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        serde_json::json!({
-                            "personas": { "backend": { "path": "backend-developer", "sha": "a1" } },
-                            "principles": [], "standards": [], "process": []
-                        })
-                        .to_string(),
+                        serde_json::json!({"required": true}).to_string(),
                     ))
                     .unwrap(),
             )
@@ -4546,7 +4587,7 @@ mod tests {
         assert_eq!(
             msgs.len(),
             1,
-            "identical re-PUT must not emit another event"
+            "an identical required re-PUT must not emit another event"
         );
     }
 
@@ -5089,6 +5130,12 @@ mod tests {
         )
         .await;
         let own = require_for_ws(&state, "ws-merge-1", "own-process", 1).await;
+        // The kind must differ from the two personas so the ordering
+        // assertion below actually exercises the kind rank (the helpers
+        // default to Persona; this entry is a process).
+        let mut own_process = own.clone();
+        own_process.kind = MetaSpecKind::Process;
+        state.meta_specs.update(&own_process).await.unwrap();
         // Another tenant's required meta-spec must not leak in.
         let _other = make_required_spec(
             &state,

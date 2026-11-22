@@ -2737,7 +2737,24 @@ mod tests {
     // ── Phase 4 (task-118): worker agent spawning ──────────────────────────
 
     /// Helper: a Backlog Implementation task in repo r-1 (workspace ws-1).
+    /// The worker-spawn gate (api/spawn.rs) blocks spawns for tasks whose
+    /// spec is not Approved in the ledger, and chain_state seeds
+    /// "specs/system/auth.md" as Pending (the pre-approval state the
+    /// Phase-2 flow starts from) — a spawnable Implementation task implies
+    /// its spec has been approved, so the helper performs the same
+    /// re-approval a human does before the scheduler runs. The Pending
+    /// spawn-block itself is pinned by
+    /// api/spawn.rs::spawn_blocks_worker_for_pending_spec_until_reapproval.
     async fn impl_task(state: &Arc<crate::AppState>, id: &str) -> Task {
+        if let Some(mut entry) = state
+            .spec_ledger
+            .find_by_path("specs/system/auth.md")
+            .await
+            .unwrap()
+        {
+            entry.approval_status = ApprovalStatus::Approved;
+            state.spec_ledger.save(&entry).await.unwrap();
+        }
         let mut t = Task::new(Id::new(id), "Implement thing", 0);
         t.task_type = Some(TaskType::Implementation);
         t.workspace_id = Id::new("ws-1");

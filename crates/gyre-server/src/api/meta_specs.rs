@@ -8081,6 +8081,19 @@ pub struct UpdateMetaSpecRequest {
     pub prompt: Option<String>,
     pub required: Option<bool>,
     pub approval_status: Option<String>,
+    /// §8 tenant-admin override flag: when approving a Tenant-scoped
+    /// meta-spec, propagate the change past workspace-level overrides
+    /// (urgent compliance-driven changes). Only meaningful for
+    /// Tenant-scoped specs; rejected otherwise. Restricted to admins of
+    /// that tenant. Under the registry model the workspace-override
+    /// surface the flag used to bypass is retired (a required
+    /// Tenant-scoped meta-spec binds every workspace in its tenant
+    /// unconditionally), so an accepted `force` authorizes the same
+    /// immediate propagation that is now the default — the flag's
+    /// validation contract (who may demand it, for which scope) is
+    /// preserved verbatim.
+    #[serde(default)]
+    pub force: Option<bool>,
 }
 
 // ---------------------------------------------------------------------------
@@ -8650,6 +8663,35 @@ pub async fn update_meta_spec_registry(
         "PUT /api/v1/meta-specs/:id",
     )
     .await?;
+
+    // §8 tenant-admin force flag: only defined for Tenant-scoped specs, and
+    // only an admin of THAT tenant may force propagation into its
+    // workspaces (an admin of another tenant must not be able to stomp
+    // workspace rollout policies outside their own scope). Registry model:
+    // the workspace-override surface the flag bypassed is retired, so an
+    // accepted force demands the (now-default) immediate tenant-wide
+    // propagation — the authorization contract above is unchanged.
+    if req.force.unwrap_or(false) {
+        if ms.scope != MetaSpecScope::Tenant {
+            return Err(ApiError::BadRequest(
+                "force is only valid when approving a Tenant-scoped meta-spec".to_string(),
+            ));
+        }
+        match &ms.scope_id {
+            Some(scope_tenant) if auth.tenant_id == *scope_tenant => {}
+            Some(_) => {
+                return Err(ApiError::Forbidden(
+                    "only an admin of the scope tenant may force tenant-wide propagation"
+                        .to_string(),
+                ))
+            }
+            None => {
+                return Err(ApiError::Internal(anyhow::anyhow!(
+                    "Tenant-scoped meta-spec '{id}' has no scope_id"
+                )))
+            }
+        }
+    }
 
     let now = now_secs();
 
@@ -10236,7 +10278,7 @@ mod registry_tests {
         // path is rejected — see `spec_bindings_reject_spec_absent_from_ledger`).
         let entry = gyre_domain::SpecLedgerEntry {
             bindings_sha: String::new(),
-            path: "specs/system/auth.md".to_string(),
+            path: "system/auth.md".to_string(),
             title: "Auth".to_string(),
             owner: "user:admin".to_string(),
             kind: None,
@@ -10403,7 +10445,7 @@ mod registry_tests {
         // membership gate).
         let entry = gyre_domain::SpecLedgerEntry {
             bindings_sha: String::new(),
-            path: "specs/system/auth.md".to_string(),
+            path: "system/auth.md".to_string(),
             title: "Auth".to_string(),
             owner: "user:admin".to_string(),
             kind: None,
@@ -10455,7 +10497,7 @@ mod registry_tests {
 
         let before = state
             .spec_ledger
-            .find_by_path("specs/system/auth.md")
+            .find_by_path("system/auth.md")
             .await
             .unwrap()
             .unwrap();
@@ -10491,7 +10533,7 @@ mod registry_tests {
 
         let after = state
             .spec_ledger
-            .find_by_path("specs/system/auth.md")
+            .find_by_path("system/auth.md")
             .await
             .unwrap()
             .unwrap();
@@ -10519,7 +10561,7 @@ mod registry_tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let identical = state
             .spec_ledger
-            .find_by_path("specs/system/auth.md")
+            .find_by_path("system/auth.md")
             .await
             .unwrap()
             .unwrap();
@@ -10541,7 +10583,7 @@ mod registry_tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let bumped = state
             .spec_ledger
-            .find_by_path("specs/system/auth.md")
+            .find_by_path("system/auth.md")
             .await
             .unwrap()
             .unwrap();
@@ -10554,7 +10596,7 @@ mod registry_tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let unbound = state
             .spec_ledger
-            .find_by_path("specs/system/auth.md")
+            .find_by_path("system/auth.md")
             .await
             .unwrap()
             .unwrap();
