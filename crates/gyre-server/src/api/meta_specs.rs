@@ -8679,6 +8679,7 @@ fn parse_approval_status(s: &str) -> Result<MetaSpecApprovalStatus, ApiError> {
 ///   force flag and DELETE);
 /// - Workspace entries: that workspace's Owner/Admin members (the tenant
 ///   Admin bypass is retained, bounded to the workspace's own tenant).
+///
 /// A workspace Owner/Admin writing a Global/Tenant entry is the
 /// privilege-escalation direction the spec warns about — 403.
 ///
@@ -12257,9 +12258,7 @@ mod registry_tests {
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri(format!(
-                        "/api/v1/meta-specs?scope=workspace&scope_id=ws-req-1&kind=meta:persona"
-                    ))
+                    .uri("/api/v1/meta-specs?scope=workspace&scope_id=ws-req-1&kind=meta:persona")
                     .header("authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
