@@ -12454,6 +12454,12 @@ mod registry_tests {
         use gyre_domain::{Workspace, WorkspaceMembership, WorkspaceRole};
 
         let state = make_test_state_with_jwt();
+        // The Tenant-scoped POST below pins scope_id to the caller's own
+        // tenant "default"; `require_registry_scope` fails closed (404)
+        // when the scope tenant row is missing, and the mem test state
+        // wires an empty tenant repo — materialize it like production
+        // startup (main.rs) and the sibling reconciliation tests do.
+        crate::bootstrap_default_tenant(&state).await;
         let app = crate::api::api_router().with_state(state.clone());
 
         // A workspace the owner belongs to (their authority exists, but
