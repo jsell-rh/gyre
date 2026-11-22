@@ -97,7 +97,7 @@ Canonical spec: `specs/system/agent-runtime.md`. Source: `678a8ac3e3bfeafeb66cdb
 
 ## Shipped
 
-Implemented on this branch (checkpoint commit `95ab1dcb` carried the implementation from the prior interrupted assignment; commit `7e27cbdf` is behavior-preserving rustfmt of the newly added test code — the trusted-finalizer formatting pass; the base merge `464dcdd3` brought in unrelated task-278 work with no overlap).
+Implemented on this branch (checkpoint commit `95ab1dcb` carried the implementation from the prior interrupted assignment; commit `7e27cbdf` is behavior-preserving rustfmt of the newly added test code — the trusted-finalizer formatting pass). This assignment was the rebase repair onto main: merge commit `3c8e4bec` brought in main `88202d67` (task-310 WebSocket-primary agent transport, task-301 meta-spec API). The one content conflict, `docs/agent-protocol.md`, was resolved preserving both sides — task-304's Nix-flake/single-image-definition wording of the `docker/gyre-agent/` paragraph and build commands, plus task-310's `GYRE_WORKSPACE_ID` row and WebSocket-primary-transport section (including the "holding an authenticated WebSocket connection" clause on the same paragraph). `crates/gyre-server/src/api/spawn.rs` auto-merged cleanly: the task-304 Nix failure guidance and task-310's `GYRE_WORKSPACE_ID` injection coexist. All verification below was re-run at the merged head. (An earlier base merge `464dcdd3` brought in task-278 work with no overlap.)
 
 ### Single image definition (Nix flake)
 
@@ -116,8 +116,10 @@ The blanket "worktree mounted as volume" wording was amended in `specs/system/ag
 
 ### Test evidence
 
+Re-run at merged head `3c8e4bec`:
+
 - `cargo test -p gyre-adapters compute`: 53 passed, 0 failed, 4 ignored (require live container runtime/SSH daemon). Includes the Container backend regression (`docker_run_args_enforce_security_defaults`, `spawn_executes_security_defaults_via_docker_stub`/`podman_stub` asserting `--network=none`, `--memory=2g`, `--pids-limit=512`, `--user=65534:65534`, worktree volume), the SSH backend regression (`ssh_docker_run_args_enforce_security_defaults`), and the new k8s tests (pids limit default/override, default-deny policy scoping, RFC 1123 policy naming, apply-stream composition incl. bridge opt-in applying the Pod only, stub-kubectl spawn capturing the full stream, kill deleting both objects).
-- `cargo check -p gyre-server`: passes (test-binary linking exceeds the sandbox 4 GiB budget — the verifier must run `cargo test -p gyre-server spawn`, in particular `kubernetes_spawn_applies_default_deny_network_policy_and_pids_limit`, which observes the applied stream end-to-end through the stub kubectl).
+- `cargo check -p gyre-server`: passes at the merged head (test-binary linking exceeds the sandbox 4 GiB budget — the verifier must run `cargo test -p gyre-server spawn`, in particular `kubernetes_spawn_applies_default_deny_network_policy_and_pids_limit`, which observes the applied stream end-to-end through the stub kubectl).
 - `cargo fmt --check -p gyre-adapters -p gyre-server`: clean.
 - Probe log saved at `/tmp/stage/review-evidence/probes.txt`.
 
