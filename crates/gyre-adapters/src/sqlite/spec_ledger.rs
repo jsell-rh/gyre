@@ -26,6 +26,7 @@ struct SpecLedgerRow {
     updated_at: i64,
     repo_id: Option<String>,
     workspace_id: Option<String>,
+    bindings_sha: String,
 }
 
 impl SpecLedgerRow {
@@ -52,6 +53,7 @@ impl SpecLedgerRow {
             updated_at: self.updated_at as u64,
             repo_id: self.repo_id,
             workspace_id: self.workspace_id,
+            bindings_sha: self.bindings_sha,
         }
     }
 }
@@ -73,6 +75,7 @@ struct NewSpecLedgerRow<'a> {
     updated_at: i64,
     repo_id: Option<&'a str>,
     workspace_id: Option<&'a str>,
+    bindings_sha: &'a str,
 }
 
 fn approval_status_str(s: &ApprovalStatus) -> &'static str {
@@ -138,6 +141,7 @@ impl SpecLedgerRepository for SqliteStorage {
                 updated_at: e.updated_at as i64,
                 repo_id: e.repo_id.as_deref(),
                 workspace_id: e.workspace_id.as_deref(),
+                bindings_sha: &e.bindings_sha,
             };
             diesel::insert_into(spec_ledger_entries::table)
                 .values(&row)
@@ -156,6 +160,7 @@ impl SpecLedgerRepository for SqliteStorage {
                     spec_ledger_entries::updated_at.eq(row.updated_at),
                     spec_ledger_entries::repo_id.eq(row.repo_id),
                     spec_ledger_entries::workspace_id.eq(row.workspace_id),
+                    spec_ledger_entries::bindings_sha.eq(row.bindings_sha),
                 ))
                 .execute(&mut *conn)
                 .context("upsert spec ledger entry")?;

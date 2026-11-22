@@ -594,6 +594,7 @@ pub async fn sync_spec_ledger(
         } else {
             info!(spec_path = %entry.path, "spec-registry: new spec registered");
             SpecLedgerEntry {
+                bindings_sha: String::new(),
                 path: entry.path.clone(),
                 title: entry.title.clone(),
                 owner: entry.owner.clone(),
@@ -3120,6 +3121,7 @@ specs:
             l.insert(
                 "system/design-principles.md".to_string(),
                 SpecLedgerEntry {
+                    bindings_sha: String::new(),
                     path: "system/design-principles.md".to_string(),
                     title: "Design Principles".to_string(),
                     owner: "user:jsell".to_string(),
@@ -3155,6 +3157,7 @@ specs:
             l.insert(
                 "system/design-principles.md".to_string(),
                 SpecLedgerEntry {
+                    bindings_sha: String::new(),
                     path: "system/design-principles.md".to_string(),
                     title: "Design Principles".to_string(),
                     owner: "user:jsell".to_string(),
@@ -3199,6 +3202,7 @@ specs:
             l.insert(
                 "system/old-spec.md".to_string(),
                 SpecLedgerEntry {
+                    bindings_sha: String::new(),
                     path: "system/old-spec.md".to_string(),
                     title: "Old Spec".to_string(),
                     owner: "user:jsell".to_string(),
@@ -3373,6 +3377,7 @@ specs:
 
     fn make_test_ledger_entry(path: &str, sha: &str, status: ApprovalStatus) -> SpecLedgerEntry {
         SpecLedgerEntry {
+            bindings_sha: String::new(),
             path: path.to_string(),
             title: format!("Spec {path}"),
             owner: "user:test".to_string(),

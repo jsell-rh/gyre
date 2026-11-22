@@ -1364,9 +1364,10 @@ else
   warn "Meta-spec registry creation failed"
 fi
 
-# Workspace meta-spec-set
-MS_SET=$(api_get "${API}/workspaces/${WS_ID}/meta-spec-set" 2>/dev/null) || MS_SET="{}"
-ok "Workspace meta-spec-set: $(echo "$MS_SET" | jq -c 'keys' 2>/dev/null || echo "retrieved")"
+# Workspace-scoped meta-spec listing (agent-runtime §2 bindings panel;
+# the retired workspace/tenant meta-spec-set endpoints are gone — 404).
+MS_LIST=$(api_get "${API}/workspaces/${WS_ID}/meta-specs" 2>/dev/null) || MS_LIST="[]"
+ok "Workspace meta-specs: $(echo "$MS_LIST" | jq 'length // 0')"
 
 # =============================================================================
 step $((STEP++)) "Compute targets"
