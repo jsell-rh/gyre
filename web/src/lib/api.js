@@ -78,7 +78,11 @@ async function request(path, options = {}) {
 
 export const api = {
   version: () => request('/version'),
-  activity: (limit = 100) => request(`/activity?limit=${limit}`),
+  // Unified activity feed. `since` (epoch SECONDS) is the time-period
+  // query (activity-dashboard.md §"over any time period"): the server
+  // filters durable notifications with created_at >= since, newest-first.
+  activity: (limit = 100, since = null) =>
+    request(`/activity?limit=${limit}${since != null ? `&since=${Math.floor(since)}` : ''}`),
   agents: ({ workspaceId, repoId, status } = {}) => {
     const p = new URLSearchParams();
     if (status) p.set('status', status);
@@ -137,6 +141,16 @@ export const api = {
   mrGates: (id) => request(`/merge-requests/${id}/gates`),
   mrAttestation: (id) => request(`/merge-requests/${id}/attestation`),
   mrTimeline: (id) => request(`/merge-requests/${id}/timeline`),
+  // Try-it ephemeral preview environments (activity-dashboard.md §"Try it"
+  // links): provision for a merged MR's commit, list per MR / workspace,
+  // fetch status, tear down.
+  tryIt: (mrId) => request(`/merge-requests/${mrId}/try-it`, { method: 'POST' }),
+  mrTryItEnvironments: (mrId) => request(`/merge-requests/${mrId}/try-it`),
+  previewEnvironments: (workspaceId) =>
+    request(`/preview-environments?workspace_id=${encodeURIComponent(workspaceId)}`),
+  previewEnvironment: (id) => request(`/preview-environments/${id}`),
+  teardownPreviewEnvironment: (id) =>
+    request(`/preview-environments/${id}`, { method: 'DELETE' }),
   submitReview: (mrId, data) =>
     request(`/merge-requests/${mrId}/reviews`, {
       method: 'POST',
