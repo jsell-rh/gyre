@@ -1,7 +1,17 @@
 <script>
+  /**
+   * Toast — compatibility facade over the shadcn-svelte toast parts
+   * (lib/components/ui/toast/). The toast store contract
+   * (toast/toastSuccess/toastError/toastWarning/toastInfo/dismiss,
+   * dedupe, max 5, auto-dismiss) is unchanged in ./toast.svelte.js; this
+   * component renders the store's items through the ui parts, keeping the
+   * icons, localized dismiss labels, role=alert on errors, and the
+   * reduced-motion-aware fly transition.
+   */
   import { fly } from 'svelte/transition';
   import { t as i18n } from 'svelte-i18n';
   import { getToasts, dismiss } from './toast.svelte.js';
+  import { Toaster, Toast } from './components/ui/toast/index.js';
 
   const prefersReducedMotion = typeof window !== 'undefined' && typeof window.matchMedia === 'function'
     ? window.matchMedia('(prefers-reduced-motion: reduce)').matches
@@ -10,13 +20,23 @@
   /** Svelte JS transitions bypass CSS reduced-motion rules — apply duration 0 manually */
   const flyDuration = prefersReducedMotion ? 0 : 200;
 
+  // Dynamic transition (Svelte transitions are functions): the item
+  // element animates in with the same fly parameters as before.
+  const toastTransition = (node, params) => fly(node, { y: 8, duration: flyDuration, ...params });
+
   let toasts = $derived(getToasts());
 </script>
 
-<div class="toast-container" aria-live="polite" aria-atomic="false">
+<Toaster>
   {#each toasts as t (t.id)}
-    <div class="toast toast-{t.type}" role={t.type === 'error' ? 'alert' : undefined} transition:fly={{ y: 8, duration: flyDuration }}>
-      <span class="toast-icon" aria-hidden="true">
+    <Toast
+      type={t.type}
+      role={t.type === 'error' ? 'alert' : undefined}
+      ondismiss={() => dismiss(t.id)}
+      dismissLabel={$i18n('common.dismiss_notification', { values: { message: t.message } })}
+      transition={toastTransition}
+    >
+      {#snippet icon()}
         {#if t.type === 'success'}
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16" aria-hidden="true"><path d="M20 6L9 17l-5-5"/></svg>
         {:else if t.type === 'error'}
@@ -26,85 +46,8 @@
         {:else}
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
         {/if}
-      </span>
-      <span class="toast-message">{t.message}</span>
-      <button class="toast-dismiss" onclick={() => dismiss(t.id)} aria-label={$i18n('common.dismiss_notification', { values: { message: t.message } })}>
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true"><path d="M18 6L6 18M6 6l12 12"/></svg>
-      </button>
-    </div>
+      {/snippet}
+      {t.message}
+    </Toast>
   {/each}
-</div>
-
-<style>
-  .toast-container {
-    position: fixed;
-    bottom: var(--space-6);
-    right: var(--space-6);
-    z-index: 2000;
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-2);
-    max-width: 380px;
-    pointer-events: none;
-  }
-
-  .toast {
-    display: flex;
-    align-items: flex-start;
-    gap: var(--space-3);
-    padding: var(--space-3) var(--space-4);
-    background: var(--color-surface-elevated);
-    border: 1px solid var(--color-border-strong);
-    border-radius: var(--radius);
-    box-shadow: var(--shadow-md);
-    pointer-events: all;
-  }
-
-  .toast-icon {
-    flex-shrink: 0;
-    margin-top: 1px;
-  }
-
-  .toast-success .toast-icon { color: var(--color-success); }
-  .toast-error   .toast-icon { color: var(--color-danger);  }
-  .toast-warning .toast-icon { color: var(--color-warning); }
-  .toast-info    .toast-icon { color: var(--color-link);    }
-
-  .toast-success { border-left: 3px solid var(--color-success); }
-  .toast-error   { border-left: 3px solid var(--color-danger);  }
-  .toast-warning { border-left: 3px solid var(--color-warning); }
-  .toast-info    { border-left: 3px solid var(--color-link);    }
-
-  .toast-message {
-    flex: 1;
-    font-size: var(--text-sm);
-    color: var(--color-text);
-    line-height: 1.4;
-  }
-
-  .toast-dismiss {
-    flex-shrink: 0;
-    background: transparent;
-    border: none;
-    color: var(--color-text-muted);
-    cursor: pointer;
-    padding: var(--space-1);
-    border-radius: var(--radius-sm);
-    display: flex;
-    align-items: center;
-    transition: color var(--transition-fast);
-  }
-
-  .toast-dismiss:hover {
-    color: var(--color-text);
-  }
-
-  .toast-dismiss:focus-visible {
-    outline: 2px solid var(--color-focus);
-    outline-offset: 2px;
-  }
-
-  @media (prefers-reduced-motion: reduce) {
-    .toast-dismiss { transition: none; }
-  }
-</style>
+</Toaster>
