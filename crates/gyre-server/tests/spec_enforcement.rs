@@ -56,6 +56,11 @@ async fn start_server() -> TestServer {
     // (merge_processor.rs merge_signing_tests, api/jj.rs, git_http.rs).
     unsafe { std::env::set_var("GYRE_SIGNING_MODE", "local") };
 
+    // Explicit in-memory opt-in (architecture.md §Storage): the default
+    // (unset) backend is now durable SQLite at the platform default
+    // data path — a test run must never touch the operator's real
+    // database file. Idempotent and race-free (Once-guarded).
+    gyre_server::select_in_memory_storage();
     let state = build_state(&token, &base_url, None);
     abac_middleware::seed_builtin_policies(&state)
         .await
