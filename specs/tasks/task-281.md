@@ -3,7 +3,7 @@ title: "Impact analysis: cascade test results and per-dependent test status serv
 spec_ref: "Spec gap spec-cab97078efffe0fbfb7339be / impact-cascade-results-ui / ed9f34316476"
 depends_on: [task-280]
 progress: ready-for-review
-commits: ["71bda29a"]
+commits: ["71bda29a", "82d862ac"]
 ---
 
 ## Required behavior
