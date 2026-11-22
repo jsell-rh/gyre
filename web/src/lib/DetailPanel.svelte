@@ -10,6 +10,8 @@
   import ArchPreviewCanvas from './ArchPreviewCanvas.svelte';
   import ConstraintEditor from './ConstraintEditor.svelte';
   import InlineChat from './InlineChat.svelte';
+  import AgentTty from './AgentTty.svelte';
+  import TryItButton from './TryItButton.svelte';
   import { api, selfReviewerId } from './api.js';
   import { entityName as sharedEntityName, shortId as sharedShortId, formatSha, formatId as sharedFormatId } from './entityNames.svelte.js';
   import { relativeTime, absoluteTime, formatDuration, formatDate } from './timeFormat.js';
@@ -2513,6 +2515,12 @@
                       View Provenance
                     </button>
                   {/if}
+                  <!-- "Try it": spin up an ephemeral preview environment of
+                       this MR's landed commit (activity-dashboard.md §"Try
+                       it" links). -->
+                  <div class="mr-try-it">
+                    <TryItButton mrId={mr.id} />
+                  </div>
                 </div>
               {/if}
             {/if}
@@ -2551,6 +2559,14 @@
                     View MR
                   </button>
                 {/if}
+              </div>
+              <!-- TTY attach — the human window into the Ralph loop
+                   (activity-dashboard.md: "attach to a TTY if needed").
+                   Opens the authenticated /ws/agents/:id/tty socket,
+                   replays the buffered log lines, then streams live
+                   output. -->
+              <div class="agent-tty-mount">
+                <AgentTty agentId={ag.id ?? entity.id} />
               </div>
               {#if ag.status && ag.status !== 'pending'}
                 {@const phases = (() => {
@@ -8720,6 +8736,14 @@
     margin-top: var(--space-2);
     font-size: var(--text-sm);
     flex-wrap: wrap;
+  }
+
+  .mr-try-it {
+    margin-left: auto;
+  }
+
+  .agent-tty-mount {
+    margin-top: var(--space-2);
   }
 
   .mr-quick-links {

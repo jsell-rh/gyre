@@ -1623,11 +1623,11 @@ pub(crate) async fn spawn_agent_core(
 /// Outcome of the raw compute-target dispatch for one agent process:
 /// whether a process actually started, and the PID / container id / image
 /// digest captured for workload attestation.
-struct AgentLaunchDispatch {
-    launched: bool,
-    pid: Option<u32>,
-    container_id: Option<String>,
-    container_image: Option<String>,
+pub(crate) struct AgentLaunchDispatch {
+    pub(crate) launched: bool,
+    pub(crate) pid: Option<u32>,
+    pub(crate) container_id: Option<String>,
+    pub(crate) container_image: Option<String>,
 }
 
 /// The platform's single four-backend process dispatch (container / SSH /
@@ -1645,7 +1645,7 @@ struct AgentLaunchDispatch {
 /// Returns `Err` only for the SSH container-mode agent-name rejection
 /// (shell-injection guard, M19.5-A).
 #[allow(clippy::too_many_arguments)]
-async fn dispatch_agent_launch(
+pub(crate) async fn dispatch_agent_launch(
     state: &Arc<AppState>,
     agent: &Agent,
     resolved_target_config: &Option<super::compute::ComputeTargetConfig>,
