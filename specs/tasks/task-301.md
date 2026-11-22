@@ -3,7 +3,7 @@ title: "Meta-spec API at specced routes with scope-level admin auth"
 spec_ref: "Spec gap spec-41a92c20354c6a108e6074e3 / meta-spec-api-contract / 4a3f940495a8"
 depends_on: []
 progress: ready-for-review
-commits: ["c5a157de6c437f3f3c7f30156d88c46545fea89b"]
+commits: ["c5a157de", "d280cff1"]
 ---
 
 ## Required behavior
@@ -82,9 +82,8 @@ Canonical spec: `specs/system/agent-runtime.md`. Source: `678a8ac3e3bfeafeb66cdb
 
 ## Shipped
 
-Commit `c5a157de` implements both halves of the task; this commit adds
-coverage-row updates, the stale cross-reference fix in
-`specs/system/meta-spec-reconciliation.md`, and this bookkeeping.
+Commits `c5a157de` (route move + scope-level write gate) and `d280cff1`
+(review repair: cross-tenant Admin write containment) implement the task.
 
 ### Route contract (agent-runtime §2 API table)
 
@@ -98,17 +97,13 @@ spec bindings reference the entry), and the `/versions` +
 `/versions/:version` endpoints (api/mod.rs:980-996). The old prefix is
 removed with no silent alias — test `registry_old_prefix_removed_no_alias`
 asserts every old verb 404s and that the `:path/blast-radius` route still
-resolves under the shared prefix (matchit 0.7.3 normalizes param names, so
-`:id` and `:path` coexist; the static `preview` segments stay prioritized).
-ABAC `RouteResourceMapping` entries moved to the new patterns
-(abac_middleware.rs:782-796) and the `meta-specs-registry` special case was
-dropped from `prefix_entity_type` (mechanical singularization now covers
-`meta-specs` → `meta_spec`). Internal callers (reconciliation.rs tests,
-rbac.rs tests), the web client (web/src/lib/api.js), scripts/e2e-flow.sh,
-and docs/api-reference.md all target the new paths;
-`scripts/check-abac-route-registry.sh` is green and the exemption files
-never listed a meta-spec route (the mappings were resolver entries at the
-base too — nothing was grandfathered).
+resolves under the shared prefix. ABAC `RouteResourceMapping` entries
+moved to the new patterns (abac_middleware.rs:782-796) and the
+`meta-specs-registry` special case was dropped from `prefix_entity_type`.
+Internal callers (reconciliation.rs tests, rbac.rs tests), the web client
+(web/src/lib/api.js), scripts/e2e-flow.sh, and docs/api-reference.md all
+target the new paths; `scripts/check-abac-route-registry.sh` is green and
+the exemption files never listed a meta-spec route.
 
 ### Scope-level authorization (§2 Required vs Optional)
 
@@ -119,38 +114,57 @@ Global/Tenant entries are writable only by a tenant Admin (Tenant
 additionally requires the caller to be an Admin of the scope tenant);
 Workspace entries are writable by that workspace's Owner/Admin members via
 a real `workspace_memberships` lookup, with the tenant Admin bypass
-retained. `require_registry_scope` (containment) runs first so a
-membership-based grant can never cross tenants. The PUT handler now loads
+retained and bounded to the workspace's own tenant. The PUT handler loads
 the record and derives scope from it (never from the request), with 403
-before 404 for unprivileged callers on missing ids (same ordering as
-DELETE). The misleading "outer write gate already enforces this for every
-PUT" comment is replaced by a description of the real per-scope gate. A
-workspace Owner/Admin PUT on a Global or Tenant entry — the
-privilege-escalation direction the spec warns about — returns 403 without
-flipping the flag. DELETE keeps its existing scope-aware gate, and the §8
-force flag still requires an Admin of the scope tenant.
+before 404 for unprivileged callers on missing ids. The misleading "outer
+write gate already enforces this for every PUT" comment is replaced by a
+description of the real per-scope gate. DELETE keeps its existing
+scope-aware gate, and the §8 force flag still requires an Admin of the
+scope tenant.
+
+### Cross-tenant Admin write containment (review repair, `d280cff1`)
+
+The first candidate's Workspace branch granted the tenant-Admin bypass
+with no tenant match: since `require_registry_scope`'s Admin bypass admits
+an Admin of ANY tenant through containment, an Admin of tenant A could
+PUT (any field, including `{"required":true}`) and POST workspace-scoped
+meta-specs inside tenant B's workspaces — injecting that prompt into every
+agent tenant B spawns there — while being denied 403 on DELETE of the same
+entry. The Workspace branch now loads the workspace and enforces
+`ws.tenant_id == auth.tenant_id` unconditionally before any bypass,
+mirroring `authorize_meta_spec_delete` and the function's own Tenant
+branch. Two pre-existing test setups that created Tenant-scoped fixtures
+via the "default" system admin pinned to another tenant (`delete_tenant_scoped_meta_spec_requires_scope_tenant_admin`,
+`force_requires_admin_of_the_scope_tenant`) — correctly rejected by the
+scope-level gate — now create via a signed Admin JWT of the scope tenant.
 
 ### Test evidence
 
-New tests in `registry_tests` (api/meta_specs.rs):
+`registry_tests` (api/meta_specs.rs):
 `workspace_owner_sets_required_on_workspace_meta_spec` (AC2 — Owner, not
 tenant Admin, PUTs `required=true` on a Workspace-scoped entry at the new
-path: 200, flag persists in the store, `assemble_prompt_set` injects it as
-a `required-workspace` section; a workspace Admin member is also allowed;
-a plain Developer member stays 403; also asserts the AC1 filtered
-listing), `workspace_owner_cannot_write_global_or_tenant_meta_spec` (AC3 —
-the same Owner on a Global entry and on a Tenant entry of the caller's own
-tenant: 403, flag unchanged), and `registry_old_prefix_removed_no_alias`.
-Existing semantics tests (version bump/history, DELETE 409, version
-content, membership/delete gates, force gate, rbac-denied audit,
-reconciliation triggers) were retargeted to the new paths.
+path: 200, flag persists, `assemble_prompt_set` injects it as a
+`required-workspace` section; a workspace Admin member is also allowed; a
+plain Developer member stays 403; also asserts the AC1 filtered listing),
+`workspace_owner_cannot_write_global_or_tenant_meta_spec` (AC3 — the same
+Owner on a Global entry and on a Tenant entry of the caller's own tenant:
+403, flag unchanged), `registry_old_prefix_removed_no_alias`, and the
+repair's `cross_tenant_admin_cannot_write_workspace_meta_spec`
+(cross-tenant Admin PUT `required=true` → 403 with the flag unchanged in
+the store; cross-tenant Admin POST → 403; the scope tenant's Admin PUT
+still succeeds — the bound, not bypass removal). Existing semantics tests
+(version bump/history, DELETE 409, version content, membership/delete
+gates, force gate, rbac-denied audit, reconciliation triggers) were
+retargeted to the new paths.
 
 In this sandbox the build wrapper permits `cargo check` only:
 `SKIP_WEB_BUILD=1 cargo check -p gyre-server --lib --tests` exits 0 (all
-test code type-checks), and the abac-route-registry,
-abac-exempt-handlers, and arch script gates pass (outputs saved under
-/tmp/stage/review-evidence). gyre-server test execution exceeds the 4 GiB
-sandbox budget and is deferred to the independent verifier:
-`SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib registry_tests` (plus
-`--lib rbac` and the prompt_assembly suite) — full list in
-/tmp/stage/review-evidence/task-301-probes.md.
+test code type-checks), `rustfmt --check` on the changed file is clean,
+and the arch, abac-route-registry, and abac-exempt-handlers script gates
+pass (outputs saved under /tmp/stage/review-evidence). gyre-server test
+execution exceeds the sandbox build budget and is deferred to the
+independent verifier — required probes:
+`SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib registry_tests`,
+`SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib rbac`, and
+`SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib prompt_assembly` (full
+list in /tmp/stage/review-evidence/task-301-probes.md).
