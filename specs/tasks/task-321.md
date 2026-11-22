@@ -672,3 +672,21 @@ Publish exactly the independently reviewed missing-work plan below. Only create 
 ## Shipped
 
 Task definitions and explicit bindings only; no product implementation claimed.
+
+### Published
+
+- Seven task documents (task-314 through task-320) created from the independently reviewed plan a6e170077d3916adf545dc2d6627606f0766342baf60ae0965d0b3a25b9ac267 for specs/development/ci-docs-release.md, each carrying the plan's exact required_behavior, acceptance criteria, negative probe, and section bindings; all remain `not-started`.
+- specs/task-spec-inputs.json gains exactly the seven backlog section bindings (cdd27aa4…, b7c86bc0…, 0707840b…, 5e69a03…, c467a8f…, 3d8bcb4…, 4a0c06c…) and their seven `Spec gap spec-17849f2036d5093f11e2a1ae / …` gap bindings. No existing task, spec, registry entry, coverage status, product file, or gate was modified (verified: `git diff <base>..HEAD` touches only the eight new task docs and the registry additions).
+
+### Rebase repair
+
+The branch was rebased onto the concurrent dogfooding publication (52d7b66, task-313) which also appends registry entries to specs/task-spec-inputs.json. The content conflict was resolved as the exact union of both parents' `sections` and `bindings` maps — the ci-docs-release bindings from this publication plus the dogfooding binding `backlog/69fff34a83938a4731034172` — verified programmatically (resolved file equals the union of both parent versions for both maps; JSON valid; no conflict markers remain).
+
+### Verification evidence
+
+- Plan-to-document fidelity: each task doc's title, required_behavior, every acceptance criterion, negative probe, covers IDs, and depends_on were asserted to match the plan JSON verbatim (script, exit 0).
+- Coverage of the audit: all 7 audited gaps are covered by exactly one task each; satisfied/context sections are not assigned; each covered section resolves to specs/development/ci-docs-release.md; no other plan binds these sections (no duplicate work).
+- Audit challenge (spot-checks against the tree): no astro.config.*/docs-site/ or Pages deployment exists; no scripts/check-i18n-* or doc-freshness script exists; ChangelogEntry has no spec_ref; the CLI version comes from clap's manifest attribute; `check_pre_accept_gates` still early-returns for repos without configured gates — the audited gaps are real.
+- No new entries in any frozen scripts/*-exemptions.txt; product surface untouched.
+
+Deferred to the independent verifier: full-history attribution scan and workspace-wide gates (owned by the executor).
