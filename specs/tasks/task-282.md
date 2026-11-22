@@ -3,7 +3,7 @@ title: "Serve the spec's literal /api/v1/deps/* API surface (all ten rows, ?work
 spec_ref: "Spec gap spec-cab97078efffe0fbfb7339be / deps-spec-route-paths / ed9f34316476"
 depends_on: [task-281]
 progress: ready-for-review
-commits: ["f5703622638027ab45be016c909da3e5cbe02c8a", "53b8b41983bdf52dc96e9f5d72dd8c8621a8eca8", "88309116208775e04bc778364f335ae5afcb6688"]
+commits: ["2ae4dbed4e0ceddcd7ce59298671cc1359d0c18d", "f5703622638027ab45be016c909da3e5cbe02c8a", "53b8b41983bdf52dc96e9f5d72dd8c8621a8eca8", "88309116208775e04bc778364f335ae5afcb6688"]
 ---
 
 ## Required behavior
@@ -89,53 +89,60 @@ All ten routes are registered in the ABAC resolver
 (crates/gyre-server/src/abac_middleware.rs — per-repo routes use the
 `:repo_id` param so the repo-to-workspace-to-tenant scope chain resolves;
 the flat write routes enforce per-handler containment).
+docs/api-reference.md documents all ten `/api/v1/deps/*` paths, and coverage
+row 15 of specs/coverage/system/dependency-graph.md is re-evidenced with the
+literal-path source locations.
 
-### Verification-repair round (f5703622)
+### Verification-repair round (2ae4dbed)
 
-The prior verification round failed on formatting only: rustfmt diffs on
-changed lines in `api/dependencies.rs` and `api/mod.rs`, plus two
-`clippy::doc_lazy_continuation` lints where the `add_manual_dependency` doc
-comment's closing paragraph parsed as a lazy continuation of the preceding
-list. Fixed with `cargo fmt -p gyre-server` and one blank `///` separator
-line — whitespace and a doc comment only, zero behavior change (per this
-assignment's instruction not to cold-build an unchanged crate for
-formatting-only feedback; the verifier's checks.sh re-runs rustfmt/clippy on
-the exact head).
+The prior verification round (`cargo test --all`, attempt 3efa65adfa) failed
+exactly one probe: `deps_graph_endpoint_workspace_query_scopes_the_graph`
+asserted the `?workspace=ws-dg-x` graph holds only the a→b edge, but both
+fixture edges touch ws-dg-x — a→c via its source repo `a`. The shared
+`workspace_scoped_graph` core (serving both the query form and the dedicated
+`/api/v1/workspaces/:id/dependency-graph` route) implements the dedicated
+route's committed semantics (in place since d7940e85, pre-task-282): edges
+where at least one endpoint is in the workspace. The task contract requires
+the query form to deliver the SAME graph as the dedicated route, and the
+test's own comment states that semantics — the ws-dg-x assertion was the
+defect. Repaired it to expect every edge touching ws-dg-x repos (targets
+{b, c} — the exact 2-edge result the verifier's own failing run observed)
+and strengthened the probe: the `?workspace=` form is now also asserted
+equivalent to the dedicated `get_workspace_dependency_graph` route on
+identical fixtures, so any divergence between the two forms fails the test.
+Test-only change; no production behavior touched. The ws-dg-y crossing-edge
+and unknown-workspace-404 assertions are unchanged.
 
 ### Test and gate evidence
 
-- `cargo check -p gyre-server --lib --tests` — exit 0 at the prior checkpoint
-  (after finishing the previous checkpoint's unfinished fix: Debug derives on
-  the response DTOs the new `expect_err`-based probe tests require; response
-  shapes unchanged).
-- `cargo check -p gyre-cli` — exit 0; the CLI consumes the existing routes
-  over HTTP and calls no handler directly, so it is unchanged.
-- `scripts/check-abac-route-registry.sh`, `check-abac-exempt-handlers.sh`,
-  `check-forged-scope-fields.sh` — all pass at this head, no new exemption
-  entries.
+- `cargo check -p gyre-server --lib --tests` — exit 0 at this head (2ae4dbed,
+  including the test repair).
 - `cargo fmt --check -p gyre-server` — exit 0 at this head.
-- Standalone axum-0.7 routing probe (registered the exact route shapes):
-  all ten literal rows match — zero 404s, no Router conflict panic, and a
-  GET on the flat `:id` path 405s, proving the DELETE registration matched
-  rather than a catch-all. Saved under /tmp/stage/review-evidence.
+- `scripts/check-abac-route-registry.sh` — exit 0 (all ten `/api/v1/deps/*`
+  routes resolve in the ABAC registry; no exemption-file growth).
+- `scripts/check-abac-exempt-handlers.sh` — exit 0 (86 handlers checked).
+- Standalone axum-0.7 routing probe (prior round, 53b8b419): all ten literal
+  rows match — zero 404s, no Router conflict panic, a GET on the flat `:id`
+  path 405s (recorded in that round's review evidence; /tmp/stage is
+  per-attempt, so re-run if needed).
 - Probe tests in the `api::dependencies` tests module:
-  `deps_graph_endpoint_workspace_query_scopes_the_graph`,
-  `deps_manual_endpoint_declares_edge_and_enforces_caller_scope`,
+  `deps_graph_endpoint_workspace_query_scopes_the_graph` (repaired this
+  round), `deps_manual_endpoint_declares_edge_and_enforces_caller_scope`,
   `deps_delete_by_id_is_manual_only_and_tenant_contained`,
   `deps_acknowledge_endpoint_is_tenant_contained_and_effective`.
 
 ### Deferred to the independent verifier
 
 gyre-server test compilation exceeds this sandbox's 4 GiB build budget (the
-build wrapper blocks it), so the verifier must run:
+build wrapper blocks it in the implement stage), so the verifier must run:
 
 - `cargo test -p gyre-server --lib api::dependencies::tests` (the four
-  task-282 probe tests plus the pre-existing dependencies tests as
-  regression cover for the unchanged existing surface);
+  task-282 probe tests — including the repaired workspace-query scoping
+  test — plus the pre-existing dependencies tests as regression cover for
+  the unchanged existing surface);
 - `cargo test -p gyre-server --test task164_dependency_graph_detail`
-  (updated for the `get_graph` Query parameter; compiles per
-  `cargo check --tests`).
+  (dedicated-route and tenant-wide graph cover; passed in the prior
+  verification round).
 
-docs/api-reference.md documents all ten `/api/v1/deps/*` paths, and coverage
-row 15 of specs/coverage/system/dependency-graph.md is re-evidenced with the
-literal-path source locations.
+Repair evidence for this round is saved under
+/tmp/stage/review-evidence/task282-repair.md.
