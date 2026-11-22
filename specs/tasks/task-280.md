@@ -2,8 +2,8 @@
 title: "Cascade testing: real agent-executed test runs against the merged version, with durable result records"
 spec_ref: "Spec gap spec-cab97078efffe0fbfb7339be / cascade-test-execution / ed9f34316476"
 depends_on: []
-progress: not-started
-commits: []
+progress: complete
+commits: ["3d88b9c0b70ac9433ef890ae3e74361f4ea18b7f", "15bae5c0fb9d06aa98ac05b08fd46a0264845c23", "935f408420804f6df661657ddca7e6e554e5b8cd"]
 ---
 
 ## Required behavior
@@ -51,3 +51,87 @@ Canonical spec: `specs/system/dependency-graph.md`. Source: `678a8ac3e3bfeafeb66
     ]
   }
 ]
+
+## Shipped
+
+The EXECUTION and DURABLE RESULTS links of dependency-graph.md §Cascade
+Testing are implemented in production code; the identification, task-filing,
+event, notification, and failure follow-up links are unchanged from before
+this task.
+
+### This round (rebase repair against current main)
+
+The published task-280 head (d21b6c6) conflicted with current main
+(2b5189b9, task-278 every-push detection work). The merge was resolved in
+commit 6882bd3d: the sole conflict, specs/coverage/system/dependency-graph.md,
+was resolved by keeping this branch's row 12 (Cascade Testing, task-280
+implemented) and main's task-278 row-5/6/8 re-evidence plus its header note,
+with the combined coverage count (12/16) recomputed from the merged table.
+No production-code conflicts: main's incoming changes touch git_http.rs and
+api/dependencies.rs, none of the task-280 cascade files. Evidence on the
+merged tree: `cargo check -p gyre-server` passes (exit 0); `cargo test -p
+gyre-adapters cascade` passes 5/5; `cargo fmt --check` clean for
+gyre-ports, gyre-domain, gyre-adapters, and gyre-server; check-mem-port-contracts,
+check-migration-sql-portability, check-in-memory-state-stores, and
+check-migration-versions all pass.
+
+### EXECUTION (agent actually spawned, no human action)
+
+- `trigger_cascade_tests` (crates/gyre-server/src/merge_processor.rs) creates
+each per-dependent cascade-test task with
+`task_type = Some(TaskType::Implementation)` — the discriminator the worker
+scheduler spawns (previously unset, so signal_chain.rs skipped the task:
+"untyped → never spawned").
+- The task description is the spawned agent's instruction set, rendered into
+its `system://context` prompt: full context (dependent repo, merged repo +
+id, merge SHA) and the procedure — update the dependency reference to the
+merged commit (or its tag), run the repo's full test suite, complete the
+agent run on pass / fail the run with the failing test output on failure.
+Completion and failure flow through the existing `report_cascade_test_result`
+path (api/spawn.rs), unchanged.
+- The trigger-time context (merged repo id, merge SHA) is persisted in the KV
+store keyed by cascade task id so the durable result record carries the full
+identity of the triggering merge.
+
+### DURABLE RESULTS (survive restart)
+
+- New port `CascadeTestResultRepository` (gyre-ports) with a
+  `CascadeTestResult` domain record (dependent repo id, merged repo id,
+  merge SHA, cascade task id, pass/fail, failure details, timestamp).
+- Implemented by all three adapters with the identical one-row-per-task
+  upsert contract (record replaces the row for the same cascade_task_id):
+  mem (MemCascadeTestResultRepository), Diesel SQLite, and Postgres
+  (ON CONFLICT (cascade_task_id) DO UPDATE).
+- Migration 2026-11-21-000070_cascade_test_results uses plain portable SQL
+  (TEXT/BOOLEAN/BIGINT, no dialect-only constructs) so it runs on both
+  backends; sequence number 000070 verified unused.
+- Wired via the `store!` macro as `AppState.cascade_test_results` (lib.rs) —
+  no Arc<Mutex<HashMap>> state alias; a restart does not orphan results.
+- `report_cascade_test_result` persists the record on every report (pass and
+  fail; failure details carried on fail), in addition to the unchanged
+  one-shot cascade_test_passed/failed events, member notifications, and
+  auto-created failure follow-up task.
+
+### Test evidence
+
+- Passed here (smaller explicit packages): `cargo test -p gyre-adapters
+cascade` — 5/5, including `result_survives_fresh_storage_instance` (a fresh
+SqliteStorage instance over the same database file recovers the record,
+proving restart durability) and `record_replaces_row_for_same_task` (the
+upsert contract).
+- gyre-server test compilation is deferred to the independent verifier per
+the 4 GiB budget rule. The verifier must execute the focused server tests:
+  - `signal_chain::tests::scheduler_spawns_agent_for_cascade_test_task`
+    (the EXECUTION probe: merge in repo B → cascade-test task claimed by
+    the worker-spawn cycle → agent record tied to the dependent repo)
+  - `merge_processor::tests::report_cascade_test_result_persists_durable_pass_record`,
+    `..._persists_durable_failure_record`, `..._rereport_replaces_record`
+  - `merge_processor::tests::trigger_cascade_tests_creates_tasks_for_dependents`
+    (asserts the task carries task_type = Implementation at creation and
+    that the description is the agent instruction set)
+  - existing trigger/report behavioral tests:
+    `trigger_cascade_tests_creates_task_per_dependent`,
+    `trigger_cascade_tests_skips_when_policy_disabled`,
+    `trigger_cascade_tests_respects_dependent_workspace_opt_out`,
+    `report_cascade_test_result_failed_creates_follow_up_task`,
+    `report_cascade_test_failure_notifies_workspace_members`.
