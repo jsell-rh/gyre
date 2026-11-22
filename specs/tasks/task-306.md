@@ -97,7 +97,9 @@ Canonical spec: `specs/system/explorer-canvas.md`. Source: `678a8ac3e3bfeafeb66c
 
 ### What changed this round
 
-Round 87 (repair dispatch from checkpoint `6b6bcf3b`). `origin/main` fetched and **unchanged** at `7e746233` — the exact commit already reconciled into this branch by round-76's merge `f2a0f9da` — so no new reconciliation was needed. Both external blockers re-verified with the focused deterministic source-level probe at head `6b6bcf3b`; evidence saved to `/tmp/stage/review-evidence/task306-round87-probe.txt` (exit 0). Docs-only round: zero changes to the four language extractors, the graph store/adapters, or the upsert path (AC 1 holds) — no Rust or web source touched, so there were no newly added Rust files to format and no product-surface commit to attribute beyond this docs commit.
+Round 88 (repair dispatch from checkpoint `9445f0d6`). `origin/main` fetched and **unchanged** at `7e746233` — the exact commit already reconciled into this branch by round-76's merge `f2a0f9da` — so no new reconciliation was needed. Both external blockers re-verified with the focused deterministic source-level probe at head `9445f0d6`; evidence saved to `/tmp/stage/review-evidence/task306-round88-probe.txt` (exit 0).
+
+Docs-only round: zero changes to the four language extractors, the graph store/adapters, or the upsert path (AC 1 holds) — no Rust or web source touched, so there were no newly added Rust files to format and no product-surface commit to attribute beyond this docs commit.
 
 ### Realized-model graph-node-metrics backend — NOT landed
 
@@ -116,7 +118,7 @@ Recorded: **explorer-canvas.md §Component Architecture** (Canvas 2D for graph/t
 
 ### Evidence
 
-Probe evidence with source SHAs saved at `/tmp/stage/review-evidence/task306-round87-probe.txt` (exit 0). Per the standing constraint, large gyre-server builds/test compilation run in the independent verifier; this round ran no server tests and defers none.
+Probe evidence with source SHAs saved at `/tmp/stage/review-evidence/task306-round88-probe.txt` (exit 0). Per the standing constraint, large gyre-server builds/test compilation run in the independent verifier; this round ran no server tests and defers none.
 
 ### Remaining work to unblock
 
