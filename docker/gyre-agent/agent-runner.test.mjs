@@ -582,3 +582,464 @@ describe('preview mode (meta-spec reconciliation §5): draft reaches the agent, 
     );
   });
 });
+
+// ── WebSocket transport (architecture.md §API, task-310) ────────────────────
+//
+// "WebSocket as the primary transport for agent ↔ server communication".
+// These tests run the REAL agent-runner.mjs as a child process against a
+// minimal RFC 6455 WebSocket server (handshake + text frames) and prove:
+//   1. the runner maintains an authenticated WS session (Auth →
+//      AuthResult → Subscribe to its own workspace) and its heartbeats
+//      travel over the WS, NOT the HTTP fallback;
+//   2. a server-pushed agent-directed shutdown message reaches the runner
+//      over the WS (no polling) and triggers the graceful stop inside the
+//      grace window — no completion call, no MR;
+//   3. the transport survives a transient drop (reconnect with backoff).
+
+import { createHash } from 'node:crypto';
+
+const WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
+
+/** Minimal RFC 6455 server-side WebSocket: text frames both ways on one
+ * connection (handshake done by the enclosing HTTP server's upgrade
+ * handler). Client frames are masked and unmasked here. */
+class MiniWsConnection {
+  constructor(socket) {
+    this.socket = socket;
+    this.buffer = Buffer.alloc(0);
+    this.onmessage = null;
+    this.onclose = null;
+    socket.on('data', (chunk) => this._feed(chunk));
+    socket.on('close', () => this.onclose?.());
+    socket.on('error', () => {
+      socket.destroy();
+    });
+  }
+
+  _feed(chunk) {
+    this.buffer = Buffer.concat([this.buffer, chunk]);
+    for (;;) {
+      const frame = this._readFrame();
+      if (!frame) return;
+      if (frame.opcode === 0x1) {
+        this.onmessage?.(frame.payload.toString('utf8'));
+      } else if (frame.opcode === 0x8) {
+        this._sendFrame(0x8, Buffer.alloc(0));
+        this.socket.end();
+        return;
+      }
+      // ping/pong/continuation frames: not needed for these tests
+    }
+  }
+
+  _readFrame() {
+    const buf = this.buffer;
+    if (buf.length < 2) return null;
+    const opcode = buf[0] & 0x0f;
+    const masked = (buf[1] & 0x80) !== 0;
+    let len = buf[1] & 0x7f;
+    let offset = 2;
+    if (len === 126) {
+      if (buf.length < 4) return null;
+      len = buf.readUInt16BE(2);
+      offset = 4;
+    } else if (len === 127) {
+      if (buf.length < 10) return null;
+      len = Number(buf.readBigUInt64BE(2));
+      offset = 10;
+    }
+    const maskLen = masked ? 4 : 0;
+    if (buf.length < offset + maskLen + len) return null;
+    let payload = buf.subarray(offset + maskLen, offset + maskLen + len);
+    if (masked) {
+      const mask = buf.subarray(offset, offset + 4);
+      const unmasked = Buffer.allocUnsafe(len);
+      for (let i = 0; i < len; i++) unmasked[i] = payload[i] ^ mask[i & 3];
+      payload = unmasked;
+    }
+    this.buffer = buf.subarray(offset + maskLen + len);
+    return { opcode, payload };
+  }
+
+  send(text) {
+    this._sendFrame(0x1, Buffer.from(text, 'utf8'));
+  }
+
+  close() {
+    this._sendFrame(0x8, Buffer.alloc(0));
+    this.socket.end();
+  }
+
+  _sendFrame(opcode, payload) {
+    const len = payload.length;
+    let header;
+    if (len < 126) {
+      header = Buffer.from([0x80 | opcode, len]);
+    } else if (len < 65536) {
+      header = Buffer.allocUnsafe(4);
+      header[0] = 0x80 | opcode;
+      header[1] = 126;
+      header.writeUInt16BE(len, 2);
+    } else {
+      header = Buffer.allocUnsafe(10);
+      header[0] = 0x80 | opcode;
+      header[1] = 127;
+      header.writeBigUInt64BE(BigInt(len), 2);
+    }
+    this.socket.write(Buffer.concat([header, payload]));
+  }
+}
+
+/**
+ * Recording server: plain HTTP requests answered with 404 (the runner
+ * treats post-query calls as best-effort) PLUS a /ws upgrade endpoint
+ * that speaks enough of the server protocol for the runner (Auth →
+ * AuthResult, Heartbeat → HeartbeatAck) while recording every WS text
+ * message and connection so tests can assert on the transport.
+ */
+async function startWsRecordingServer() {
+  const requests = [];
+  const wsMessages = []; // { connection, text }
+  const connections = [];
+  let authCount = 0;
+
+  function handleProtocol(conn, text) {
+    let msg;
+    try {
+      msg = JSON.parse(text);
+    } catch {
+      return;
+    }
+    if (msg.type === 'Auth') {
+      authCount += 1;
+      conn.send(JSON.stringify({ type: 'AuthResult', success: true, message: 'authenticated' }));
+    } else if (msg.type === 'Heartbeat') {
+      conn.send(JSON.stringify({ type: 'HeartbeatAck', success: true, message: 'heartbeat recorded' }));
+    }
+  }
+
+  const server = http.createServer((req, res) => {
+    requests.push({ method: req.method, path: req.url });
+    res.writeHead(404, { 'Content-Type': 'application/json' });
+    res.end('{"error":"not found"}');
+  });
+  server.on('upgrade', (req, socket, head) => {
+    const key = req.headers['sec-websocket-key'];
+    const accept = createHash('sha1').update(key + WS_GUID).digest('base64');
+    socket.write(
+      'HTTP/1.1 101 Switching Protocols\r\n' +
+        'Upgrade: websocket\r\n' +
+        'Connection: Upgrade\r\n' +
+        `Sec-WebSocket-Accept: ${accept}\r\n\r\n`,
+    );
+    const conn = new MiniWsConnection(socket);
+    if (head && head.length) conn._feed(head);
+    connections.push(conn);
+    conn.onmessage = (text) => {
+      wsMessages.push({ connection: conn, text });
+      handleProtocol(conn, text);
+    };
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const { port } = server.address();
+  return {
+    server,
+    url: `http://127.0.0.1:${port}`,
+    requests,
+    wsMessages,
+    connections,
+    authCount: () => authCount,
+  };
+}
+
+/** Build an isolated copy of the runner with a custom stub SDK. */
+function buildStubbedRunnerWithSdk(sdkSource) {
+  const dir = mkdtempSync(join(tmpdir(), 'gyre-runner-ws-'));
+  cpSync(RUNNER_SRC, join(dir, 'agent-runner.mjs'));
+  const pkgDir = join(dir, 'node_modules', '@anthropic-ai', 'claude-agent-sdk');
+  mkdirSync(pkgDir, { recursive: true });
+  writeFileSync(
+    join(pkgDir, 'package.json'),
+    JSON.stringify({
+      name: '@anthropic-ai/claude-agent-sdk',
+      version: '0.0.0-stub',
+      type: 'module',
+      main: 'index.mjs',
+      exports: './index.mjs',
+    }),
+  );
+  writeFileSync(join(pkgDir, 'index.mjs'), sdkSource);
+  writeFileSync(join(dir, 'queries.log'), '');
+  return dir;
+}
+
+/** Slow stub SDK: yields one message every `ms` so the runner's message
+ * loop (and its heartbeat cadence) is observable over time. */
+function slowSdk(ms, count) {
+  return `import { appendFileSync } from 'node:fs';
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+export async function* query({ prompt, options }) {
+  appendFileSync(process.env.GYRE_STUB_QUERIES_FILE, JSON.stringify(prompt) + '\\n');
+  for (let i = 0; i < ${count}; i++) {
+    await sleep(${ms});
+    yield { type: 'text', content: 'tick ' + i };
+  }
+}
+`;
+}
+
+/** Abort-aware stub SDK: a long-running query that ends promptly when the
+ * runner aborts it (server-directed shutdown) — the same contract the real
+ * SDK's options.abortController provides. */
+function abortableSdk(ms, count) {
+  return `import { appendFileSync } from 'node:fs';
+const abortableSleep = (ms, signal) => new Promise((resolve) => {
+  const t = setTimeout(resolve, ms);
+  if (signal) signal.addEventListener('abort', () => { clearTimeout(t); resolve(); }, { once: true });
+});
+export async function* query({ prompt, options }) {
+  appendFileSync(process.env.GYRE_STUB_QUERIES_FILE, JSON.stringify(prompt) + '\\n');
+  const signal = options?.abortController?.signal;
+  for (let i = 0; i < ${count}; i++) {
+    await abortableSleep(${ms}, signal);
+    if (signal?.aborted) return;
+    yield { type: 'text', content: 'tick ' + i };
+  }
+}
+`;
+}
+
+/** Poll until predicate() returns truthy (or fail with `what`). */
+async function waitFor(predicate, what, timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const value = predicate();
+    if (value) return value;
+    if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
+    await new Promise((r) => setTimeout(r, 25));
+  }
+}
+
+function parseWsMessages(cap, type) {
+  return cap.wsMessages
+    .map((m) => {
+      try {
+        return JSON.parse(m.text);
+      } catch {
+        return null;
+      }
+    })
+    .filter((m) => m && m.type === type);
+}
+
+describe('WebSocket primary transport (architecture.md §API)', () => {
+  it('maintains an authenticated WS session and heartbeats ride the WS, not the HTTP fallback', async () => {
+    const cap = await startWsRecordingServer();
+    const dir = buildStubbedRunnerWithSdk(slowSdk(200, 8)); // ~1.6s of query time
+
+    const { code, stderr } = await runRunnerCapturingOutput(dir, {
+      GYRE_SERVER_URL: cap.url,
+      GYRE_AUTH_TOKEN: 'ws-agent-token',
+      GYRE_AGENT_ID: 'agt-ws-hb',
+      GYRE_TASK_ID: 'task-ws-hb',
+      GYRE_BRANCH: 'feat/ws-hb',
+      GYRE_REPO_ID: 'repo-1',
+      GYRE_WORKSPACE_ID: 'ws-42',
+      GYRE_SVID_PEM: 'test-svid-pem',
+      GYRE_STACK_HASH: 'test-stack-fingerprint',
+      GYRE_HEARTBEAT_INTERVAL_MS: '100',
+    });
+
+    assert.equal(code, 0, `runner must exit 0, stderr:\n${stderr}`);
+
+    // Authenticated session: Auth (answered by AuthResult) then Subscribe
+    // to the agent's OWN workspace with a replay bound.
+    const auths = parseWsMessages(cap, 'Auth');
+    assert.equal(auths.length, 1, 'exactly one Auth per connection');
+    assert.equal(auths[0].token, 'ws-agent-token', 'Auth must carry the agent token');
+    const subs = parseWsMessages(cap, 'Subscribe');
+    assert.equal(subs.length, 1, 'Subscribe must follow successful auth');
+    assert.deepEqual(
+      subs[0].scopes.map((s) => s.workspace_id),
+      ['ws-42'],
+      "Subscribe must scope to the agent's own workspace (GYRE_WORKSPACE_ID)",
+    );
+    assert.ok(
+      typeof subs[0].last_seen === 'number' && subs[0].last_seen > 0,
+      'Subscribe must bound replay with last_seen (no stale-event re-fire)',
+    );
+
+    // Heartbeats traveled over the WS as the PRIMARY channel: at least two
+    // WS heartbeats carrying the session's workload-identity proof...
+    const wsHeartbeats = parseWsMessages(cap, 'Heartbeat');
+    assert.ok(
+      wsHeartbeats.length >= 2,
+      `heartbeats must ride the WS transport, got ${wsHeartbeats.length}: ` +
+        JSON.stringify(cap.wsMessages.map((m) => m.text.slice(0, 80))),
+    );
+    for (const hb of wsHeartbeats) {
+      assert.equal(hb.svid, 'test-svid-pem');
+      assert.equal(hb.stack_fingerprint, 'test-stack-fingerprint');
+    }
+    // ...and the HTTP fallback heartbeat was NEVER used while connected.
+    assert.ok(
+      cap.requests.every((r) => !(r.method === 'PUT' && r.path.includes('/heartbeat'))),
+      `no HTTP heartbeat fallback while the WS transport is up, got: ${JSON.stringify(cap.requests)}`,
+    );
+
+    // The normal flow is unbroken: completion still happens.
+    assert.ok(
+      cap.requests.some((r) => r.method === 'POST' && r.path.endsWith('/agents/agt-ws-hb/complete')),
+      'WS transport must not break the completion flow',
+    );
+
+    cap.server.close();
+  });
+
+  it('receives a server-pushed shutdown over the WS (no polling) and stops gracefully inside the window', async () => {
+    const cap = await startWsRecordingServer();
+    // Long abortable query (~10s if never aborted) — the shutdown must cut
+    // it short.
+    const dir = buildStubbedRunnerWithSdk(abortableSdk(250, 40));
+
+    const runPromise = runRunnerCapturingOutput(dir, {
+      GYRE_SERVER_URL: cap.url,
+      GYRE_AUTH_TOKEN: 'ws-agent-token',
+      GYRE_AGENT_ID: 'agt-ws-shutdown',
+      GYRE_TASK_ID: 'task-ws-shutdown',
+      GYRE_BRANCH: 'feat/ws-shutdown',
+      GYRE_REPO_ID: 'repo-1',
+      GYRE_WORKSPACE_ID: 'ws-42',
+      GYRE_SVID_PEM: 'test-svid-pem',
+      GYRE_STACK_HASH: 'test-stack-fingerprint',
+      GYRE_HEARTBEAT_INTERVAL_MS: '100',
+    });
+
+    // Wait until the runner is subscribed, then push the exact
+    // spec-rejection shutdown message shape (api/specs.rs reject_spec →
+    // MessageKind::StatusUpdate, Destination::Agent) at its live session.
+    const subEntry = await waitFor(
+      () =>
+        cap.wsMessages.find((m) => {
+          try {
+            return JSON.parse(m.text).type === 'Subscribe';
+          } catch {
+            return false;
+          }
+        }),
+      'runner Subscribe',
+    );
+    subEntry.connection.send(
+      JSON.stringify({
+        id: 'msg-shutdown-1',
+        tenant_id: 't1',
+        from: 'server',
+        workspace_id: 'ws-42',
+        to: { agent: 'agt-ws-shutdown' },
+        kind: 'status_update',
+        payload: {
+          action: 'shutdown',
+          reason: 'spec rejected: test',
+          spec_path: 'specs/system/test.md',
+          grace_period_secs: 60,
+        },
+        created_at: Date.now(),
+        signature: null,
+        key_id: null,
+        acknowledged: false,
+      }),
+    );
+
+    const started = Date.now();
+    const { code, stdout, stderr } = await runPromise;
+    const elapsed = Date.now() - started;
+
+    // Graceful stop inside the grace window — far short of both the 60s
+    // grace period and the 10s the query would otherwise run.
+    assert.equal(code, 0, `shutdown stop must exit 0, stderr:\n${stderr}`);
+    assert.ok(elapsed < 8000, `graceful stop must be prompt (took ${elapsed}ms)`);
+    assert.match(
+      `${stdout}\n${stderr}`,
+      /shutdown signal received: spec rejected: test/,
+      'the shutdown reason must be logged',
+    );
+
+    // Graceful stop, NOT completion: the task was cancelled server-side,
+    // so the MR-creating call must never happen.
+    assert.ok(
+      cap.requests.every((r) => !r.path.includes('/complete')),
+      `no completion call after a server-directed shutdown, got: ${JSON.stringify(cap.requests)}`,
+    );
+    // Exactly one LLM query (the task prompt) — no remediation loop.
+    const queries = readFileSync(join(dir, 'queries.log'), 'utf8').trim()
+      .split('\n').filter(Boolean);
+    assert.equal(queries.length, 1, 'shutdown must end the query loop, not remediate');
+
+    cap.server.close();
+  });
+
+  it('reconnects with backoff after a transient drop and keeps the session alive', async () => {
+    const cap = await startWsRecordingServer();
+    const dir = buildStubbedRunnerWithSdk(slowSdk(200, 8));
+
+    const runPromise = runRunnerCapturingOutput(dir, {
+      GYRE_SERVER_URL: cap.url,
+      GYRE_AUTH_TOKEN: 'ws-agent-token',
+      GYRE_AGENT_ID: 'agt-ws-reconnect',
+      GYRE_TASK_ID: 'task-ws-reconnect',
+      GYRE_BRANCH: 'feat/ws-reconnect',
+      GYRE_REPO_ID: 'repo-1',
+      GYRE_WORKSPACE_ID: 'ws-42',
+      GYRE_SVID_PEM: 'test-svid-pem',
+      GYRE_STACK_HASH: 'test-stack-fingerprint',
+      GYRE_HEARTBEAT_INTERVAL_MS: '100',
+      // Fast reconnect for the test (same code path, default 500ms).
+      GYRE_WS_RECONNECT_BASE_MS: '50',
+    });
+
+    // Drop the first connection once the runner is subscribed — a
+    // transient transport failure.
+    const firstSub = await waitFor(
+      () =>
+        cap.wsMessages.find((m) => {
+          try {
+            return JSON.parse(m.text).type === 'Subscribe';
+          } catch {
+            return false;
+          }
+        }),
+      'first Subscribe',
+    );
+    firstSub.connection.close();
+
+    const { code, stderr } = await runPromise;
+    assert.equal(code, 0, `runner must survive the drop and complete, stderr:\n${stderr}`);
+
+    // The transport re-established itself: a second Auth on a NEW
+    // connection (backoff reconnect), not just the dropped one.
+    const authConnections = new Set(
+      cap.wsMessages
+        .filter((m) => {
+          try {
+            return JSON.parse(m.text).type === 'Auth';
+          } catch {
+            return false;
+          }
+        })
+        .map((m) => m.connection),
+    );
+    assert.ok(
+      authConnections.size >= 2,
+      `runner must reconnect after a drop (auths on ${authConnections.size} connection(s))`,
+    );
+
+    // And the run still completes normally (MR flow unbroken).
+    assert.ok(
+      cap.requests.some((r) => r.method === 'POST' && r.path.endsWith('/agents/agt-ws-reconnect/complete')),
+      'reconnect must not break the completion flow',
+    );
+
+    cap.server.close();
+  });
+});

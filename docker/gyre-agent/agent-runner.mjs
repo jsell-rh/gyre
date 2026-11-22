@@ -398,14 +398,301 @@ const HEARTBEAT_INTERVAL_MS = (() => {
 })();
 let conversationSha = null;
 
+// ── WebSocket transport (architecture.md §API, task-310) ────────────────────
+//
+// "WebSocket as the primary transport for agent ↔ server communication".
+// The runner holds one authenticated WS connection for the whole session:
+// liveness heartbeats travel here first (the HTTP heartbeat stays as the
+// documented fallback when the transport is down), and server-directed
+// messages (Destination::Agent: shutdown commands, gate-failure feedback,
+// spec-rejection grace signals) are PUSHED to the live session in real
+// time instead of never arriving. Reconnect with exponential backoff so
+// a transient drop does not end the transport.
+
+const WS_RECONNECT_BASE_MS = positiveIntEnv('GYRE_WS_RECONNECT_BASE_MS', 500);
+const WS_RECONNECT_MAX_MS = positiveIntEnv('GYRE_WS_RECONNECT_MAX_MS', 15_000);
+const WS_HEARTBEAT_ACK_TIMEOUT_MS = positiveIntEnv('GYRE_WS_ACK_TIMEOUT_MS', 10_000);
+
+/** Parse a positive-integer env override; anything missing/invalid keeps
+ * the safe default (same pattern as GYRE_HEARTBEAT_INTERVAL_MS). */
+function positiveIntEnv(name, fallback) {
+  const parsed = Number.parseInt(process.env[name] ?? '', 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+let ws = null; // active WebSocket (null while down)
+let wsReconnectTimer = null;
+let wsBackoffMs = WS_RECONNECT_BASE_MS;
+let wsSessionEnded = false; // terminal: stop reconnecting
+let wsHeartbeatPending = null; // { settle, timer } awaiting HeartbeatAck
+// Replay boundary for Subscribe: bounded forward from every received bus
+// message (server clock) so a reconnect replays exactly what was missed
+// during the drop — and never re-fires stale persisted events (old
+// shutdown commands included) at/after session start.
+let lastSeenMs = Date.now();
+// Server-directed shutdown (agent-runtime.md §1 spec rejection): set
+// once, honored by the query loop, the gate loop, and the main flow.
+let shutdownSignal = null;
+// Abort handle for the in-flight SDK query (server-directed shutdown).
+let activeQueryAbort = null;
+
+function wsUrl() {
+  return `${serverUrl.replace(/^http/, 'ws')}/ws`;
+}
+
+function wsIsOpen() {
+  return ws !== null && ws.readyState === WebSocket.OPEN;
+}
+
+function connectWs() {
+  if (wsSessionEnded || !token) return;
+  if (typeof WebSocket === 'undefined') {
+    // Node < 22 has no global WebSocket — degrade to the HTTP surfaces.
+    console.warn('[ws] WebSocket API unavailable — transport degraded to HTTP fallbacks');
+    wsSessionEnded = true;
+    return;
+  }
+  let socket;
+  try {
+    socket = new WebSocket(wsUrl());
+  } catch {
+    scheduleWsReconnect();
+    return;
+  }
+  ws = socket;
+  socket.onopen = () => {
+    // First message must be Auth (ws.rs): the server validates the agent
+    // token and registers the connection under the verified identity.
+    socket.send(JSON.stringify({ type: 'Auth', token }));
+  };
+  socket.onmessage = (event) => handleWsServerMessage(event.data);
+  socket.onclose = () => {
+    if (ws === socket) ws = null;
+    failPendingWsHeartbeat();
+    scheduleWsReconnect();
+  };
+  socket.onerror = () => {
+    // onclose follows every error; reconnection is driven from there.
+  };
+}
+
+function scheduleWsReconnect() {
+  if (wsSessionEnded || wsReconnectTimer !== null) return;
+  const delay = wsBackoffMs;
+  wsBackoffMs = Math.min(wsBackoffMs * 2, WS_RECONNECT_MAX_MS);
+  wsReconnectTimer = setTimeout(() => {
+    wsReconnectTimer = null;
+    connectWs();
+  }, delay);
+}
+
+/** Close the transport for good (terminal run state) so the process can
+ * exit and no reconnect timer keeps the event loop alive. */
+function stopWsTransport(reason) {
+  const alreadyDown = wsSessionEnded && ws === null && wsReconnectTimer === null;
+  wsSessionEnded = true;
+  if (wsReconnectTimer !== null) {
+    clearTimeout(wsReconnectTimer);
+    wsReconnectTimer = null;
+  }
+  failPendingWsHeartbeat();
+  if (ws !== null) {
+    try {
+      ws.close();
+    } catch {
+      // already closed
+    }
+  }
+  if (!alreadyDown) console.log(`[ws] transport closed (${reason})`);
+}
+
+function handleWsServerMessage(raw) {
+  let msg;
+  try {
+    msg = JSON.parse(raw);
+  } catch {
+    return;
+  }
+  if (msg === null || typeof msg !== 'object') return;
+  if (msg.type === undefined) {
+    // No `type` tag → a message-bus envelope (gyre message::Message)
+    // pushed to this live session.
+    handleBusMessage(msg);
+    return;
+  }
+  switch (msg.type) {
+    case 'AuthResult':
+      if (msg.success) {
+        wsBackoffMs = WS_RECONNECT_BASE_MS; // a good connect resets backoff
+        subscribeWs();
+      } else {
+        // A token that fails auth will not become valid by reconnecting.
+        console.warn(`[ws] auth rejected: ${msg.message} — transport disabled`);
+        wsSessionEnded = true;
+        try {
+          ws?.close();
+        } catch {
+          // already closed
+        }
+      }
+      break;
+    case 'HeartbeatAck':
+      settlePendingWsHeartbeat(msg.success === true);
+      break;
+    default:
+      // Pong / ReplayCatchUp / SubscribeError / future additive types:
+      // forward-compatible, ignored.
+      break;
+  }
+}
+
+function subscribeWs() {
+  if (!wsIsOpen()) return;
+  // Subscribe to the agent's own workspace (GYRE_WORKSPACE_ID, injected
+  // at spawn). Agent-directed delivery is identity-gated server-side and
+  // works regardless; the subscription adds workspace-scoped push.
+  const workspaceId = process.env.GYRE_WORKSPACE_ID;
+  if (!workspaceId) {
+    console.warn('[ws] GYRE_WORKSPACE_ID not set — subscribing with no scopes');
+  }
+  const scopes = workspaceId ? [{ workspace_id: workspaceId }] : [];
+  ws.send(JSON.stringify({ type: 'Subscribe', scopes, last_seen: lastSeenMs }));
+}
+
+/** Handle one pushed message-bus envelope. Shutdown commands trigger
+ * the graceful stop; other agent-directed signals are surfaced on the
+ * runner log (the operator-visible feedback channel). */
+function handleBusMessage(msg) {
+  const kind = typeof msg.kind === 'string' ? msg.kind : 'unknown';
+  if (typeof msg.created_at === 'number' && msg.created_at > lastSeenMs) {
+    lastSeenMs = msg.created_at;
+  }
+  const toAgent =
+    msg.to && typeof msg.to === 'object' && typeof msg.to.agent === 'string'
+      ? msg.to.agent
+      : null;
+  const payload = msg.payload && typeof msg.payload === 'object' ? msg.payload : {};
+
+  // Server-directed shutdown (agent-runtime.md §1 spec rejection /
+  // cascaded shutdown): react in real time — graceful stop within the
+  // specced grace window instead of never receiving the signal.
+  if (kind === 'status_update' && payload.action === 'shutdown') {
+    requestShutdown(payload);
+    return;
+  }
+
+  if (toAgent === agentId) {
+    const summary = JSON.stringify(payload).slice(0, 500);
+    console.log(`[ws] server message (${kind}): ${summary}`);
+    postLog(`[server] ${kind}: ${summary}`);
+  }
+}
+
+/** Record the server-directed shutdown and abort the in-flight SDK query
+ * immediately — waiting for the message loop's next iteration could burn
+ * the whole grace window on one long LLM call. */
+function requestShutdown(payload) {
+  if (shutdownSignal) return; // already stopping
+  const payloadGrace = Number(payload.grace_period_secs);
+  const graceSecs =
+    Number.isFinite(payloadGrace) && payloadGrace > 0 ? payloadGrace : 60;
+  shutdownSignal = { reason: payload.reason || 'server-directed shutdown', graceSecs };
+  console.warn(
+    `[ws] shutdown signal received: ${shutdownSignal.reason} (grace: ${graceSecs}s) — stopping`,
+  );
+  postLog(`Shutdown signal received: ${shutdownSignal.reason}`);
+  try {
+    activeQueryAbort?.abort();
+  } catch {
+    // already aborted
+  }
+}
+
 /**
- * Send one heartbeat to the server (uses GYRE_AUTH_TOKEN; interim, see
- * M27.4 for the full proxy plan). identity-security.md Layer 1: the
- * heartbeat carries the session's X.509-SVID for fail-closed
- * workload-identity verification (GYRE_SVID_PEM is injected at spawn).
+ * Server-directed graceful stop (agent-runtime.md §1 spec-rejection
+ * shutdown): the task was cancelled server-side, so no local gates run
+ * and no completion/MR is created — record provenance (best-effort),
+ * log, and exit 0 inside the grace window.
+ */
+async function gracefulStop() {
+  console.warn(`[ws] graceful stop: ${shutdownSignal.reason}`);
+  if (!previewMode) {
+    try {
+      conversationSha = await uploadConversation();
+    } catch {
+      // best-effort — the stop itself must not be delayed past the window
+    }
+  }
+  await postLog(`Agent stopped by server signal: ${shutdownSignal.reason}`);
+  stopWsTransport('graceful stop');
+  process.exit(0);
+}
+
+function settlePendingWsHeartbeat(ok) {
+  if (wsHeartbeatPending) {
+    const { settle, timer } = wsHeartbeatPending;
+    clearTimeout(timer);
+    wsHeartbeatPending = null;
+    settle(ok);
+  }
+}
+
+function failPendingWsHeartbeat() {
+  settlePendingWsHeartbeat(false);
+}
+
+/**
+ * Send one heartbeat over the WS transport and await its ack. Resolves
+ * false when the transport is down, the ack times out, or the heartbeat
+ * was rejected — the caller then falls back to the HTTP surface.
+ */
+function sendWsHeartbeat(svid, stackFingerprint) {
+  return new Promise((resolve) => {
+    if (!wsIsOpen()) {
+      resolve(false);
+      return;
+    }
+    // One heartbeat is outstanding at a time (15s interval ≫ ack timeout).
+    settlePendingWsHeartbeat(false);
+    const timer = setTimeout(
+      () => settlePendingWsHeartbeat(false),
+      WS_HEARTBEAT_ACK_TIMEOUT_MS,
+    );
+    wsHeartbeatPending = { settle: resolve, timer };
+    try {
+      ws.send(
+        JSON.stringify({ type: 'Heartbeat', svid, stack_fingerprint: stackFingerprint }),
+      );
+    } catch {
+      settlePendingWsHeartbeat(false);
+    }
+  });
+}
+
+/**
+ * Send one heartbeat to the server. architecture.md §API (task-310): the
+ * WebSocket is the PRIMARY channel — heartbeats ride the authenticated
+ * transport and fall back to the documented HTTP surface
+ * (PUT /api/v1/agents/{id}/heartbeat) only when the transport is down or
+ * the ack fails, so stale-agent detection is fed identically on either
+ * channel. identity-security.md Layer 1: the heartbeat carries the
+ * session's X.509-SVID for fail-closed workload-identity verification
+ * (GYRE_SVID_PEM is injected at spawn).
  */
 async function sendHeartbeat() {
   lastHeartbeat = Date.now();
+  const svid = process.env.GYRE_SVID_PEM || '';
+  const stackFingerprint = process.env.GYRE_STACK_HASH || '';
+  if (wsIsOpen()) {
+    const acked = await sendWsHeartbeat(svid, stackFingerprint);
+    if (acked) return;
+  }
+  await sendHttpHeartbeat(svid, stackFingerprint);
+}
+
+/** HTTP heartbeat fallback (docs/agent-protocol.md): kept for
+ * compatibility and for transports where the WS channel is unavailable. */
+async function sendHttpHeartbeat(svid, stackFingerprint) {
   try {
     const resp = await fetch(`${serverUrl}/api/v1/agents/${agentId}/heartbeat`, {
       method: 'PUT',
@@ -413,10 +700,7 @@ async function sendHeartbeat() {
         ...(token ? { Authorization: `Bearer ${token}` } : {}),
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({
-        svid: process.env.GYRE_SVID_PEM || '',
-        stack_fingerprint: process.env.GYRE_STACK_HASH || '',
-      }),
+      body: JSON.stringify({ svid, stack_fingerprint: stackFingerprint }),
     });
     if (!resp.ok) console.warn(`[heartbeat] failed: ${resp.status}`);
   } catch (e) {
@@ -439,51 +723,66 @@ function maybeHeartbeat() {
  * task prompt AND for pre-PR gate-failure remediation queries.
  */
 async function runAgentQuery(prompt) {
-  for await (const message of query({ prompt, options })) {
-    messageCount++;
+  // Abort handle for server-directed shutdown: requestShutdown() aborts
+  // the in-flight query so the graceful stop lands inside the grace
+  // window instead of after the current LLM call finishes.
+  const abortController = new AbortController();
+  activeQueryAbort = abortController;
+  try {
+    for await (const message of query({
+      prompt,
+      options: { ...options, abortController },
+    })) {
+      messageCount++;
 
-    // Record message for provenance
-    const logEntry = {
-      role: message.type === 'text' ? 'assistant' : message.type,
-      type: message.type,
-      timestamp: Date.now(),
-    };
+      // Server-directed stop: leave the loop as soon as the signal lands.
+      if (shutdownSignal) break;
 
-    if (message.type === 'text') {
-      logEntry.content = message.content;
-      process.stdout.write(message.content);
-      postLog(`[assistant] ${message.content.slice(0, 500)}`);
-    } else if (message.type === 'tool_use') {
-      logEntry.name = message.name;
-      logEntry.content = typeof message.input === 'string'
-        ? message.input
-        : JSON.stringify(message.input);
-      console.log(`[tool] ${message.name}`);
-      postLog(`[tool_use] ${message.name}`);
-    } else if (message.type === 'tool_result') {
-      // Truncate large tool results in provenance log (keep first 2KB)
-      const resultText = typeof message.content === 'string'
-        ? message.content
-        : JSON.stringify(message.content);
-      logEntry.content = resultText.length > 2048
-        ? resultText.slice(0, 2048) + '...(truncated)'
-        : resultText;
-      if (messageCount % 10 === 0) {
-        console.log(`[progress] ${messageCount} messages processed`);
-        postLog(`[progress] ${messageCount} messages processed`);
+      // Record message for provenance
+      const logEntry = {
+        role: message.type === 'text' ? 'assistant' : message.type,
+        type: message.type,
+        timestamp: Date.now(),
+      };
+
+      if (message.type === 'text') {
+        logEntry.content = message.content;
+        process.stdout.write(message.content);
+        postLog(`[assistant] ${message.content.slice(0, 500)}`);
+      } else if (message.type === 'tool_use') {
+        logEntry.name = message.name;
+        logEntry.content = typeof message.input === 'string'
+          ? message.input
+          : JSON.stringify(message.input);
+        console.log(`[tool] ${message.name}`);
+        postLog(`[tool_use] ${message.name}`);
+      } else if (message.type === 'tool_result') {
+        // Truncate large tool results in provenance log (keep first 2KB)
+        const resultText = typeof message.content === 'string'
+          ? message.content
+          : JSON.stringify(message.content);
+        logEntry.content = resultText.length > 2048
+          ? resultText.slice(0, 2048) + '...(truncated)'
+          : resultText;
+        if (messageCount % 10 === 0) {
+          console.log(`[progress] ${messageCount} messages processed`);
+          postLog(`[progress] ${messageCount} messages processed`);
+        }
       }
+
+      // Increment turn counter on assistant text messages
+      if (message.type === 'text') {
+        turnCounter++;
+        updateTurnFile(turnFile);
+      }
+
+      conversationLog.push(logEntry);
+
+      // Periodic heartbeat (shared with the local-gate phase below).
+      await maybeHeartbeat();
     }
-
-    // Increment turn counter on assistant text messages
-    if (message.type === 'text') {
-      turnCounter++;
-      updateTurnFile(turnFile);
-    }
-
-    conversationLog.push(logEntry);
-
-    // Periodic heartbeat (shared with the local-gate phase below).
-    await maybeHeartbeat();
+  } finally {
+    if (activeQueryAbort === abortController) activeQueryAbort = null;
   }
 }
 
@@ -693,8 +992,21 @@ async function completeAgent() {
   }
 }
 
+// Primary transport (architecture.md §API, task-310): open the
+// authenticated WS connection for the session's duration. Heartbeats
+// ride it first; server-directed messages (shutdown commands, gate
+// feedback) are pushed to this live session in real time.
+connectWs();
+
 try {
   await runAgentQuery(fullPrompt);
+
+  // Server-directed shutdown arrived mid-query: stop now, inside the
+  // grace window — no gate phase, no completion (the task was cancelled
+  // server-side; an MR for cancelled work must not open).
+  if (shutdownSignal) {
+    await gracefulStop();
+  }
 
   // ── Preview mode: no gates, no provenance upload, no completion call ─────
   // Spec §5 skips quality gates, provenance recording and MR creation — the
@@ -703,6 +1015,7 @@ try {
   if (previewMode) {
     console.log(`=== Preview mode complete: ${messageCount} messages, ${turnCounter} turns, branch ${branch} (throwaway; no upload, no completion) ===`);
     await postLog(`Preview complete: ${messageCount} messages, ${turnCounter} turns, branch=${branch}`);
+    stopWsTransport('preview complete');
     process.exit(0);
   }
 
@@ -714,6 +1027,7 @@ try {
     await uploadConversation();
     console.error('=== Agent runner aborted: malformed GYRE_LOCAL_GATES, no MR created ===');
     postLog('Agent runner aborted: malformed GYRE_LOCAL_GATES, no MR created');
+    stopWsTransport('malformed gate config');
     process.exit(1);
   }
   if (localGates.length > 0) {
@@ -730,6 +1044,11 @@ try {
     const gateHeartbeat = setInterval(() => { maybeHeartbeat(); }, HEARTBEAT_INTERVAL_MS);
     try {
       for (;;) {
+        // A shutdown signal that lands during gate execution stops the
+        // run now — no further gates, no completion, graceful exit.
+        if (shutdownSignal) {
+          await gracefulStop();
+        }
         const failures = await runLocalGates(localGates);
         if (failures.length === 0) break;
         if (remediations >= maxRemediations) {
@@ -739,6 +1058,7 @@ try {
           // Provenance is uploaded (the conversation explains why), but the
           // completion call — the MR-creating step — is never made.
           await uploadConversation();
+          stopWsTransport('gate failure');
           process.exit(1);
         }
         remediations++;
@@ -758,7 +1078,14 @@ try {
 
   console.log(`=== Agent runner complete (${messageCount} messages, ${turnCounter} turns) ===`);
   postLog(`Agent complete: ${messageCount} messages, ${turnCounter} turns, conversation_sha=${conversationSha || 'none'}`);
+  stopWsTransport('run complete');
 } catch (err) {
+  // A server-directed shutdown aborts the in-flight SDK query; that
+  // abort is the graceful stop, not a runner error.
+  if (shutdownSignal) {
+    await gracefulStop();
+  }
+
   // Preview mode records no provenance and never signals completion — the
   // server reads the branch (or its absence) and garbage-collects it.
   if (!previewMode) {
@@ -774,5 +1101,6 @@ try {
   console.error(`=== Agent runner error: ${err.message} ===`);
   console.error('[complete] skipped: runner error before local verification passed — no MR created');
   postLog(`Agent runner error: ${err.message}; completion skipped, no MR created`);
+  stopWsTransport('runner error');
   process.exit(1);
 }

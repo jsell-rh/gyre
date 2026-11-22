@@ -106,6 +106,76 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                                         break;
                                     }
                                 }
+                                WsMessage::Heartbeat {
+                                    svid,
+                                    stack_fingerprint,
+                                } => {
+                                    // architecture.md §API: WebSocket is the
+                                    // primary agent ↔ server transport, so the
+                                    // agent's liveness heartbeat rides this
+                                    // channel through the SAME domain path as
+                                    // PUT /api/v1/agents/{id}/heartbeat
+                                    // (record_agent_heartbeat: fail-closed SVID
+                                    // verification, Agent::heartbeat, audit
+                                    // trail). The agent id is the connection's
+                                    // verified identity — a client-supplied id
+                                    // would be a forged scope field. Human
+                                    // clients (user identities, global token)
+                                    // keep the REST surface; this channel is
+                                    // the agent transport.
+                                    let agent_principal = caller.user_id.is_none()
+                                        && !caller
+                                            .roles
+                                            .contains(&gyre_domain::UserRole::Admin)
+                                        && caller.agent_id != "system";
+                                    let (success, message) = if !agent_principal {
+                                        (
+                                            false,
+                                            "WS heartbeats are the agent transport channel; \
+                                             human clients keep PUT /api/v1/agents/{id}/heartbeat"
+                                                .to_string(),
+                                        )
+                                    } else {
+                                        match crate::api::agents::record_agent_heartbeat(
+                                            &state,
+                                            &caller.agent_id,
+                                            &svid,
+                                            &stack_fingerprint,
+                                        )
+                                        .await
+                                        {
+                                            Ok(()) => (
+                                                true,
+                                                "heartbeat recorded (workload identity verified)"
+                                                    .to_string(),
+                                            ),
+                                            Err(
+                                                crate::api::agents::HeartbeatFailure::NotFound(m),
+                                            ) => (false, m),
+                                            Err(crate::api::agents::HeartbeatFailure::Verification(
+                                                m,
+                                            )) => (
+                                                false,
+                                                format!("workload-identity verification failed: {m}"),
+                                            ),
+                                            Err(crate::api::agents::HeartbeatFailure::Storage(
+                                                m,
+                                            )) => (false, format!("failed to record heartbeat: {m}")),
+                                        }
+                                    };
+                                    let ack = WsMessage::HeartbeatAck { success, message };
+                                    match serde_json::to_string(&ack) {
+                                        Ok(payload) => {
+                                            if sender.send(Message::Text(payload)).await.is_err() {
+                                                break;
+                                            }
+                                        }
+                                        Err(e) => {
+                                            warn!(%e, "failed to serialize HeartbeatAck");
+                                            break;
+                                        }
+                                    }
+                                }
                                 WsMessage::Subscribe { scopes, last_seen, session_id } => {
                                     // Record session_id for this connection (presence tracking).
                                     connection_session_id = session_id;
@@ -924,6 +994,247 @@ mod tests {
         assert!(
             !leaked,
             "agent-directed message must not reach another agent's session"
+        );
+    }
+
+    // ── WS-borne liveness (architecture.md §API: WebSocket is the primary
+    // agent ↔ server transport; task-310) ────────────────────────────────
+    //
+    // The agent's Heartbeat rides the WebSocket into the SAME domain
+    // liveness path as PUT /api/v1/agents/{id}/heartbeat
+    // (api::agents::record_agent_heartbeat): fail-closed SVID verification,
+    // Agent::heartbeat + persistence, audit trail, stale-agent detection.
+
+    /// Seed an agent record (liveness path target) + its token, aged so
+    /// that only a fresh heartbeat can keep it alive.
+    async fn seed_heartbeat_agent(state: &Arc<AppState>, agent_id: &str, token: &str) {
+        seed_agent_ws_identity(state, agent_id, token).await;
+        let mut agent =
+            gyre_domain::Agent::new(gyre_common::Id::new(agent_id), agent_id, now_secs());
+        agent
+            .transition_status(gyre_domain::AgentStatus::Active)
+            .unwrap();
+        agent.workspace_id = gyre_common::Id::new("ws-live-agents");
+        // Aged past the 60s stale window with no heartbeat ever recorded.
+        agent.spawned_at = agent.spawned_at.saturating_sub(10_000);
+        agent.last_heartbeat = None;
+        state.agents.create(&agent).await.unwrap();
+    }
+
+    async fn ws_send_json(
+        ws: &mut tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+        value: &serde_json::Value,
+    ) {
+        ws.send(tungstenite::Message::Text(value.to_string()))
+            .await
+            .unwrap();
+    }
+
+    async fn ws_next_json(
+        ws: &mut tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+    ) -> serde_json::Value {
+        let msg = tokio::time::timeout(std::time::Duration::from_secs(5), ws.next())
+            .await
+            .expect("timed out waiting for WS message")
+            .unwrap()
+            .unwrap();
+        match msg {
+            tungstenite::Message::Text(text) => serde_json::from_str(&text).unwrap(),
+            other => panic!("expected text message, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn ws_agent_heartbeat_keeps_agent_alive_in_stale_detection() {
+        let (url, state) = start_test_server("tok").await;
+        seed_heartbeat_agent(&state, "agent-ws-hb", "hb-agent-token").await;
+        // Control agent: same age, never heartbeats on any channel — the
+        // stale detector must stop it, proving the window is still active
+        // and the surviving agent below is alive BECAUSE of the WS
+        // heartbeat (not because detection is broken).
+        seed_heartbeat_agent(&state, "agent-ws-stale-control", "stale-control-token").await;
+
+        // Issue the session's real SVID (identity-security.md Layer 1) —
+        // the same evidence the REST heartbeat path verifies against.
+        let svid = crate::spiffe::issue_session_svid(
+            &state,
+            "agent-ws-hb",
+            "test-persona",
+            "local",
+            "sha256:test-stack-fingerprint",
+        )
+        .await
+        .expect("test SVID issuance must succeed");
+
+        let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        auth_ws(&mut ws, "hb-agent-token").await;
+
+        // Heartbeat over the WebSocket — no HTTP heartbeat is ever sent.
+        ws_send_json(
+            &mut ws,
+            &serde_json::json!({
+                "type": "Heartbeat",
+                "svid": svid.record.chain_pem,
+                "stack_fingerprint": svid.record.stack_fingerprint,
+            }),
+        )
+        .await;
+        let ack = ws_next_json(&mut ws).await;
+        assert_eq!(
+            ack["type"], "HeartbeatAck",
+            "expected HeartbeatAck, got {ack}"
+        );
+        assert_eq!(ack["success"], true, "ack must report success: {ack}");
+
+        // The agent's liveness was advanced through the shared domain path.
+        let updated = state
+            .agents
+            .find_by_id(&gyre_common::Id::new("agent-ws-hb"))
+            .await
+            .unwrap()
+            .unwrap();
+        let hb = updated.last_heartbeat.expect("heartbeat recorded");
+        assert!(
+            hb <= now_secs() && now_secs().saturating_sub(hb) < 60,
+            "recorded heartbeat must be fresh (got {hb})"
+        );
+
+        // The heartbeat was audited with a Success outcome through the
+        // same audit trail as the REST surface.
+        let events = crate::agent_audit::recorded_events(&state, "agent_heartbeat").await;
+        let mine: Vec<_> = events
+            .iter()
+            .filter(|e| e.resource_id.as_deref() == Some("agent-ws-hb"))
+            .collect();
+        assert_eq!(mine.len(), 1, "exactly one heartbeat audit event");
+        assert_eq!(mine[0].outcome, gyre_domain::AuditOutcome::Success);
+
+        // Stale-agent detection: the WS-only heartbeat keeps the agent
+        // Active; the control agent that never heartbeated is stopped by
+        // the same 60s window.
+        crate::stale_agents::run_once(&state).await.unwrap();
+        let live = state
+            .agents
+            .find_by_id(&gyre_common::Id::new("agent-ws-hb"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            live.status,
+            gyre_domain::AgentStatus::Active,
+            "an agent heartbeating only over WS must not be marked Dead/Stopped"
+        );
+        let control = state
+            .agents
+            .find_by_id(&gyre_common::Id::new("agent-ws-stale-control"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            control.status,
+            gyre_domain::AgentStatus::Stopped,
+            "control agent without any heartbeat must be stopped by the stale window"
+        );
+    }
+
+    #[tokio::test]
+    async fn ws_agent_heartbeat_without_svid_is_rejected() {
+        // Secure-by-default (identity-security.md Layer 1): a WS heartbeat
+        // that presents no SVID is refused with a failure ack and the
+        // agent's liveness is NOT advanced — same semantics as the REST
+        // surface, no bypass variant on the agent transport.
+        let (url, state) = start_test_server("tok").await;
+        seed_heartbeat_agent(&state, "agent-ws-hb-reject", "hb-reject-token").await;
+
+        let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        auth_ws(&mut ws, "hb-reject-token").await;
+
+        ws_send_json(
+            &mut ws,
+            &serde_json::json!({
+                "type": "Heartbeat",
+                "svid": "",
+                "stack_fingerprint": "",
+            }),
+        )
+        .await;
+        let ack = ws_next_json(&mut ws).await;
+        assert_eq!(ack["type"], "HeartbeatAck");
+        assert_eq!(
+            ack["success"], false,
+            "heartbeat without SVID must be rejected"
+        );
+        assert!(
+            ack["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("verification failed"),
+            "rejection reason must name workload-identity verification: {ack}"
+        );
+
+        let after = state
+            .agents
+            .find_by_id(&gyre_common::Id::new("agent-ws-hb-reject"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            after.last_heartbeat, None,
+            "rejected WS heartbeat must not advance agent liveness"
+        );
+
+        // The rejection is audited as an AgentHeartbeat Failure event.
+        let events = crate::agent_audit::recorded_events(&state, "agent_heartbeat").await;
+        let mine: Vec<_> = events
+            .iter()
+            .filter(|e| e.resource_id.as_deref() == Some("agent-ws-hb-reject"))
+            .collect();
+        assert_eq!(mine.len(), 1, "exactly one heartbeat audit event");
+        assert_eq!(mine[0].outcome, gyre_domain::AuditOutcome::Failure);
+    }
+
+    #[tokio::test]
+    async fn ws_heartbeat_from_human_principal_is_rejected() {
+        // The WS heartbeat is the agent transport's liveness channel. A
+        // human/admin connection (global token) must be refused — human
+        // clients keep PUT /api/v1/agents/{id}/heartbeat and must not be
+        // able to advance any agent's liveness from this message type.
+        let (url, state) = start_test_server("tok").await;
+        seed_heartbeat_agent(&state, "agent-ws-hb-human", "hb-human-target-token").await;
+
+        let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        // Global token authenticates as the system admin principal.
+        auth_ws(&mut ws, "tok").await;
+
+        ws_send_json(
+            &mut ws,
+            &serde_json::json!({
+                "type": "Heartbeat",
+                "svid": "irrelevant",
+                "stack_fingerprint": "irrelevant",
+            }),
+        )
+        .await;
+        let ack = ws_next_json(&mut ws).await;
+        assert_eq!(ack["type"], "HeartbeatAck");
+        assert_eq!(
+            ack["success"], false,
+            "non-agent principal must not heartbeat over WS"
+        );
+
+        let after = state
+            .agents
+            .find_by_id(&gyre_common::Id::new("agent-ws-hb-human"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            after.last_heartbeat, None,
+            "no agent liveness may be advanced"
         );
     }
 

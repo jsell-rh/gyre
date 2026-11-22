@@ -2,8 +2,8 @@
 title: "WebSocket as the primary agent↔server transport: WS client in the agent runtime, real-time agent-directed push, and WS-borne liveness"
 spec_ref: "Spec gap spec-f907eda3bd014fe546b838e2 / websocket-agent-transport / 4156114b8040"
 depends_on: []
-progress: not-started
-commits: []
+progress: complete
+commits: ["b6a6ccf2e05aebe9b7452a4969cbcb9e2c83b253", "bfd09c09e00db84e9d1db181f48ba46ab4f27ddb"]
 ---
 
 ## Required behavior
@@ -62,3 +62,31 @@ Canonical spec: `specs/development/architecture.md`. Source: `678a8ac3e3bfeafeb6
     ]
   }
 ]
+
+## Shipped
+
+The canonical agent runtime now runs the WebSocket as its primary transport, and the server feeds WS-borne liveness through the same domain path as the HTTP heartbeat.
+
+### Agent-side WS client (docker/gyre-agent/agent-runner.mjs)
+
+- `connectWs()` opens one WS to `/ws` for the whole session: `Auth` with the agent token (connection registered under the verified identity server-side), then `Subscribe` scoped to the agent's own workspace (`GYRE_WORKSPACE_ID`, newly injected by `api/spawn.rs` in both `launch_agent_process` and `launch_taskless_agent_process`) with a `last_seen` replay bound that advances on every received bus message so a reconnect replays exactly what was missed and never re-fires stale persisted events.
+- Reconnect with exponential backoff (`GYRE_WS_RECONNECT_BASE_MS` default 500ms doubling to `GYRE_WS_RECONNECT_MAX_MS` default 15s); backoff resets after a successful auth. Transport is torn down on every terminal path (`stopWsTransport`) so no timer keeps the process alive.
+
+### Real-time inbound
+
+- Pushed bus envelopes (no `type` tag) are handled by `handleBusMessage`. A shutdown command (`kind: status_update`, `payload.action: shutdown`) sets the shutdown signal, aborts the in-flight SDK query via the `options.abortController` passed to `query()`, and routes the run into `gracefulStop()` — provenance upload best-effort, log, exit 0, no gates, no completion/MR for server-cancelled work. The signal is honored from the query loop, the gate loop, and the error path. Other agent-directed messages are surfaced on the runner log and uploaded to the server log.
+
+### WS-borne liveness (server)
+
+- `gyre-common::WsMessage` gained `Heartbeat { svid, stack_fingerprint }` / `HeartbeatAck { success, message }` (additive, `type`-tagged per the versioning rules).
+- `ws.rs` accepts `Heartbeat` only on agent-verified connections (human/admin principals get a failure ack and no liveness advance) and calls the new shared `api::agents::record_agent_heartbeat` — the exact domain path behind `PUT /api/v1/agents/{id}/heartbeat` (fail-closed SVID verification via `attest_session`, `Agent::heartbeat`, WireGuard peer `last_seen`, the agent-heartbeat audit trail). The REST handler now delegates to the same function; the HTTP heartbeat, MCP polling (`gyre_message_poll`), and `/ws` human-client (SPA/CLI) surfaces keep their documented semantics — the runner uses the HTTP heartbeat only as fallback when the WS transport is down or the ack fails/rejects.
+
+### Documentation
+
+- `docs/agent-protocol.md`: new **WebSocket primary transport** block (Auth/Subscribe, backoff, Heartbeat/HeartbeatAck semantics, same-liveness-path statement, real-time shutdown behavior, unchanged fallbacks) plus the `GYRE_WORKSPACE_ID` env-var row. `docs/api-reference.md`: `Heartbeat`/`HeartbeatAck` added to the WS protocol examples with the agent-connections-only note. No spec amendment; the gRPC bullet is recorded for the controller (no internal service-to-service path exists — no trigger), and task-272's completion-flow contract was not folded in (its `GYRE_LOCAL_GATES` flow is untouched and the WS stop path deliberately bypasses it for server-cancelled work).
+
+### Test evidence
+
+- `node --test docker/gyre-agent/agent-runner.test.mjs`: 15/15 pass, including three new suites that run the real runner as a child process against a WS-speaking server — authenticated session + heartbeats ride the WS with zero HTTP heartbeat fallback while connected + completion flow intact; server-pushed shutdown (no polling) → graceful stop inside the window (exit 0, no completion call, query loop ended); backoff reconnect after a transient drop. Log: `/tmp/stage/review-evidence/node-agent-runner-tests.log`.
+- `cargo check -p gyre-server` and `cargo check -p gyre-server --tests`: exit 0 (serialized build wrapper). `cargo fmt --check -p gyre-server -p gyre-common`: clean after formatting the checkpoint's new Rust code.
+- Deferred to the independent verifier (too heavy for this sandbox's 4 GiB budget; recorded in `/tmp/stage/review-evidence/README.md`): `cargo test -p gyre-server ws_agent_heartbeat_keeps_agent_alive_in_stale_detection`, `ws_agent_heartbeat_without_svid_is_rejected`, `ws_heartbeat_from_human_principal_is_rejected` (WS-only heartbeat keeps the agent Active through `stale_agents::run_once` while a no-heartbeat control agent is Stopped by the same window; rejected heartbeats do not advance liveness and are audited as Failure; human principals cannot advance liveness over WS), plus `cargo test -p gyre-common protocol` for the serde roundtrips.
