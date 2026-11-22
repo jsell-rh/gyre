@@ -100,8 +100,8 @@ use gyre_ports::{
     PreAcceptGate, ProcessHandle, PushGateRepository, QualityGateRepository, RekorClient,
     RepoAccessOverrideRepository, RepoRepository, ReviewRepository, RolloutPolicyRepository,
     SpawnLogRepository, SpecApprovalEventRepository, SpecApprovalRepository, SpecLedgerRepository,
-    SpecLifecycleRepository, SpecPolicyRepository, TaskRepository, TeamRepository,
-    TraceRepository, UserRepository, UserWorkspaceStateRepository, WorkspaceMembershipRepository,
+    SpecLifecycleRepository, SpecPolicyRepository, TaskRepository, TeamRepository, TraceRepository,
+    UserRepository, UserWorkspaceStateRepository, WorkspaceMembershipRepository,
     WorkspaceRepository, WorktreeRepository,
 };
 use jobs::JobRegistry;
