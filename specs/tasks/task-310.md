@@ -3,7 +3,7 @@ title: "WebSocket as the primary agent↔server transport: WS client in the agen
 spec_ref: "Spec gap spec-f907eda3bd014fe546b838e2 / websocket-agent-transport / 4156114b8040"
 depends_on: []
 progress: ready-for-review
-commits: ["bfd09c09e00db84e9d1db181f48ba46ab4f27ddb", "b6a6ccf2"]
+commits: ["b6a6ccf2e05aebe9b7452a4969cbcb9e2c83b253", "bfd09c09e00db84e9d1db181f48ba46ab4f27ddb"]
 ---
 
 ## Required behavior
