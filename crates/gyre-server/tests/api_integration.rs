@@ -49,6 +49,12 @@ impl Ctx {
         let port = listener.local_addr().unwrap().port();
         let base_url = format!("http://127.0.0.1:{port}");
 
+        // Explicit in-memory opt-in (architecture.md §Storage): the default
+        // (unset) backend is now durable SQLite at the platform default
+        // data path — a test run must never touch the operator's real
+        // database file. Idempotent and race-free (Once-guarded), so
+        // parallel Ctx::new callers are safe.
+        gyre_server::select_in_memory_storage();
         let state = build_state(TOKEN, &base_url, None);
         abac_middleware::seed_builtin_policies(&state)
             .await
@@ -1646,6 +1652,8 @@ async fn cors_includes_server_port() {
     unsafe { std::env::set_var("GYRE_PORT", port.to_string()) };
 
     let base_url = format!("http://127.0.0.1:{port}");
+    // Explicit in-memory opt-in: see Ctx::new.
+    gyre_server::select_in_memory_storage();
     let state = build_state(TOKEN, &base_url, None);
     abac_middleware::seed_builtin_policies(&state)
         .await

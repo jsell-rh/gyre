@@ -670,6 +670,11 @@ mod tests {
     use gyre_domain::{GateResult, GateStatus, QualityGate, Review};
 
     fn test_state() -> Arc<AppState> {
+        // Explicit in-memory opt-in (architecture.md §Storage): the default
+        // (unset) backend is now durable SQLite at the platform default
+        // data path — a unit test must never touch the operator's real
+        // database file.
+        crate::select_in_memory_storage();
         crate::build_state("gyre-test-token", "http://localhost:0", None)
     }
 

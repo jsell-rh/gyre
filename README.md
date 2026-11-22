@@ -15,11 +15,15 @@ cargo build --release -p gyre-server -p gyre-cli
 # Rust-only build (skip web rebuild — uses committed web/dist/)
 SKIP_WEB_BUILD=1 cargo build --release -p gyre-server -p gyre-cli
 
-# Run (in-memory, stateless — good for dev/eval)
+# Run (durable SQLite at the platform default data path, e.g.
+# ~/.local/share/gyre/gyre.db on Linux — persists across restarts)
 ./target/release/gyre-server
 
-# Run with persistent SQLite storage
-GYRE_DATABASE_URL=sqlite://gyre.db ./target/release/gyre-server
+# Run stateless (explicit in-memory opt-in — good for dev/eval)
+GYRE_DATABASE_URL=memory ./target/release/gyre-server
+
+# Run with SQLite at an explicit path
+GYRE_DATABASE_URL=sqlite:///tmp/gyre.db ./target/release/gyre-server
 
 # Run with PostgreSQL
 GYRE_DATABASE_URL=postgres://user:pass@localhost/gyre ./target/release/gyre-server
@@ -62,7 +66,7 @@ All settings are environment variables. The server starts with safe defaults —
 |---|---|---|
 | `GYRE_PORT` | `3000` | HTTP/WS listen port |
 | `GYRE_AUTH_TOKEN` | `gyre-dev-token` | Bearer token for API auth |
-| `GYRE_DATABASE_URL` | _(unset — in-memory)_ | Database URL. Supports `sqlite://gyre.db` (SQLite) or `postgres://user:pass@host/db` (PostgreSQL). Diesel runs migrations automatically on startup. |
+| `GYRE_DATABASE_URL` | _(unset — durable SQLite at the default data path)_ | Database URL. Unset (default) opens durable SQLite at the platform default data path (e.g. `~/.local/share/gyre/gyre.db` on Linux). `memory` runs stateless (state lost on restart). Supports `sqlite://<path>` (SQLite) or `postgres://user:***@host/db` (PostgreSQL). Diesel runs migrations automatically on startup. |
 | `GYRE_REPOS_PATH` | `./repos/` | Directory for bare git repositories |
 | `GYRE_BASE_URL` | `http://localhost:<port>` | Public URL used in clone URLs |
 | `RUST_LOG` | `info` | Log level (`debug`, `trace`, `warn`) |
