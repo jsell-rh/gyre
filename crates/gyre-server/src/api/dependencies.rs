@@ -509,6 +509,7 @@ async fn require_repo_tenant_containment(
 /// - a token carrying repo/workspace hierarchy claims
 ///   (platform-model.md §1 Token Scoping) may only declare edges from
 ///   within its own scope.
+///
 /// No caller-supplied tenant/workspace scoping fields exist on this
 /// request (check-forged-scope-fields): the tenant is the caller's own.
 pub async fn add_manual_dependency(
@@ -667,10 +668,7 @@ pub async fn get_graph(
 /// form on the graph endpoint and the dedicated
 /// `/api/v1/workspaces/{id}/dependency-graph` route. Includes edges where
 /// at least one endpoint (source or target) is in the workspace.
-async fn workspace_scoped_graph(
-    state: &AppState,
-    id: &str,
-) -> Result<GraphResponse, ApiError> {
+async fn workspace_scoped_graph(state: &AppState, id: &str) -> Result<GraphResponse, ApiError> {
     let workspace_id = Id::new(id);
 
     state
@@ -3996,13 +3994,9 @@ import "google/protobuf/empty.proto";
         // only declare edges from within its own scope).
         let mut repo_scoped = auth_in_tenant("tenant-1");
         repo_scoped.repo_id = Some("some-other-repo".to_string());
-        let err = add_manual_dependency(
-            State(state.clone()),
-            repo_scoped,
-            Json(req.clone()),
-        )
-        .await
-        .expect_err("repo-scoped token outside its repo must be refused");
+        let err = add_manual_dependency(State(state.clone()), repo_scoped, Json(req.clone()))
+            .await
+            .expect_err("repo-scoped token outside its repo must be refused");
         assert!(matches!(err, ApiError::Forbidden(_)), "got: {err}");
 
         // Unknown source repo: 404.
@@ -4054,7 +4048,12 @@ import "google/protobuf/empty.proto";
         .expect_err("auto-detected edge must be refused");
         assert!(matches!(err, ApiError::InvalidInput(_)), "got: {err}");
         assert!(
-            state.dependencies.find_by_id(&auto_id).await.unwrap().is_some(),
+            state
+                .dependencies
+                .find_by_id(&auto_id)
+                .await
+                .unwrap()
+                .is_some(),
             "refused delete must leave the auto-detected edge in place"
         );
 
@@ -4083,14 +4082,12 @@ import "google/protobuf/empty.proto";
         .await
         .expect_err("cross-tenant caller must be refused");
         assert!(matches!(err, ApiError::Forbidden(_)), "got: {err}");
-        assert!(
-            state
-                .dependencies
-                .find_by_id(&manual_id)
-                .await
-                .unwrap()
-                .is_some()
-        );
+        assert!(state
+            .dependencies
+            .find_by_id(&manual_id)
+            .await
+            .unwrap()
+            .is_some());
 
         // Manual edge, same-tenant caller: deleted.
         delete_dependency_by_id(
@@ -4100,14 +4097,12 @@ import "google/protobuf/empty.proto";
         )
         .await
         .expect("same-tenant manual delete");
-        assert!(
-            state
-                .dependencies
-                .find_by_id(&manual_id)
-                .await
-                .unwrap()
-                .is_none()
-        );
+        assert!(state
+            .dependencies
+            .find_by_id(&manual_id)
+            .await
+            .unwrap()
+            .is_none());
 
         // Unknown edge: 404.
         let err = delete_dependency_by_id(

@@ -790,10 +790,22 @@ pub fn api_router() -> Router<Arc<AppState>> {
             "/api/v1/deps/repo/:repo_id/impact",
             get(dependencies::blast_radius),
         )
-        .route("/api/v1/deps/stale", get(dependencies::list_stale_dependencies))
-        .route("/api/v1/deps/breaking", get(dependencies::list_breaking_changes))
-        .route("/api/v1/deps/manual", post(dependencies::add_manual_dependency))
-        .route("/api/v1/deps/:id", delete(dependencies::delete_dependency_by_id))
+        .route(
+            "/api/v1/deps/stale",
+            get(dependencies::list_stale_dependencies),
+        )
+        .route(
+            "/api/v1/deps/breaking",
+            get(dependencies::list_breaking_changes),
+        )
+        .route(
+            "/api/v1/deps/manual",
+            post(dependencies::add_manual_dependency),
+        )
+        .route(
+            "/api/v1/deps/:id",
+            delete(dependencies::delete_dependency_by_id),
+        )
         .route(
             "/api/v1/deps/breaking/:id/acknowledge",
             post(dependencies::deps_acknowledge_breaking_change),
