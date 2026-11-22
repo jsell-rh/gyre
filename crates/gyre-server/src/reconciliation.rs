@@ -5547,7 +5547,7 @@ mod tests {
             .oneshot(
                 http::Request::builder()
                     .method("POST")
-                    .uri("/api/v1/meta-specs-registry")
+                    .uri("/api/v1/meta-specs")
                     .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(
@@ -5611,7 +5611,7 @@ mod tests {
             .oneshot(
                 http::Request::builder()
                     .method("PUT")
-                    .uri(format!("/api/v1/meta-specs-registry/{ms_id}"))
+                    .uri(format!("/api/v1/meta-specs/{ms_id}"))
                     .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(
@@ -5641,7 +5641,7 @@ mod tests {
             .oneshot(
                 http::Request::builder()
                     .method("PUT")
-                    .uri(format!("/api/v1/meta-specs-registry/{ms_id}"))
+                    .uri(format!("/api/v1/meta-specs/{ms_id}"))
                     .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(
