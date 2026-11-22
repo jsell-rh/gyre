@@ -95,22 +95,22 @@ Canonical spec: `specs/system/explorer-canvas.md`. Source: `678a8ac3e3bfeafeb66c
 
 **Status: blocked-on-external-implementation — no closure claimed; section `c3a39b320325eff390c4b56c` remains open.**
 
-Round 75 (repair round from checkpoint `df11b62a`; working tree clean, no merge/rebase pending). `origin/main` is **unchanged** at `88202d67` since round 68 — already merged into this branch as `6c87f2c3`; nothing new to merge. Deterministic evidence saved to `/tmp/stage/review-evidence/task306-round75-probe.txt`.
+Round 76 (repair round from checkpoint `7f2efb61`). Change this round: `origin/main` **moved** `88202d67 → 7e746233` (task-308, SQLite as the default durable storage backend) — the branch was reconciled with main via merge commit `f2a0f9da` (clean, no conflicts) before re-running the blockers probe. The new main content does not touch any watched file for this gap. Deterministic evidence saved to `/tmp/stage/review-evidence/task306-round76-probe.txt`.
 
 ### Realized-model graph-node-metrics backend — NOT landed (anywhere reachable)
 
-- `git diff 678a8ac3 HEAD --stat` over the four extractors, `sqlite/graph.rs`, `graph_extraction.rs`, `layoutRegistry.js`, `SvgGraphCanvas.svelte`, and `ExplorerCanvas.svelte` is **empty** — byte-identical to the discovery base; the four extractors still hardcode `complexity: None` / `churn_count_30d: 0` at the exact discovery lines (rust:160-161, go:135-136, python:136-137, typescript:129-130) and the upsert still overwrites stored values at sqlite/graph.rs:366-367.
-- Task registry: `specs/tasks/` still maxes at task-311; **no task file exists for the realized-model plan's graph-node-metrics task** — it has not been dispatched.
+- `git diff 678a8ac3 HEAD --stat` over the four extractors, `sqlite/graph.rs`, `graph_extraction.rs`, `layoutRegistry.js`, `SvgGraphCanvas.svelte`, and `ExplorerCanvas.svelte` is **empty** at the post-merge head `f2a0f9da` — byte-identical to the discovery base; the four extractors still hardcode `complexity: None` / `churn_count_30d: 0` at the exact discovery lines (rust:160-161, go:135-136, python:136-137, typescript:129-130) and the upsert still overwrites stored values at sqlite/graph.rs:366-367. `grep -rn cyclomatic crates/` (production) finds no cyclomatic computation anywhere.
+- Task registry: `specs/tasks/` still maxes at task-311 — **no task file exists for the realized-model plan's graph-node-metrics task**; it has not been dispatched.
 
 Ordering guard applies — no local backend work is permitted, so the end-to-end indicator verification cannot run against populated metrics. The probe fails as designed (every node returns null complexity / zero churn and renders uniformly), which leaves this task open rather than triggering any local implementation.
 
 ### ui-layout d3-force rerouting — NOT landed
 
-`getLayout('graph')` still resolves to ExplorerCanvas (Canvas 2D; layoutRegistry.js 'graph' entry maps `component: ExplorerCanvas` with no `engine` selector), and ExplorerView still defaults `activeLayout = $state('graph')` at :455. SvgGraphCanvas is served only for hierarchical/layered, so SVG-path case (3) does not trigger.
+`getLayout('graph')` still resolves to ExplorerCanvas (Canvas 2D; layoutRegistry.js 'graph' entry maps `component: ExplorerCanvas`, no `engine` selector), and ExplorerView still defaults `activeLayout = $state('graph')` at :455. SvgGraphCanvas is served only for hierarchical/layered, so SVG-path case (3) does not trigger.
 
 ### No narrow frontend defect under permitted work (a)
 
-Canvas indicator formulas (ExplorerCanvas.svelte:1814 `nodeWeight = Math.max(1, n.complexity || 1)`; :3717 `churnThickness = Math.min(4, 1 + (n?.churn_count_30d || 0) * 0.3)`) and the API→renderer field plumbing (api/graph.rs:66/:105 serializing `complexity`/`churn_count_30d` per node) verified intact at this head — once the backend populates the metrics, the live Canvas-2D path activates the formulas with zero frontend changes.
+Canvas indicator formulas (ExplorerCanvas.svelte:1814 `nodeWeight = Math.max(1, n.complexity || 1)`; :3717 `churnThickness = Math.min(4, 1 + (n?.churn_count_30d || 0) * 0.3)`) and the API→renderer field plumbing (api/graph.rs:104-105 serializing `complexity`/`churn_count_30d` per node) verified intact at this head — once the backend populates the metrics, the live Canvas-2D path activates the formulas with zero frontend changes.
 
 ### Spec-vs-spec conflict escalation (acceptance criterion 5, recorded for the spec lifecycle)
 
@@ -118,7 +118,7 @@ There is a genuine, unresolved conflict between two canonical specs over the ren
 
 ### Round output
 
-Task file at round 75 with truthful `blocked-on-external-implementation`; coverage row round reference updated (row stays open); 0/7 acceptance criteria ticked. Only `specs/` files changed — no Rust, no web, so no formatting or build work was needed (no cold build of an unchanged crate). Per the assignment constraint, large gyre-server builds/test compilation run in the independent verifier; this round runs no server tests, so nothing is deferred beyond that standing constraint.
+Task file at round 76 with truthful `blocked-on-external-implementation`; coverage row round reference updated (row stays open); 0/7 acceptance criteria ticked. Only `specs/` files and the main-reconciliation merge changed — no Rust or web source touched, so no formatting or build work was needed (no cold build of an unchanged crate). Per the assignment constraint, large gyre-server builds/test compilation run in the independent verifier; this round runs no server tests, so nothing is deferred beyond that standing constraint.
 
 ### Remaining work to unblock
 
