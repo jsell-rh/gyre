@@ -3,7 +3,7 @@ title: "Gate all implementation work on approved specs"
 spec_ref: "Spec gap spec-41a92c20354c6a108e6074e3 / approval-single-trigger / 4a3f940495a8"
 depends_on: []
 progress: ready-for-review
-commits: ["d5662b9e702f3691db12a406b3d9e8b5c4363e6f"]
+commits: ["d5662b9e702f3691db12a406b3d9e8b5c4363e6f", "569ea13821554e618ee7446aecd69c72a35a8ce7"]
 ---
 
 ## Required behavior
