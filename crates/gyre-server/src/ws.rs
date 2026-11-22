@@ -1011,7 +1011,9 @@ mod tests {
         seed_agent_ws_identity(state, agent_id, token).await;
         let mut agent =
             gyre_domain::Agent::new(gyre_common::Id::new(agent_id), agent_id, now_secs());
-        agent.transition_status(gyre_domain::AgentStatus::Active).unwrap();
+        agent
+            .transition_status(gyre_domain::AgentStatus::Active)
+            .unwrap();
         agent.workspace_id = gyre_common::Id::new("ws-live-agents");
         // Aged past the 60s stale window with no heartbeat ever recorded.
         agent.spawned_at = agent.spawned_at.saturating_sub(10_000);
@@ -1082,7 +1084,10 @@ mod tests {
         )
         .await;
         let ack = ws_next_json(&mut ws).await;
-        assert_eq!(ack["type"], "HeartbeatAck", "expected HeartbeatAck, got {ack}");
+        assert_eq!(
+            ack["type"], "HeartbeatAck",
+            "expected HeartbeatAck, got {ack}"
+        );
         assert_eq!(ack["success"], true, "ack must report success: {ack}");
 
         // The agent's liveness was advanced through the shared domain path.
@@ -1159,9 +1164,15 @@ mod tests {
         .await;
         let ack = ws_next_json(&mut ws).await;
         assert_eq!(ack["type"], "HeartbeatAck");
-        assert_eq!(ack["success"], false, "heartbeat without SVID must be rejected");
+        assert_eq!(
+            ack["success"], false,
+            "heartbeat without SVID must be rejected"
+        );
         assert!(
-            ack["message"].as_str().unwrap_or("").contains("verification failed"),
+            ack["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("verification failed"),
             "rejection reason must name workload-identity verification: {ack}"
         );
 
@@ -1210,7 +1221,10 @@ mod tests {
         .await;
         let ack = ws_next_json(&mut ws).await;
         assert_eq!(ack["type"], "HeartbeatAck");
-        assert_eq!(ack["success"], false, "non-agent principal must not heartbeat over WS");
+        assert_eq!(
+            ack["success"], false,
+            "non-agent principal must not heartbeat over WS"
+        );
 
         let after = state
             .agents
@@ -1218,7 +1232,10 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(after.last_heartbeat, None, "no agent liveness may be advanced");
+        assert_eq!(
+            after.last_heartbeat, None,
+            "no agent liveness may be advanced"
+        );
     }
 
     // ── Subscribe workspace-membership authorization (message-bus.md

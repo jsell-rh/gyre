@@ -530,6 +530,11 @@ See `crates/gyre-common/src/protocol.rs` for the full type definitions.
 {"type":"Ping","timestamp":1234567890}
 {"type":"Pong","timestamp":1234567890}
 
+// 2a. Agent-transport liveness (architecture.md §API: WS is the primary agent↔server
+// transport; agent-verified connections only — human clients keep the REST heartbeat):
+{"type":"Heartbeat","svid":"<X.509-SVID PEM>","stack_fingerprint":"<stack-fingerprint>"}
+{"type":"HeartbeatAck","success":true,"message":"heartbeat recorded (workload identity verified)"}
+
 // 3. Record an activity event (server stores + broadcasts to all clients):
 {"type":"ActivityEvent","event_id":"abc","agent_id":"server","event_type":"RUN_STARTED","description":"Task started","timestamp":1234567890}
 
