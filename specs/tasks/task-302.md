@@ -3,7 +3,7 @@ title: "Spec bindings as registry metadata with re-approval cascade, UI panel, a
 spec_ref: "Spec gap spec-41a92c20354c6a108e6074e3 / bindings-registry-cascade / 4a3f940495a8"
 depends_on: [task-301]
 progress: ready-for-review
-commits: ["cd6787dd8b8db7eabfb426449a0e0a26d850af77", "58c89154f14ea2bff7349db6093e38b31e395e2b", "0e90f42ca0bc43d8df82e90c27c296facc574ff1", "e68a426e306a876263f63298af11b33996bdf072", "4d3ed96b7a6960b5faedefa5a9163091075a1e6f"]
+commits: ["4d3ed96b7a6960b5faedefa5a9163091075a1e6f", "e68a426e306a876263f63298af11b33996bdf072", "0e90f42ca0bc43d8df82e90c27c296facc574ff1", "58c89154f14ea2bff7349db6093e38b31e395e2b", "cd6787dd8b8db7eabfb426449a0e0a26d850af77", "443e75a80d608a70f98a25969767a2d86c47d19e"]
 ---
 
 ## Required behavior
@@ -91,79 +91,71 @@ deterministic gates decide approval.
 ### Implementation (product commits on this branch)
 
 - `4d3ed96b` — production migration. `SpecLedgerEntry.bindings_sha`
-  (gyre-domain/spec_ledger.rs) records the canonical SHA over the binding set;
-  `registry_sha()` derives the spec's registry identity over content SHA +
-  bindings SHA (equals `current_sha` when unbound, so existing approvals stay
-  valid). `put_spec_meta_spec_bindings` (api/meta_specs.rs) writes the binding
-  set AND the ledger: a changed set updates `bindings_sha`, resets
-  `approval_status` to Pending via the existing content-edit invalidation
-  machinery, and clears the `stale_pin:{spec}:` dedup keys, with the existing
-  validation semantics preserved (pin-version-exists, cross-workscope leak
-  guard, role gating). The spawn gate (api/spawn.rs) and merge gates
-  (api/gates.rs) fail closed on non-Approved specs and ledger lookup errors, so
-  no worker agent runs under tasks referencing a Pending spec; the existing
-  SpecApproved → orchestrator → delegation chain re-fires on re-approval and
-  band-3 prompt assembly injects the newly pinned versions. The
-  workspace/tenant meta-spec-set endpoints are retired (404/405) with the KV
-  stores dropped (migration 000071); reconciliation effective-set resolution,
-  the §10 conformance sweep, and llm_helpers `{{meta_spec_context}}` resolve
-  from the DB-backed registry (required flags + spec-level bindings);
-  required-flag changes and meta-spec approval still trigger the
-  reconciliation sweep. Merge-time drift enforcement compares the attestation
-  `meta_specs_used` array against current required versions
-  (merge_processor.rs `selection_meta_spec_drift_hold`, reconciliation.rs
-  `mr_meta_spec_drift`), exchanging `{meta_spec_id, kind, content_hash,
-  version}` snapshots. No production reference to `diff_meta_spec_set` /
-  `compute_meta_spec_set_sha` or writer to meta_spec_sets /
-  tenant_meta_spec_sets remains.
-- `e68a426e` — registry-model tests, Specs-view Edit bindings panel
-  (web/src/lib/DetailPanel.svelte; required meta-specs pre-selected and locked,
-  optional selection with pinned versions, saved via the bindings endpoint)
-  with web API client calls (web/src/lib/api.js), and set-retirement
-  verification.
-- `0e90f42c` — first review repair: rustfmt + AC1 kill tests
-  (`pin_update_on_approved_spec_resets_approval_and_registry_sha`,
-  `spec_bindings_reject_spec_absent_from_ledger`).
-- `58c89154` — review-repair hardening: the PUT loads the ledger entry once at
-  the top with fail-closed semantics (lookup error → 500, unregistered path →
-  404) and runs the invalidation write before the binding-row swap; spawn and
-  merge gates fail closed on lookup errors; workspace-scoped meta-spec listing.
+  (gyre-domain/spec_ledger.rs) records the canonical SHA over the binding
+  set; `registry_sha()` derives the spec's registry identity over content
+  SHA + bindings SHA (equals `current_sha` when unbound, so existing
+  approvals stay valid). `put_spec_meta_spec_bindings` (api/meta_specs.rs)
+  writes the binding set AND the ledger: a changed set updates
+  `bindings_sha`, resets `approval_status` to Pending via the existing
+  content-edit invalidation machinery, and clears the `stale_pin:{spec}:`
+  dedup keys, with the existing validation semantics preserved
+  (pin-version-exists, cross-workscope leak guard, role gating,
+  fail-closed unregistered-spec rejection). The spawn gate (api/spawn.rs)
+  and merge gates (api/gates.rs) fail closed on non-Approved specs and
+  ledger lookup errors; the existing SpecApproved → orchestrator →
+  delegation chain re-fires on re-approval.
+- `e68a426e` — UI bindings panel (Specs view Edit flow: required
+  meta-specs pre-selected and locked, optional selection with pinned
+  versions, saved via PUT /api/v1/specs/:path/meta-spec-bindings), web API
+  client calls, and the meta-spec-set retirement: workspace/tenant set
+  PUT/GET routes removed (404), all production writers to the
+  meta_spec_sets/tenant_meta_spec_sets KV stores removed,
+  `resolve_effective_meta_spec_set` / `run_conformance_sweep` /
+  `llm_helpers::workspace_meta_spec_context` migrated to the DB-backed
+  registry model (required flags + spec-level bindings), merge-time drift
+  enforcement compares the attestation `meta_specs_used` array against
+  current required versions with `{meta_spec_id, kind, content_hash,
+  version}` snapshot tuples.
+- `0e90f42c`, `58c89154`, `cd6787dd` — review-repair rounds (rustfmt,
+  fail-closed ledger reads in the bindings PUT / spawn gate / merge gates,
+  workspace-scoped bindable-meta-spec listing for the panel).
+- `443e75a8` — verification-repair round for the 26 failures from
+  `cargo test --all` at the prior candidate (run a5483570). Fixes:
+  (1) the two spec-bindings tests registered the spec under
+  `specs/system/auth.md` while the route's `:path` decodes to
+  `system/auth.md` (ledger paths are relative to `specs/`), so the
+  fail-closed PUT 404'd — now the ledger-convention path; (2) restored
+  the §8 `force` flag contract on `PUT /api/v1/meta-specs/:id`
+  (meta-spec-reconciliation.md §8.4: 400 for non-Tenant scope,
+  scope-tenant admins only) that the set retirement had silently dropped;
+  (3) migrated the 20 §6/§7 mechanics-test call sites to required specs
+  (`make_required_global_spec`) — under the amendments row only required
+  meta-specs reconcile workspaces, so the old optional fixtures created 0
+  tasks; (4) rewrote `set_update_emits_meta_spec_set_updated_event` to
+  the registry-model trigger (Workspace-scoped required false→true flip
+  emits the event; identical re-PUT does not); (5) PRODUCTION FIX:
+  `parse_meta_spec_drift_warning` now splits the
+  `{kind}:{id}@v{version}` label from the right — kinds themselves carry
+  a colon (`meta:persona`), and the left split broke the §9 round-trip
+  (also consumed by merge_deps); (6) the effective-set ordering test now
+  uses a Process-kind fixture so the kind-rank assertion is exercisable;
+  (7) signal_chain `impl_task` re-approves the seeded spec before
+  spawning — the new worker-spawn approval gate correctly blocks spawns
+  for Pending specs, which the scheduler-mechanics tests were tripping
+  over (the Pending block itself stays pinned in api/spawn.rs).
 
-### Rebase repair against 82aed3db (this round, merge commit `9c412898`)
+### Test evidence and deferral
 
-Rebased the saved source onto the task-280 base. Three resolutions, all
-behavior-preserving, evidence in
-`/tmp/stage/review-evidence/rebase-merge-resolution.md`:
-
-1. lib.rs `gyre_ports` import conflict: took the union — base's
-   `CascadeTestResultRepository` imported, our removal of
-   `MetaSpecSetRepository`/`TenantMetaSpecSetRepository` kept (retirement
-   intact; cascade wiring present in AppState and the store! registry).
-2. Base-side test helper `ledger_entry` (api/specs.rs) initialized
-   `SpecLedgerEntry` without the new `bindings_sha` field — added
-   `bindings_sha: String::new()` consistent with the other eleven
-   initializers.
-3. Migration version collision: both sides had added a 000070 migration —
-   renamed ours to `2026-11-21-000071_spec_bindings_registry` (contents
-   unchanged) so neither silently never runs;
-   `scripts/check-migration-versions.sh` passes.
-
-### Test evidence (this round)
-
-- `SKIP_WEB_BUILD=1 cargo check -p gyre-server` → exit 0.
-- `SKIP_WEB_BUILD=1 cargo check -p gyre-server --tests` → exit 0 (after
-  resolution 2).
-- `SKIP_WEB_BUILD=1 cargo check -p gyre-adapters -p gyre-domain -p gyre-ports
-  --tests` → exit 0.
-- `scripts/check-arch.sh`, `check-migration-versions.sh`,
-  `check-abac-route-registry.sh`, `check-mem-port-contracts.sh`,
-  `check-dead-message-kinds.sh` → all pass.
-
-Deferred to the independent verifier (4 GiB budget; large gyre-server test
-compilation): `cargo test -p gyre-server meta_specs`, `cargo test -p gyre-server
-merge_processor` (meta_specs_used drift holds + task-280
-`trigger_cascade_tests_*`), `cargo test -p gyre-server prompt_assembly`,
-`cargo test -p gyre-adapters` (000071 up/down, cascade_test_result repos), and
-`cd web && npm ci && npm test` (bindings panel component tests). Behavior on
-those suites is carried unchanged from the reviewed commits plus the three
-rebase resolutions above.
+- Local (this sandbox): `cargo check -p gyre-server --lib` and
+  `cargo check -p gyre-server --lib --tests` clean (the build wrapper
+  blocks gyre-server test codegen here, so no local test execution);
+  rustfmt clean on all touched files; attribution, ABAC-registry and
+  arch invariants re-verified via the repo scripts during the prior
+  rounds and unchanged by this round's edits (no routes, migrations, or
+  port traits touched).
+- The independent verifier must run `cargo test --all` (the original
+  failing command; evidence and the full 26-test list recorded under
+  /tmp/stage/review-evidence/repair-round.md). All 26 prior failures are
+  accounted for by the seven fixes above; no assertion was weakened —
+  each migrated test keeps its original assertion strength against the
+  registry-model replacement surface.
