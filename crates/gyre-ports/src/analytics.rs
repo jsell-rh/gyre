@@ -13,7 +13,7 @@ use gyre_domain::{AnalyticsEvent, CostEntry};
 /// not wildcards) — the mem adapter's `starts_with`, SQLite's
 /// `substr(...) = ...` under BINARY collation, and Postgres's escaped
 /// case-sensitive LIKE all implement exactly this contract.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct AnalyticsQueryFilter {
     /// Exact event name, or literal case-sensitive prefix match when it
     /// ends with `*`.
@@ -30,6 +30,27 @@ pub struct AnalyticsQueryFilter {
     pub limit: usize,
 }
 
+impl Default for AnalyticsQueryFilter {
+    /// Manual impl: `limit` defaults to the same value as [`new`](Self::new)
+    /// and the REST query handler (100). A derived Default would set the
+    /// `usize` to 0, and every adapter's `query_filtered` truncates to
+    /// `limit` — so `..Default::default()` constructions would silently
+    /// match nothing (task-295: this made the preview.analytics count
+    /// probe read 0 and turned sibling "assert-empty" tests vacuous).
+    fn default() -> Self {
+        Self {
+            event_name: None,
+            agent_id: None,
+            user_id: None,
+            workspace_id: None,
+            repo_id: None,
+            since: None,
+            until: None,
+            limit: 100,
+        }
+    }
+}
+
 /// Grouping dimension for `AnalyticsRepository::count_grouped`
 /// (analytics.md §Query Parameters: `group_by`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,10 +65,7 @@ pub enum AnalyticsGroupBy {
 
 impl AnalyticsQueryFilter {
     pub fn new() -> Self {
-        Self {
-            limit: 100,
-            ..Default::default()
-        }
+        Self::default()
     }
 }
 
@@ -103,4 +121,29 @@ pub trait CostRepository: Send + Sync {
     async fn query_by_task(&self, task_id: &Id) -> Result<Vec<CostEntry>>;
     async fn total_by_agent(&self, agent_id: &Id) -> Result<f64>;
     async fn total_by_period(&self, since: u64, until: u64) -> Result<f64>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// task-295 verification repair: a derived `Default` set `limit` to 0,
+    /// and every adapter's `query_filtered` truncates to `filter.limit`,
+    /// so `..Default::default()` constructions silently matched nothing
+    /// (the try-it analytics count probe read 0 events it had just
+    /// recorded). The default must stay a real result cap, identical to
+    /// `new()` and the REST query handler's default.
+    #[test]
+    fn default_filter_keeps_a_nonzero_result_cap() {
+        let f = AnalyticsQueryFilter::default();
+        assert!(f.limit > 0, "default limit must not zero out query results");
+        assert_eq!(f.limit, AnalyticsQueryFilter::new().limit);
+        assert_eq!(f.event_name, None);
+        assert_eq!(f.agent_id, None);
+        assert_eq!(f.user_id, None);
+        assert_eq!(f.workspace_id, None);
+        assert_eq!(f.repo_id, None);
+        assert_eq!(f.since, None);
+        assert_eq!(f.until, None);
+    }
 }

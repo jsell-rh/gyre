@@ -41,6 +41,7 @@ pub mod narrative;
 pub mod network_peer;
 pub mod notification;
 pub mod policy;
+pub mod preview_environment;
 pub mod prompt_template;
 pub mod python_extractor;
 pub mod quality_gate;
@@ -126,6 +127,7 @@ pub use policy::{
     builtin_policies, trust_policies_for_level, Condition, ConditionOp, ConditionValue, Policy,
     PolicyDecision, PolicyEffect, PolicyScope, SYSTEM_ABAC_IDENTITY,
 };
+pub use preview_environment::{PreviewEnvironment, PreviewEnvironmentStatus};
 pub use prompt_template::{PromptTemplate, LLM_FUNCTION_KEYS};
 pub use python_extractor::PythonExtractor;
 pub use quality_gate::{GatePhase, GateResult, GateStatus, GateType, QualityGate};

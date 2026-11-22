@@ -719,6 +719,26 @@ pub async fn start_job_registry(state: Arc<AppState>) {
         )
         .await;
 
+    // Register preview_env_gc job (activity-dashboard.md §"Try it" links):
+    // TTL expiry + liveness reconciliation for ephemeral preview
+    // environments — terminates the environment (process, mesh peer,
+    // scratch state) at or after its deadline.
+    registry
+        .register(
+            JobDefinition {
+                name: crate::preview_env_gc::JOB_NAME.to_string(),
+                description: "Tears down try-it preview environments past their TTL (or whose \
+             process is gone): kills the process, removes the WireGuard mesh peer, releases \
+             budget slots and scratch state"
+                    .to_string(),
+                interval_secs: crate::preview_env_gc::INTERVAL_SECS,
+                enabled: true,
+                run_at_utc_hour: None,
+            },
+            |state| async move { crate::preview_env_gc::run_once(&state).await },
+        )
+        .await;
+
     // Register PR hygiene job (specs/development/agent-workflow.md §PRs as
     // the Collaboration Primitive, task-270): continuously (minutes-scale
     // interval, NOT the daily abandoned_branch_check cadence) monitors open

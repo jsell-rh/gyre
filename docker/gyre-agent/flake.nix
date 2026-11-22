@@ -40,7 +40,7 @@
           buildPhase = ":";
           installPhase = ''
             mkdir -p $out/gyre
-            cp agent-runner.mjs cred-proxy.mjs entrypoint.sh setup-wg.sh $out/gyre/
+            cp agent-runner.mjs cred-proxy.mjs entrypoint.sh preview-serve.mjs setup-wg.sh $out/gyre/
             chmod +x $out/gyre/entrypoint.sh
           '';
         };

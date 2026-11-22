@@ -2,8 +2,8 @@
 title: "Activity Dashboard completion: real-time durable feed with time-period queries, artifact links, Try-it ephemeral preview environments, TTY attach, and trial analytics"
 spec_ref: "Spec gap spec-b128f93cd5d035d28c8bbf7f / activity-dashboard-completion / f0cbfae7cd02"
 depends_on: []
-progress: not-started
-commits: []
+progress: complete
+commits: ["abbb9a4434e2fa0fa62e98f492178f32ecd8d452", "2f1f2c909ec5cc429380fa1e5cfd37de321cc59c", "5c043f3008a9e4b9a8076fc297911a69f3013773", "63ae1466c5cde34707d32ab49e8c8cdc1a377496", "28bfa569f1532567fb8d6acd0139cac9c9c576d8", "012714900a30a81a8401fb600cfac72e7835180c", "8f720877e6eadee1e2bf4bcbe13ab294c6c910d7", "7410c32759cff9c8930fbcc759e89046cc5c6184", "e4f941a12e393bdf00aedca3755f92a934c5b36f", "4986339d71637c9161f7c09f367b2ca691f64f4c"]
 ---
 
 ## Required behavior
@@ -90,3 +90,29 @@ Canonical spec: `specs/system/activity-dashboard.md`. Source: `678a8ac3e3bfeafeb
     ]
   }
 ]
+
+## Shipped
+
+All five spec bullets of specs/system/activity-dashboard.md are closed in production code, carried on this branch through the prior verified rounds (implementation 4986339d through tenant-scope CI repair 5c043f30, asset build abbb9a44). This round was a rebase repair: the published PR conflicted with current main, so main's head 73c504f2 (task-301: meta-spec registry moved to the specced flat `/api/v1/meta-specs` routes with scope-level admin auth) was merged in as a72f7a89. Source conflicts were resolved by consistently applying main's route rename across abac_middleware.rs (RouteResourceMapping entries + prefix_entity_type special case dropped), api/mod.rs, rbac.rs and reconciliation.rs tests, web/src/lib/api.js, scripts/e2e-flow.sh, and docs/api-reference.md — the task-295 implementation (try-it routes, preview-environment ABAC entries, migration 000070, list_since port, activityStream/AgentTty frontend) is preserved unchanged. No new source conflicts remain (no conflict markers; only meta_specs.rs's intentional `registry_old_prefix_removed_no_alias` test still names the old prefix to assert it 404s).
+
+### Test evidence (this round, merged head a72f7a89)
+
+- `SKIP_WEB_BUILD=1 cargo check -p gyre-server` — clean (6m34s).
+- `cargo test -p gyre-adapters preview_environment` — 7/7 passed, including tenant-scoped reads and durability-across-reopen.
+- `cargo test -p gyre-ports` — passed.
+- `cd web && npm ci && npm test` — 132 files, 2614 passed / 41 skipped (covers activityStream, AgentTty, WorkspaceHome activity sidebar, api.js meta-specs rename consumers).
+- `cargo fmt --all -- --check`, `scripts/check-arch.sh`, `check-abac-route-registry.sh`, `check-migration-versions.sh`, `check-mem-port-contracts.sh`, `check-tenant-filter.sh` — all exit 0.
+- Evidence saved under /tmp/stage/review-evidence.
+
+### Verifier-owed test execution (gyre-server test binaries exceed the in-sandbox 4 GiB budget)
+
+- `cargo test --all` (full suite), minimally: `cargo test -p gyre-server --lib try_it_`, `cargo test -p gyre-server --lib api::activity::tests::unified_activity_honors_since_against_durable_notifications`, and — new this round, exercising the merged route rename — `cargo test -p gyre-server --lib meta_specs`, plus `cargo test -p gyre-adapters preview_environment` and `cd web && npm ci && npm test`.
+
+### Standing implementation summary (unchanged this round)
+
+- Time-period feed: `NotificationRepository::list_since(since, limit)` in every adapter (mem, SQLite, PostgreSQL, broadcasting wrapper); GET /api/v1/activity filters in the repository; api.js `activity(limit, since)` forwards it.
+- Real-time sidebars: web/src/lib/activityStream.svelte.js rides the single shared /ws connection, live-prepends per workspace, dedupes, re-syncs via `GET /api/v1/activity?since=` on reconnect.
+- Try-it preview environments: durable PreviewEnvironment + port + SQLite migration 000070 + adapters wired with store!; POST /api/v1/merge-requests/:id/try-it (+ /mrs/:id alias), GET /api/v1/preview-environments[/:id], DELETE teardown; compute-target dispatch, WireGuard mesh peer registration, TTL GC job, ABAC entries, per-handler tenant/membership scoping.
+- Trial analytics: preview.started/ended/expired/failed AnalyticsEvents via state.analytics.record; approve/reject half untouched.
+- TTY attach: web/src/lib/AgentTty.svelte consumes api.agentTtyUrl (no longer dead code), mounted in DetailPanel.
+- Artifact deep links: entries surface mr_id/repo_id/agent_id/task_id/spec_path/gate_name/commit_sha/branch; gate-failure/test-result entries land on the MR's gates tab; merged-MR entries render TryItButton.
