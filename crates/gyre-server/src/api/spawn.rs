@@ -743,6 +743,39 @@ pub(crate) async fn spawn_agent_core(
                 ));
             }
         }
+
+        // agent-runtime.md §2 (Spec-Level Binding / Stale Pin Detection):
+        // the binding set is spec-registry metadata covered by the registry
+        // SHA in the approval ledger — updating a pin invalidates the spec's
+        // approval, and no worker agent may run for tasks referencing the
+        // spec until a human re-approves it (the SpecApproved → orchestrator
+        // → delegation chain then re-implements under the new pins). The
+        // same gate covers content-edit invalidation (a push that changes
+        // the spec resets it to Pending). Tasks whose spec is not in the
+        // registry cannot be evaluated and are not gated here.
+        if let Some(spec_path) = task.spec_path.as_deref() {
+            use gyre_domain::spec_ledger::ApprovalStatus;
+            // Fail closed on a ledger lookup error: degrading to "no gate"
+            // would let a worker spawn for a spec whose approval state
+            // could not be determined (same fail-open read class as the
+            // review F1 finding on the bindings PUT).
+            let entry = state
+                .spec_ledger
+                .find_by_path(spec_path)
+                .await
+                .map_err(|e| {
+                    ApiError::Internal(anyhow::anyhow!("spec ledger lookup for '{spec_path}': {e}"))
+                })?;
+            if let Some(entry) = entry {
+                if entry.approval_status != ApprovalStatus::Approved {
+                    return Err(ApiError::Conflict(format!(
+                        "spec '{spec_path}' approval status is '{}' — re-approve the \
+                         spec before spawning worker agents for its tasks",
+                        entry.approval_status
+                    )));
+                }
+            }
+        }
     }
 
     // Fetch workspace for compute target resolution and clone URL.
@@ -4595,6 +4628,134 @@ mod tests {
         assert_eq!(json["branch"], "feat/build");
         // jj_change_id is present in the response (null when worktree doesn't exist on disk)
         assert!(json.get("jj_change_id").is_some());
+    }
+
+    /// agent-runtime.md §2 (Spec-Level Binding / Stale Pin Detection) —
+    /// worker-spawn approval gate: the binding set is spec-registry metadata
+    /// covered by the registry SHA in the approval ledger, so updating a pin
+    /// resets the spec's ledger entry to Pending — and no worker agent may
+    /// be spawned for a task referencing that spec until a human re-approves
+    /// it. Kill test for the spawn.rs gate: removing the approval-status
+    /// check leaves this test red (the Pending spawn would succeed and
+    /// create an agent + worktree). The same gate covers content-edit
+    /// invalidation (a push that changes the spec resets it to Pending).
+    #[tokio::test]
+    async fn spawn_blocks_worker_for_pending_spec_until_reapproval() {
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let (app, repo_id) = create_repo(app).await;
+
+        // Ledger entry for the task's spec: Pending — exactly the state a
+        // pin update (or a content-edit invalidation) leaves behind.
+        let mut entry = gyre_domain::SpecLedgerEntry {
+            bindings_sha: String::new(),
+            path: "specs/system/gated.md".to_string(),
+            title: "Gated".to_string(),
+            owner: "user:admin".to_string(),
+            kind: None,
+            current_sha: "b".repeat(40),
+            approval_mode: "human_only".to_string(),
+            approval_status: gyre_domain::ApprovalStatus::Pending,
+            linked_tasks: vec![],
+            linked_mrs: vec![],
+            drift_status: "clean".to_string(),
+            created_at: 1,
+            updated_at: 1,
+            repo_id: None,
+            workspace_id: None,
+        };
+        state.spec_ledger.save(&entry).await.unwrap();
+
+        // Implementation task referencing that spec.
+        let task_body = serde_json::json!({
+            "title": "gated task",
+            "task_type": "implementation",
+            "spec_path": "specs/system/gated.md",
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/tasks")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&task_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let task_id = body_json(resp).await["id"].as_str().unwrap().to_string();
+
+        // Spawn while the spec is Pending → 409 Conflict, and no agent or
+        // worktree record is created (the gate fires before provisioning).
+        let spawn_body = serde_json::json!({
+            "name": "worker-pending-spec",
+            "repo_id": repo_id,
+            "task_id": task_id,
+            "branch": "feat/pending-spec",
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/agents/spawn")
+                    .header("content-type", "application/json")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&spawn_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::CONFLICT,
+            "spawn for a task whose spec is Pending must be refused: {:?}",
+            body_json(resp).await
+        );
+        let agents = state.agents.list().await.unwrap();
+        assert!(
+            agents.is_empty(),
+            "no worker agent may be created while the spec is Pending"
+        );
+        let worktrees = state
+            .worktrees
+            .find_by_repo(&Id::new(&repo_id))
+            .await
+            .unwrap();
+        assert!(
+            worktrees.is_empty(),
+            "no worktree may be created while the spec is Pending"
+        );
+
+        // Human re-approval unblocks the same spawn (the SpecApproved →
+        // orchestrator → delegation chain re-implements under the new pins;
+        // the worker spawn then proceeds for the re-approved spec).
+        entry.approval_status = gyre_domain::ApprovalStatus::Approved;
+        state.spec_ledger.save(&entry).await.unwrap();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/agents/spawn")
+                    .header("content-type", "application/json")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&spawn_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::CREATED,
+            "re-approval must unblock the spawn: {:?}",
+            body_json(resp).await
+        );
+        let json = body_json(resp).await;
+        assert_eq!(json["agent"]["status"], "active");
+        assert_eq!(state.agents.list().await.unwrap().len(), 1);
     }
 
     /// identity-security.md §Task-Scoped JWT Claims: every JWT minted by

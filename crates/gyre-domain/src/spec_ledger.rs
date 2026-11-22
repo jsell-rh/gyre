@@ -1,6 +1,7 @@
 //! Spec registry ledger domain types.
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 /// Approval status of a spec in the ledger.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -37,6 +38,14 @@ pub struct SpecLedgerEntry {
     pub kind: Option<String>,
     /// Git blob SHA of the spec file at HEAD.
     pub current_sha: String,
+    /// SHA-256 over the spec's meta-spec binding set (canonical form:
+    /// one "{meta_spec_id}\t{pinned_version}" line per binding, sorted).
+    /// Empty when the spec has no bindings — the binding set is spec-registry
+    /// metadata covered by the registry SHA the approval ledger records
+    /// (agent-runtime.md §2 Spec-Level Binding), so changing a pin changes
+    /// the spec's registry identity and requires re-approval.
+    #[serde(default)]
+    pub bindings_sha: String,
     /// Approval mode from the manifest.
     pub approval_mode: String,
     /// Current approval status.
@@ -53,6 +62,34 @@ pub struct SpecLedgerEntry {
     pub repo_id: Option<String>,
     /// Workspace scope (for SpecApproved Destination::Workspace routing).
     pub workspace_id: Option<String>,
+}
+
+impl SpecLedgerEntry {
+    /// The registry SHA of the spec: the identity the approval ledger
+    /// records and validates against. Covers the spec's content (`current_sha`,
+    /// the git blob SHA of the markdown file) AND its meta-spec binding set
+    /// (`bindings_sha`) — agent-runtime.md §2 Spec-Level Binding stores
+    /// bindings "in the spec registry alongside other spec metadata", and
+    /// §2 Stale Pin Detection requires "Human updates the pin → spec
+    /// metadata changes → spec SHA changes → spec needs re-approval".
+    ///
+    /// Equals `current_sha` when the spec has no bindings, so every spec
+    /// without a binding set keeps its existing identity (recorded approvals
+    /// stay valid). With bindings, a new composite SHA is derived over both
+    /// parts: any content edit or binding/pin change produces a new registry
+    /// SHA and invalidates prior approvals via the existing staleness
+    /// machinery (approval events are valid only for the SHA they were
+    /// granted on).
+    pub fn registry_sha(&self) -> String {
+        if self.bindings_sha.is_empty() {
+            return self.current_sha.clone();
+        }
+        let mut hasher = Sha256::new();
+        hasher.update(self.current_sha.as_bytes());
+        hasher.update(b"\n");
+        hasher.update(self.bindings_sha.as_bytes());
+        format!("{:x}", hasher.finalize())
+    }
 }
 
 /// An event in the approval history for a spec.

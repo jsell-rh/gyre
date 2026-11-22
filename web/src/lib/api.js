@@ -439,6 +439,16 @@ export const api = {
   getSpecProgress: (path) => request(`/specs/${encodeURIComponent(path)}/progress`),
   getPendingSpecs: () => request('/specs/pending'),
   getDriftedSpecs: () => request('/specs/drifted'),
+  // Spec-level meta-spec bindings (agent-runtime.md §2 Spec-Level Binding).
+  // PUT is a declarative full-set replace: the array IS the desired binding
+  // set, missing meta-specs are unbound.
+  getSpecMetaSpecBindings: (path) =>
+    request(`/specs/${encodeURIComponent(path)}/meta-spec-bindings`),
+  putSpecMetaSpecBindings: (path, bindings) =>
+    request(`/specs/${encodeURIComponent(path)}/meta-spec-bindings`, {
+      method: 'PUT',
+      body: JSON.stringify({ bindings }),
+    }),
   // Constraint syntax validation (authorization-provenance.md §7.6)
   validateConstraints: (data) =>
     request('/constraints/validate', { method: 'POST', body: JSON.stringify(data) }),
@@ -473,9 +483,20 @@ export const api = {
   getMetaSpecVersions: (id) => request(`/meta-specs/${id}/versions`),
   getMetaSpecVersion: (id, ver) => request(`/meta-specs/${id}/versions/${ver}`),
   getMetaSpecBlastRadius: (path) => request(`/meta-specs/${encodeURIComponent(path)}/blast-radius`),
-  getWorkspaceMetaSpecSet: (id) => request(`/workspaces/${id}/meta-spec-set`),
-  setWorkspaceMetaSpecSet: (id, data) =>
-    request(`/workspaces/${id}/meta-spec-set`, { method: 'PUT', body: JSON.stringify(data) }),
+  // Workspace-scoped meta-spec listing (agent-runtime §2 bindings panel):
+  // the meta-specs bindable FROM this workspace (Global + tenant + the
+  // workspace's own), for authors without the Admin role the flat registry
+  // listing requires.
+  getWorkspaceMetaSpecs: (workspaceId, params = {}) => {
+    const qs = new URLSearchParams(params).toString();
+    return request(
+      `/workspaces/${encodeURIComponent(workspaceId)}/meta-specs${qs ? '?' + qs : ''}`
+    );
+  },
+  // NOTE: the workspace/tenant meta-spec-set endpoints are retired
+  // (meta-spec-reconciliation.md amendments row) — required flags and
+  // spec-level bindings via the /meta-specs and
+  // /specs/:path/meta-spec-bindings contracts replace them.
   // Workspace briefing (TASK-205). repoId narrows every section to one repo
   // (HSI §1.5 repo-scope Briefing: ?repo_id= server-side filter).
   getWorkspaceBriefing: (id, since, repoId) => {
