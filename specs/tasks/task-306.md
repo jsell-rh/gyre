@@ -95,23 +95,22 @@ Canonical spec: `specs/system/explorer-canvas.md`. Source: `678a8ac3e3bfeafeb66c
 
 **Status: blocked-on-external-implementation — no closure claimed; section `c3a39b320325eff390c4b56c` remains open.**
 
-Round 73 (repair round from checkpoint `e47aa7aa4`; working tree held only the executor's round-reset of this task file). `origin/main` is **unchanged** at `88202d67` since round 68 — already merged into this branch as `6c87f2c3`; no merge/rebase pending. Deterministic evidence saved to `/tmp/stage/review-evidence/task306-round73-probe.txt`.
+Round 74 (repair round from checkpoint `703d1ec0e`; working tree held only the executor's round-reset of this task file). `origin/main` is **unchanged** at `88202d67` since round 68 — already merged into this branch as `6c87f2c3`; no merge/rebase pending. After `git fetch origin --prune` the remote holds only `origin/main` at that same sha (the worker/task-092/093/095/097/116 refs present in round 73 were pruned; main unchanged, so nothing they contained landed). Deterministic evidence saved to `/tmp/stage/review-evidence/task306-round74-probe.txt`.
 
 ### Realized-model graph-node-metrics backend — NOT landed (anywhere reachable)
 
-- `git diff 678a8ac3 HEAD --stat` over the four extractors, `sqlite/graph.rs`, and `graph_extraction.rs` is still **empty** — byte-identical to the discovery base; the four extractors still hardcode `complexity: None` / `churn_count_30d: 0` at the exact discovery lines (rust:160-161, go:135-136, python:136-137, typescript:129-130) and the upsert still overwrites stored values at sqlite/graph.rs:366-367.
-- **Full remote-tip blob scan (re-run this round):** all `refs/heads/*` fetched (including the worker/task-092/093/095/097/116 refs newly published since round 72). The unique tip blobs of the six watched backend files plus `layoutRegistry.js`/`SvgGraphCanvas.svelte` number 78 (path,sha) pairs; grepping every backend blob finds non-default metric literals only inside the six `sqlite/graph.rs` versions' `#[cfg(test)]` round-trip fixture (`complexity: Some(7)`, `churn_count_30d: 3`) — **zero production cyclomatic/churn computation at any remote tip, merged or unmerged**.
-- Registry check: remote task numbers still max at 311. The owning plan id is referenced (task-276/277/306/307, graph_diff_core.rs) but **no task file exists for the realized-model plan's graph-node-metrics task** — it has not been dispatched.
+- `git diff 678a8ac3 HEAD --stat` over the four extractors, `sqlite/graph.rs`, `graph_extraction.rs`, `layoutRegistry.js`, and `SvgGraphCanvas.svelte` is **empty** — byte-identical to the discovery base; the four extractors still hardcode `complexity: None` / `churn_count_30d: 0` at the exact discovery lines (rust:160-161, go:135-136, python:136-137, typescript:129-130) and the upsert still overwrites stored values at sqlite/graph.rs:366-367.
+- Task registry: `specs/tasks/` still maxes at task-311; **no task file exists for the realized-model plan's graph-node-metrics task** — it has not been dispatched.
 
 Ordering guard applies — no local backend work is permitted, so the end-to-end indicator verification cannot run against populated metrics. The probe fails as designed (every node returns null complexity / zero churn and renders uniformly), which leaves this task open rather than triggering any local implementation.
 
 ### ui-layout d3-force rerouting — NOT landed
 
-`getLayout('graph')` still resolves to ExplorerCanvas (Canvas 2D; layoutRegistry.js 'graph' entry maps `component: ExplorerCanvas` with no `engine` selector — verified at HEAD and across all 6 unique remote-tip `layoutRegistry.js` blobs, so no remote tip reroutes the 'graph' layout), and ExplorerView still defaults `activeLayout = $state('graph')` at :455. SvgGraphCanvas is served only for hierarchical/layered, so SVG-path case (3) does not trigger.
+`getLayout('graph')` still resolves to ExplorerCanvas (Canvas 2D; layoutRegistry.js 'graph' entry maps `component: ExplorerCanvas` with no `engine` selector), and ExplorerView still defaults `activeLayout = $state('graph')` at :455. SvgGraphCanvas is served only for hierarchical/layered, so SVG-path case (3) does not trigger.
 
 ### No narrow frontend defect under permitted work (a)
 
-Canvas indicator formulas (ExplorerCanvas.svelte:1813-1815 `nodeWeight = Math.max(1, n.complexity || 1)`; :3717 `churnThickness = Math.min(4, 1 + (n?.churn_count_30d || 0) * 0.3)`) and the API→renderer field plumbing (api/graph.rs:65-66/:104-105 serializing `complexity`/`churn_count_30d` per node) verified intact at this head — once the backend populates the metrics, the live Canvas-2D path activates the formulas with zero frontend changes.
+Canvas indicator formulas (ExplorerCanvas.svelte:1814 `nodeWeight = Math.max(1, n.complexity || 1)`; :3717 `churnThickness = Math.min(4, 1 + (n?.churn_count_30d || 0) * 0.3)`) and the API→renderer field plumbing (api/graph.rs:66/:105 serializing `complexity`/`churn_count_30d` per node) verified intact at this head — once the backend populates the metrics, the live Canvas-2D path activates the formulas with zero frontend changes.
 
 ### Spec-vs-spec conflict escalation (acceptance criterion 5, recorded for the spec lifecycle)
 
@@ -119,7 +118,7 @@ There is a genuine, unresolved conflict between two canonical specs over the ren
 
 ### Round output
 
-Task file at round 73 with truthful `blocked-on-external-implementation`; coverage row round reference updated (row stays open); 0/7 acceptance criteria ticked. Only `specs/` files changed — no Rust, no web, so no formatting or build work was needed (no cold build of an unchanged crate). Per the assignment constraint, large gyre-server builds/test compilation run in the independent verifier; this round runs no server tests, so nothing is deferred beyond that standing constraint.
+Task file at round 74 with truthful `blocked-on-external-implementation`; coverage row round reference updated (row stays open); 0/7 acceptance criteria ticked. Only `specs/` files changed — no Rust, no web, so no formatting or build work was needed (no cold build of an unchanged crate). Per the assignment constraint, large gyre-server builds/test compilation run in the independent verifier; this round runs no server tests, so nothing is deferred beyond that standing constraint.
 
 ### Remaining work to unblock
 
