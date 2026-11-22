@@ -1,6 +1,29 @@
 <script>
+  /**
+   * Modal — compatibility facade composing the shadcn-svelte Dialog parts
+   * (lib/components/ui/dialog/, built on bits-ui Dialog).
+   *
+   * Consumed contract unchanged:
+   *   - `open` (bindable), `title`, `size` (sm/md/lg/xl), `onclose`,
+   *     `onsubmit`, `footer` snippet, children snippet
+   *   - role=dialog + aria-modal + aria-labelledby wiring (bits-ui)
+   *   - Escape closes (bits-ui EscapeLayer, document keydown)
+   *   - focus trap + focus restore (bits-ui FocusScope); opening focuses
+   *     the first form field, else the first focusable element
+   *   - overlay click closes (exactly once: bits-ui's pointerdown-outside
+   *     dismissal is disabled via onInteractOutside preventDefault and the
+   *     overlay's own onclick is the single close path, so jsdom-driven
+   *     clicks and real pointer interactions behave identically)
+   *   - Enter submits when `onsubmit` is provided (not from textarea/select)
+   *   - body scroll lock (bits-ui ScrollLock)
+   *
+   * The legacy `.modal*` class names are kept as inert DOM hooks.
+   */
   import { tick } from 'svelte';
   import { t } from 'svelte-i18n';
+  import {
+    Dialog, DialogOverlay, DialogContent, DialogTitle, DialogClose,
+  } from './components/ui/dialog/index.js';
 
   let {
     open = $bindable(false),
@@ -14,210 +37,117 @@
 
   let modalEl = $state(null);
   let previousFocus = null;
-  const titleId = 'modal-title-' + Math.random().toString(36).slice(2);
+
+  // max-width per size — mirrors the former .modal-sm/md/lg/xl rules
+  const SIZE_CLASSES = {
+    sm: 'max-w-[400px]',
+    md: 'max-w-[560px]',
+    lg: 'max-w-[800px]',
+    xl: 'max-w-[1100px]',
+  };
+  let sizeClass = $derived(SIZE_CLASSES[size] ?? SIZE_CLASSES.md);
 
   function close() {
     open = false;
     onclose?.();
   }
 
-  function onkeydown(e) {
-    if (e.key === 'Escape') {
-      close();
+  function onOpenChange(next) {
+    if (next) {
+      open = true;
       return;
     }
+    // bits-ui closes (Escape key): surface the same onclose contract the
+    // overlay/close-button paths fire.
+    open = false;
+    onclose?.();
+  }
+
+  function onkeydown(e) {
     // Enter submits if an onsubmit handler is provided (skip textarea and select)
     if (e.key === 'Enter' && onsubmit && e.target.tagName !== 'TEXTAREA' && e.target.tagName !== 'SELECT') {
       e.preventDefault();
       onsubmit();
-      return;
     }
-    // Focus trap: keep Tab within modal
-    if (e.key === 'Tab' && modalEl) {
-      const focusable = modalEl.querySelectorAll(
-        'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
-      );
-      const first = focusable[0];
-      const last = focusable[focusable.length - 1];
-      if (e.shiftKey) {
-        if (document.activeElement === first) {
-          e.preventDefault();
-          last?.focus();
-        }
-      } else {
-        if (document.activeElement === last) {
-          e.preventDefault();
-          first?.focus();
-        }
-      }
-    }
+    // Tab is trapped by the bits-ui FocusScope inside DialogContent.
   }
 
-  $effect(() => {
+  function onOpenAutoFocus(e) {
+    // Keep the former focus behavior: first form field, else first
+    // focusable element (bits-ui's default would focus the first
+    // focusable — the close button).
+    e.preventDefault();
+    tick().then(() => {
+      const formField = modalEl?.querySelector(
+        '.modal-body input, .modal-body select, .modal-body textarea'
+      );
+      if (formField) {
+        formField.focus();
+      } else {
+        const focusable = modalEl?.querySelector(
+          'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+        );
+        focusable?.focus();
+      }
+    });
+  }
+
+  function onCloseAutoFocus(e) {
+    // Focus restore is handled below (previousFocus), mirroring the
+    // former behavior of restoring the element focused before opening.
+    e.preventDefault();
+  }
+
+  // Capture the pre-modal focus before the dialog content mounts and
+  // bits-ui's FocusScope can move focus into the dialog.
+  $effect.pre(() => {
     if (open) {
       previousFocus = document.activeElement;
-      document.body.style.overflow = 'hidden';
-      // Focus the first form field if available, otherwise first focusable element
-      tick().then(() => {
-        const formField = modalEl?.querySelector(
-          '.modal-body input, .modal-body select, .modal-body textarea'
-        );
-        if (formField) {
-          formField.focus();
-        } else {
-          const focusable = modalEl?.querySelector(
-            'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
-          );
-          focusable?.focus();
-        }
-      });
-    } else {
-      document.body.style.overflow = '';
+    }
+  });
+
+  $effect(() => {
+    if (!open && previousFocus) {
       previousFocus?.focus();
       previousFocus = null;
     }
-    return () => {
-      document.body.style.overflow = '';
-    };
   });
 </script>
 
-{#if open}
-  <div class="modal-backdrop">
-    <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-    <div class="modal-overlay" onclick={close} role="presentation" aria-hidden="true"></div>
-    <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-    <div
-      class="modal modal-{size}"
-      role="dialog"
-      aria-modal="true"
-      tabindex="-1"
-      aria-labelledby={titleId}
-      onkeydown={onkeydown}
-      bind:this={modalEl}
-    >
-      <div class="modal-header">
-        <h3 class="modal-title" id={titleId}>{title}</h3>
-        <button class="modal-close" onclick={close} aria-label={$t('common.close_title', { values: { title } })}>
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18" aria-hidden="true">
-            <path d="M18 6L6 18M6 6l12 12"/>
-          </svg>
-        </button>
-      </div>
-      <div class="modal-body">
-        {@render children?.()}
-      </div>
-      {#if footer}
-        <div class="modal-footer">
-          {@render footer()}
+<Dialog bind:open {onOpenChange}>
+  {#if open}
+    <div class="modal-backdrop fixed inset-0 z-[1000] flex items-center justify-center p-4">
+      <DialogOverlay
+        class="modal-overlay"
+        onclick={close}
+        role="presentation"
+        aria-hidden="true"
+      />
+      <DialogContent
+        bind:ref={modalEl}
+        class="modal modal-{size} {sizeClass}"
+        onkeydown={onkeydown}
+        onInteractOutside={(e) => e.preventDefault()}
+        {onOpenAutoFocus}
+        {onCloseAutoFocus}
+      >
+        <div class="modal-header flex shrink-0 items-center justify-between border-b border-border px-6 py-4">
+          <DialogTitle class="modal-title">{title}</DialogTitle>
+          <DialogClose class="modal-close" aria-label={$t('common.close_title', { values: { title } })}>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18" aria-hidden="true">
+              <path d="M18 6L6 18M6 6l12 12" />
+            </svg>
+          </DialogClose>
         </div>
-      {/if}
+        <div class="modal-body flex-1 overflow-y-auto p-6">
+          {@render children?.()}
+        </div>
+        {#if footer}
+          <div class="modal-footer flex shrink-0 items-center justify-end gap-2 border-t border-border px-6 py-4">
+            {@render footer()}
+          </div>
+        {/if}
+      </DialogContent>
     </div>
-  </div>
-{/if}
-
-<style>
-  .modal-backdrop {
-    position: fixed;
-    inset: 0;
-    z-index: 1000;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: var(--space-4);
-  }
-
-  .modal-overlay {
-    position: absolute;
-    inset: 0;
-    z-index: 0;
-    background: color-mix(in srgb, var(--color-surface) 60%, transparent);
-    backdrop-filter: blur(2px);
-  }
-
-  .modal {
-    position: relative;
-    z-index: 10;
-    background: var(--color-surface);
-    border: 1px solid var(--color-border-strong);
-    border-radius: var(--radius-lg);
-    box-shadow: var(--shadow-lg);
-    display: flex;
-    flex-direction: column;
-    max-height: 85vh;
-    width: 100%;
-    animation: modal-in var(--transition-fast) ease;
-  }
-
-  @keyframes modal-in {
-    from { opacity: 0; transform: scale(0.97) translateY(-8px); }
-    to   { opacity: 1; transform: scale(1) translateY(0); }
-  }
-
-  @media (prefers-reduced-motion: reduce) {
-    .modal {
-      animation: none;
-    }
-    .modal-close { transition: none; }
-  }
-
-  .modal-sm { max-width: 400px; }
-  .modal-md { max-width: 560px; }
-  .modal-lg { max-width: 800px; }
-  .modal-xl { max-width: 1100px; }
-
-  .modal-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: var(--space-4) var(--space-6);
-    border-bottom: 1px solid var(--color-border);
-    flex-shrink: 0;
-  }
-
-  .modal-title {
-    font-family: var(--font-display);
-    font-size: var(--text-lg);
-    font-weight: 600;
-    color: var(--color-text);
-  }
-
-  .modal-close {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    background: transparent;
-    border: none;
-    color: var(--color-text-muted);
-    cursor: pointer;
-    border-radius: var(--radius);
-    padding: var(--space-1);
-    transition: color var(--transition-fast), background var(--transition-fast);
-  }
-
-  .modal-close:hover {
-    color: var(--color-text);
-    background: var(--color-surface-elevated);
-  }
-
-  .modal-close:focus-visible {
-    outline: 2px solid var(--color-focus);
-    outline-offset: 2px;
-  }
-
-  .modal-body {
-    padding: var(--space-6);
-    overflow-y: auto;
-    flex: 1;
-  }
-
-  .modal-footer {
-    padding: var(--space-4) var(--space-6);
-    border-top: 1px solid var(--color-border);
-    display: flex;
-    align-items: center;
-    justify-content: flex-end;
-    gap: var(--space-2);
-    flex-shrink: 0;
-  }
-</style>
+  {/if}
+</Dialog>

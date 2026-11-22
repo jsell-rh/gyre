@@ -1,5 +1,12 @@
 import { defineConfig } from 'vite';
 import { svelte } from '@sveltejs/vite-plugin-svelte';
+import tailwindcss from '@tailwindcss/vite';
+import { fileURLToPath } from 'node:url';
+import path from 'node:path';
+
+// $lib alias — the path convention shadcn-svelte components are generated
+// against (components.json aliases). Resolves to web/src/lib.
+const libDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), 'src/lib');
 
 // Lint plugin: catch Svelte 5 runes ($state, $derived, etc.) in plain .js/.ts
 // files that won't be processed by the Svelte compiler.
@@ -22,7 +29,12 @@ function svelteRuneLint() {
 }
 
 export default defineConfig({
-  plugins: [svelte(), svelteRuneLint()],
+  plugins: [tailwindcss(), svelte(), svelteRuneLint()],
+  resolve: {
+    alias: {
+      '$lib': libDir,
+    },
+  },
   build: {
     outDir: 'dist',
     emptyOutDir: true,

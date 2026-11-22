@@ -1,50 +1,26 @@
 <script>
+  /**
+   * Card — compatibility facade composing the shadcn-svelte Card parts
+   * (lib/components/ui/card/). Consumed contract unchanged: `class`
+   * (cls), `header`/`footer` snippets, children snippet. The legacy
+   * `card` / `card-header` / `card-body` / `card-footer` class names are
+   * kept as inert DOM hooks (parent-scoped CSS targets them); styling
+   * comes from the Tailwind utilities in the ui parts, and the bespoke
+   * `.card*` scoped class layer is retired.
+   */
+  import { Card, CardHeader, CardContent, CardFooter } from './components/ui/card/index.js';
+
   let { class: cls = '', header = undefined, footer = undefined, children } = $props();
 </script>
 
-<div class="card {cls}">
+<Card class="card {cls}">
   {#if header}
-    <div class="card-header">{@render header()}</div>
+    <CardHeader class="card-header">{@render header()}</CardHeader>
   {/if}
-  <div class="card-body">
+  <CardContent class="card-body">
     {@render children?.()}
-  </div>
+  </CardContent>
   {#if footer}
-    <div class="card-footer">{@render footer()}</div>
+    <CardFooter class="card-footer">{@render footer()}</CardFooter>
   {/if}
-</div>
-
-<style>
-  .card {
-    background: var(--color-surface);
-    border: 1px solid var(--color-border);
-    border-radius: var(--radius);
-    overflow: hidden;
-  }
-
-  .card-header {
-    padding: var(--space-4) var(--space-6);
-    border-bottom: 1px solid var(--color-border);
-    font-family: var(--font-display);
-    font-weight: 600;
-    font-size: var(--text-base);
-    color: var(--color-text);
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: var(--space-4);
-  }
-
-  .card-body {
-    padding: var(--space-6);
-  }
-
-  .card-footer {
-    padding: var(--space-4) var(--space-6);
-    border-top: 1px solid var(--color-border);
-    background: var(--color-surface-elevated);
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-  }
-</style>
+</Card>
