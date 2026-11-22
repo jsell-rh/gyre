@@ -2,7 +2,7 @@
 title: "Impact analysis: cascade test results and per-dependent test status served by the API and shown in the UI"
 spec_ref: "Spec gap spec-cab97078efffe0fbfb7339be / impact-cascade-results-ui / ed9f34316476"
 depends_on: [task-280]
-progress: ready-for-review
+progress: complete
 commits: ["82d862acbe689c2232ab333f51b8fccbbee27735", "71bda29a3c4b96d9e2dae8a3b9a4b04f86c94471"]
 ---
 
