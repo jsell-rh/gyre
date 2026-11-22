@@ -156,6 +156,25 @@ pub enum WsMessage {
     PresenceEvicted {
         session_id: String,
     },
+    /// Agent-runtime liveness heartbeat on the agent's primary transport
+    /// (architecture.md §API: "WebSocket as the primary transport for
+    /// agent ↔ server communication"). Carries the same workload-identity
+    /// proof (identity-security.md Layer 1) as PUT /api/v1/agents/{id}/heartbeat
+    /// and is fed into the same domain liveness path server-side — stale-agent
+    /// detection behaves identically whichever channel delivered it. Only
+    /// meaningful on agent-verified connections; the server derives the
+    /// agent id from the authenticated connection, never from the payload.
+    Heartbeat {
+        svid: String,
+        stack_fingerprint: String,
+    },
+    /// Server reply to a [`WsMessage::Heartbeat`]. `success: false` means
+    /// the heartbeat was rejected (e.g. workload-identity verification
+    /// failed) and the agent's liveness was NOT advanced.
+    HeartbeatAck {
+        success: bool,
+        message: String,
+    },
     /// Sent by the server when replay was truncated at 1000 messages.
     /// The client can fetch the full history via GET /api/v1/workspaces/:id/messages.
     ReplayCatchUp {
@@ -219,6 +238,44 @@ mod tests {
             decoded,
             WsMessage::AuthResult { success: true, .. }
         ));
+    }
+
+    #[test]
+    fn heartbeat_roundtrip() {
+        let msg = WsMessage::Heartbeat {
+            svid: "-----BEGIN CERTIFICATE-----".to_string(),
+            stack_fingerprint: "sha256:abc".to_string(),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"type\":\"Heartbeat\""));
+        let decoded: WsMessage = serde_json::from_str(&json).unwrap();
+        match decoded {
+            WsMessage::Heartbeat {
+                svid,
+                stack_fingerprint,
+            } => {
+                assert_eq!(svid, "-----BEGIN CERTIFICATE-----");
+                assert_eq!(stack_fingerprint, "sha256:abc");
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn heartbeat_ack_roundtrip() {
+        let msg = WsMessage::HeartbeatAck {
+            success: false,
+            message: "workload-identity verification failed".to_string(),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let decoded: WsMessage = serde_json::from_str(&json).unwrap();
+        match decoded {
+            WsMessage::HeartbeatAck { success, message } => {
+                assert!(!success);
+                assert!(message.contains("verification failed"));
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
     }
 
     #[test]
