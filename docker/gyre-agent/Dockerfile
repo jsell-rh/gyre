@@ -12,6 +12,7 @@ RUN mkdir -p /gyre /workspace /run/gyre
 # Copy agent runner, credential proxy, and entrypoint
 COPY cred-proxy.mjs /gyre/cred-proxy.mjs
 COPY agent-runner.mjs /gyre/agent-runner.mjs
+COPY preview-serve.mjs /gyre/preview-serve.mjs
 COPY entrypoint.sh /gyre/entrypoint.sh
 RUN chmod +x /gyre/entrypoint.sh
 
