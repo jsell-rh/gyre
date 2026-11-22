@@ -3,7 +3,7 @@ title: "Spec Links — stored link statuses: broken when the target leaves the m
 spec_ref: "Spec gap spec-10bdced21a063f819b1baabd / spec-links-status-lifecycle / 5a915155d9bc"
 depends_on: [task-287]
 progress: ready-for-review
-commits: ["92850243a262fabad6609d7bc95e89a22aeb33ca", "6a4b091b4e0949090c5931d072e576869e06da32"]
+commits: ["6a4b091b4e0949090c5931d072e576869e06da32", "92850243a262fabad6609d7bc95e89a22aeb33ca", "763671fd7aa165044b9e6c92ed148b15e7be459b"]
 ---
 
 ## Required behavior
@@ -68,7 +68,9 @@ Canonical spec: `specs/system/spec-links.md`. Source: `678a8ac3e3bfeafeb66cdb47e
 
 All four spec-links.md §Link Status values are now stored link states that
 track CURRENT conditions, delivered on top of the task-287 cross-repo
-resolution machinery.
+resolution machinery. Verification attempt a2055071d9874d04a6774fd93c7a22bb
+flagged five clippy findings (formatting-only) in the changed files; commit
+763671fd fixes them with behavior preserved.
 
 ### Behavior
 
@@ -122,10 +124,13 @@ cache and the durable `spec_links` table where applicable):
   `GET /api/v1/specs/conflicts`; revoke → delisted + status reverted to the
   active/stale/broken rules.
 
-`cargo check -p gyre-server --lib --tests` exits 0 with zero warnings (see
-/tmp/stage/review-evidence/task-288-check.log). Per the 4 GiB build-wrapper
-budget, gyre-server test compilation is deferred to the independent
-verifier, which must run:
+`cargo clippy -p gyre-server --lib` (commit 763671fd, build wrapper, cold,
+7m50s) finishes with ZERO warnings in the three task-288 files — the five
+findings from verification attempt a2055071d9874d04a6774fd93c7a22bb are
+gone; full log retained at
+`/tmp/stage/review-evidence/task-288-clippy-fix-full.log` (summary:
+`task-288-clippy-fix.md`). Per the 4 GiB build-wrapper budget, gyre-server
+test compilation is deferred to the independent verifier, which must run:
 
     cargo test -p gyre-server --lib -- \
       staleness_pass_tracks_target_manifest_presence_both_ways \
@@ -136,8 +141,8 @@ verifier, which must run:
       conflicted_status_set_on_approval_and_reverted_on_revoke
 
 plus the regression surface: `cargo test -p gyre-server --lib --
-spec_link_staleness`, `... -- get_conflicts`, `... -- sync_`.
+spec_link_staleness`, `... -- get_conflicts`, `... -- sync_`, and the
+verification clippy gate (`bash /tmp/stage/checks.sh`).
 
 Coverage row 6 (Link Status) in specs/coverage/system/spec-links.md is
-updated to `implemented` with the source evidence above; no unrelated rows
-touched.
+`implemented` with the source evidence above; no unrelated rows touched.
