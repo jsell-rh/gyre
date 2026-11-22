@@ -2347,6 +2347,20 @@
       "heading": [
         "Dogfooding"
       ]
+    },
+    "backlog/1c20952c55f116d6b1839a84": {
+      "file": "specs/system/lsp-call-graph.md",
+      "heading": [
+        "LSP-Powered Call Graph Extraction",
+        "Edge Types Produced"
+      ]
+    },
+    "backlog/9476a77de45d2786274c547f": {
+      "file": "specs/system/lsp-call-graph.md",
+      "heading": [
+        "LSP-Powered Call Graph Extraction",
+        "Prerequisites"
+      ]
     }
   },
   "bindings": {
@@ -3221,6 +3235,12 @@
     ],
     "Spec gap spec-8986fd94925aed0eaae2d366 / dogfooding-platform-orchestration / 644cb4b53ccb": [
       "backlog/69fff34a83938a4731034172"
+    ],
+    "Spec gap spec-b89674dbcb695eb34e8d5e15 / edge-rows-inheritance-returns-routesto / d96599f10659": [
+      "backlog/1c20952c55f116d6b1839a84"
+    ],
+    "Spec gap spec-b89674dbcb695eb34e8d5e15 / server-image-pass2-toolchains / d96599f10659": [
+      "backlog/9476a77de45d2786274c547f"
     ]
   }
 }
