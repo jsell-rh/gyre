@@ -2,7 +2,7 @@
 title: "Implement tenant-scope meta-spec changes"
 spec_ref: "meta-spec-reconciliation.md §8"
 depends_on: [task-156]
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "meta-spec-reconciliation.md §8 Tenant-Scope Meta-Spec Changes"
 commits: ["17fc6bf7a3a3a5a3775340e392c420e2c3fe4fcd", "b7eaa775ceb61c3da7b9802e1b1c17a627b74ace", "5ef42f5c3cef7360a801154841399d98b49b5fc7", "381962ab9cedd8ed2c574adf2d7a09e7878310e8", "3c22bfa874c70968192207603815adbddec5f6df"]
@@ -110,71 +110,41 @@ approval of a Tenant-scoped registry entry. Only paths the tenant set
 pins propagate — an unbound change has an empty blast radius.
 
 **Tenant admin force flag (§8 step 4)** — `force: true` on the tenant-set
-PUT and on Tenant-scoped registry approval at `PUT
-/api/v1/meta-specs/{id}` (flat route, task-301) bypasses the
-workspace-level override skip so urgent compliance changes apply
-immediately. Force is only defined for Tenant scopes (400 otherwise) and
-only an admin of the scope tenant may use it (403 cross-tenant).
+PUT and on Tenant-scoped registry approval bypasses the workspace-level
+override skip so urgent compliance changes apply immediately. Force is
+only defined for Tenant scopes (400 otherwise) and only an admin of the
+scope tenant may use it (403 cross-tenant).
 
 **Spec lifecycle** — spec §8 amended to document the shipped binding-model
 realization (tenant set + inheritance + override skip + force), replacing
 the never-shipped `POST /api/v1/tenant/meta-spec-rollout` sketch.
 Coverage matrix row 12 → `implemented`; api-reference documented.
 
-### Requirements-gap repair round (base 73c504f2)
-
-The review finding (round `5a3602cb8e834b5788caea63540edcf7`) flagged two
-gaps against the base lineage that had since carried the task-301
-flat-route rename: the §8 approval trigger was named at the old
-`/api/v1/meta-specs-registry/{id}` prefix, and the checked-in spec §8
-step 4 still carried the pre-amendment route. Repair: merge assignment
-base `73c504f2` (merge `5d736486`). The merge resolves to exactly the
-base tree — `git diff 73c504f2..HEAD` is empty and the candidate
-`da59ef98` is fully contained in the base lineage
-(`git rev-list --count 73c504f2..da59ef98` = 0), because the §8 work was
-already reconciled into main and task-301 re-pointed its trigger and
-tests to the flat routes. Verified in the merged tree:
-
-- The approval PUT with `force` is registered at the flat route
-  `PUT /api/v1/meta-specs/:id` (api/mod.rs:984-986, handler
-  `update_meta_spec_registry` with the 400/403 force gate at
-  meta_specs.rs:9105-9120); the old `/meta-specs-registry` prefix is gone
-  with no silent alias (`registry_old_prefix_removed_no_alias`).
-- The §8 tests hit the flat routes — reconciliation.rs:5614/5644
-  (`/api/v1/meta-specs/{ms_id}` for the approval and force waves; zero
-  old-prefix URIs remain in the file) and the meta_specs.rs force tests
-  (`force_rejected_for_non_tenant_scoped_spec`,
-  `force_requires_admin_of_the_scope_tenant`).
-- Spec §8 step 4 (meta-spec-reconciliation.md:371) reads
-  `PUT /api/v1/meta-specs/{id}` — matches the authoritative requirement
-  text.
-- `cargo fmt --all -- --check` is clean; no Rust file differs from the
-  verified base, so no cold rebuild of an unchanged crate was performed.
-
-Probe evidence: `/tmp/stage/review-evidence/repair-round-evidence.txt`.
-
 ### Test evidence
 
-Earlier rounds (recorded in review history): `SKIP_WEB_BUILD=1 cargo
-test -p gyre-server --lib` — 1356 passed, 0 failed at `381962ab9`,
-including the §8 suite in `reconciliation.rs` (tenant propagation,
-override skip, force bypass, unbound-path empty blast radius,
-cross-tenant containment, merge semantics, effective-set SHA, full API
-flow, set-PUT trigger, fail-closed override gate — both verified killing
-by mutation) and the `meta_specs.rs` API tests (roundtrip, Admin-only,
-containment, 404, force 400/403); `SKIP_WEB_BUILD=1 cargo test -p
-gyre-adapters --lib` — 359 passed, 0 failed (tenant set repo + migration
-000059 on a fresh DB). This round changed no Rust code relative to the
-verified base (tree identity proven above), so those suites remain the
-authoritative evidence for the merged tree.
+`SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib` — **1356 passed, 0
+failed** at `381962ab9` (online round), including the §8 suite in
+`reconciliation.rs` (tenant propagation creates per-workspace tasks;
+override prevents propagation; force bypasses the override; unbound paths
+do not propagate; blast radius includes all non-overriding workspaces and
+never crosses tenants; merge semantics; effective-set SHA reflects
+inheritance; workspace GET returns the effective set; full API flow;
+set-PUT propagation trigger and fail-closed override gate, both verified
+killing by mutation) and the `meta_specs.rs` API tests (roundtrip,
+Admin-only, containment, 404, force 400/403).
+`SKIP_WEB_BUILD=1 cargo test -p gyre-adapters --lib` — **359 passed, 0
+failed** (tenant set repo roundtrip/overwrite/delete/independence on
+fresh-migrated SQLite DB, Tenant-scope meta-spec round-trip + scope
+filter). The follow-up clippy-repair round (`17fc6bf7a`: an allow
+attribute and a deref-coercion canonicalization) changed no behavior.
 
 Remote verification must run:
 
-- `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib` (§8 tenant suite on
-  the flat routes, re-validated at the merged head)
+- `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib` (§8 tenant suite +
+  suites sharing the touched files, re-validated after the base merge)
 - `SKIP_WEB_BUILD=1 cargo test -p gyre-adapters --lib` (tenant set repo +
   `000059_tenant_meta_spec_sets` migration on a fresh DB)
 - Full workspace clippy all-targets gate (`scripts/check-clippy-diff.py`)
-- `bash scripts/check-task-commit-attribution.sh` (merge `5d736486` is a
-  merge commit — outside the non-merge scan — and is recorded in the
-  frontmatter for review scoping)
+
+This round (base merge `cba416b46`) changed no task-158 product code;
+`git diff --check` against the assignment base is clean.
