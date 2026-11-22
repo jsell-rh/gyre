@@ -2,7 +2,7 @@
 title: "Meta-spec API at specced routes with scope-level admin auth"
 spec_ref: "Spec gap spec-41a92c20354c6a108e6074e3 / meta-spec-api-contract / 4a3f940495a8"
 depends_on: []
-progress: not-started
+progress: ready-for-review
 commits: ["c5a157de6c437f3f3c7f30156d88c46545fea89b"]
 ---
 
@@ -79,3 +79,78 @@ Canonical spec: `specs/system/agent-runtime.md`. Source: `678a8ac3e3bfeafeb66cdb
     ]
   }
 ]
+
+## Shipped
+
+Commit `c5a157de` implements both halves of the task; this commit adds
+coverage-row updates, the stale cross-reference fix in
+`specs/system/meta-spec-reconciliation.md`, and this bookkeeping.
+
+### Route contract (agent-runtime §2 API table)
+
+The registry CRUD moved from `/api/v1/meta-specs-registry*` to the specced
+flat routes with semantics unchanged: GET/POST `/api/v1/meta-specs`
+(list filters `?scope=&scope_id=&kind=&required=`, case-insensitive
+scope/kind parsing at the API edge), GET/PUT/DELETE
+`/api/v1/meta-specs/:id` (content PUT bumps the version with prior
+versions retained and resets approval to Pending; DELETE returns 409 while
+spec bindings reference the entry), and the `/versions` +
+`/versions/:version` endpoints (api/mod.rs:980-996). The old prefix is
+removed with no silent alias — test `registry_old_prefix_removed_no_alias`
+asserts every old verb 404s and that the `:path/blast-radius` route still
+resolves under the shared prefix (matchit 0.7.3 normalizes param names, so
+`:id` and `:path` coexist; the static `preview` segments stay prioritized).
+ABAC `RouteResourceMapping` entries moved to the new patterns
+(abac_middleware.rs:782-796) and the `meta-specs-registry` special case was
+dropped from `prefix_entity_type` (mechanical singularization now covers
+`meta-specs` → `meta_spec`). Internal callers (reconciliation.rs tests,
+rbac.rs tests), the web client (web/src/lib/api.js), scripts/e2e-flow.sh,
+and docs/api-reference.md all target the new paths;
+`scripts/check-abac-route-registry.sh` is green and the exemption files
+never listed a meta-spec route (the mappings were resolver entries at the
+base too — nothing was grandfathered).
+
+### Scope-level authorization (§2 Required vs Optional)
+
+`require_registry_admin` (tenant-Admin for every scope) was replaced by
+`authorize_registry_write`, which authorizes POST and PUT — including
+flipping `required` in either direction — by the meta-spec's OWN scope:
+Global/Tenant entries are writable only by a tenant Admin (Tenant
+additionally requires the caller to be an Admin of the scope tenant);
+Workspace entries are writable by that workspace's Owner/Admin members via
+a real `workspace_memberships` lookup, with the tenant Admin bypass
+retained. `require_registry_scope` (containment) runs first so a
+membership-based grant can never cross tenants. The PUT handler now loads
+the record and derives scope from it (never from the request), with 403
+before 404 for unprivileged callers on missing ids (same ordering as
+DELETE). The misleading "outer write gate already enforces this for every
+PUT" comment is replaced by a description of the real per-scope gate. A
+workspace Owner/Admin PUT on a Global or Tenant entry — the
+privilege-escalation direction the spec warns about — returns 403 without
+flipping the flag. DELETE keeps its existing scope-aware gate, and the §8
+force flag still requires an Admin of the scope tenant.
+
+### Test evidence
+
+New tests in `registry_tests` (api/meta_specs.rs):
+`workspace_owner_sets_required_on_workspace_meta_spec` (AC2 — Owner, not
+tenant Admin, PUTs `required=true` on a Workspace-scoped entry at the new
+path: 200, flag persists in the store, `assemble_prompt_set` injects it as
+a `required-workspace` section; a workspace Admin member is also allowed;
+a plain Developer member stays 403; also asserts the AC1 filtered
+listing), `workspace_owner_cannot_write_global_or_tenant_meta_spec` (AC3 —
+the same Owner on a Global entry and on a Tenant entry of the caller's own
+tenant: 403, flag unchanged), and `registry_old_prefix_removed_no_alias`.
+Existing semantics tests (version bump/history, DELETE 409, version
+content, membership/delete gates, force gate, rbac-denied audit,
+reconciliation triggers) were retargeted to the new paths.
+
+In this sandbox the build wrapper permits `cargo check` only:
+`SKIP_WEB_BUILD=1 cargo check -p gyre-server --lib --tests` exits 0 (all
+test code type-checks), and the abac-route-registry,
+abac-exempt-handlers, and arch script gates pass (outputs saved under
+/tmp/stage/review-evidence). gyre-server test execution exceeds the 4 GiB
+sandbox budget and is deferred to the independent verifier:
+`SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib registry_tests` (plus
+`--lib rbac` and the prompt_assembly suite) — full list in
+/tmp/stage/review-evidence/task-301-probes.md.
