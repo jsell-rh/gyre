@@ -97,7 +97,7 @@ Canonical spec: `specs/system/explorer-canvas.md`. Source: `678a8ac3e3bfeafeb66c
 
 ### What changed this round
 
-Round 84 (repair dispatch from checkpoint `cd8cd0c8`). `origin/main` fetched and **unchanged** at `7e746233` — the exact commit already reconciled into this branch by round-76's merge `f2a0f9da` — so no new reconciliation was needed. Both external blockers re-verified with the focused deterministic source-level probe at head `cd8cd0c8`; evidence saved to `/tmp/stage/review-evidence/task306-round84-probe.txt` (script `task306-round84-probe.sh`, exit 0). Docs-only round: zero changes to the four language extractors, the graph store/adapters, or the upsert path (AC 1 holds) — no Rust or web source touched, so no formatting or build work was needed and there is no product-surface commit to attribute beyond this docs commit.
+Round 85 (repair dispatch from checkpoint `ba68f256`). `origin/main` fetched and **unchanged** at `7e746233` — the exact commit already reconciled into this branch by round-76's merge `f2a0f9da` — so no new reconciliation was needed. Both external blockers re-verified with the focused deterministic source-level probe at head `ba68f256`; evidence saved to `/tmp/stage/review-evidence/task306-round85-probe.txt` (exit 0). Docs-only round: zero changes to the four language extractors, the graph store/adapters, or the upsert path (AC 1 holds) — no Rust or web source touched, so no formatting or build work was needed and there is no product-surface commit to attribute beyond this docs commit.
 
 ### Realized-model graph-node-metrics backend — NOT landed
 
@@ -116,7 +116,7 @@ Recorded: **explorer-canvas.md §Component Architecture** (Canvas 2D for graph/t
 
 ### Evidence
 
-Probe script `task306-round84-probe.sh` and captured output with source SHAs saved at `/tmp/stage/review-evidence/task306-round84-probe.txt` (exit 0). Per the standing constraint, large gyre-server builds/test compilation run in the independent verifier; this round ran no server tests and defers none.
+Probe evidence with source SHAs saved at `/tmp/stage/review-evidence/task306-round85-probe.txt` (exit 0). Per the standing constraint, large gyre-server builds/test compilation run in the independent verifier; this round ran no server tests and defers none.
 
 ### Remaining work to unblock
 
