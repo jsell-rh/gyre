@@ -1,0 +1,144 @@
+/*
+ * Tailwind CSS entry stylesheet — the styling pipeline for the shadcn-svelte
+ * component library (web/src/lib/components/ui/).
+ *
+ * Imported by src/main.js BEFORE the app boots, so the Tailwind layers are
+ * emitted ahead of the app's global stylesheet (design-system.css).
+ *
+ * Layer strategy (cascade order, lowest → highest):
+ *   theme       — Tailwind theme variables (shadcn tokens below)
+ *   base        — the app's global base layer (design-system.css wraps its
+ *                 rules in `@layer base`; Tailwind's preflight is
+ *                 deliberately NOT imported — design-system.css already is
+ *                 the app's reset/base and views rely on its element rules)
+ *   utilities   — Tailwind utilities; these must beat the base layer so the
+ *                 ui components' cva classes actually style the primitives
+ *   (unlayered) — component-scoped styles (Svelte <style> blocks) always win,
+ *                 so parent views keep styling the legacy DOM hooks
+ *
+ * Brand: the Red Hat palette from design-system.css is carried here as the
+ * shadcn theme token values — the documented brand identity is preserved as
+ * theme values, not discarded. Token values mirror design-system.css exactly
+ * (same hex values), so the two layers cannot conflict regardless of order.
+ */
+@layer theme, base, components, utilities;
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/utilities.css" layer(utilities);
+@import "tw-animate-css";
+
+/* ── Dark theme (the only theme — the app ships dark-only) ──────────────── */
+:root {
+  --background: #151515;        /* --color-bg */
+  --foreground: #ffffff;        /* --color-text */
+
+  --card: #1f1f1f;              /* --color-surface */
+  --card-foreground: #ffffff;
+  --popover: #292929;           /* --color-surface-elevated */
+  --popover-foreground: #ffffff;
+
+  --primary: #ee0000;           /* Red Hat red */
+  --primary-hover: #a60000;     /* --color-primary-hover */
+  --primary-foreground: #ffffff;
+
+  --secondary: #292929;         /* --color-surface-elevated */
+  --secondary-foreground: #ffffff;
+
+  --muted: #292929;
+  --muted-foreground: #a3a3a3;  /* --color-text-secondary */
+
+  --accent: #292929;
+  --accent-foreground: #ffffff;
+
+  --destructive: #f0561d;       /* --color-danger */
+  --destructive-hover: #c04417; /* --color-danger-hover (80% danger + black) */
+  --destructive-foreground: #ffffff;
+
+  /* Extended brand/status colors (Gyre design system) */
+  --success: #63993d;
+  --warning: #f5921b;
+  --info: #4db0ff;              /* == --color-info */
+  --link: #4db0ff;              /* --color-link */
+  --link-hover: #79c8ff;
+  --blocked: #5e40be;           /* --color-blocked */
+  --purple: #8b6fe0;            /* badge fallback purple */
+  --surface: #1f1f1f;
+  --surface-elevated: #292929;
+  --border-strong: #4d4d4d;     /* --color-border-strong */
+
+  --border: #383838;
+  --input: #4d4d4d;
+  --ring: #4db0ff;              /* --color-focus */
+
+  --radius: 0.25rem;            /* 4px — matches --radius in design-system.css */
+}
+
+/*
+ * Map the tokens into Tailwind's theme so utilities (bg-primary,
+ * text-muted-foreground, border-border, rounded-md, …) resolve to the brand
+ * values. `inline` keeps utilities referencing the CSS variables above.
+ */
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-hover: var(--primary-hover);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-hover: var(--destructive-hover);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-info: var(--info);
+  --color-link: var(--link);
+  --color-link-hover: var(--link-hover);
+  --color-blocked: var(--blocked);
+  --color-purple: var(--purple);
+  --color-surface: var(--surface);
+  --color-surface-elevated: var(--surface-elevated);
+  --color-border-strong: var(--border-strong);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+
+  /* Type — the Red Hat brand families (same stacks as design-system.css) */
+  --font-sans: 'Red Hat Text', system-ui, -apple-system, sans-serif;
+  --font-display: 'Red Hat Display', system-ui, -apple-system, sans-serif;
+  --font-mono: 'Red Hat Mono', 'Courier New', monospace;
+
+  /* Radii — the design system scale (base 4px, sm 2px, lg 8px) */
+  --radius-sm: 0.125rem;
+  --radius-md: 0.25rem;
+  --radius-lg: 0.5rem;
+  --radius-xl: 0.5rem;
+
+  /* Skeleton shimmer (design-system.css keyframe, as a Tailwind animation) */
+  --animate-shimmer: shimmer 1.5s infinite;
+
+  @keyframes shimmer {
+    from { background-position: 200% 0; }
+    to   { background-position: -200% 0; }
+  }
+}
+
+/*
+ * Element-normalization utilities the ui components need where Tailwind has
+ * no built-in equivalent (buttons must inherit the surrounding type context,
+ * matching the previous bespoke component library's behavior).
+ */
+@utility font-inherit {
+  font: inherit;
+}
+
+@utility align-inherit {
+  text-align: inherit;
+}
