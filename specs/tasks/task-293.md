@@ -2,25 +2,9 @@
 title: "Spec Links — cycle detection over the tenant-wide forge graph, not just the pushed manifest"
 spec_ref: "Spec gap spec-10bdced21a063f819b1baabd / spec-links-tenant-cycle-detection / 5a915155d9bc"
 depends_on: [task-287]
-progress: ready-for-review
-commits: ["0680e21a605bb9a07051c106ec7c1141fc212675", "092db23015876d452327beab9f04f5c6961edd77"]
+progress: not-started
+commits: []
 ---
-
-## Shipped
-
-Cycle detection now runs over the tenant-wide forge graph, not just the pushed manifest. `check_spec_link_cycles` (spec_registry.rs:1709) accepts a `TenantCycleContext` (:1682); `build_tenant_cycle_graph` (:1749) combines every stored row in the durable spec_links table with the pushed manifest's edges, keyed by (repo, path): manifest entries attributed to the source repo, cross-repo/cross-workspace targets resolved through `resolve_manifest_link_target` — the identical resolution `sync_spec_ledger` persists, so the checked graph and the stored graph attribute nodes identically. Rows the push itself replaces (the `replace_for_source(repo, path)` scoping) are excluded from the stored half, so a push that REMOVES a cycle-participating edge is accepted. Unresolved cross-repo rows (target_repo_id NULL) are never re-attributed. `detect_graph_cycles` (:1828) BFS over depends_on/implements/extends only (conflicts_with bidirectional, references and supersedes excluded via `participates_in_cycle_detection` :1670) and names the cycle with repo-attributed nodes. The git_http.rs rejection wiring is unchanged in shape, now tenant-scoped: the context is built from `state.spec_link_repo`, workspace/repo repositories, tenant resolution, memberships, and the authenticated pusher; a rejection undoes the ref updates, emits PushRejected, and records a git_push_rejected audit with gate_name "spec-link-cycles".
-
-### Prior checkpoint repair
-
-The previous assignment's checkpoint (092db230) carried the implementation and unit tests but never compiled — it was cut off mid `cargo check`. This assignment fixed the single compile error (`Arc::new(MemRepoRepository::default())` in the `two_repo_workspace` fixture), applied rustfmt, and added the missing e2e coverage.
-
-### Test evidence
-
-Unit tests (spec_registry.rs:5016+, real git repos + mem adapters, real post-push `sync_spec_ledger` storing push 1's edge): `tenant_cycle_cross_repo_second_push_rejected` (AC1 detection: A→B accepted, B→A rejected naming repo-a:system/a.md → repo-b:system/b.md), `tenant_cycle_references_back_edge_accepted` and `tenant_cycle_conflicts_with_bidirectional_not_a_cycle` (AC3), `tenant_cycle_single_manifest_cycle_rejected_with_tenant_context` (AC2), `tenant_cycle_push_removing_edge_accepted` (replace semantics), `tenant_cycle_unresolved_stored_edge_not_attributed` (no fabricated edges) — plus the pre-existing 12 single-manifest cycle tests. E2e (git_http.rs:12226): `cross_repo_spec_link_cycle_second_push_rejected_e2e` pushes through the real git-receive-pack endpoint across two repos in one workspace — push 2 returns FORBIDDEN with the cycle named, refs/heads/main rolled back to the pre-push SHA, git_push_rejected audit (gate "spec-link-cycles") and push_rejected workspace message asserted.
-
-`cargo check -p gyre-server --tests` exits 0 (all test code type-checked); rustfmt clean; clippy reports no warnings in any task-293 region. Server test execution is deferred to the independent verifier (gyre-server test codegen exceeds this sandbox's 4 GiB budget under the build wrapper) — required probes: `cargo test -p gyre-server --lib spec_registry::tests::tenant_cycle`, `cargo test -p gyre-server --lib git_http::tests::cross_repo_spec_link_cycle_second_push_rejected_e2e`, plus the `cycle_detection` regression set. Evidence recorded under /tmp/stage/review-evidence.
-
-Coverage row 11 (spec-links.md Cycle Detection) updated to implemented/task-293 with the tenant-wide source evidence; pending independent review for verified.
 
 ## Required behavior
 
