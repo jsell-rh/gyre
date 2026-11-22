@@ -95,24 +95,24 @@ Canonical spec: `specs/system/explorer-canvas.md`. Source: `678a8ac3e3bfeafeb66c
 
 **Status: blocked-on-external-implementation — no closure claimed; section `c3a39b320325eff390c4b56c` remains open.**
 
-Round 70. Re-verification ran from the checkpoint head `5c36781f5` (branch already contains the merge of base `88202d67` as `6c87f2c3`; no merge/rebase pending; only the executor's round-reset of this task file was unstaged). `origin/main` is **unchanged** since round 68 at `88202d67` — no new merge was needed. Deterministic evidence saved to `/tmp/stage/review-evidence/task306-round70-probe.txt`.
+Round 71. Re-verification ran from the checkpoint head `663e8a68c` (branch already contains the merge of base `88202d67` as `6c87f2c3`; no merge/rebase pending; the working tree held only the executor's round-reset of this task file). `origin/main` is **unchanged** since round 68 at `88202d67` — no new merge was needed. Deterministic evidence saved to `/tmp/stage/review-evidence/task306-round71-probe.txt`.
 
 ### Realized-model graph-node-metrics backend — NOT landed (anywhere reachable)
 
 - `git diff 678a8ac3 origin/main --stat` over the four extractors, `sqlite/graph.rs`, and `graph_extraction.rs` is still **empty** — byte-identical to the discovery base; local HEAD is likewise identical to `origin/main` on those files.
-- All four extractors still hardcode `complexity: None` / `churn_count_30d: 0` at the exact discovery lines (rust:160-161, go:135-136, python:136-137, typescript:129-130).
-- **Full remote-tip scan (blob-level, this round's method):** after fetching all of `refs/heads/*` (6662 non-main remote refs), a `git ls-tree` of every remote tip over the six watched backend files yields 70 unique blobs — 6 baseline (at `origin/main`) plus 64 historical extras — and `git cat-file blob | grep -i cyclomatic` over every extra blob finds **zero hits**. No graph-node-metrics implementation exists at any remote tip, merged or unmerged; the extras are just older historical file versions.
-- The SQLite upsert still writes `graph_nodes::complexity.eq(row.complexity)` / `graph_nodes::churn_count_30d.eq(row.churn_count_30d)` (sqlite/graph.rs:366-367), overwriting stored values with the extractor defaults on every re-extraction.
+- All four extractors still hardcode `complexity: None` / `churn_count_30d: 0` at the exact discovery lines (rust:160-161, go:135-136, python:136-137, typescript:129-130); the upsert still writes `graph_nodes::complexity.eq(row.complexity)` / `graph_nodes::churn_count_30d.eq(row.churn_count_30d)` (sqlite/graph.rs:366-367), overwriting stored values on every re-extraction.
+- **Full remote-tip blob scan (re-run this round):** `git ls-remote --heads` shows 6664 non-main remote heads (up from 6662 at round 70 — the only new heads are this round's own task-306 branches). After fetching all of `refs/heads/*`, the unique blobs of the six watched backend files across every non-task-306 remote tip number 70 — the same blob set as round 70's scan (6 baseline + 64 historical extras) — and grepping each for cyclomatic/churn computation finds **zero hits**. No graph-node-metrics implementation exists at any remote tip, merged or unmerged.
+- Registry check: the newest tasks are unrelated (task-308 SQLite default storage, task-309 shadcn-svelte UI, task-310 WebSocket transport — landed as `88202d67`, touches no watched file; task-311 architecture.md backlog publisher, docs-only). No task file exists for the realized-model plan's graph-node-metrics task — the owning task has not even been dispatched.
 
-Ordering guard applies — no local backend work is permitted, so the end-to-end indicator verification cannot run against populated metrics.
+Ordering guard applies — no local backend work is permitted, so the end-to-end indicator verification cannot run against populated metrics. The probe fails as designed (every node returns null complexity / zero churn and renders uniformly), which leaves this task open rather than triggering any local implementation.
 
 ### ui-layout d3-force rerouting — NOT landed
 
-`getLayout('graph')` still resolves to ExplorerCanvas (Canvas 2D; layoutRegistry.js 'graph' entry maps `component: ExplorerCanvas` with no `engine` selector — the registry's SVG engines serve only hierarchical/layered), and ExplorerView still defaults `activeLayout = $state('graph')` at :455. SvgGraphCanvas still carries zero complexity/churn encoding but is not served for 'graph', so the SVG-path case (b) does not trigger.
+`getLayout('graph')` still resolves to ExplorerCanvas (Canvas 2D; layoutRegistry.js 'graph' entry maps `component: ExplorerCanvas` with no `engine` selector — the registry's SVG engines serve only hierarchical/layered), and ExplorerView still defaults `activeLayout = $state('graph')` at :455. A blob-level check of every `layoutRegistry.js` blob across all non-task-306 remote tips confirms **no remote tip reroutes the 'graph' layout** away from ExplorerCanvas. SvgGraphCanvas still carries zero complexity/churn encoding but is not served for 'graph', so the SVG-path case (b) does not trigger.
 
 ### No narrow frontend defect under permitted work (a)
 
-Canvas indicator formulas (ExplorerCanvas.svelte:1814 `nodeWeight = Math.max(1, n.complexity || 1)`; :3717 `churnThickness = Math.min(4, 1 + (n?.churn_count_30d || 0) * 0.3)`) and the API→renderer field plumbing (api/graph.rs serializes `complexity`/`churn_count_30d` per node; ExplorerView passes the raw API graph nodes unmodified into the live renderer) verified intact at this head — once the backend populates the metrics, the live Canvas-2D path activates the formulas with zero frontend changes.
+Canvas indicator formulas (ExplorerCanvas.svelte:1814 `nodeWeight = Math.max(1, n.complexity || 1)`; :3717 `churnThickness = Math.min(4, 1 + (n?.churn_count_30d || 0) * 0.3)`) and the API→renderer field plumbing (api/graph.rs:66/:105 serializes `complexity`/`churn_count_30d` per node; ExplorerView passes the raw API graph nodes unmodified into the live renderer) verified intact at this head — once the backend populates the metrics, the live Canvas-2D path activates the formulas with zero frontend changes.
 
 ### Spec-vs-spec conflict escalation (acceptance criterion 5, recorded for the spec lifecycle)
 
@@ -120,7 +120,7 @@ There is a genuine, unresolved conflict between two canonical specs over the ren
 
 ### Round output
 
-Task file at round 70 with truthful `blocked-on-external-implementation`; coverage row round reference updated (row stays open); 0/7 acceptance criteria ticked. Only `specs/` files changed — no Rust, no web, so no formatting or build work was needed (no cold build of an unchanged crate). Per the assignment constraint, large gyre-server builds/test compilation run in the independent verifier; this round runs no server tests, so nothing is deferred beyond that standing constraint.
+Task file at round 71 with truthful `blocked-on-external-implementation`; coverage row round reference updated (row stays open); 0/7 acceptance criteria ticked. Only `specs/` files changed — no Rust, no web, so no formatting or build work was needed (no cold build of an unchanged crate). Per the assignment constraint, large gyre-server builds/test compilation run in the independent verifier; this round runs no server tests, so nothing is deferred beyond that standing constraint.
 
 ### Remaining work to unblock
 
