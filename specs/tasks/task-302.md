@@ -2,8 +2,8 @@
 title: "Spec bindings as registry metadata with re-approval cascade, UI panel, and meta-spec-set retirement"
 spec_ref: "Spec gap spec-41a92c20354c6a108e6074e3 / bindings-registry-cascade / 4a3f940495a8"
 depends_on: [task-301]
-progress: ready-for-review
-commits: ["0160a25e5ce31515fb553963f06843d357dfcc91", "443e75a84d6f56f47a31fe374a7ee0e52c3d7480", "cd6787dd8b8db7eabfb426449a0e0a26d850af77", "58c89154f14ea2bff7349db6093e38b31e395e2b", "0e90f42ca0bc43d8df82e90c27c296facc574ff1", "e68a426e306a876263f63298af11b33996bdf072", "4d3ed96b7a6960b5faedefa5a9163091075a1e6f"]
+progress: not-started
+commits: []
 ---
 
 ## Required behavior
@@ -82,77 +82,3 @@ Canonical spec: `specs/system/agent-runtime.md`. Source: `678a8ac3e3bfeafeb66cdb
     ]
   }
 ]
-
-## Shipped
-
-No acceptance-criterion checkboxes are ticked; independent review and
-deterministic gates decide approval.
-
-### Implementation (product commits on this branch)
-
-- `4d3ed96b` — production migration. `SpecLedgerEntry.bindings_sha`
-  (gyre-domain/spec_ledger.rs) records the canonical SHA over the binding
-  set; `registry_sha()` derives the spec's registry identity over content
-  SHA + bindings SHA (equals `current_sha` when unbound, so existing
-  approvals stay valid). `put_spec_meta_spec_bindings` (api/meta_specs.rs)
-  writes the binding set AND the ledger: a changed set updates
-  `bindings_sha`, resets `approval_status` to Pending via the existing
-  content-edit invalidation machinery, and clears the `stale_pin:{spec}:`
-  dedup keys, with the existing validation semantics preserved
-  (pin-version-exists, cross-workscope leak guard, role gating,
-  fail-closed unregistered-spec rejection). The spawn gate (api/spawn.rs)
-  and merge gates (api/gates.rs) fail closed on non-Approved specs and
-  ledger lookup errors; the existing SpecApproved → orchestrator →
-  delegation chain re-fires on re-approval.
-- `e68a426e` — UI bindings panel (Specs view Edit flow: required
-  meta-specs pre-selected and locked, optional selection with pinned
-  versions, saved via PUT /api/v1/specs/:path/meta-spec-bindings), web API
-  client calls, and the meta-spec-set retirement: workspace/tenant set
-  PUT/GET routes removed (404), all production writers to the
-  meta_spec_sets/tenant_meta_spec_sets KV stores removed,
-  `resolve_effective_meta_spec_set` / `run_conformance_sweep` /
-  `llm_helpers::workspace_meta_spec_context` migrated to the DB-backed
-  registry model (required flags + spec-level bindings), merge-time drift
-  enforcement compares the attestation `meta_specs_used` array against
-  current required versions with `{meta_spec_id, kind, content_hash,
-  version}` snapshot tuples.
-- `0e90f42c`, `58c89154`, `cd6787dd` — review-repair rounds (rustfmt,
-  fail-closed ledger reads in the bindings PUT / spawn gate / merge gates,
-  workspace-scoped bindable-meta-spec listing for the panel).
-- `443e75a8` — verification-repair round for the 26 failures from
-  `cargo test --all` at the prior candidate (run a5483570): registry-test
-  ledger-path convention, restored §8 `force` flag contract on
-  `PUT /api/v1/meta-specs/:id`, §6/§7 mechanics tests migrated to
-  required-spec fixtures, `set_update_emits_meta_spec_set_updated_event`
-  rewritten to the registry-model trigger, production fix in
-  `parse_meta_spec_drift_warning` (right-split of `{kind}:{id}@v{version}`
-  labels whose kinds carry a colon), effective-set kind-rank fixture, and
-  signal_chain `impl_task` re-approves the seeded spec before spawning.
-- `0160a25e` — verification repair for the single remaining failure at
-  candidate `056a011c` (run `be00b4ae`,
-  `signal_chain::tests::scheduler_decomposes_delegation_into_ordered_
-  subtasks`, panic "implementation sub-task assigned to a spawned worker
-  agent"). Root cause: the test invoked the `on_spec_approved` hook
-  directly, but production `approve_spec` (api/specs.rs) writes the
-  Approved status to the spec ledger BEFORE invoking that hook — the test
-  skipped the handler's ledger write, so the seeded Pending spec stayed
-  Pending and the task-302 worker-spawn approval gate (api/spawn.rs)
-  correctly blocked the Phase-4 spawn. Fix: the ledger re-approval
-  `impl_task` already performed is extracted into a documented
-  `approve_spec_in_ledger` helper (production parity with the approval
-  handler) and called in the decomposes test before `on_spec_approved`.
-  No assertion was weakened and the Pending spawn-block is unchanged
-  (still pinned by
-  `api/spawn.rs::spawn_blocks_worker_for_pending_spec_until_reapproval`).
-
-### Test evidence and deferral
-
-- Local (this sandbox): `cargo check -p gyre-server --lib --tests` clean
-  at this round's head; rustfmt clean on the touched file; web/dist left
-  at its committed state (executor restores generated assets).
-- The independent verifier must re-run `cargo test --all` (the original
-  failing command). This round's change is confined to the
-  `signal_chain.rs` test module; the fixed test exercises the same
-  assertions as before against the now-approved ledger state. No routes,
-  migrations, port traits, or production code paths were touched in this
-  round.
