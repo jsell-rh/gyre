@@ -1,4 +1,14 @@
 <script>
+  /**
+   * Badge — compatibility facade over the shadcn-svelte Badge
+   * (lib/components/ui/badge/). Consumed contract unchanged: `value`
+   * (status string, mapped to a variant + humanized label), `variant`
+   * override, `role` (default status), `aria-label`, `title`.
+   * Styling comes from cva variants + Tailwind; the bespoke
+   * `.badge .badge-{variant}` class layer is retired.
+   */
+  import { Badge } from './components/ui/badge/index.js';
+
   let { value = '', variant = 'default', role: roleAttr = 'status', 'aria-label': ariaLabel = undefined, title = undefined } = $props();
 
   /* Map common status strings to badge variants */
@@ -38,29 +48,4 @@
   );
 </script>
 
-<span class="badge badge-{resolvedVariant}" role={roleAttr} aria-label={ariaLabel} {title}>{label}</span>
-
-<style>
-  .badge {
-    display: inline-block;
-    padding: var(--space-1) var(--space-2);
-    border-radius: var(--radius-sm);
-    font-family: var(--font-body);
-    font-size: var(--text-xs);
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    white-space: nowrap;
-    border: 1px solid transparent;
-  }
-
-  .badge-success  { background: color-mix(in srgb, var(--color-success) 15%, transparent);  color: var(--color-success); border-color: color-mix(in srgb, var(--color-success) 30%, transparent); }
-  .badge-warning  { background: color-mix(in srgb, var(--color-warning) 15%, transparent); color: var(--color-warning); border-color: color-mix(in srgb, var(--color-warning) 30%, transparent); }
-  .badge-danger   { background: color-mix(in srgb, var(--color-danger) 15%, transparent);  color: var(--color-danger); border-color: color-mix(in srgb, var(--color-danger) 30%, transparent); }
-  .badge-info     { background: color-mix(in srgb, var(--color-info) 15%, transparent);  color: var(--color-info); border-color: color-mix(in srgb, var(--color-info) 30%, transparent); }
-  .badge-purple   { background: color-mix(in srgb, var(--color-purple, #8b6fe0) 15%, transparent);  color: var(--color-purple, #8b6fe0); border-color: color-mix(in srgb, var(--color-purple, #8b6fe0) 30%, transparent); }
-  .badge-blocked  { background: color-mix(in srgb, var(--color-blocked) 15%, transparent);  color: var(--color-blocked); border-color: color-mix(in srgb, var(--color-blocked) 30%, transparent); }
-  .badge-muted    { background: color-mix(in srgb, var(--color-text-muted) 15%, transparent); color: var(--color-text-muted); border-color: color-mix(in srgb, var(--color-text-muted) 30%, transparent); }
-  .badge-critical { background: color-mix(in srgb, var(--color-danger) 15%, transparent);    color: var(--color-danger); border-color: color-mix(in srgb, var(--color-danger) 30%, transparent); }
-  .badge-default  { background: color-mix(in srgb, var(--color-text-muted) 15%, transparent); color: var(--color-text-muted); border-color: color-mix(in srgb, var(--color-text-muted) 30%, transparent); }
-</style>
+<Badge variant={resolvedVariant} class="badge badge-{resolvedVariant}" role={roleAttr} aria-label={ariaLabel} {title}>{label}</Badge>
