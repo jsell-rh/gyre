@@ -423,6 +423,19 @@ impl ResourceResolver {
                 RouteResourceMapping::api("/api/v1/specs/drifted", "spec", None),
                 RouteResourceMapping::api("/api/v1/specs/index", "spec", None),
                 RouteResourceMapping::api("/api/v1/specs/graph", "spec", None),
+                // task-290 (spec-links.md §Querying the Graph): the four
+                // spec-graph query endpoints were registry-exempt with no
+                // per-handler authorization, so any authenticated
+                // principal in any tenant received the forge-wide links
+                // store. Registered here (and removed from
+                // scripts/abac-route-registry-exemptions.txt) so they get
+                // real policy evaluation; the two collection routes name
+                // no path entity, so their handlers additionally scope
+                // the store read to the caller's tenant.
+                RouteResourceMapping::api("/api/v1/specs/stale-links", "spec", None),
+                RouteResourceMapping::api("/api/v1/specs/conflicts", "spec", None),
+                RouteResourceMapping::api("/api/v1/specs/:path/dependents", "spec", None),
+                RouteResourceMapping::api("/api/v1/specs/:path/dependencies", "spec", None),
                 RouteResourceMapping::api(SPECS_PATH_ROUTE, "spec", None),
                 RouteResourceMapping::api("/api/v1/specs/:path/approve", "spec", Some("approve")),
                 RouteResourceMapping::api("/api/v1/specs/:path/revoke", "spec", Some("write")),
