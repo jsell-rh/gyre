@@ -97,7 +97,7 @@ Canonical spec: `specs/system/explorer-canvas.md`. Source: `678a8ac3e3bfeafeb66c
 
 ### What changed this round
 
-Round 89 (repair dispatch from checkpoint `724837b7`). `origin/main` fetched and **unchanged** at `7e746233` — the exact commit already reconciled into this branch by round-76's merge `f2a0f9da` — so no new reconciliation was needed. Both external blockers re-verified with the focused deterministic source-level probe at head `724837b7`; evidence with source SHAs saved to `/tmp/stage/review-evidence/task306-round89-probe.txt` (exit 0).
+Round 90 (repair dispatch from checkpoint `ad42a81f`). `origin/main` fetched and **unchanged** at `7e746233` — the exact commit already reconciled into this branch by round-76's merge `f2a0f9da` — so no new reconciliation was needed. Both external blockers re-verified with the focused deterministic source-level probe at head `ad42a81f`; evidence with source SHAs saved to `/tmp/stage/review-evidence/task306-round90-probe.txt` (exit 0).
 
 Docs-only round: zero changes to the four language extractors, the graph store/adapters, or the upsert path (AC 1 holds) — no Rust or web source touched, so there were no newly added Rust files to format and no product-surface commit to attribute beyond this docs commit.
 
@@ -118,7 +118,7 @@ Recorded: **explorer-canvas.md §Component Architecture** (Canvas 2D for graph/t
 
 ### Evidence
 
-Probe evidence with source SHAs saved at `/tmp/stage/review-evidence/task306-round89-probe.txt` (exit 0). Per the standing constraint, large gyre-server builds/test compilation run in the independent verifier; this round ran no server tests and defers none.
+Probe evidence with source SHAs saved at `/tmp/stage/review-evidence/task306-round90-probe.txt` (exit 0). Per the standing constraint, large gyre-server builds/test compilation run in the independent verifier; this round ran no server tests and defers none.
 
 ### Remaining work to unblock
 
