@@ -3,8 +3,12 @@
 ## Running the Server
 
 ```bash
-# Dev mode (defaults: port 3000, token gyre-dev-token, in-memory DB)
+# Dev mode (defaults: port 3000, token gyre-dev-token, durable SQLite at the
+# platform default data path, e.g. ~/.local/share/gyre/gyre.db on Linux)
 cargo run -p gyre-server
+
+# Stateless run (explicit in-memory opt-in; state is lost on restart)
+GYRE_DATABASE_URL=memory cargo run -p gyre-server
 
 # With custom settings
 GYRE_PORT=8080 GYRE_AUTH_TOKEN=my-token GYRE_DATABASE_URL=sqlite:///tmp/gyre.db RUST_LOG=debug \
@@ -57,7 +61,7 @@ Access at `http://localhost:3000`. Default token `gyre-dev-token` works against 
 | `GYRE_PROCFS_MONITOR` | _(enabled)_ | Set to `false` to disable the procfs-based agent process monitor (G7). Polls `/proc/{pid}/fd/` and `/proc/{pid}/net/tcp` every 5 s per live agent PID; emits real `FileAccess` and `NetworkConnect` audit events. No-op on non-Linux platforms. |
 | `GYRE_REPOS_PATH` | `./repos/` | Directory for bare git repositories on disk. Created on startup if absent. (M10.3) |
 | `GYRE_GIT_PATH` | `git` | Path to the `git` binary. Defaults to `git` (resolved via `PATH`). Override for NixOS/container environments where git is at a fixed store path (e.g. `/nix/store/.../bin/git`). Used by smart HTTP handlers, merge processor, and spec lifecycle hooks. |
-| `GYRE_DATABASE_URL` | _(unset -- in-memory)_ | Database URL. `sqlite://gyre.db` for SQLite or `postgres://user:pass@host/db` for PostgreSQL. When set, all port traits persist via Diesel ORM with auto-migrations. Unset = in-memory (default, stateless). (M10.1, M15.1, M15.2) |
+| `GYRE_DATABASE_URL` | _(unset -- durable SQLite at the default data path)_ | Database URL. **Unset (default)** opens durable SQLite at the platform default data path -- `$XDG_DATA_HOME/gyre/gyre.db` (default `~/.local/share/gyre/gyre.db`) on Linux, `~/Library/Application Support/gyre/gyre.db` on macOS, `%APPDATA%\gyre\gyre.db` on Windows. Parent directories are created and the path is logged on startup; all port traits persist via Diesel ORM with auto-migrations (architecture.md §Storage: SQLite as the default, zero ops). `memory` selects the stateless in-memory mode (explicit opt-in; state is lost on restart and no database file is created). `sqlite://<path>` for SQLite at an explicit path or `postgres://user:***@host/db` for PostgreSQL. (M10.1, M15.1, M15.2) |
 | `GYRE_SCIM_TOKEN` | _(unset -- SCIM disabled)_ | Bearer token SCIM clients must send to `/scim/v2/` endpoints. When unset, SCIM provisioning endpoints return 403 (fail-closed). Separate from `GYRE_AUTH_TOKEN`; `/scim/v2/*` is exempt from the global auth middleware and authenticated per-handler against this token (constant-time compare). (M23, task-265) |
 | `GYRE_TRUSTED_PROXIES` | _(empty)_ | Comma-separated CIDRs / bare IPs of trusted reverse proxies (e.g. `10.0.0.0/8`). Audit-event `source_ip` resolution: the socket peer address is always the source of truth; `X-Forwarded-For`/`X-Real-Ip` are honored only when the immediate peer matches this list (rightmost-untrusted XFF entry wins). Empty (default) = every connection is direct and forwarded headers are ignored -- a direct client cannot forge its source IP (task-102 F3, CWE-348). Malformed entries are skipped, never widened to everyone. |
 | `GYRE_RTO` | _(unset)_ | Recovery Time Objective in seconds; returned by `GET /api/v1/admin/bcp/targets` (M23) |

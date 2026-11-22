@@ -33,6 +33,11 @@ impl Ctx {
         // explicitly opts into local forge-key signing (the documented
         // operator opt-in). Keyless/fail-loud signing has its own suites.
         unsafe { std::env::set_var("GYRE_SIGNING_MODE", "local") };
+        // Explicit in-memory opt-in (architecture.md §Storage): the default
+        // (unset) backend is now durable SQLite at the platform default
+        // data path — a test run must never touch the operator's real
+        // database file. Idempotent and race-free (Once-guarded).
+        gyre_server::select_in_memory_storage();
         let state = build_state(TOKEN, &base_url, None);
         abac_middleware::seed_builtin_policies(&state)
             .await
@@ -55,6 +60,8 @@ impl Ctx {
 
         // task-264: see Ctx::new — explicit local-signing opt-in.
         unsafe { std::env::set_var("GYRE_SIGNING_MODE", "local") };
+        // Explicit in-memory opt-in: see Ctx::new.
+        gyre_server::select_in_memory_storage();
         let base_state = build_state(TOKEN, &base_url, None);
         let mut s = (*base_state).clone();
         s.llm = Some(Arc::new(MockLlmPortFactory::echo()) as Arc<dyn LlmPortFactory>);
@@ -756,6 +763,7 @@ async fn test_push_triggers_graph_extraction() {
     // task-264: see Ctx::new — explicit local-signing opt-in (this test
     // pushes real commits through git-receive-pack).
     unsafe { std::env::set_var("GYRE_SIGNING_MODE", "local") };
+    gyre_server::select_in_memory_storage(); // explicit in-memory opt-in: see Ctx::new
     let state = gyre_server::build_state(token, &base_url, None);
     abac_middleware::seed_builtin_policies(&state)
         .await
@@ -960,6 +968,7 @@ async fn test_view_query_diff_scope_commit_range() {
     // task-264: see Ctx::new — explicit local-signing opt-in (this test
     // pushes real commits through git-receive-pack).
     unsafe { std::env::set_var("GYRE_SIGNING_MODE", "local") };
+    gyre_server::select_in_memory_storage(); // explicit in-memory opt-in: see Ctx::new
     let state = gyre_server::build_state(token, &base_url, None);
     abac_middleware::seed_builtin_policies(&state)
         .await

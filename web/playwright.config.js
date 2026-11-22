@@ -41,6 +41,12 @@ export default defineConfig({
     env: {
       GYRE_PORT: '2222',
       GYRE_AUTH_TOKEN: 'e2e-test-token',
+      // Explicit in-memory opt-in (architecture.md §Storage): the default
+      // (unset) backend is durable SQLite at the platform default data path.
+      // The e2e suite must stay stateless — without this sentinel the
+      // webServer would silently boot on durable storage outside the working
+      // tree, and repeated runs with reuseExistingServer would bleed state.
+      GYRE_DATABASE_URL: 'memory',
     },
   },
   outputDir: 'test-results',
