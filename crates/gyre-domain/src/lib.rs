@@ -26,6 +26,7 @@ pub mod constraint_evaluator;
 pub mod container_audit;
 pub mod decisions;
 pub mod dependency;
+pub mod edge_resolution;
 pub mod extractor;
 pub mod git_types;
 pub mod go_extractor;
