@@ -6,6 +6,7 @@
 //! - Interfaces (`type Bar interface`)
 //! - Exported functions (`func FunctionName(...)`)
 //! - Exported methods (`func (r *Receiver) MethodName(...)`)
+//! - Returns edges from function/method result types (`func f() *User`)
 //!
 //! **qualified_name scheme:** `<go-module-path>/<directory-path>.TypeName`
 //! (Go's import-path rule: module path joined with the file's directory;
@@ -14,6 +15,7 @@
 //! Example: module `github.com/org/myapp`, file `api/server.go`
 //! → `github.com/org/myapp/api.Server`
 
+use crate::edge_resolution::{node_type_index, resolve_deferred_target};
 use crate::extractor::{
     shallow_scan_for_marker, ExtractionError, ExtractionResult, LanguageExtractor,
 };
@@ -63,10 +65,14 @@ impl LanguageExtractor for GoExtractor {
             edges: Vec::new(),
             errors: Vec::new(),
             name_to_id: HashMap::new(),
+            deferred_returns: Vec::new(),
         };
 
         // Pass 1: tree-sitter AST extraction (declarations + basic edges).
         ctx.extract_go_files();
+        // Deferred Returns edges: result types can reference nodes extracted
+        // later in the run, so they are resolved after every file.
+        ctx.resolve_deferred_returns();
 
         ExtractionResult {
             nodes: ctx.nodes,
@@ -91,6 +97,9 @@ struct GoExtractionContext {
     errors: Vec<ExtractionError>,
     /// qualified_name → node Id for edge resolution.
     name_to_id: HashMap<String, Id>,
+    /// Deferred Returns edges: (function_id, result_type_name) collected from
+    /// function/method result types, resolved after all files are extracted.
+    deferred_returns: Vec<(Id, String)>,
 }
 
 impl GoExtractionContext {
@@ -479,8 +488,17 @@ impl GoExtractionContext {
         self.name_to_id.insert(qname, fn_id.clone());
         self.nodes.push(fn_node);
 
-        let edge = self.make_edge(EdgeType::Contains, pkg_id.clone(), fn_id);
+        let edge = self.make_edge(EdgeType::Contains, pkg_id.clone(), fn_id.clone());
         self.edges.push(edge);
+
+        // Result type: `func GetUser() *User` → deferred Returns edge to the
+        // User node. Unresolved names (error, string, external types) yield
+        // no edge. Deferred so the type can be defined in a later file.
+        if let Some(result) = node.child_by_field_name("result") {
+            if let Some(type_name) = go_result_type_name(&result, source) {
+                self.deferred_returns.push((fn_id, type_name));
+            }
+        }
     }
 
     fn extract_method_decl(
@@ -525,8 +543,15 @@ impl GoExtractionContext {
         self.name_to_id.insert(qname, fn_id.clone());
         self.nodes.push(fn_node);
 
-        let edge = self.make_edge(EdgeType::Contains, pkg_id.clone(), fn_id);
+        let edge = self.make_edge(EdgeType::Contains, pkg_id.clone(), fn_id.clone());
         self.edges.push(edge);
+
+        // Result type on methods, same as functions.
+        if let Some(result) = node.child_by_field_name("result") {
+            if let Some(type_name) = go_result_type_name(&result, source) {
+                self.deferred_returns.push((fn_id, type_name));
+            }
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -658,6 +683,30 @@ impl GoExtractionContext {
         }
     }
 
+    // -----------------------------------------------------------------------
+    // Deferred-edge resolution (after all files are extracted)
+    // -----------------------------------------------------------------------
+
+    /// Resolve deferred Returns edges: function/method → result-type node.
+    fn resolve_deferred_returns(&mut self) {
+        let deferred = std::mem::take(&mut self.deferred_returns);
+        let id_to_type = node_type_index(&self.nodes);
+        let mut seen: std::collections::HashSet<(String, String)> =
+            std::collections::HashSet::new();
+        for (fn_id, type_name) in deferred {
+            let Some(target_id) =
+                resolve_deferred_target(&type_name, &self.name_to_id, &id_to_type, '.')
+            else {
+                continue;
+            };
+            let key = (fn_id.to_string(), target_id.to_string());
+            if seen.insert(key) {
+                let edge = self.make_edge(EdgeType::Returns, fn_id, target_id);
+                self.edges.push(edge);
+            }
+        }
+    }
+
     /// Extract import paths and create DependsOn edges for same-module packages.
     fn extract_imports(&mut self, node: &tree_sitter::Node, source: &[u8], pkg_id: &Id) {
         if self.module_path.is_empty() {
@@ -716,6 +765,46 @@ fn has_child_kind(node: &tree_sitter::Node, kind: &str) -> bool {
         }
     }
     false
+}
+
+/// Extract a resolvable type name from a function/method `result` node.
+///
+/// Handles the single-result forms:
+/// - `func f() User` → `type_identifier` → `User`
+/// - `func f() *User` → `pointer_type` wrapping a `type_identifier` → `User`
+/// - `func f() pkg.Type` → `qualified_type` → `pkg.Type` (suffix resolution
+///   finds `module/pkg.Type`)
+///
+/// Returns `None` for multiple-result lists (`(int, error)` parameter_list),
+/// builtin composite types (slices, maps, channels, func types, `interface{}`),
+/// and unnamed results — those have no single user-defined return type to
+/// resolve, and unresolved names (error, string, external types) yield no
+/// edge (no fabricated targets).
+fn go_result_type_name(result: &tree_sitter::Node, source: &[u8]) -> Option<String> {
+    match result.kind() {
+        "type_identifier" | "qualified_type" => {
+            let text = result.utf8_text(source).ok()?.trim();
+            if text.is_empty() {
+                None
+            } else {
+                Some(text.to_string())
+            }
+        }
+        "pointer_type" => {
+            // `*User` → unwrap one pointer level to the inner type.
+            for i in 0..result.child_count() {
+                let child = result.child(i).unwrap();
+                if matches!(child.kind(), "type_identifier" | "qualified_type") {
+                    let text = child.utf8_text(source).ok()?.trim();
+                    if !text.is_empty() {
+                        return Some(text.to_string());
+                    }
+                }
+            }
+            None
+        }
+        _ => None,
+    }
 }
 
 /// Extract the receiver type name from a method_declaration node.
@@ -1503,5 +1592,119 @@ func main() {
         );
         let ep = endpoint.unwrap();
         assert_eq!(ep.name, "health");
+    }
+
+    // -----------------------------------------------------------------------
+    // Returns edges (function/method result types)
+    // -----------------------------------------------------------------------
+
+    fn node_id_by_name(result: &ExtractionResult, name: &str) -> Option<Id> {
+        result
+            .nodes
+            .iter()
+            .find(|n| n.name == name)
+            .map(|n| n.id.clone())
+    }
+
+    fn has_edge(result: &ExtractionResult, et: EdgeType, from_name: &str, to_name: &str) -> bool {
+        match (
+            node_id_by_name(result, from_name),
+            node_id_by_name(result, to_name),
+        ) {
+            (Some(f), Some(t)) => result
+                .edges
+                .iter()
+                .any(|e| e.edge_type == et && e.source_id == f && e.target_id == t),
+            _ => false,
+        }
+    }
+
+    #[test]
+    fn function_result_type_emits_returns_edge() {
+        let src = r#"package service
+
+type User struct{}
+
+func GetUser() *User {
+    return nil
+}
+
+func Plain() error {
+    return nil
+}
+"#;
+        let dir = make_repo(GO_MOD, &[("service/user.go", src)]);
+        let result = GoExtractor.extract(dir.path(), "abc123");
+        assert!(
+            result.errors.is_empty(),
+            "unexpected errors: {:?}",
+            result.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+        assert!(
+            has_edge(&result, EdgeType::Returns, "GetUser", "User"),
+            "func GetUser() *User must emit a Returns edge GetUser -> User"
+        );
+        assert!(
+            !has_edge(&result, EdgeType::Returns, "Plain", "error"),
+            "primitive result type (error) must yield no Returns edge"
+        );
+        let returns_count = result
+            .edges
+            .iter()
+            .filter(|e| e.edge_type == EdgeType::Returns)
+            .count();
+        assert_eq!(returns_count, 1, "exactly one Returns edge expected");
+    }
+
+    #[test]
+    fn method_result_type_emits_returns_edge() {
+        let src = r#"package api
+
+type Server struct{}
+
+func (s *Server) Build() Server {
+    return Server{}
+}
+"#;
+        let dir = make_repo(GO_MOD, &[("api/server.go", src)]);
+        let result = GoExtractor.extract(dir.path(), "abc123");
+        assert!(
+            result.errors.is_empty(),
+            "unexpected errors: {:?}",
+            result.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+        // The method node's name is Build; the result type node is Server.
+        assert!(
+            has_edge(&result, EdgeType::Returns, "Build", "Server"),
+            "method with user-defined result type must emit a Returns edge"
+        );
+    }
+
+    #[test]
+    fn multi_value_result_yields_no_returns_edge() {
+        let src = r#"package api
+
+type Item struct{}
+
+func GetItems() ([]Item, error) {
+    return nil, nil
+}
+"#;
+        let dir = make_repo(GO_MOD, &[("api/items.go", src)]);
+        let result = GoExtractor.extract(dir.path(), "abc123");
+        assert!(
+            result.errors.is_empty(),
+            "unexpected errors: {:?}",
+            result.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+        let returns_count = result
+            .edges
+            .iter()
+            .filter(|e| e.edge_type == EdgeType::Returns)
+            .count();
+        assert_eq!(
+            returns_count, 0,
+            "multi-value results have no single return type and must yield no Returns edge"
+        );
     }
 }
