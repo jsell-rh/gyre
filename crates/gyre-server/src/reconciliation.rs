@@ -5490,7 +5490,8 @@ mod tests {
         .await;
         seed_agent_commit(&state, "ag-vb", "repo-br-vb1", "sha-vb-1").await;
 
-        let json = get_blast_radius(&state, "backend-developer", "from_version=3&to_version=4").await;
+        let json =
+            get_blast_radius(&state, "backend-developer", "from_version=3&to_version=4").await;
 
         assert_eq!(json["from_version"].as_u64(), Some(3));
         assert_eq!(json["to_version"].as_u64(), Some(4));
@@ -5568,10 +5569,7 @@ mod tests {
         // every AFFECTED workspace, never B's repo, with zero counts for
         // the repo that has no provenance under the superseded version.
         let flat = json["affected_repos"].as_array().unwrap();
-        let flat_ids: Vec<&str> = flat
-            .iter()
-            .map(|r| r["id"].as_str().unwrap())
-            .collect();
+        let flat_ids: Vec<&str> = flat.iter().map(|r| r["id"].as_str().unwrap()).collect();
         assert_eq!(flat_ids.len(), 3);
         assert!(flat_ids.contains(&"repo-br-va1"));
         assert!(flat_ids.contains(&"repo-br-va2"));
@@ -5598,10 +5596,24 @@ mod tests {
 
         // Stale pin (v2) under a registry at v3: skipped by default.
         let _ws_stale = make_workspace_in_tenant(&state, "ws-br-dc-stale", "default").await;
-        seed_spec_binding(&state, &ms.id, 2, "specs/system/dc-stale.md", "ws-br-dc-stale").await;
+        seed_spec_binding(
+            &state,
+            &ms.id,
+            2,
+            "specs/system/dc-stale.md",
+            "ws-br-dc-stale",
+        )
+        .await;
         // Current pin (v3): affected by default.
         let _ws_current = make_workspace_in_tenant(&state, "ws-br-dc-current", "default").await;
-        seed_spec_binding(&state, &ms.id, 3, "specs/system/dc-current.md", "ws-br-dc-current").await;
+        seed_spec_binding(
+            &state,
+            &ms.id,
+            3,
+            "specs/system/dc-current.md",
+            "ws-br-dc-current",
+        )
+        .await;
 
         // A Workspace-scoped REQUIRED meta-spec is the workspace's own
         // binding: affected at its current version with the §8 label
@@ -5730,7 +5742,8 @@ mod tests {
         )
         .await;
 
-        let json = get_blast_radius(&state, "backend-developer", "from_version=2&to_version=3").await;
+        let json =
+            get_blast_radius(&state, "backend-developer", "from_version=2&to_version=3").await;
 
         let entry = |id: &str| {
             json["affected_workspaces"]
