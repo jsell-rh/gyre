@@ -15,6 +15,7 @@
 //! Own test binary (own process): `build_state` reads `GYRE_DATABASE_URL`
 //! from the process environment.
 
+use axum::body::Body;
 use axum::extract::{Path, State};
 use axum::Json;
 use gyre_common::Id;
@@ -22,9 +23,11 @@ use gyre_domain::{
     BreakingChange, DependencyEdge, DependencyStatus, DependencyType, DetectionMethod, Repository,
     Workspace,
 };
-use gyre_server::api::dependencies::{get_graph, get_workspace_dependency_graph};
+use gyre_server::api::dependencies::{get_workspace_dependency_graph, GraphResponse};
 use gyre_server::build_state;
+use http::{Request, StatusCode};
 use tempfile::TempDir;
+use tower::ServiceExt;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn graph_edges_carry_version_and_breaking_change_detail() {
@@ -109,7 +112,33 @@ async fn graph_edges_carry_version_and_breaking_change_detail() {
     state.breaking_changes.create(&bc_ack).await.unwrap();
 
     // ── Tenant-wide graph ────────────────────────────────────────────────
-    let Json(graph) = get_graph(State(state.clone())).await.unwrap();
+    // get_graph now carries the AuthenticatedAgent extractor (task-282
+    // review F1: the `?workspace=` query form is tenant-contained in the
+    // handler), and the auth type is pub(crate) — so the tenant-wide
+    // graph is probed through the real router (require_auth → ABAC →
+    // handler) with the test's global token. The token authenticates as
+    // the system principal in tenant "default", which is the tenant the
+    // fixtures above are filed under, so the read is in scope.
+    gyre_server::abac_middleware::seed_builtin_policies(&state)
+        .await
+        .expect("seed builtin policies");
+    let app = gyre_server::build_router(state.clone());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/v1/dependencies/graph")
+                .header("authorization", "Bearer task164-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let graph: GraphResponse = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(graph.edges.len(), 1, "exactly one edge in the graph");
     let e = &graph.edges[0];
     assert_eq!(e.id, "edge-1");

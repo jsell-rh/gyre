@@ -9,6 +9,20 @@
 //!   GET    /api/v1/repos/{id}/blast-radius            — transitive dependents (BFS)
 //!   GET    /api/v1/repos/{id}/cascade-test-results    — durable cascade test results (task-281)
 //!   POST   /api/v1/repos/{id}/cascade-tests/trigger   — trigger cascade tests for dependents
+//!
+//! Spec-literal surface (dependency-graph.md §API, task-282) — additions
+//! alongside the routes above (the CLI and UI keep consuming those),
+//! backed by the same handler cores:
+//!   GET    /api/v1/deps/graph[?workspace={id}]         — tenant-wide / workspace-scoped graph
+//!   GET    /api/v1/deps/repo/{id}/dependents           — incoming deps
+//!   GET    /api/v1/deps/repo/{id}/dependencies         — outgoing deps
+//!   GET    /api/v1/deps/repo/{id}/impact               — full blast radius (with cascade results)
+//!   GET    /api/v1/deps/stale                          — stale edges across the tenant
+//!   GET    /api/v1/deps/breaking                       — unacknowledged breaking changes
+//!   POST   /api/v1/deps/manual                         — declare a manual edge (source validated
+//!                                                          against the caller's scope)
+//!   DELETE /api/v1/deps/{id}                           — remove an edge (manual only)
+//!   POST   /api/v1/deps/breaking/{id}/acknowledge      — acknowledge a breaking change
 
 use axum::{
     extract::{Path, State},
@@ -38,11 +52,29 @@ pub struct AddDependencyRequest {
     pub target_artifact: Option<String>,
 }
 
+/// POST /api/v1/deps/manual request body (dependency-graph.md §API:/// "Declare a manual dependency edge"). The flat spec path has no repo
+/// path segment, so the SOURCE repo rides in the body — and is validated
+/// against the caller's scope in [`add_manual_dependency`] (never
+/// trusted: no caller-supplied tenant/workspace scoping fields exist on
+/// this request; the tenant is the caller's own, the source repo is
+/// loaded and containment-checked server-side).
+#[derive(Deserialize, Clone)]
+pub struct AddManualDependencyRequest {
+    pub source_repo_id: String,
+    pub target_repo_id: String,
+    #[serde(default = "default_dep_type")]
+    pub dependency_type: DependencyType,
+    #[serde(default)]
+    pub source_artifact: Option<String>,
+    #[serde(default)]
+    pub target_artifact: Option<String>,
+}
+
 fn default_dep_type() -> DependencyType {
     DependencyType::Manual
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 pub struct DependencyEdgeResponse {
     pub id: String,
     pub source_repo_id: String,
@@ -79,7 +111,7 @@ impl From<DependencyEdge> for DependencyEdgeResponse {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct GraphNode {
     pub repo_id: String,
     pub name: String,
@@ -87,7 +119,7 @@ pub struct GraphNode {
 
 /// Breaking-change summary attached to a graph edge (dependency-graph.md §UI
 /// dependency detail panel: "breaking changes, acknowledgment status").
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct BreakingChangeSummary {
     pub id: String,
     pub commit_sha: String,
@@ -112,7 +144,7 @@ impl From<gyre_domain::BreakingChange> for BreakingChangeSummary {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct GraphEdgeResponse {
     pub id: String,
     pub source: String,
@@ -134,7 +166,7 @@ pub struct GraphEdgeResponse {
     pub breaking_changes: Vec<BreakingChangeSummary>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct GraphResponse {
     pub nodes: Vec<GraphNode>,
     pub edges: Vec<GraphEdgeResponse>,
@@ -425,11 +457,249 @@ pub async fn delete_dependency(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// GET /api/v1/dependencies/graph
-/// Returns the full tenant-wide dependency graph.
+/// Per-handler authorization for the flat `/api/v1/deps/*` write routes:
+/// load the named repo, resolve its workspace, and compare the workspace's
+/// tenant against the caller's — Forbidden on mismatch, fail-closed
+/// NotFound when the scope chain cannot be resolved (task-093 F3 fix
+/// class: the flat paths carry no repo path segment, so the middleware's
+/// path-attribute extraction cannot resolve `resource.tenant_id` for
+/// them; the handler performs the containment itself).
+async fn require_repo_tenant_containment(
+    state: &AppState,
+    auth: &crate::auth::AuthenticatedAgent,
+    repo_id: &Id,
+) -> Result<(), ApiError> {
+    let repo = state
+        .repos
+        .find_by_id(repo_id)
+        .await
+        .map_err(ApiError::Internal)?
+        .ok_or_else(|| ApiError::NotFound(format!("repo {repo_id} not found")))?;
+
+    let workspace = state
+        .workspaces
+        .find_by_id(&repo.workspace_id)
+        .await
+        .map_err(ApiError::Internal)?
+        .ok_or_else(|| {
+            ApiError::NotFound(format!(
+                "repo {repo_id} references workspace {} which does not exist — the tenant \
+                 scope cannot be determined; fix the repo's workspace reference",
+                repo.workspace_id
+            ))
+        })?;
+
+    if workspace.tenant_id.as_str() != auth.tenant_id {
+        return Err(ApiError::Forbidden(format!(
+            "repo {repo_id} belongs to tenant {}, not the caller's tenant {}",
+            workspace.tenant_id, auth.tenant_id
+        )));
+    }
+    Ok(())
+}
+
+/// Per-handler tenant containment for the `?workspace={id}` query form of
+/// the graph endpoint (task-282 review F1): load the named workspace and
+/// compare its tenant against the caller's — Forbidden on mismatch,
+/// fail-closed NotFound when the workspace does not exist. The dedicated
+/// `/api/v1/workspaces/{id}/dependency-graph` route resolves
+/// `resource.workspace_id` from its path segment, so the middleware's
+/// scope chain (workspace → tenant → builtin tenant-isolation policy)
+/// contains it; the query-parameter form carries the scope in the query
+/// string, which the middleware never consults for scope attributes —
+/// `resource.tenant_id` stays unset, tenant-isolation never fires, and
+/// the role bands allow the read. The handler therefore performs the
+/// containment itself (same fix class as require_repo_tenant_containment
+/// above).
+async fn require_workspace_tenant_containment(
+    state: &AppState,
+    auth: &crate::auth::AuthenticatedAgent,
+    workspace_id: &str,
+) -> Result<(), ApiError> {
+    let workspace = state
+        .workspaces
+        .find_by_id(&Id::new(workspace_id))
+        .await
+        .map_err(ApiError::Internal)?
+        .ok_or_else(|| ApiError::NotFound(format!("workspace {workspace_id} not found")))?;
+
+    if workspace.tenant_id.as_str() != auth.tenant_id {
+        return Err(ApiError::Forbidden(format!(
+            "workspace {workspace_id} belongs to tenant {}, not the caller's tenant {}",
+            workspace.tenant_id, auth.tenant_id
+        )));
+    }
+    Ok(())
+}
+
+/// POST /api/v1/deps/manual — declare a manual dependency edge
+/// (dependency-graph.md §API). Same edge-creation core as
+/// POST /api/v1/repos/{id}/dependencies; the flat spec path carries the
+/// source repo in the body, so the source is validated against the
+/// caller's scope instead of being trusted:
+/// - the source repo must exist and its workspace's tenant must match the
+///   caller's (containment, Forbidden on mismatch — fail-closed NotFound
+///   when the scope chain cannot be resolved);
+/// - a token carrying repo/workspace hierarchy claims
+///   (platform-model.md §1 Token Scoping) may only declare edges from
+///   within its own scope.
+///
+/// No caller-supplied tenant/workspace scoping fields exist on this
+/// request (check-forged-scope-fields): the tenant is the caller's own.
+pub async fn add_manual_dependency(
+    State(state): State<Arc<AppState>>,
+    auth: crate::auth::AuthenticatedAgent,
+    Json(req): Json<AddManualDependencyRequest>,
+) -> Result<(StatusCode, Json<DependencyEdgeResponse>), ApiError> {
+    let source_repo_id = Id::new(&req.source_repo_id);
+    let target_repo_id = Id::new(&req.target_repo_id);
+
+    let source_repo = state
+        .repos
+        .find_by_id(&source_repo_id)
+        .await
+        .map_err(ApiError::Internal)?
+        .ok_or_else(|| {
+            ApiError::NotFound(format!("source repo {} not found", req.source_repo_id))
+        })?;
+
+    state
+        .repos
+        .find_by_id(&target_repo_id)
+        .await
+        .map_err(ApiError::Internal)?
+        .ok_or_else(|| {
+            ApiError::NotFound(format!("target repo {} not found", req.target_repo_id))
+        })?;
+
+    if source_repo_id.as_str() == target_repo_id.as_str() {
+        return Err(ApiError::InvalidInput(
+            "a repo cannot depend on itself".to_string(),
+        ));
+    }
+
+    // Per-handler tenant containment on BOTH ends of the edge (task-282
+    // review F2): the source (the caller's declared dependency) AND the
+    // target. A caller in tenant A must not be able to declare an edge
+    // into a tenant-B repo — the edge would enter tenant-B's dependents,
+    // blast-radius, and cascade-test surface.
+    require_repo_tenant_containment(&state, &auth, &source_repo_id).await?;
+    require_repo_tenant_containment(&state, &auth, &target_repo_id).await?;
+
+    // Token-scope containment (platform-model.md §1): a repo-scoped token
+    // may only declare edges FROM its own repo; a workspace-scoped token
+    // only from repos in its own workspace. Scope claims are
+    // signature-verified by the auth extractor — never caller-asserted
+    // here.
+    if let Some(token_repo) = &auth.repo_id {
+        if token_repo.as_str() != req.source_repo_id {
+            return Err(ApiError::Forbidden(format!(
+                "repo-scoped token may only declare dependencies of repo {token_repo}, not {}",
+                req.source_repo_id
+            )));
+        }
+    }
+    if let Some(token_ws) = &auth.workspace_id {
+        if token_ws != source_repo.workspace_id.as_str() {
+            return Err(ApiError::Forbidden(format!(
+                "workspace-scoped token may only declare dependencies within workspace \
+                 {token_ws}, not {}",
+                source_repo.workspace_id
+            )));
+        }
+    }
+
+    let now = now_secs();
+    let edge = DependencyEdge::new(
+        new_id(),
+        source_repo_id,
+        target_repo_id,
+        req.dependency_type,
+        req.source_artifact.unwrap_or_default(),
+        req.target_artifact.unwrap_or_default(),
+        DetectionMethod::Manual,
+        now,
+    );
+
+    state
+        .dependencies
+        .save(&edge)
+        .await
+        .map_err(ApiError::Internal)?;
+
+    Ok((StatusCode::CREATED, Json(edge.into())))
+}
+
+/// DELETE /api/v1/deps/{id} — remove a dependency edge, manual only
+/// (dependency-graph.md §API). Same manual-only semantics as
+/// DELETE /api/v1/repos/{id}/dependencies/{dep_id}: an auto-detected edge
+/// is refused. The flat spec path carries no repo segment, so the handler
+/// enforces per-handler tenant containment against the edge's source
+/// repo (the repo whose declared dependency the edge is) before any
+/// mutation or refusal detail is revealed.
+pub async fn delete_dependency_by_id(
+    State(state): State<Arc<AppState>>,
+    auth: crate::auth::AuthenticatedAgent,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let edge_id = Id::new(&id);
+    let edge = state
+        .dependencies
+        .find_by_id(&edge_id)
+        .await
+        .map_err(ApiError::Internal)?
+        .ok_or_else(|| ApiError::NotFound(format!("dependency {id} not found")))?;
+
+    // Authorization before effect: the edge belongs to its source repo's
+    // tenant; a caller in another tenant gets Forbidden, not the
+    // manual-only refusal (which would leak the edge's detection method).
+    require_repo_tenant_containment(&state, &auth, &edge.source_repo_id).await?;
+
+    if edge.detection_method != DetectionMethod::Manual {
+        return Err(ApiError::InvalidInput(
+            "only manually-declared dependencies can be deleted via API; \
+             auto-detected edges are managed by the forge"
+                .to_string(),
+        ));
+    }
+
+    state
+        .dependencies
+        .delete(&edge_id)
+        .await
+        .map_err(ApiError::Internal)?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Query parameters for the graph endpoints. `workspace` scopes the graph
+/// to repos within that workspace — the spec's query-parameter form
+/// (dependency-graph.md §API: `GET /api/v1/deps/graph?workspace={id}`),
+/// equivalent to the dedicated `/workspaces/{id}/dependency-graph` route.
+#[derive(Deserialize, Default)]
+pub struct GraphQuery {
+    pub workspace: Option<String>,
+}
+
+/// GET /api/v1/dependencies/graph — full tenant-wide dependency graph.
+/// GET /api/v1/deps/graph — same graph at the spec-literal path; the SAME
+/// path accepts `?workspace={id}` for the workspace-scoped graph. The
+/// query-parameter scope is caller-visible data selection, so it is
+/// tenant-contained in the handler (require_workspace_tenant_containment
+/// — the middleware cannot resolve `resource.tenant_id` from a query
+/// string; task-282 review F1): a workspace outside the caller's tenant
+/// is Forbidden, never graph data.
 pub async fn get_graph(
     State(state): State<Arc<AppState>>,
+    auth: crate::auth::AuthenticatedAgent,
+    axum::extract::Query(query): axum::extract::Query<GraphQuery>,
 ) -> Result<Json<GraphResponse>, ApiError> {
+    if let Some(ws_id) = query.workspace.filter(|w| !w.is_empty()) {
+        require_workspace_tenant_containment(&state, &auth, &ws_id).await?;
+        let graph = workspace_scoped_graph(&state, &ws_id).await?;
+        return Ok(Json(graph));
+    }
+
     let all_edges = state
         .dependencies
         .list_all()
@@ -440,14 +710,12 @@ pub async fn get_graph(
     Ok(Json(graph))
 }
 
-/// GET /api/v1/workspaces/{id}/dependency-graph
-/// Returns the dependency graph scoped to repos within a workspace.
-/// Includes edges where at least one endpoint (source or target) is in the workspace.
-pub async fn get_workspace_dependency_graph(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-) -> Result<Json<GraphResponse>, ApiError> {
-    let workspace_id = Id::new(&id);
+/// Workspace-scoped graph core, shared by the `?workspace={id}` query
+/// form on the graph endpoint and the dedicated
+/// `/api/v1/workspaces/{id}/dependency-graph` route. Includes edges where
+/// at least one endpoint (source or target) is in the workspace.
+async fn workspace_scoped_graph(state: &AppState, id: &str) -> Result<GraphResponse, ApiError> {
+    let workspace_id = Id::new(id);
 
     state
         .workspaces
@@ -479,7 +747,17 @@ pub async fn get_workspace_dependency_graph(
         })
         .collect();
 
-    let graph = build_graph_response(&state, filtered_edges).await?;
+    build_graph_response(state, filtered_edges).await
+}
+
+/// GET /api/v1/workspaces/{id}/dependency-graph
+/// Returns the dependency graph scoped to repos within a workspace.
+/// Includes edges where at least one endpoint (source or target) is in the workspace.
+pub async fn get_workspace_dependency_graph(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<GraphResponse>, ApiError> {
+    let graph = workspace_scoped_graph(&state, &id).await?;
     Ok(Json(graph))
 }
 
@@ -880,8 +1158,53 @@ pub async fn acknowledge_breaking_change(
         .map_err(ApiError::Internal)?
         .ok_or_else(|| ApiError::NotFound(format!("breaking change {id} not found")))?;
 
+    acknowledge_breaking_change_core(&state, &bc).await?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// POST /api/v1/deps/breaking/{id}/acknowledge — flat spec path
+/// (dependency-graph.md §API) for acknowledging a breaking change. Same
+/// core as `/api/v1/dependencies/breaking/{id}/acknowledge`; the flat
+/// path carries no repo segment, so the handler enforces per-handler
+/// tenant containment against the breaking change's source repo (the repo
+/// that introduced the change) before the acknowledgment takes effect.
+pub async fn deps_acknowledge_breaking_change(
+    State(state): State<Arc<AppState>>,
+    auth: crate::auth::AuthenticatedAgent,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let bc_id = Id::new(&id);
+
+    let bc = state
+        .breaking_changes
+        .find_by_id(&bc_id)
+        .await
+        .map_err(ApiError::Internal)?
+        .ok_or_else(|| ApiError::NotFound(format!("breaking change {id} not found")))?;
+
+    // Authorization before effect: a caller in another tenant gets
+    // Forbidden and the breaking change stays unacknowledged.
+    require_repo_tenant_containment(&state, &auth, &bc.source_repo_id).await?;
+
+    acknowledge_breaking_change_core(&state, &bc).await?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Acknowledgment core shared by both paths: idempotent on an already-
+/// acknowledged change, records the acknowledgment, and — when every
+/// breaking change on the dependency edge is now acknowledged — reverts
+/// the edge status to Active.
+async fn acknowledge_breaking_change_core(
+    state: &AppState,
+    bc: &gyre_domain::BreakingChange,
+) -> Result<(), ApiError> {
+    let bc_id = bc.id.clone();
+    let id = bc_id.to_string();
+
     if bc.acknowledged {
-        return Ok(StatusCode::NO_CONTENT);
+        return Ok(());
     }
 
     let now = now_secs();
@@ -921,7 +1244,7 @@ pub async fn acknowledge_breaking_change(
         }
     }
 
-    Ok(StatusCode::NO_CONTENT)
+    Ok(())
 }
 
 /// GET /api/v1/workspaces/:id/dependency-policy
@@ -3593,5 +3916,646 @@ import "google/protobuf/empty.proto";
         assert!(matches!(err, ApiError::InvalidInput(_)), "got: {err}");
         let tasks = state.tasks.list_by_repo(&a).await.unwrap();
         assert!(tasks.is_empty());
+    }
+
+    // ── Spec-literal /api/v1/deps/* routes (task-282) ─────────────────
+
+    #[tokio::test]
+    async fn deps_graph_endpoint_workspace_query_scopes_the_graph() {
+        // Two workspaces (both tenant-1): a→b inside ws-x, a→c crossing
+        // into ws-y. The unparameterized graph returns every edge; the
+        // `?workspace=` form returns exactly the edges touching ws-x
+        // repos — the same semantics as the dedicated
+        // /workspaces/{id}/dependency-graph route; an unknown workspace
+        // 404s.
+        let state = setup();
+        let a = create_repo_in_workspace(&state, "dg-a", "ws-dg-x").await;
+        let b = create_repo_in_workspace(&state, "dg-b", "ws-dg-x").await;
+        let c = create_repo_in_workspace(&state, "dg-c", "ws-dg-y").await;
+
+        for target in [&b, &c] {
+            state
+                .dependencies
+                .save(&DependencyEdge::new(
+                    Id::new(uuid::Uuid::new_v4().to_string()),
+                    a.clone(),
+                    target.clone(),
+                    DependencyType::Code,
+                    "Cargo.toml",
+                    "crate",
+                    DetectionMethod::CargoToml,
+                    1000,
+                ))
+                .await
+                .unwrap();
+        }
+
+        // Tenant-wide: both edges.
+        let Json(all) = get_graph(
+            State(state.clone()),
+            auth_in_tenant("tenant-1"),
+            axum::extract::Query(GraphQuery::default()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(all.edges.len(), 2, "tenant-wide graph has both edges");
+
+        // Workspace-scoped via the spec's query-parameter form. Both
+        // edges touch ws-dg-x: a→b entirely inside it, and a→c via its
+        // source repo `a` — the dedicated route's committed semantics
+        // ("edges where at least one endpoint is in the workspace").
+        let Json(scoped) = get_graph(
+            State(state.clone()),
+            auth_in_tenant("tenant-1"),
+            axum::extract::Query(GraphQuery {
+                workspace: Some("ws-dg-x".to_string()),
+            }),
+        )
+        .await
+        .unwrap();
+        let mut scoped_targets: Vec<String> =
+            scoped.edges.iter().map(|e| e.target.clone()).collect();
+        scoped_targets.sort();
+        let mut expected_targets = vec![b.to_string(), c.to_string()];
+        expected_targets.sort();
+        assert_eq!(
+            scoped_targets, expected_targets,
+            "ws-dg-x graph has every edge touching a ws-dg-x repo"
+        );
+
+        // The spec's query-parameter form must deliver the SAME
+        // workspace-scoped graph as the dedicated
+        // /workspaces/{id}/dependency-graph route (task-282), so the two
+        // forms are asserted equivalent on identical fixtures.
+        let Json(dedicated) =
+            get_workspace_dependency_graph(State(state.clone()), Path("ws-dg-x".to_string()))
+                .await
+                .unwrap();
+        let mut dedicated_targets: Vec<String> =
+            dedicated.edges.iter().map(|e| e.target.clone()).collect();
+        dedicated_targets.sort();
+        assert_eq!(
+            scoped_targets, dedicated_targets,
+            "?workspace= form and dedicated route must agree"
+        );
+
+        // Scoped to the workspace holding only the far endpoint: the
+        // crossing edge a→c is included (at least one endpoint in scope).
+        let Json(scoped_y) = get_graph(
+            State(state.clone()),
+            auth_in_tenant("tenant-1"),
+            axum::extract::Query(GraphQuery {
+                workspace: Some("ws-dg-y".to_string()),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(scoped_y.edges.len(), 1);
+        assert_eq!(scoped_y.edges[0].target, c.to_string());
+
+        // Unknown workspace: 404, not an empty graph.
+        let err = get_graph(
+            State(state.clone()),
+            auth_in_tenant("tenant-1"),
+            axum::extract::Query(GraphQuery {
+                workspace: Some("no-such-ws".to_string()),
+            }),
+        )
+        .await
+        .expect_err("unknown workspace");
+        assert!(matches!(err, ApiError::NotFound(_)), "got: {err}");
+    }
+
+    /// Create a workspace in an ARBITRARY tenant (unlike
+    /// ensure_test_workspace, which is hardwired to tenant-1) — fixtures
+    /// for cross-tenant containment probes.
+    async fn create_workspace_in_tenant(state: &Arc<AppState>, ws_id: &str, tenant: &str) {
+        let ws = gyre_domain::Workspace::new(
+            gyre_common::Id::new(ws_id),
+            gyre_common::Id::new(tenant),
+            format!("Workspace {ws_id}"),
+            ws_id,
+            0,
+        );
+        state.workspaces.create(&ws).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn deps_graph_workspace_query_is_tenant_contained() {
+        // Task-282 review F1: the `?workspace={id}` query form must not
+        // disclose another tenant's graph. The middleware cannot contain
+        // it (the scope rides the query string, which is never consulted
+        // for resource attributes), so the handler must: a caller gets
+        // Forbidden for a workspace outside their tenant, and their own
+        // tenant's workspace still resolves.
+        let state = setup();
+        // Own-tenant (tenant-1) workspace with one edge.
+        let a = create_repo_in_workspace(&state, "dg-c-a", "ws-dg-own").await;
+        let b = create_repo_in_workspace(&state, "dg-c-b", "ws-dg-own").await;
+        // Foreign (tenant-2) workspace with its own repos and edge.
+        create_workspace_in_tenant(&state, "ws-dg-foreign", "tenant-2").await;
+        let x = create_repo_in_workspace(&state, "dg-c-x", "ws-dg-foreign").await;
+        let y = create_repo_in_workspace(&state, "dg-c-y", "ws-dg-foreign").await;
+
+        for (src, tgt) in [(a.clone(), b.clone()), (x.clone(), y.clone())] {
+            state
+                .dependencies
+                .save(&DependencyEdge::new(
+                    Id::new(uuid::Uuid::new_v4().to_string()),
+                    src,
+                    tgt,
+                    DependencyType::Code,
+                    "Cargo.toml",
+                    "crate",
+                    DetectionMethod::CargoToml,
+                    1000,
+                ))
+                .await
+                .unwrap();
+        }
+
+        // Cross-tenant query: Forbidden — pre-fix this returned the
+        // foreign tenant's full graph (repo names, edges, versions,
+        // breaking changes).
+        let err = get_graph(
+            State(state.clone()),
+            auth_in_tenant("tenant-1"),
+            axum::extract::Query(GraphQuery {
+                workspace: Some("ws-dg-foreign".to_string()),
+            }),
+        )
+        .await
+        .expect_err("cross-tenant workspace query must be refused");
+        assert!(matches!(err, ApiError::Forbidden(_)), "got: {err}");
+
+        // Symmetrically, a tenant-2 caller cannot read tenant-1's graph.
+        let err = get_graph(
+            State(state.clone()),
+            auth_in_tenant("tenant-2"),
+            axum::extract::Query(GraphQuery {
+                workspace: Some("ws-dg-own".to_string()),
+            }),
+        )
+        .await
+        .expect_err("cross-tenant workspace query must be refused");
+        assert!(matches!(err, ApiError::Forbidden(_)), "got: {err}");
+
+        // Own-tenant query still resolves (containment is not
+        // over-broad): tenant-1 sees the ws-dg-own edge only.
+        let Json(own) = get_graph(
+            State(state.clone()),
+            auth_in_tenant("tenant-1"),
+            axum::extract::Query(GraphQuery {
+                workspace: Some("ws-dg-own".to_string()),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(own.edges.len(), 1);
+        assert_eq!(own.edges[0].source, a.to_string());
+        assert_eq!(own.edges[0].target, b.to_string());
+
+        // And tenant-2 sees its own workspace's graph.
+        let Json(foreign_own) = get_graph(
+            State(state.clone()),
+            auth_in_tenant("tenant-2"),
+            axum::extract::Query(GraphQuery {
+                workspace: Some("ws-dg-foreign".to_string()),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(foreign_own.edges.len(), 1);
+        assert_eq!(foreign_own.edges[0].source, x.to_string());
+        assert_eq!(foreign_own.edges[0].target, y.to_string());
+    }
+
+    #[tokio::test]
+    async fn deps_graph_workspace_query_cross_tenant_killed_at_router() {
+        // Task-282 review F1 kill probe, at ROUTER level (the full
+        // production stack: require_auth → ABAC → handler). The global
+        // test token authenticates as the system Admin in tenant
+        // "default"; a workspace in another tenant must yield 403 on the
+        // `?workspace=` query form — on BOTH paths that share get_graph
+        // (/api/v1/deps/graph and /api/v1/dependencies/graph). Pre-fix
+        // this probe got 200 with the foreign tenant's graph.
+        use axum::body::Body;
+        use http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        let state = setup();
+        crate::abac_middleware::seed_builtin_policies(&state)
+            .await
+            .expect("seed builtin policies");
+
+        // Own-tenant workspace ("default" — the system principal's
+        // tenant) and a foreign one (tenant-2), each with an edge.
+        create_workspace_in_tenant(&state, "ws-sys-own", "default").await;
+        let a = create_repo_in_workspace(&state, "dg-r-a", "ws-sys-own").await;
+        let b = create_repo_in_workspace(&state, "dg-r-b", "ws-sys-own").await;
+        create_workspace_in_tenant(&state, "ws-r-foreign", "tenant-2").await;
+        let x = create_repo_in_workspace(&state, "dg-r-x", "ws-r-foreign").await;
+        let y = create_repo_in_workspace(&state, "dg-r-y", "ws-r-foreign").await;
+
+        for (src, tgt) in [(a.clone(), b.clone()), (x.clone(), y.clone())] {
+            state
+                .dependencies
+                .save(&DependencyEdge::new(
+                    Id::new(uuid::Uuid::new_v4().to_string()),
+                    src,
+                    tgt,
+                    DependencyType::Code,
+                    "Cargo.toml",
+                    "crate",
+                    DetectionMethod::CargoToml,
+                    1000,
+                ))
+                .await
+                .unwrap();
+        }
+
+        let app = crate::build_router(state.clone());
+
+        // Foreign workspace on the spec-literal path: 403.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/deps/graph?workspace=ws-r-foreign")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "cross-tenant ?workspace= query must be Forbidden at the router, got {}",
+            resp.status()
+        );
+
+        // Same leak surface on the legacy path (both share get_graph): 403.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/dependencies/graph?workspace=ws-r-foreign")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "cross-tenant ?workspace= query on /dependencies/graph must be Forbidden, got {}",
+            resp.status()
+        );
+
+        // Positive control through the same stack: the caller's own
+        // tenant's workspace still returns the scoped graph (200, one
+        // edge), proving the 403s above are tenant containment, not a
+        // blanket refusal.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/deps/graph?workspace=ws-sys-own")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "own-tenant ?workspace= query must pass, got {}",
+            resp.status()
+        );
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            body["edges"].as_array().map(|e| e.len()),
+            Some(1),
+            "own-tenant scoped graph has exactly the ws-sys-own edge"
+        );
+    }
+
+    #[tokio::test]
+    async fn deps_manual_endpoint_declares_edge_and_enforces_caller_scope() {
+        let state = setup();
+        let a = create_repo(&state, "man-a").await; // workspace proj-1, tenant-1
+        let b = create_repo(&state, "man-b").await;
+
+        let req = AddManualDependencyRequest {
+            source_repo_id: a.to_string(),
+            target_repo_id: b.to_string(),
+            dependency_type: DependencyType::Manual,
+            source_artifact: None,
+            target_artifact: None,
+        };
+
+        // Same-tenant caller: edge created, stored, manual detection.
+        let (code, body) = add_manual_dependency(
+            State(state.clone()),
+            auth_in_tenant("tenant-1"),
+            Json(req.clone()),
+        )
+        .await
+        .expect("same-tenant manual declaration");
+        assert_eq!(code, StatusCode::CREATED);
+        assert_eq!(body.detection_method, DetectionMethod::Manual);
+        assert_eq!(body.source_repo_id, a.to_string());
+        let stored = state.dependencies.list_by_repo(&a).await.unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].id.to_string(), body.id);
+
+        // Cross-tenant caller: Forbidden, and no second edge is created.
+        let err = add_manual_dependency(
+            State(state.clone()),
+            auth_in_tenant("tenant-evil"),
+            Json(req.clone()),
+        )
+        .await
+        .expect_err("cross-tenant caller must be refused");
+        assert!(matches!(err, ApiError::Forbidden(_)), "got: {err}");
+        assert_eq!(state.dependencies.list_by_repo(&a).await.unwrap().len(), 1);
+
+        // Repo-scoped token on a different repo: Forbidden (a token may
+        // only declare edges from within its own scope).
+        let mut repo_scoped = auth_in_tenant("tenant-1");
+        repo_scoped.repo_id = Some("some-other-repo".to_string());
+        let err = add_manual_dependency(State(state.clone()), repo_scoped, Json(req.clone()))
+            .await
+            .expect_err("repo-scoped token outside its repo must be refused");
+        assert!(matches!(err, ApiError::Forbidden(_)), "got: {err}");
+
+        // Unknown source repo: 404.
+        let err = add_manual_dependency(
+            State(state.clone()),
+            auth_in_tenant("tenant-1"),
+            Json(AddManualDependencyRequest {
+                source_repo_id: "no-such-repo".to_string(),
+                target_repo_id: b.to_string(),
+                dependency_type: DependencyType::Manual,
+                source_artifact: None,
+                target_artifact: None,
+            }),
+        )
+        .await
+        .expect_err("unknown source repo");
+        assert!(matches!(err, ApiError::NotFound(_)), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn deps_manual_endpoint_refuses_cross_tenant_target() {
+        // Task-282 review F2: containment must cover BOTH ends of the
+        // declared edge. A tenant-1 caller whose source repo is in their
+        // own tenant must not be able to declare an edge INTO a tenant-2
+        // repo — the edge would enter the target tenant's dependents,
+        // blast-radius, and cascade-test surface.
+        let state = setup();
+        let a = create_repo(&state, "man-ct-a").await; // workspace proj-1, tenant-1
+        create_workspace_in_tenant(&state, "ws-man-foreign", "tenant-2").await;
+        let foreign = create_repo_in_workspace(&state, "man-ct-f", "ws-man-foreign").await;
+
+        let req = AddManualDependencyRequest {
+            source_repo_id: a.to_string(),
+            target_repo_id: foreign.to_string(),
+            dependency_type: DependencyType::Manual,
+            source_artifact: None,
+            target_artifact: None,
+        };
+
+        // Same-tenant source, cross-tenant target: Forbidden, and no
+        // edge is created in either direction.
+        let err = add_manual_dependency(
+            State(state.clone()),
+            auth_in_tenant("tenant-1"),
+            Json(req.clone()),
+        )
+        .await
+        .expect_err("cross-tenant target must be refused");
+        assert!(matches!(err, ApiError::Forbidden(_)), "got: {err}");
+        assert!(
+            state
+                .dependencies
+                .list_by_repo(&a)
+                .await
+                .unwrap()
+                .is_empty(),
+            "refused declaration must leave no edge from the source"
+        );
+        assert!(
+            state
+                .dependencies
+                .list_dependents(&foreign)
+                .await
+                .unwrap()
+                .is_empty(),
+            "refused declaration must not enter the foreign repo's dependents"
+        );
+
+        // Positive control: a tenant-2 caller declaring the same edge
+        // from a source in their own tenant succeeds — proving the 403
+        // above is target-tenant containment, not a blanket refusal. We
+        // need a tenant-2 source repo.
+        let src2 = create_repo_in_workspace(&state, "man-ct-src2", "ws-man-foreign").await;
+        let (code, _body) = add_manual_dependency(
+            State(state.clone()),
+            auth_in_tenant("tenant-2"),
+            Json(AddManualDependencyRequest {
+                source_repo_id: src2.to_string(),
+                target_repo_id: foreign.to_string(),
+                dependency_type: DependencyType::Manual,
+                source_artifact: None,
+                target_artifact: None,
+            }),
+        )
+        .await
+        .expect("same-tenant declaration must succeed");
+        assert_eq!(code, StatusCode::CREATED);
+        let dependents = state.dependencies.list_dependents(&foreign).await.unwrap();
+        assert_eq!(dependents.len(), 1);
+        assert_eq!(dependents[0].source_repo_id, src2);
+    }
+
+    #[tokio::test]
+    async fn deps_delete_by_id_is_manual_only_and_tenant_contained() {
+        let state = setup();
+        let a = create_repo(&state, "flat-del-a").await;
+        let b = create_repo(&state, "flat-del-b").await;
+
+        // Auto-detected edge: refused, edge survives.
+        let auto_id = Id::new(uuid::Uuid::new_v4().to_string());
+        state
+            .dependencies
+            .save(&DependencyEdge::new(
+                auto_id.clone(),
+                a.clone(),
+                b.clone(),
+                DependencyType::Code,
+                "Cargo.toml",
+                "crate-b",
+                DetectionMethod::CargoToml,
+                1000,
+            ))
+            .await
+            .unwrap();
+
+        let err = delete_dependency_by_id(
+            State(state.clone()),
+            auth_in_tenant("tenant-1"),
+            Path(auto_id.to_string()),
+        )
+        .await
+        .expect_err("auto-detected edge must be refused");
+        assert!(matches!(err, ApiError::InvalidInput(_)), "got: {err}");
+        assert!(
+            state
+                .dependencies
+                .find_by_id(&auto_id)
+                .await
+                .unwrap()
+                .is_some(),
+            "refused delete must leave the auto-detected edge in place"
+        );
+
+        // Manual edge, cross-tenant caller: Forbidden, edge survives.
+        let manual_id = Id::new(uuid::Uuid::new_v4().to_string());
+        state
+            .dependencies
+            .save(&DependencyEdge::new(
+                manual_id.clone(),
+                a.clone(),
+                b.clone(),
+                DependencyType::Manual,
+                "",
+                "",
+                DetectionMethod::Manual,
+                1000,
+            ))
+            .await
+            .unwrap();
+
+        let err = delete_dependency_by_id(
+            State(state.clone()),
+            auth_in_tenant("tenant-evil"),
+            Path(manual_id.to_string()),
+        )
+        .await
+        .expect_err("cross-tenant caller must be refused");
+        assert!(matches!(err, ApiError::Forbidden(_)), "got: {err}");
+        assert!(state
+            .dependencies
+            .find_by_id(&manual_id)
+            .await
+            .unwrap()
+            .is_some());
+
+        // Manual edge, same-tenant caller: deleted.
+        delete_dependency_by_id(
+            State(state.clone()),
+            auth_in_tenant("tenant-1"),
+            Path(manual_id.to_string()),
+        )
+        .await
+        .expect("same-tenant manual delete");
+        assert!(state
+            .dependencies
+            .find_by_id(&manual_id)
+            .await
+            .unwrap()
+            .is_none());
+
+        // Unknown edge: 404.
+        let err = delete_dependency_by_id(
+            State(state.clone()),
+            auth_in_tenant("tenant-1"),
+            Path("no-such-edge".to_string()),
+        )
+        .await
+        .expect_err("unknown edge");
+        assert!(matches!(err, ApiError::NotFound(_)), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn deps_acknowledge_endpoint_is_tenant_contained_and_effective() {
+        let state = setup();
+        let a = create_repo(&state, "ack-flat-a").await;
+        let b = create_repo(&state, "ack-flat-b").await;
+
+        let edge = DependencyEdge::new(
+            Id::new(uuid::Uuid::new_v4().to_string()),
+            a.clone(),
+            b.clone(),
+            DependencyType::Code,
+            "Cargo.toml",
+            "crate-b",
+            DetectionMethod::CargoToml,
+            1000,
+        );
+        state.dependencies.save(&edge).await.unwrap();
+
+        // bc.source_repo_id is the repo that introduced the change (b).
+        let bc = gyre_domain::BreakingChange::new(
+            Id::new("bc-flat-1"),
+            edge.id.clone(),
+            b.clone(),
+            "fed987",
+            "flatten the API",
+            2000,
+        );
+        state.breaking_changes.create(&bc).await.unwrap();
+
+        // Cross-tenant caller: Forbidden, breaking change stays open.
+        let err = deps_acknowledge_breaking_change(
+            State(state.clone()),
+            auth_in_tenant("tenant-evil"),
+            Path("bc-flat-1".to_string()),
+        )
+        .await
+        .expect_err("cross-tenant caller must be refused");
+        assert!(matches!(err, ApiError::Forbidden(_)), "got: {err}");
+        let still = state
+            .breaking_changes
+            .find_by_id(&Id::new("bc-flat-1"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!still.acknowledged);
+
+        // Same-tenant caller: acknowledged (the shared core — the same
+        // one behind /api/v1/dependencies/breaking/{id}/acknowledge).
+        deps_acknowledge_breaking_change(
+            State(state.clone()),
+            auth_in_tenant("tenant-1"),
+            Path("bc-flat-1".to_string()),
+        )
+        .await
+        .expect("same-tenant acknowledge");
+        let acked = state
+            .breaking_changes
+            .find_by_id(&Id::new("bc-flat-1"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(acked.acknowledged);
+
+        // Idempotent on the already-acknowledged change.
+        deps_acknowledge_breaking_change(
+            State(state.clone()),
+            auth_in_tenant("tenant-1"),
+            Path("bc-flat-1".to_string()),
+        )
+        .await
+        .expect("idempotent re-acknowledge");
     }
 }
