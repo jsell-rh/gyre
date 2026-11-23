@@ -3,7 +3,7 @@ title: "Accountability patrol manifest-aware checks: orphans, stale entries, pen
 spec_ref: "Spec gap spec-c08e139362b99830187a32b4 / accountability-manifest-patrol / a458cd7cdf30"
 depends_on: []
 progress: ready-for-review
-commits: ["c203ba588e94f0d070e1175bf0662495d16786f8", "e23181ef18e4d20a00cc89a044775287ea1da1f6"]
+commits: ["c203ba588e94f0d070e1175bf0662495d16786f8", "e23181ef18e4d20a00cc89a044775287ea1da1f6", "501038ccfb344edbf26dacd0fb0726bfb0a78d0e"]
 ---
 
 ## Required behavior
@@ -124,16 +124,31 @@ watches no prefixes). Plus three unit tests for the pending-since transition
 semantics in `spec_pending_since.rs`.
 
 `cargo check -p gyre-server --tests` passes (exit 0, full test-target type
-check, 2026-11-23). This sandbox's build wrapper blocks gyre-server test
-compilation (4 GiB budget — error: "gyre-server code generation plus the
-model exceeds 4 GiB"), so the independent verifier must run:
+check, recorded 2026-11-23 on the implementation commit). This sandbox's
+build wrapper blocks gyre-server test compilation (4 GiB budget — error:
+"gyre-server code generation plus the model exceeds 4 GiB"), so the
+independent verifier must run:
 
 - `cargo test -p gyre-server --lib spec_lifecycle_patrol`
 - `cargo test -p gyre-server --lib spec_pending_since`
 - `cargo test -p gyre-server --lib spec_registry` (sync signature gained
   the KV-store param; all call sites updated and compile-checked)
 
-Formatting: `cargo fmt -p gyre-server -- --check` clean.
+### Verification-repair round (501038cc)
+
+The retained verification run failed only on two
+`clippy::doc_lazy_continuation` warnings at `spec_registry.rs:476-477`
+(everything else — rustfmt, architecture/ABAC/migration/message-kind and
+the other mechanical gates, web build — passed). Root cause: the task-339
+helpers were inserted between `sync_spec_ledger`'s doc block and its
+`#[allow(clippy::too_many_arguments)]`, so the merged doc string parsed the
+helpers' doc lines as a lazy continuation of the doc list, and
+`sync_spec_ledger` silently lost its doc and lint allowance. Commit 501038cc
+relocates the two helpers above the doc block — pure doc/attribute
+relocation, no behavior change. `cargo fmt -p gyre-server -- --check` clean
+on the fixed tree (exit 0). No cold clippy rebuild was run in this sandbox
+(no build cache; formatting-only feedback per the assignment contract); the
+exact-head clippy gate re-runs in independent verification.
 
 Coverage row 19 (and row 14's accountability clause) in
 `specs/coverage/system/spec-registry.md` updated with the source evidence
