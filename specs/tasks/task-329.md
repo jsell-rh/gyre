@@ -3,7 +3,7 @@ title: "§9 MetaSpecPolicy in full: warn_on_drift/block_on_drift/drift_tolerance
 spec_ref: "Spec gap spec-556a0b49e9f2803bf0e2ff3d / merge-gate-drift-policy / b288723d2f73"
 depends_on: [task-302]
 progress: ready-for-review
-commits: ["1d00568be42553a4f25433fb0e40f175d0b81dd6", "532681145499d676af92b79f405dec8c678591d8"]
+commits: ["1d00568be42553a4f25433fb0e40f175d0b81dd6", "532681145499d676af92b79f405dec8c678591d8", "e80bf10637e4e6d94e5a004774856db73d0a7fa0"]
 ---
 
 ## Required behavior
@@ -105,9 +105,8 @@ on the task-302 versioned basis (per-meta-spec `meta_specs_used` versions).
 
 Type-checked clean with `cargo check -p gyre-server --lib --tests` (exit 0;
 lib + all test code, after web build). Server test binaries exceed this
-sandbox's build budget (dep tree is check-only here; cgroup 6 GiB), so the
-following are recorded for the independent verifier (full list + commands in
-`/tmp/stage/review-evidence/task-329-probes.md`):
+sandbox's build budget, so the following are recorded for the independent
+verifier (repair evidence: `/tmp/stage/review-evidence/task-329-repair.md`):
 
 - AC1 (round-trip + 400): `workspace_meta_spec_policy_roundtrip_via_update_workspace`,
   `merge_policy_full_shape_and_tolerance_validation` (api/workspaces.rs).
@@ -130,3 +129,15 @@ following are recorded for the independent verifier (full list + commands in
 Coverage row 13 (§9 Merge Gate Behavior) in
 `specs/coverage/system/meta-spec-reconciliation.md` updated with the new
 source evidence and test names.
+
+### Verification repair (attempt 2)
+
+Verification attempt 7dbb272a failed only on clippy
+`doc_lazy_continuation` at merge_processor.rs:4701-4702 (doc-comment
+markdown: trailing paragraph after the `-` list was a lazy continuation);
+rustfmt, all architecture/ABAC/migration gates, and the web build passed.
+Fixed in e80bf106 by inserting a blank `///` separator — comment-only,
+behavior unchanged; `rustfmt --check` clean and a lazy-continuation scan
+over all six candidate-touched Rust files flags nothing else. The verifier
+must re-run `cargo clippy --all-targets -- -D warnings` plus the test
+list above.
