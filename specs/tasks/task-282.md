@@ -2,7 +2,7 @@
 title: "Serve the spec's literal /api/v1/deps/* API surface (all ten rows, ?workspace= graph scoping)"
 spec_ref: "Spec gap spec-cab97078efffe0fbfb7339be / deps-spec-route-paths / ed9f34316476"
 depends_on: [task-281]
-progress: ready-for-review
+progress: complete
 commits: ["f84489d8364de87c2429e62fa11a859815a5b561", "2ae4dbed4e0ceddcd7ce59298671cc1359d0c18d", "f5703622638027ab45be016c909da3e5cbe02c8a", "53b8b41983bdf52dc96e9f5d72dd8c8621a8eca8", "88309116208775e04bc778364f335ae5afcb6688"]
 ---
 
