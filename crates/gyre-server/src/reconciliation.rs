@@ -5636,10 +5636,15 @@ mod tests {
         assert_eq!(skipped, vec![("ws-br-dc-stale".to_string(), 2)]);
 
         let json = get_blast_radius(&state, "own-required", "").await;
-        assert_eq!(json["from_version"].as_u64(), Some(2));
+        assert_eq!(json["from_version"].as_u64(), Some(own.version as u64));
         assert_eq!(
             json["affected_workspaces"][0]["id"].as_str(),
             Some("ws-br-dc-own")
+        );
+        assert_eq!(
+            json["affected_workspaces"][0]["pinned_version"].as_u64(),
+            Some(own.version as u64),
+            "an affected workspace reports the superseded version it is bound at"
         );
         assert_eq!(
             json["affected_workspaces"][0]["reason"].as_str(),
