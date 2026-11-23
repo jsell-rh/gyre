@@ -2498,6 +2498,41 @@
         "Accountability Agent (personas/accountability.md)"
       ]
     },
+    "backlog/c5b26c825b5cd17bd8cd4b61": {
+      "file": "specs/development/agent-experience.md",
+      "heading": [
+        "Day-One Agent Experience Infrastructure",
+        "Observability for Agents"
+      ]
+    },
+    "backlog/17fa0c307f57c2691d7eb0af": {
+      "file": "specs/development/agent-experience.md",
+      "heading": [
+        "Day-One Agent Experience Infrastructure",
+        "Testing & Validation"
+      ]
+    },
+    "backlog/fff96bf529e90ad943501101": {
+      "file": "specs/development/agent-experience.md",
+      "heading": [
+        "Day-One Agent Experience Infrastructure",
+        "Spec Organization & Cache Hit Optimization"
+      ]
+    },
+    "backlog/fd6e133d1621c46338a657b0": {
+      "file": "specs/development/agent-experience.md",
+      "heading": [
+        "Day-One Agent Experience Infrastructure",
+        "Entropy Management / Garbage Collection"
+      ]
+    },
+    "backlog/07a6866179016f8676c1640d": {
+      "file": "specs/development/agent-experience.md",
+      "heading": [
+        "Day-One Agent Experience Infrastructure",
+        "Repository as System of Record"
+      ]
+    },
     "backlog/4390a1b94a03e318854cbbec": {
       "file": "specs/system/dependency-graph.md",
       "heading": [
@@ -3429,6 +3464,21 @@
     ],
     "Spec gap spec-c08e139362b99830187a32b4 / accountability-manifest-patrol / a458cd7cdf30": [
       "backlog/2236f6ecfe981117d57f7990"
+    ],
+    "Spec gap spec-8f4edcf188b12e2a350050e2 / agent-telemetry-query / fd38a2fca0f8": [
+      "backlog/c5b26c825b5cd17bd8cd4b61"
+    ],
+    "Spec gap spec-8f4edcf188b12e2a350050e2 / agent-sensory-access / fd38a2fca0f8": [
+      "backlog/17fa0c307f57c2691d7eb0af"
+    ],
+    "Spec gap spec-8f4edcf188b12e2a350050e2 / spec-index-cache-hits / fd38a2fca0f8": [
+      "backlog/fff96bf529e90ad943501101"
+    ],
+    "Spec gap spec-8f4edcf188b12e2a350050e2 / fixup-mr-pipeline / fd38a2fca0f8": [
+      "backlog/fd6e133d1621c46338a657b0"
+    ],
+    "Spec gap spec-8f4edcf188b12e2a350050e2 / doc-garden-quality-grades / fd38a2fca0f8": [
+      "backlog/07a6866179016f8676c1640d"
     ],
     "Spec gap spec-cab97078efffe0fbfb7339be / dep-edge-orphaned-on-target-archive-delete / ed9f34316476": [
       "backlog/4390a1b94a03e318854cbbec"
