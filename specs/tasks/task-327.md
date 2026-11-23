@@ -2,7 +2,7 @@
 title: "Blast radius computed from provenance: version-discriminated affected workspaces plus per-repo spec/commit counts from real attestation queries"
 spec_ref: "Spec gap spec-556a0b49e9f2803bf0e2ff3d / blast-radius-provenance / b288723d2f73"
 depends_on: [task-302]
-progress: ready-for-review
+progress: complete
 commits: ["508a821b9df142ba1dfde5ae54e4425918345c45", "8c86b5d90bd39edc02e54a803219062bdec36e4a", "7a50c0883a88557c15e6612901f55f3a3b4a917c", "0e3bd11882ac6d540f3076d505a06cfdb77b58bc", "ded8ebc8ec3ce1578fbf2160ff2b26f12eb472a5"]
 ---
 
