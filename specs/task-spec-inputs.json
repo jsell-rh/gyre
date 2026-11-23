@@ -2434,6 +2434,69 @@
         "LSP-Powered Call Graph Extraction",
         "Prerequisites"
       ]
+    },
+    "backlog/0c04e18483ce2f9bf15e2c1c": {
+      "file": "specs/system/spec-registry.md",
+      "heading": [
+        "Spec Registry",
+        "The Manifest: `specs/manifest.yaml`",
+        "Manifest Schema"
+      ]
+    },
+    "backlog/ff5387eb7f01a9b7b31c5126": {
+      "file": "specs/system/spec-registry.md",
+      "heading": [
+        "Spec Registry",
+        "Integration with Existing Specs",
+        "Spec Lifecycle (spec-lifecycle.md)"
+      ]
+    },
+    "backlog/dc58139efeac521a97fffb3d": {
+      "file": "specs/system/spec-registry.md",
+      "heading": [
+        "Spec Registry",
+        "The Manifest: `specs/manifest.yaml`",
+        "Manifest Rules"
+      ]
+    },
+    "backlog/16caff87fba84183d8dfcc06": {
+      "file": "specs/system/spec-registry.md",
+      "heading": [
+        "Spec Registry",
+        "The Forge Ledger",
+        "API Surface"
+      ]
+    },
+    "backlog/9df024e265cff9471afd92d4": {
+      "file": "specs/system/spec-registry.md",
+      "heading": [
+        "Spec Registry",
+        "Auto-Generated Index"
+      ]
+    },
+    "backlog/4f7e9a6ec00744d40ce24f65": {
+      "file": "specs/system/spec-registry.md",
+      "heading": [
+        "Spec Registry",
+        "Integration with Existing Specs",
+        "Agent Gates (agent-gates.md)"
+      ]
+    },
+    "backlog/a81aa30dd4413677c04273d8": {
+      "file": "specs/system/spec-registry.md",
+      "heading": [
+        "Spec Registry",
+        "Integration with Existing Specs",
+        "Spec-to-Code Binding (agent-gates.md)"
+      ]
+    },
+    "backlog/2236f6ecfe981117d57f7990": {
+      "file": "specs/system/spec-registry.md",
+      "heading": [
+        "Spec Registry",
+        "Integration with Existing Specs",
+        "Accountability Agent (personas/accountability.md)"
+      ]
     }
   },
   "bindings": {
@@ -3337,6 +3400,28 @@
     ],
     "Spec gap spec-b89674dbcb695eb34e8d5e15 / server-image-pass2-toolchains / d96599f10659": [
       "backlog/9476a77de45d2786274c547f"
+    ],
+    "Spec gap spec-c08e139362b99830187a32b4 / approver-owner-default / a458cd7cdf30": [
+      "backlog/0c04e18483ce2f9bf15e2c1c"
+    ],
+    "Spec gap spec-c08e139362b99830187a32b4 / manifest-supersedes-lifecycle-config / a458cd7cdf30": [
+      "backlog/ff5387eb7f01a9b7b31c5126"
+    ],
+    "Spec gap spec-c08e139362b99830187a32b4 / manifest-self-registration / a458cd7cdf30": [
+      "backlog/dc58139efeac521a97fffb3d"
+    ],
+    "Spec gap spec-c08e139362b99830187a32b4 / spec-api-read-completion / a458cd7cdf30": [
+      "backlog/16caff87fba84183d8dfcc06",
+      "backlog/9df024e265cff9471afd92d4"
+    ],
+    "Spec gap spec-c08e139362b99830187a32b4 / approval-ledger-unification / a458cd7cdf30": [
+      "backlog/4f7e9a6ec00744d40ce24f65"
+    ],
+    "Spec gap spec-c08e139362b99830187a32b4 / merge-gate-manifest-policy / a458cd7cdf30": [
+      "backlog/a81aa30dd4413677c04273d8"
+    ],
+    "Spec gap spec-c08e139362b99830187a32b4 / accountability-manifest-patrol / a458cd7cdf30": [
+      "backlog/2236f6ecfe981117d57f7990"
     ]
   }
 }
