@@ -3,7 +3,7 @@ title: "Accountability patrol manifest-aware checks: orphans, stale entries, pen
 spec_ref: "Spec gap spec-c08e139362b99830187a32b4 / accountability-manifest-patrol / a458cd7cdf30"
 depends_on: []
 progress: not-started
-commits: []
+commits: ["e23181ef18e4d20a00cc89a044775287ea1da1f6"]
 ---
 
 ## Required behavior
