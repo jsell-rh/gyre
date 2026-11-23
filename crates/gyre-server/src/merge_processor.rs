@@ -4698,6 +4698,7 @@ async fn selection_trust_hold(
 /// - Otherwise (within tolerance, or the default warn-only policy) the
 ///   `[WARN] meta-spec-drift` gate result is recorded — unless
 ///   `warn_on_drift: false` suppresses it — and the merge proceeds.
+///
 /// MRs without an attestation and workspaces without a bound set skip
 /// the check gracefully.
 async fn selection_meta_spec_drift_hold(
