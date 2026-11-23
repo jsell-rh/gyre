@@ -2,8 +2,8 @@
 title: "Remove orchestrator agent-spawning and carry out the spec amendment table"
 spec_ref: "Spec gap spec-41a92c20354c6a108e6074e3 / orchestrator-boundary-amendments / 4a3f940495a8"
 depends_on: [task-302]
-progress: ready-for-review
-commits: ["ad799518154d4f69e39fec04059f8766ed013e7f", "d750e2e564303902eac010d96c13da0b52d2b6cb", "e822f5417041018c32c286a22e87664b47c175d4", "1167df20681ee579878dbf704587a97befec7633", "071353fe866168d84e605b15c84108e083c2844f"]
+progress: not-started
+commits: []
 ---
 
 ## Required behavior
@@ -127,102 +127,3 @@ Canonical spec: `specs/system/agent-runtime.md`. Source: `678a8ac3e3bfeafeb66cdb
     ]
   }
 ]
-
-## Shipped
-
-Progress: `ready-for-review` — the amendment-table carry-out shipped in
-checkpoints `071353fe`/`1167df20` with repair rounds `e822f541`,
-`d750e2e5`, and this round `ad799518`, which repairs the five test
-failures the independent verifier found (`cargo test --all` at candidate
-`ff340f04`: 2707 passed / 5 failed — all fixture/vocabulary defects,
-none a change to the shipped production behavior).
-
-### Amendment-table carry-out (checkpoints 071353fe + 1167df20)
-
-1. **gyre_spawn_worker removed**: MCP catalog entry, tools/call dispatch,
-   scope validation, prompt references (api/prompts.rs, api/spawn.rs), and
-   tests. No MCP tool handler available to a repo-orchestrator JWT creates
-   agent records (gyre_spawn_repo_orchestrator remains workspace-tier
-   only — the scheduler-side Phase-3 mechanism); the mechanical Phase-4
-   scheduler is the only task→agent path for repo orchestrators.
-   Decomposition machinery untouched.
-2. **/api/v1/personas removed; registry carries personas**: routes/module
-   gone (404); MetaSpec carries the Persona operational fields
-   model/temperature/max_tokens/budget (migration 000072, SQLite+PG+mem
-   adapters); `sync_persona_from_meta_spec` materializes/adopts the
-   Persona read model spawn-time resolution consumes. Consumers migrated:
-   CLI bootstrap (find/create/approve via `/api/v1/meta-specs` with
-   `kind=meta:persona`, `registry_persona_names_derive_to_builtin_slugs`
-   unit test, 25 CLI bootstrap tests pass), web client (dead `/personas`
-   methods removed from api.js), server tests
-   (`create_tenant_seeds_builtin_personas` via the persona port;
-   `persona_approval_via_registry_denies_agent` replaces the abac live
-   test whose fixture was the removed approve endpoint;
-   `registry_meta_persona_is_spawn_bindable` covers registry POST →
-   Pending sync → spawn refusal → registry approval + operational-field
-   edit mirrored → spawn binds the registry-created persona).
-3. **archive ABAC action**: action vocabulary + resolver mappings for repo
-   archive/unarchive with action override `archive`; exemption-file
-   entries removed (frozen count 38→36). Test:
-   `archive_action_deny_blocks_repo_archive_through_middleware`.
-4. **Ralph-loop supersession**: `specs/system/ralph-loop.md` and its
-   coverage file deleted; authorization-provenance.md and the
-   meta-spec-reconciliation.md example re-pointed to agent-runtime.md §1;
-   remaining `ralph-loop.md` grep hits in specs/ and docs/ are only
-   agent-runtime.md's own canonical supersession statement and historical
-   task/coverage/milestone records.
-5. **hierarchy-enforcement.md §3/§4 amendments**: compute-target and
-   meta-spec CRUD route families added to the §4 route table with
-   auth-context notes; meta_spec_versions/meta_spec_bindings/
-   compute_targets added to the §3 tenant-filter configuration; KvJsonStore
-   note corrected (compute_targets is a tenant_id-bearing table since
-   migration 000033).
-6. **Dependency close-out (task-302 clauses)**: no workspace/tenant
-   meta-spec-set routes remain; no production writer to
-   meta_spec_sets/tenant_meta_spec_sets; merge-time drift enforcement
-   compares merge-attestation meta_specs_used against current required
-   meta-spec versions (test `retired_meta_spec_set_endpoints_return_404`).
-
-### Repair round `ad799518` (this round)
-
-The five verification failures were test-fixture and vocabulary defects:
-
-- `archive_action_deny_blocks_repo_archive_through_middleware` (401 vs
-  403): the test signed `member_jwt()` against bare `test_state()`
-  (jwt_config None) — the auth extractor rejected the token before any
-  policy evaluation. Now uses `setup_membership_state()` (JWT config +
-  user row + ws-1 membership). The 403 still proves the archive action
-  mapping: the Developer blanket write Allow (800) does not list
-  `archive`, so a mis-mapped action would yield 200.
-- `persona_approval_via_registry_denies_agent` (404 vs 403) and
-  `registry_meta_persona_is_spawn_bindable` (404 vs 201):
-  `require_registry_scope` resolves Tenant-scoped registry entries
-  against the REAL tenant store, which production provisions at startup
-  (hierarchy-enforcement.md §1); the empty mem-fixture tenant store made
-  the handlers 404 before the write gate / create path ran. Both
-  fixtures now call `crate::bootstrap_default_tenant` (the production
-  bootstrap helper).
-- `mcp_spawn_worker_removed_from_catalog_and_dispatch` (fixture panic):
-  the repo id `r-1` was passed as the orchestrator's workspace_id; now
-  registers with (`ws-1`, `Some("r-1")`), the argument shape of the
-  passing repo-orchestrator fixtures.
-- `permissions_resources_evaluate_real_policies_for_agent_jwt` ("persona
-  must appear in permissions://me"): removing the /api/v1/personas routes
-  also dropped `persona` from `all_resource_types()` (route-registry
-  derived), but the type is still in abac-policy-engine.md's
-  resource.type examples and still targeted by the immutable
-  `persona-human-approval` builtin Deny. `all_resource_types()` now
-  unions the route-registry vocabulary with the non-wildcard resource
-  types the code-owned builtin policy set addresses, so a specced type
-  policies still decide cannot silently leave the permissions:// probe
-  set when its route family is retired.
-
-### Test evidence and deferred verification
-
-gyre-server test binaries exceed this sandbox's 4 GiB build budget, so
-the five repaired tests and the full suite run in the independent
-verifier. Exact command list, root-cause analysis, and local probe
-results (cargo check --lib / --tests exit 0, clippy clean on changed
-lines, rustfmt clean, mechanical check scripts OK) are recorded in
-/tmp/stage/review-evidence/task-298-repair-round4.md. Prior-round
-evidence: task-298-repair-round2.md, task-298-repair-round3.md.
