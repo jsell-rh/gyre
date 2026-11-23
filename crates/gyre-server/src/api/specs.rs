@@ -311,11 +311,51 @@ pub async fn list_drifted_specs(
 }
 
 // ---------------------------------------------------------------------------
+// Spec-path spelling resolution (shared by the spec read paths)
+// ---------------------------------------------------------------------------
+
+/// Both spellings a task's `spec_path` may carry for this spec.
+///
+/// The ledger records manifest-relative paths ("system/x.md"), while the
+/// post-receive spec lifecycle hook records tasks with the git-rooted
+/// spelling ("specs/system/x.md") — and the task repository matches
+/// `spec_path` exactly. Both forms must therefore be queried to see every
+/// task linked to a spec; this is the same dual-spelling resolution the
+/// spec-lifecycle patrol applies (`spec_lifecycle_patrol::spec_has_live_task`).
+fn spec_path_spellings(ledger_path: &str) -> [String; 2] {
+    match ledger_path.strip_prefix("specs/") {
+        Some(stripped) if !stripped.is_empty() => [ledger_path.to_string(), stripped.to_string()],
+        _ => [ledger_path.to_string(), format!("specs/{ledger_path}")],
+    }
+}
+
+/// Tasks whose `spec_path` matches `ledger_path` under either spelling,
+/// deduplicated by id (the spellings are distinct, so a row can only be
+/// returned once, but the result stays stable if that ever changes).
+async fn tasks_linked_to_spec(
+    state: &AppState,
+    ledger_path: &str,
+) -> anyhow::Result<Vec<gyre_domain::Task>> {
+    let mut tasks = Vec::new();
+    for spelling in spec_path_spellings(ledger_path) {
+        tasks.extend(state.tasks.list_by_spec_path(&spelling).await?);
+    }
+    tasks.sort_by(|a, b| a.id.as_str().cmp(b.id.as_str()));
+    tasks.dedup_by(|a, b| a.id == b.id);
+    Ok(tasks)
+}
+
+// ---------------------------------------------------------------------------
 // GET /api/v1/specs/index — auto-generated markdown index
 // ---------------------------------------------------------------------------
 
 pub async fn spec_index(State(state): State<Arc<AppState>>) -> axum::response::Response<String> {
     let all_entries = state.spec_ledger.list_all().await.unwrap_or_default();
+
+    // Open tasks (not Done/Cancelled) per spec, matched under both
+    // spec_path spellings so hook-created tasks are counted
+    // (see `spec_path_spellings`).
+    let all_tasks = state.tasks.list().await.unwrap_or_default();
 
     // Group specs by directory.
     let mut by_dir: std::collections::BTreeMap<String, Vec<SpecLedgerEntry>> =
@@ -331,18 +371,32 @@ pub async fn spec_index(State(state): State<Arc<AppState>>) -> axum::response::R
     for (dir, mut entries) in by_dir {
         entries.sort_by(|a, b| a.path.cmp(&b.path));
         md.push_str(&format!("## {}\n\n", capitalize_dir(&dir)));
-        md.push_str("| Spec | Status | SHA |\n");
-        md.push_str("|------|--------|-----|\n");
+        md.push_str("| Spec | Status | SHA | Open Tasks |\n");
+        md.push_str("|------|--------|-----|------------|\n");
         for e in entries {
             // Char-boundary-safe truncation (gate output and spec SHAs may
             // round-trip non-ASCII; a fixed byte index would panic).
             let short_sha = truncate_bytes(&e.current_sha, 8);
+            let spellings = spec_path_spellings(&e.path);
+            let open_tasks = all_tasks
+                .iter()
+                .filter(|t| {
+                    t.spec_path
+                        .as_deref()
+                        .is_some_and(|sp| spellings.iter().any(|s| s == sp))
+                        && !matches!(
+                            t.status,
+                            gyre_domain::TaskStatus::Done | gyre_domain::TaskStatus::Cancelled
+                        )
+                })
+                .count();
             md.push_str(&format!(
-                "| [{title}](specs/{path}) | {status} | `{sha}` |\n",
+                "| [{title}](specs/{path}) | {status} | `{sha}` | {open_tasks} |\n",
                 title = e.title,
                 path = e.path,
                 status = e.approval_status,
                 sha = short_sha,
+                open_tasks = open_tasks,
             ));
         }
         md.push('\n');
@@ -389,10 +443,11 @@ pub async fn get_spec(
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("spec '{spec_path}' not in registry")))?;
 
-    // Populate linked_tasks from tasks with matching spec_path.
-    entry.linked_tasks = state
-        .tasks
-        .list_by_spec_path(&spec_path)
+    // Populate linked_tasks from tasks with matching spec_path, under
+    // either spelling (ledger-relative or hook-rooted; see
+    // `spec_path_spellings`). Best-effort: a task-store failure must not
+    // fail the whole spec read.
+    entry.linked_tasks = tasks_linked_to_spec(&state, &spec_path)
         .await
         .unwrap_or_default()
         .iter()
@@ -2230,8 +2285,9 @@ pub async fn get_spec_progress(
         )));
     }
 
-    // Query tasks linked to this spec path.
-    let linked_tasks = state.tasks.list_by_spec_path(&spec_path).await?;
+    // Query tasks linked to this spec path, under either spelling
+    // (see `spec_path_spellings`).
+    let linked_tasks = tasks_linked_to_spec(&state, &spec_path).await?;
 
     // Query all MRs and filter by spec_ref prefix match ("path@sha").
     let prefix = format!("{spec_path}@");
@@ -6459,6 +6515,156 @@ specs:
         let text = String::from_utf8(body.to_vec()).unwrap();
         assert!(text.contains("Spec Registry Index"));
         assert!(text.contains("Design Principles"));
+    }
+
+    /// Seed a task the way the post-receive spec lifecycle hook records
+    /// one (git_http.rs): spec_path uses the git-rooted spelling
+    /// "specs/{path}", not the ledger's manifest-relative spelling.
+    async fn seed_hook_spelling_task(state: &crate::AppState, id: &str, spec_path: &str) {
+        let mut task = gyre_domain::Task::new(gyre_common::Id::new(id), "Hook task", 1700000000);
+        task.spec_path = Some(spec_path.to_string());
+        state.tasks.create(&task).await.unwrap();
+    }
+
+    /// task-336: the single-spec read must list hook-created tasks in
+    /// linked_tasks. The hook stores spec_path as "specs/system/..."
+    /// while the ledger path is "system/..." and the repository matches
+    /// spec_path exactly — the pre-fix single-spelling query returned an
+    /// empty linked_tasks for exactly the tasks the hook creates.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn get_spec_lists_hook_created_tasks_in_linked_tasks() {
+        let (app, state) = app_with_spec();
+        seed_hook_spelling_task(&state, "hook-task-1", "specs/system/design-principles.md").await;
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/specs/system%2Fdesign-principles.md")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let linked: Vec<String> = json["linked_tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(
+            linked,
+            vec!["hook-task-1".to_string()],
+            "hook-created task (rooted spec_path spelling) must appear in linked_tasks"
+        );
+    }
+
+    /// task-336: GET /progress shares the dual-spelling defect — its task
+    /// listing must include hook-created tasks too.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn spec_progress_lists_hook_created_tasks() {
+        let (app, state) = app_with_spec();
+        seed_hook_spelling_task(&state, "hook-task-2", "specs/system/design-principles.md").await;
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/specs/system%2Fdesign-principles.md/progress")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let ids: Vec<&str> = json["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            ids,
+            vec!["hook-task-2"],
+            "hook-created task (rooted spec_path spelling) must appear in spec progress"
+        );
+    }
+
+    /// task-336: the generated index must carry an open-task-count column —
+    /// N for a spec with N open hook-created tasks, 0 for a taskless spec,
+    /// and terminal tasks (Done/Cancelled) must not count as open.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn spec_index_counts_open_tasks_per_spec() {
+        let state = test_state();
+        state
+            .spec_ledger
+            .save(&make_ledger_entry(
+                "system/with-tasks.md",
+                ApprovalStatus::Approved,
+            ))
+            .await
+            .unwrap();
+        state
+            .spec_ledger
+            .save(&make_ledger_entry(
+                "system/taskless.md",
+                ApprovalStatus::Pending,
+            ))
+            .await
+            .unwrap();
+
+        // Two open tasks under the hook's rooted spelling, one Done task
+        // under the ledger spelling — the count must be 2, not 3.
+        seed_hook_spelling_task(&state, "open-1", "specs/system/with-tasks.md").await;
+        seed_hook_spelling_task(&state, "open-2", "specs/system/with-tasks.md").await;
+        let mut done =
+            gyre_domain::Task::new(gyre_common::Id::new("done-1"), "Done task", 1700000000);
+        done.spec_path = Some("system/with-tasks.md".to_string());
+        let _ = done.transition_status(gyre_domain::TaskStatus::InProgress);
+        let _ = done.transition_status(gyre_domain::TaskStatus::Review);
+        let _ = done.transition_status(gyre_domain::TaskStatus::Done);
+        state.tasks.create(&done).await.unwrap();
+
+        let app = crate::api::api_router().with_state(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/specs/index")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let text = String::from_utf8(body.to_vec()).unwrap();
+
+        // Column header present.
+        assert!(
+            text.contains("| Spec | Status | SHA | Open Tasks |"),
+            "index must carry the open-task-count column header"
+        );
+        // Per-spec counts: 2 open for with-tasks.md (Done excluded), 0 for
+        // the taskless spec. Rows link to specs/{path}.
+        let with_tasks_row = text
+            .lines()
+            .find(|l| l.contains("system/with-tasks.md"))
+            .expect("row for system/with-tasks.md");
+        assert!(with_tasks_row.contains("| 2 |"));
+        let taskless_row = text
+            .lines()
+            .find(|l| l.contains("system/taskless.md"))
+            .expect("row for system/taskless.md");
+        assert!(
+            taskless_row.contains("| 0 |"),
+            "a spec with no open tasks must show 0, not an empty cell"
+        );
     }
 
     // ── TASK-006: SignedInput on spec approval ──────────────────────────
