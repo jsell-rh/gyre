@@ -2,8 +2,8 @@
 title: "Accountability patrol manifest-aware checks: orphans, stale entries, pending-beyond-one-cycle, modified-without-task keyed on the manifest"
 spec_ref: "Spec gap spec-c08e139362b99830187a32b4 / accountability-manifest-patrol / a458cd7cdf30"
 depends_on: []
-progress: not-started
-commits: []
+progress: complete
+commits: ["501038ccfb344edbf26dacd0fb0726bfb0a78d0e", "c203ba588e94f0d070e1175bf0662495d16786f8", "e23181ef18e4d20a00cc89a044775287ea1da1f6"]
 ---
 
 ## Required behavior
@@ -61,3 +61,95 @@ Canonical spec: `specs/system/spec-registry.md`. Source: `52d7b66b7b2f0a4dc1d63a
     ]
   }
 ]
+
+## Shipped
+
+All four manifest-aware accountability patrol checks are implemented in
+`crates/gyre-server/src/spec_lifecycle_patrol.rs`, keyed on each repo's
+`specs/manifest.yaml` at HEAD (resolved per patrol run by
+`load_repo_manifest_contexts`: repo row → workspace scope, `git rev-parse
+HEAD`, manifest read from that HEAD). `spec_patrol.rs` and the push-time
+coverage rejection were not touched.
+
+### Behavior
+
+1. **Orphan spec files** — `check_orphan_spec_files` reuses the push-time
+   coverage check's file-scan class (`spec_registry::find_unregistered_specs`,
+   now `pub(crate)`; `git ls-tree` at HEAD), so the patrol flags exactly the
+   files a push would, with the same exclusions (`index.md`, `prior-art/`,
+   `milestones/`, non-`.md` — hence `manifest.yaml` itself is never flagged
+   however registered).
+2. **Stale manifest entries** — `check_stale_manifest_entries` resolves each
+   manifest entry's blob SHA at HEAD (`get_blob_sha`) and flags entries with
+   no file, escalating what was previously only a sync-time warning log.
+3. **Pending beyond one cycle** — `check_pending_beyond_cycle` flags
+   `Pending` ledger entries whose effective `requires_approval` is true and
+   whose recorded pending-since exceeds the patrol's one-cycle bound
+   (`drift_review_max_age_secs` / `DEFAULT_DRIFT_REVIEW_MAX_AGE_SECS`,
+   overridable per request). The durable signal is
+   `crates/gyre-server/src/spec_pending_since.rs`: a record in the
+   port-backed KV store (`kv_store` table, persisted by both the SQLite and
+   PostgreSQL adapters — the "equivalent durable state" the task allows,
+   avoiding a schema migration), keyed by ledger path. It is written by
+   `sync_spec_ledger` at every (re-)entry into `Pending` (new registration,
+   content invalidation, re-pending after deprecation, extends-drift
+   invalidation) and maintained by `approve_spec`/`revoke_spec`/`reject_spec`
+   via `on_transition` (entering pending restarts the clock, leaving it
+   clears it, an unchanged status keeps it). `updated_at` is never used. A
+   pending entry with no recorded signal (a row older than the signal) is
+   skipped and logged — never flagged unconditionally.
+4. **Modified without task, manifest-keyed** — `check_modified_specs_without_tasks`
+   now keys task-eligibility on the manifest's `effective_auto_create_tasks`
+   at the entry's repo HEAD (mirroring `should_create_lifecycle_task`),
+   querying both `spec_path` spellings as before; manifest-less repos keep
+   the config watched-prefix fallback the lifecycle hook itself applies, so
+   patrol and hook can never disagree.
+
+All findings escalate through the existing `escalate_findings` path
+(`MessageKind::Escalation` on the workspace event stream) — only with a
+resolvable workspace, never a fabricated scope.
+
+### Test evidence
+
+Three new tests in `spec_lifecycle_patrol.rs` map one-to-one onto the
+acceptance criteria (real git fixtures, real ledger sync through
+`sync_spec_ledger`, escalation rows asserted on
+`messages.list_by_workspace(..., kind=escalation)`):
+`flags_orphan_files_and_stale_manifest_entries_with_escalations`,
+`flags_pending_beyond_cycle_only_when_the_recorded_age_exceeds_it`
+(asserts both the over-bound finding and the fresh-under-bound non-finding,
+plus the no-signal skip), and
+`modified_without_task_is_keyed_on_the_manifest_not_the_config` (repo config
+watches no prefixes). Plus three unit tests for the pending-since transition
+semantics in `spec_pending_since.rs`.
+
+`cargo check -p gyre-server --tests` passes (exit 0, full test-target type
+check, recorded 2026-11-23 on the implementation commit). This sandbox's
+build wrapper blocks gyre-server test compilation (4 GiB budget — error:
+"gyre-server code generation plus the model exceeds 4 GiB"), so the
+independent verifier must run:
+
+- `cargo test -p gyre-server --lib spec_lifecycle_patrol`
+- `cargo test -p gyre-server --lib spec_pending_since`
+- `cargo test -p gyre-server --lib spec_registry` (sync signature gained
+  the KV-store param; all call sites updated and compile-checked)
+
+### Verification-repair round (501038cc)
+
+The retained verification run failed only on two
+`clippy::doc_lazy_continuation` warnings at `spec_registry.rs:476-477`
+(everything else — rustfmt, architecture/ABAC/migration/message-kind and
+the other mechanical gates, web build — passed). Root cause: the task-339
+helpers were inserted between `sync_spec_ledger`'s doc block and its
+`#[allow(clippy::too_many_arguments)]`, so the merged doc string parsed the
+helpers' doc lines as a lazy continuation of the doc list, and
+`sync_spec_ledger` silently lost its doc and lint allowance. Commit 501038cc
+relocates the two helpers above the doc block — pure doc/attribute
+relocation, no behavior change. `cargo fmt -p gyre-server -- --check` clean
+on the fixed tree (exit 0). No cold clippy rebuild was run in this sandbox
+(no build cache; formatting-only feedback per the assignment contract); the
+exact-head clippy gate re-runs in independent verification.
+
+Coverage row 19 (and row 14's accountability clause) in
+`specs/coverage/system/spec-registry.md` updated with the source evidence
+above; no unrelated rows touched.
