@@ -2,8 +2,8 @@
 title: "Adopt the specced Svelte 5 + shadcn-svelte web UI stack, replacing the bespoke component library"
 spec_ref: "Spec gap spec-f907eda3bd014fe546b838e2 / shadcn-svelte-ui-stack / 4156114b8040"
 depends_on: []
-progress: complete
-commits: ["40fcedae4ccabed95f2575598d300eac859764e8", "f863a10dd81d4fb9e8e6ede73714c0f6f1e8b127", "9a56ebdfc15a3a9023d1356d21953d977f51c293", "ae5d3eb45e44bf40a01680b674fd2b821d6c9496", "4d5e209b474cc94fd5b4f26ba3144b742df9e55d", "493d1e10ad07c1705d4f015601848cce06f1159b"]
+progress: ready-for-review
+commits: ["40fcedae4ccabed95f2575598d300eac859764e8", "f863a10dd81d4fb9e8e6ede73714c0f6f1e8b127", "9a56ebdfc15a3a9023d1356d21953d977f51c293", "ae5d3eb45e44bf40a01680b674fd2b821d6c9496", "4d5e209b474cc94fd5b4f26ba3144b742df9e55d", "493d1e10ad07c1705d4f015601848cce06f1159b", "b9bcaf5ee201e7969dc622867f757654a33b4946"]
 ---
 
 ## Required behavior
@@ -77,10 +77,11 @@ Canonical spec: `specs/development/architecture.md`. Source: `678a8ac3e3bfeafeb6
 ## Shipped
 
 The shadcn-svelte half of the architecture.md §Tech Stack requirement is
-implemented (commit 4d5e209b) and preserved through this round's merge
-repair (3d2ce221 against main 9cdd4b588, task-302). The Rust-half
-canonical conflict remains an open controller escalation — see the end of
-this section.
+implemented (commit 4d5e209b, preserved through the merge repairs up to
+HEAD). The Rust-half canonical conflict remains an open controller
+escalation — see the end of this section. This round repaired the CI
+failure on the task's PR (see below); no web source changed, so the
+prior rounds' web verification stands.
 
 ### Retained implementation (commit 4d5e209b, prior approved rounds)
 
@@ -97,58 +98,75 @@ this section.
   components behind the existing consumed contracts (Button and
   Modal/Dialog on bits-ui primitives; Badge, Card, Table, Tabs,
   AccordionItem, Toast, Skeleton as cva-variant + Tailwind-utility
-  components), so `web/src/components/*` and all views keep working. The
-  bespoke `.btn`/`.card`/`.badge` class layer is retired from component
-  styling; the Red Hat brand identity is preserved as the shadcn theme
-  token values. Verification probes: `web/src/__tests__/ShadcnUiStack.test.js`
-  asserts the cva/bits-ui rendering and the wired Tailwind pipeline.
+  components), so `web/src/components/*` and all views keep working.
+  The bespoke `.btn`/`.card`/`.badge` class layer is retired from
+  component styling; the Red Hat brand identity is preserved as the
+  shadcn theme token values. Verification probe:
+  `web/src/__tests__/ShadcnUiStack.test.js` asserts the cva/bits-ui
+  rendering and the wired Tailwind pipeline; the corroborating
+  remove-the-Tailwind-entry-import probe (unstyled rebuild without
+  `app.css`) was run in a prior round with outputs retained under
+  /tmp/stage/review-evidence.
+- Prior-round web test evidence on the merged tree: `npx vitest run` —
+  128 files, 2603 tests passed, 0 failed. This round, `cargo check -p
+  gyre-server` ran build.rs's `npm run build` on the current tree
+  successfully ("Web assets built successfully"), and a plain `vite
+  build` reproduces the committed web/dist asset hashes exactly.
 
-### This round: merge repair against current main (9cdd4b588, task-302)
+### This round: CI repair (commit b9bcaf5e)
 
-Merge commit 3d2ce221 resolves the DIRTY merge state. Source resolution:
-main's task-302 web changes (DetailPanel spec-bindings panel, api.js
-meta-spec-bindings endpoints, locales, DetailPanel tests) merged on top
-of the shadcn component tree — main's DetailPanel consumes the
-shadcn-backed `./Button`/`./Tabs`/`./Badge`/`./Skeleton` primitives, so
-the merged tree is coherent. crates/ resolved identical to main (the
-branch carries no Rust delta; verified `git diff MERGE_HEAD -- crates/`
-is empty), so the merged Rust tree is main's already-verified code. The
-web/dist conflicts were resolved to main's dist verbatim per the
-executor's assignment-base restore; final integration rebuilds and
-publishes dist remotely from the merged source (a fresh
-`vite build` of the merged tree was verified in this round — see probe
-evidence — but not committed, per assignment rules).
+PR #921 run 45132923610 (head 7cb19ff) failed
+`gyre-server::scim_groups::mappings_and_groups_survive_restart` at
+scim_groups.rs:844 — `assert_eq!(resp.status(), StatusCode::CREATED)`
+got 500 vs 201 on `POST /scim/v2/Groups`.
 
-### Test evidence (merged tree, this round)
+Root cause, verified empirically in-sandbox (evidence under
+/tmp/stage/review-evidence): `SqliteCustomizer` batched three PRAGMAs
+into ONE diesel `sql_query` string. Diesel's SQLite backend prepares
+statements via `sqlite3_prepare_v2`, which compiles only the FIRST
+statement of a multi-statement string — `PRAGMA foreign_keys=ON` and
+`PRAGMA busy_timeout=5000` were silently dropped, so busy_timeout stayed
+at SQLite's default 0. Concurrent writers on the same file then raced
+for the write lock with no wait; the loser got an immediate
+`database is locked` (SQLITE_BUSY) surfaced as `ApiError::Internal` →
+500. The failing test is the only scim_groups test whose group-create
+POST is immediately preceded by an authenticated workspace-scoped
+request (`PUT /api/v1/workspaces/{id}/scim-mappings` with the owner's
+token), which spawns a fire-and-forget `upsert_last_seen` write in
+`last_seen_middleware` — the two INSERTs contended and the group insert
+lost the race under CI scheduling (hence the flakiness: identical
+creates passed in the sibling tests of the same run).
 
-- `cd web && npm ci && npx vitest run`: 128 test files, 2603 tests
-  passed, 41 skipped, 0 failed — includes the shadcn stack probes
-  (ShadcnUiStack, Modal, Toast, AccordionItem/Scoping) and main's merged
-  task-302 DetailPanel suite.
-- Corroborating probe (verification intent), run against the merged
-  tree with outputs under /tmp/stage/review-evidence:
-  - `npx vite build --outDir .../dist-with-tailwind`: emitted CSS
-    (767,370 bytes) begins with the `tailwindcss v4.3.5` banner and
-    carries the Tailwind utilities layer — the pipeline genuinely styles
-    the build.
-  - With `import './app.css'` removed from `main.js`, the rebuild's CSS
-    (738,862 bytes) has NO `tailwindcss v4` marker and no Tailwind
-    utilities — unstyled output, proving the UI depends on the Tailwind
-    pipeline rather than dead config. `main.js` restored afterwards;
-    working tree dist untouched (builds went to temp outDirs).
+Fix: execute each PRAGMA as its own `sql_query` in the customizer
+(`foreign_keys=ON` is a no-op today — the migrations declare no FK
+constraints — and `journal_mode=WAL` was already the first statement,
+so only busy_timeout behavior changes).
 
-### Deferred to verifier / integration
+Regression guards added in `gyre-adapters` (both verified to FAIL on the
+batched form and PASS after the fix):
+- `pooled_connections_have_wal_foreign_keys_and_busy_timeout` — reads
+  the three PRAGMAs back off pooled connections (busy_timeout was 0
+  before the fix).
+- `concurrent_writers_wait_on_busy_timeout_instead_of_failing` — holds
+  the SQLite write lock on one connection and INSERTs from a second;
+  fails with `database is locked` before, succeeds after.
 
-- Playwright e2e (`cd web && npm run test:e2e`): boots
-  `cargo run -p gyre-server`, a large Rust build that must run in the
-  independent verifier within the 4 GiB budget; screenshot baselines
-  regenerate deliberately at that stage if the restyle changes pixels
-  (functional assertions are the behavioral anchor).
-- `cargo test --all` and workspace gates (arch lint, clippy, fmt) — the
-  merged Rust tree is byte-identical to main's verified tree, but the
-  full suites are verifier-owned.
-- Committed web/dist rebuild/publication — executor restores dist from
-  the assignment base and final integration rebuilds remotely.
+In-sandbox probes this round: `cargo test -p gyre-adapters` — 610
+passed, 0 failed; `cargo check -p gyre-server` clean;
+`scripts/check-task-commit-attribution.sh` OK after restoring the
+commit list above.
+
+### Deferred to the independent verifier
+
+- `cargo nextest run -p gyre-server --test scim_groups` (the repaired
+  CI test) and the full server suite — gyre-server test compilation
+  exceeds the in-model 4 GiB budget and must run in the verifier.
+- Playwright e2e with deliberately regenerated screenshot baselines
+  (unchanged from prior rounds; no web source changed this round).
+- Workspace gates (arch lint, clippy, fmt on all targets), GitHub CI on
+  the exact head, and web/dist rebuild/publication (executor-owned; a
+  fresh `vite build` of the current tree reproduces the committed dist
+  hashes, so the committed dist already serves the migrated UI).
 
 ### Open controller escalation (Rust half — NOT closed by this task)
 
