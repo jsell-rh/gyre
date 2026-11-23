@@ -578,6 +578,37 @@ impl ResourceResolver {
                 RouteResourceMapping::api("/api/v1/network/derp-map", "network_peer", None),
                 // ── Dependencies graph ─────────────────────────────────────
                 RouteResourceMapping::api("/api/v1/dependencies/graph", "dependency", None),
+                // ── Spec-literal /api/v1/deps/* routes (dependency-graph.md
+                // §API, task-282). The per-repo routes use the `:repo_id`
+                // param name so `resource.repo_id` is extracted and the
+                // repo → workspace → tenant scope chain resolves for the
+                // builtin tenant-isolation policy (same attribute shape
+                // as the /repos/:id/* siblings). The flat write routes
+                // (manual add, delete by id, breaking acknowledge) carry
+                // no repo segment — their handlers enforce per-handler
+                // tenant containment (api/dependencies.rs,
+                // require_repo_tenant_containment).
+                RouteResourceMapping::api("/api/v1/deps/graph", "dependency", None),
+                RouteResourceMapping::api(
+                    "/api/v1/deps/repo/:repo_id/dependents",
+                    "dependency",
+                    None,
+                ),
+                RouteResourceMapping::api(
+                    "/api/v1/deps/repo/:repo_id/dependencies",
+                    "dependency",
+                    None,
+                ),
+                RouteResourceMapping::api("/api/v1/deps/repo/:repo_id/impact", "repo", None),
+                RouteResourceMapping::api("/api/v1/deps/stale", "dependency", None),
+                RouteResourceMapping::api("/api/v1/deps/breaking", "dependency", None),
+                RouteResourceMapping::api("/api/v1/deps/manual", "dependency", Some("write")),
+                RouteResourceMapping::api("/api/v1/deps/:id", "dependency", None),
+                RouteResourceMapping::api(
+                    "/api/v1/deps/breaking/:id/acknowledge",
+                    "dependency",
+                    Some("write"),
+                ),
                 // ── Federation ─────────────────────────────────────────────
                 RouteResourceMapping::api("/api/v1/federation/trusted-issuers", "federation", None),
                 RouteResourceMapping::api(
