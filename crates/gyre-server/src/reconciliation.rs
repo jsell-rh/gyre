@@ -1956,41 +1956,101 @@ fn record_drift_metrics(state: &AppState, workspace_id: &str, drifted_repos: &[S
 /// `[WARN] meta-spec-drift: ...`). The gate result is informational — it
 /// carries `GateStatus::Passed` so it never blocks a merge by itself;
 /// blocking is decided by the workspace merge policy
-/// (`require_current_meta_spec_set`).
+/// (`MetaSpecPolicy.block_on_drift` + `drift_tolerance`).
 pub const META_SPEC_DRIFT_GATE_ID: &str = "meta-spec-drift";
 
-/// A detected meta-spec drift for one MR (§9).
+/// A detected meta-spec drift for one MR (§9): the per-meta-spec version
+/// transitions between the MR's provenance-recorded governing versions
+/// and the workspace's current required registry versions.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetaSpecDrift {
-    /// The meta-spec usage recorded for the MR's author agent (the same
-    /// `meta_specs_used` array the merge attestation persists at merge
-    /// time), as `{meta_spec_id, kind, content_hash, version}` snapshots —
-    /// the set under which the code was produced.
-    pub produced: Vec<gyre_domain::MetaSpecSnapshot>,
-    /// Currently-required meta-spec snapshots NOT matched by the recorded
-    /// usage (missing entirely, or recorded at an older version/content
-    /// hash than currently required).
-    pub current: Vec<gyre_domain::MetaSpecSnapshot>,
+    /// One transition per drifted currently-required meta-spec.
+    pub transitions: Vec<MetaSpecDriftTransition>,
+}
+
+/// One drifted meta-spec's version transition (§9): the version the MR's
+/// authoring agent ran under (from the `meta_specs_used` prompt-set
+/// record) versus the current registry version.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MetaSpecDriftTransition {
+    /// Display kind of the meta-spec ("persona", "principle",
+    /// "standard", "process" — the registry kind's `meta:` namespace
+    /// prefix stripped for the §9 warning naming).
+    pub kind: String,
+    /// Registry name of the meta-spec (e.g. "backend-developer").
+    pub name: String,
+    /// Version the authoring agent's provenance recorded for this
+    /// meta-spec. `None` when the recorded usage cannot prove a version
+    /// for it — no entry at all (the agent ran before the meta-spec was
+    /// required; legacy hash-only provenance), or an entry claiming the
+    /// CURRENT version whose content hash disagrees with the registry
+    /// (currency disproved by content). Unverifiable drift never
+    /// fail-opens: under `block_on_drift` it blocks at any tolerance.
+    pub recorded_version: Option<u32>,
+    /// Current registry version of the meta-spec.
+    pub current_version: u32,
+}
+
+impl MetaSpecDriftTransition {
+    /// How many versions behind the recorded usage is:
+    /// `current_version − recorded_version`. `None` when the recorded
+    /// version is unverifiable (never fail-open — see
+    /// [`Self::recorded_version`]).
+    pub fn versions_behind(&self) -> Option<u32> {
+        self.recorded_version
+            .map(|v| self.current_version.saturating_sub(v))
+    }
+
+    /// §9 label: `{kind} {name} v{old} -> v{new}` (e.g.
+    /// `persona backend-developer v3 -> v4`); `v?` marks an unverifiable
+    /// recorded version.
+    pub fn label(&self) -> String {
+        let recorded = self
+            .recorded_version
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "?".to_string());
+        format!(
+            "{} {} v{} -> v{}",
+            self.kind, self.name, recorded, self.current_version
+        )
+    }
+}
+
+impl MetaSpecDrift {
+    /// §9 block decision under a `drift_tolerance`: the drift blocks when
+    /// some meta-spec is MORE than `tolerance` versions behind, or when
+    /// its currency cannot be proven (unverifiable — never fail-open).
+    /// `tolerance: 0` blocks on any provable drift.
+    pub fn exceeds_tolerance(&self, tolerance: u32) -> bool {
+        self.transitions.iter().any(|t| match t.versions_behind() {
+            None => true,
+            Some(behind) => behind > tolerance,
+        })
+    }
+
+    /// The §9 transition labels (see [`MetaSpecDriftTransition::label`]).
+    pub fn labels(&self) -> Vec<String> {
+        self.transitions.iter().map(|t| t.label()).collect()
+    }
+}
+
+/// Display kind for §9 drift naming: the registry kind's `meta:`
+/// namespace prefix stripped ("meta:persona" → "persona").
+fn display_kind(kind: &str) -> String {
+    kind.strip_prefix("meta:").unwrap_or(kind).to_string()
 }
 
 /// Format the drift warning for the §9 gate result:
-/// `[WARN] meta-spec-drift: code produced under meta-specs {produced},
-/// current requires {current}. Reconciliation may be needed.`
+/// `[WARN] meta-spec-drift: {kind} {name} v{old} -> v{new}, ....
+/// Reconciliation may be needed.`
 ///
-/// Snapshot labels render as `{kind}:{meta_spec_id}@v{version}`.
+/// Each transition names the per-meta-spec version change (§9's example
+/// output: `[WARN] meta-spec-drift: persona backend-developer v3 -> v4`),
+/// with `v?` marking an unverifiable recorded version.
 pub fn format_meta_spec_drift_warning(drift: &MetaSpecDrift) -> String {
-    fn labels(snaps: &[gyre_domain::MetaSpecSnapshot]) -> String {
-        snaps
-            .iter()
-            .map(|s| s.label())
-            .collect::<Vec<_>>()
-            .join(", ")
-    }
     format!(
-        "[WARN] meta-spec-drift: code produced under meta-specs [{}], current requires [{}]. \
-         Reconciliation may be needed.",
-        labels(&drift.produced),
-        labels(&drift.current)
+        "[WARN] meta-spec-drift: {}. Reconciliation may be needed.",
+        drift.labels().join(", ")
     )
 }
 
@@ -2000,39 +2060,34 @@ pub fn format_meta_spec_drift_warning(drift: &MetaSpecDrift) -> String {
 /// surface a recorded drift warning gate result without re-deriving it from
 /// provenance. Returns `None` for any other output.
 pub fn parse_meta_spec_drift_warning(output: &str) -> Option<MetaSpecDrift> {
-    let rest = output.strip_prefix("[WARN] meta-spec-drift: code produced under meta-specs [")?;
-    let (produced, rest) = rest.split_once("], current requires [")?;
-    let current = rest.strip_suffix("]. Reconciliation may be needed.")?;
-
-    fn parse_labels(list: &str) -> Vec<gyre_domain::MetaSpecSnapshot> {
-        list.split(", ")
-            .filter(|l| !l.is_empty())
-            .filter_map(|label| {
-                // {kind}:{meta_spec_id}@v{version}. Kinds carry a colon
-                // themselves ("meta:persona") while meta-spec ids do not,
-                // so the kind/id split runs from the RIGHT — a left split
-                // would eat the kind's namespace prefix into the id and
-                // break the round-trip.
-                let (kind_id, version) = label.rsplit_once("@v")?;
-                let version: u32 = version.parse().ok()?;
-                let (kind, id) = kind_id.rsplit_once(':')?;
-                Some(gyre_domain::MetaSpecSnapshot {
-                    meta_spec_id: id.to_string(),
-                    kind: kind.to_string(),
-                    content_hash: String::new(),
-                    version,
-                })
-            })
-            .collect()
-    }
-
-    if produced.is_empty() && current.is_empty() {
+    let rest = output.strip_prefix("[WARN] meta-spec-drift: ")?;
+    let list = rest.strip_suffix(". Reconciliation may be needed.")?;
+    if list.is_empty() {
         return None;
     }
-    Some(MetaSpecDrift {
-        produced: parse_labels(produced),
-        current: parse_labels(current),
-    })
+
+    let mut transitions = Vec::new();
+    // Each label is `{kind} {name} v{old} -> v{new}` where `old` is a
+    // version number or `?` (unverifiable). Names may contain spaces, so
+    // the kind/name and old-version splits run from the RIGHT — a left
+    // split would eat name words into the version fields.
+    for part in list.split(", ") {
+        let (left, right) = part.split_once(" -> ")?;
+        let current_version: u32 = right.strip_prefix('v')?.parse().ok()?;
+        let (head, old) = left.rsplit_once(" v")?;
+        let recorded_version = match old {
+            "?" => None,
+            digits => Some(digits.parse::<u32>().ok()?),
+        };
+        let (kind, name) = head.split_once(' ')?;
+        transitions.push(MetaSpecDriftTransition {
+            kind: kind.to_string(),
+            name: name.to_string(),
+            recorded_version,
+            current_version,
+        });
+    }
+    Some(MetaSpecDrift { transitions })
 }
 
 /// Resolve the meta-spec usage recorded for an MR's author agent: the
@@ -2063,28 +2118,66 @@ async fn mr_recorded_meta_specs_used(
 
 /// §9 merge-gate drift evaluation for one MR (registry model).
 ///
-/// Compares the merge-attestation `meta_specs_used` array — resolved from
-/// the author agent's spawn-time prompt-set record — against the
-/// workspace's CURRENT required meta-spec versions
-/// (`resolve_effective_meta_spec_set`). A currently-required meta-spec
-/// that the recorded usage is missing, or that it recorded at an older
-/// version or different content hash, is drift: the attestation was
-/// recorded against an older required version. Returns `None` (no drift)
-/// when:
+/// Compares the MR's provenance-recorded governing versions — the
+/// `meta_specs_used` array resolved from the author agent's spawn-time
+/// prompt-set record, the same array the merge attestation persists at
+/// merge time — against the workspace's CURRENT required meta-spec
+/// versions, PER META-SPEC: `versions_behind = current_version −
+/// recorded_version`. A currently-required meta-spec that the recorded
+/// usage is missing, recorded at an older version, or recorded at the
+/// current version with a different content hash is drift; each drifted
+/// spec yields one [`MetaSpecDriftTransition`] carrying the version
+/// transition the §9 warning names. Returns `None` (no drift) when:
 /// - the workspace has no required meta-specs (nothing to conform to),
 /// - the MR has no author-agent prompt-set record (produced before any
 ///   meta-specs were injected — §9 skips the check gracefully),
 /// - every currently-required meta-spec is matched at its current
 ///   version and content hash (pass).
 ///
-/// Fail closed: a required-set resolution error propagates rather than
-/// reading as "no required meta-specs" — a store outage must not silently
-/// disable merge-time drift enforcement.
+/// Recorded versions that cannot prove currency (no entry, or a hash
+/// disagreement at the claimed version) surface as `recorded_version:
+/// None` — unverifiable, never fail-open: the block decision in
+/// [`MetaSpecDrift::exceeds_tolerance`] treats them as beyond any
+/// tolerance.
+///
+/// Fail closed: a workspace or required-set resolution error propagates
+/// rather than reading as "no required meta-specs" — a store outage must
+/// not silently disable merge-time drift enforcement.
 pub async fn mr_meta_spec_drift(
     state: &AppState,
     mr: &gyre_domain::MergeRequest,
 ) -> anyhow::Result<Option<MetaSpecDrift>> {
-    let current = required_meta_spec_snapshots(state, &mr.workspace_id).await?;
+    // Same fail-closed workspace lookup as `required_meta_spec_snapshots`:
+    // a store error propagates; a missing workspace binds nothing.
+    let ws = match state.workspaces.find_by_id(&mr.workspace_id).await {
+        Ok(Some(ws)) => ws,
+        Ok(None) => return Ok(None),
+        Err(e) => {
+            warn!(
+                workspace_id = %mr.workspace_id,
+                error = %e,
+                "merge drift check: workspace lookup failed — failing closed"
+            );
+            return Err(anyhow::anyhow!(
+                "workspace lookup failed for merge drift check: {e}"
+            ));
+        }
+    };
+    // Full registry records (not just snapshots): the §9 warning names
+    // each meta-spec by kind and NAME, which only the registry rows carry.
+    let current = match effective_required_meta_specs(state, &ws).await {
+        Ok(specs) => specs,
+        Err(e) => {
+            warn!(
+                workspace_id = %mr.workspace_id,
+                error = %e,
+                "merge drift check: effective-set resolution failed — failing closed"
+            );
+            return Err(anyhow::anyhow!(
+                "effective meta-spec set resolution failed: {e}"
+            ));
+        }
+    };
     if current.is_empty() {
         return Ok(None);
     }
@@ -2093,24 +2186,48 @@ pub async fn mr_meta_spec_drift(
         None => return Ok(None),
     };
 
-    let mut drifted: Vec<gyre_domain::MetaSpecSnapshot> = Vec::new();
+    let mut transitions: Vec<MetaSpecDriftTransition> = Vec::new();
     for cur in &current {
-        let matched = produced.iter().any(|p| {
-            p.meta_spec_id == cur.meta_spec_id
-                && p.version == cur.version
-                && p.content_hash == cur.content_hash
-        });
-        if !matched {
-            drifted.push(cur.clone());
+        let recorded = produced
+            .iter()
+            .find(|p| p.meta_spec_id == cur.id.as_str());
+        match recorded {
+            // Matched at the current version AND content hash — pass.
+            Some(p) if p.version == cur.version && p.content_hash == cur.content_hash => continue,
+            Some(p) => {
+                // A version-count transition is provable only from a
+                // recorded version that differs from the current one.
+                // An entry claiming the CURRENT version while its
+                // content hash disagrees with the registry cannot prove
+                // currency (the hash disproves it): unverifiable, never
+                // fail-open.
+                let recorded_version = if p.version == cur.version {
+                    None
+                } else {
+                    Some(p.version)
+                };
+                transitions.push(MetaSpecDriftTransition {
+                    kind: display_kind(cur.kind.as_str()),
+                    name: cur.name.clone(),
+                    recorded_version,
+                    current_version: cur.version,
+                });
+            }
+            // No entry for a currently-required meta-spec (the agent ran
+            // before it was required, or legacy hash-only provenance):
+            // currency cannot be proven — unverifiable.
+            None => transitions.push(MetaSpecDriftTransition {
+                kind: display_kind(cur.kind.as_str()),
+                name: cur.name.clone(),
+                recorded_version: None,
+                current_version: cur.version,
+            }),
         }
     }
-    if drifted.is_empty() {
+    if transitions.is_empty() {
         return Ok(None);
     }
-    Ok(Some(MetaSpecDrift {
-        produced,
-        current: drifted,
-    }))
+    Ok(Some(MetaSpecDrift { transitions }))
 }
 
 // ---------------------------------------------------------------------------
@@ -4766,28 +4883,111 @@ mod tests {
             .await
             .expect("required-set resolution failed")
             .expect("drift expected");
-        assert_eq!(drift.produced.len(), 1);
-        assert_eq!(drift.produced[0].version, 1);
-        assert_eq!(drift.current.len(), 1);
-        assert_eq!(drift.current[0].meta_spec_id, ms.id.to_string());
-        assert_eq!(drift.current[0].version, 2);
-        assert_eq!(drift.current[0].content_hash, ms.content_hash);
+        assert_eq!(drift.transitions.len(), 1);
+        let t = &drift.transitions[0];
+        assert_eq!(t.kind, "persona");
+        assert_eq!(t.name, "backend-developer");
+        assert_eq!(t.recorded_version, Some(1));
+        assert_eq!(t.current_version, 2);
+        assert_eq!(t.versions_behind(), Some(1));
+        assert_eq!(t.label(), "persona backend-developer v1 -> v2");
 
-        // The warning matches the §9 format exactly and round-trips (the
-        // parser reconstructs ids/versions; content hashes do not render).
+        // Tolerance semantics: one version behind exceeds tolerance 0
+        // ("block on any drift") but stays within tolerance 1.
+        assert!(drift.exceeds_tolerance(0));
+        assert!(!drift.exceeds_tolerance(1));
+
+        // The warning matches the §9 format exactly (per-meta-spec
+        // version transition naming) and round-trips.
         let warning = format_meta_spec_drift_warning(&drift);
-        assert!(
-            warning.starts_with("[WARN] meta-spec-drift: code produced under meta-specs ["),
-            "warning must follow the §9 format: {warning}"
+        assert_eq!(
+            warning,
+            "[WARN] meta-spec-drift: persona backend-developer v1 -> v2. \
+             Reconciliation may be needed."
         );
-        assert!(warning.contains(&format!("{}@v1", ms.id.as_str())));
-        assert!(warning.contains(&format!("{}@v2", ms.id.as_str())));
-        assert!(warning.ends_with(". Reconciliation may be needed."));
         let parsed = parse_meta_spec_drift_warning(&warning).expect("round-trip");
-        assert_eq!(parsed.produced[0].meta_spec_id, ms.id.to_string());
-        assert_eq!(parsed.produced[0].version, 1);
-        assert_eq!(parsed.current[0].meta_spec_id, ms.id.to_string());
-        assert_eq!(parsed.current[0].version, 2);
+        assert_eq!(parsed, drift);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn drift_check_two_versions_behind_exceeds_tolerance_one() {
+        // versions_behind = current − recorded: a v1 record against a v3
+        // registry is 2 behind — blocked at tolerance 1, within tolerance 2.
+        let drift = MetaSpecDrift {
+            transitions: vec![MetaSpecDriftTransition {
+                kind: "persona".to_string(),
+                name: "backend-developer".to_string(),
+                recorded_version: Some(1),
+                current_version: 3,
+            }],
+        };
+        assert!(drift.exceeds_tolerance(1));
+        assert!(!drift.exceeds_tolerance(2));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn drift_check_unverifiable_recorded_version_never_fails_open() {
+        // A required meta-spec the recorded usage lacks entirely (or a
+        // legacy hash-only record) cannot prove currency: it exceeds ANY
+        // tolerance and renders as `v?`.
+        let state = test_state();
+        let _ws = make_workspace(&state, "ws-drift-2c").await;
+        let repo = make_repo(&state, "repo-drift-2c", "ws-drift-2c").await;
+        let ms = require_for_ws(&state, "ws-drift-2c", "backend-developer", 4).await;
+
+        // Same version claim but a disagreeing content hash: currency is
+        // disproved by content — unverifiable, never fail-open.
+        let mr_hash_mismatch = make_mr_with_prompt_set(
+            &state,
+            "mr-drift-2c-hash",
+            "ws-drift-2c",
+            &repo,
+            vec![used_snapshot(&ms, 4, "other-content-hash")],
+        )
+        .await;
+        let drift = mr_meta_spec_drift(&state, &mr_hash_mismatch)
+            .await
+            .expect("required-set resolution failed")
+            .expect("drift expected");
+        assert_eq!(drift.transitions.len(), 1);
+        assert_eq!(drift.transitions[0].recorded_version, None);
+        assert_eq!(drift.transitions[0].versions_behind(), None);
+        assert_eq!(drift.transitions[0].label(), "persona backend-developer v? -> v4");
+        assert!(drift.exceeds_tolerance(u32::MAX), "unverifiable must block at any tolerance");
+
+        // No entry at all for the required meta-spec: same unverifiable
+        // treatment (legacy hash-only provenance class).
+        let mr_missing = make_mr_with_prompt_set(
+            &state,
+            "mr-drift-2c-missing",
+            "ws-drift-2c",
+            &repo,
+            vec![gyre_domain::MetaSpecSnapshot {
+                meta_spec_id: "unrelated-ms".to_string(),
+                kind: "meta:principle".to_string(),
+                content_hash: "h".to_string(),
+                version: 9,
+            }],
+        )
+        .await;
+        let drift = mr_meta_spec_drift(&state, &mr_missing)
+            .await
+            .expect("required-set resolution failed")
+            .expect("drift expected");
+        assert_eq!(drift.transitions.len(), 1);
+        assert_eq!(drift.transitions[0].recorded_version, None);
+        assert!(drift.exceeds_tolerance(0));
+        assert!(drift.exceeds_tolerance(u32::MAX));
+
+        // The unverifiable warning round-trips through the parser.
+        let warning = format_meta_spec_drift_warning(&drift);
+        assert_eq!(
+            warning,
+            "[WARN] meta-spec-drift: persona backend-developer v? -> v4. \
+             Reconciliation may be needed."
+        );
+        let parsed = parse_meta_spec_drift_warning(&warning).expect("round-trip");
+        assert_eq!(parsed, drift);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -4813,7 +5013,7 @@ mod tests {
             .await
             .expect("required-set resolution failed")
             .expect("missing required meta-spec is drift");
-        assert_eq!(drift.current.len(), 1);
+        assert_eq!(drift.transitions.len(), 1);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -4898,7 +5098,7 @@ mod tests {
         assert_eq!(parse_meta_spec_drift_warning(""), None);
         assert_eq!(
             parse_meta_spec_drift_warning(
-                "[WARN] meta-spec-drift: code produced under meta-specs [], current requires []. Reconciliation may be needed."
+                "[WARN] meta-spec-drift: . Reconciliation may be needed."
             ),
             None,
             "an all-empty drift must not parse"
@@ -4909,6 +5109,13 @@ mod tests {
             ),
             None,
             "the retired set-SHA format must not parse (no silent alias)"
+        );
+        assert_eq!(
+            parse_meta_spec_drift_warning(
+                "[WARN] meta-spec-drift: persona backend-developer v3 -> v4. Reconciliation may be needed. extra"
+            ),
+            None,
+            "trailing content after the canonical suffix must not parse"
         );
     }
 

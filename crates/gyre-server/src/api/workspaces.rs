@@ -50,6 +50,45 @@ pub struct UpdateWorkspaceRequest {
     /// `Option<Value>`, which would make a clear a silent no-op.
     #[serde(default, deserialize_with = "crate::api::deserialize_present")]
     pub compute_target_id: Option<serde_json::Value>,
+    /// §9 merge-gate drift policy (meta-spec-reconciliation.md), partial
+    /// update. Stored per workspace through the merge-policy KV store —
+    /// the same policy the merge processor enforces and
+    /// `PUT /workspaces/:id/merge-policy` manages. Admin-only (see
+    /// `update_workspace`).
+    #[serde(default)]
+    pub meta_spec_policy: Option<MetaSpecPolicyRequest>,
+}
+
+/// Request shape for the §9 `MetaSpecPolicy` fields
+/// (meta-spec-reconciliation.md §9). All fields optional (partial update);
+/// `drift_tolerance` arrives as a raw JSON number so invalid values
+/// (negative, fractional, out of range) are rejected with a 400 rather
+/// than a serde 422.
+#[derive(Deserialize)]
+pub struct MetaSpecPolicyRequest {
+    pub warn_on_drift: Option<bool>,
+    pub block_on_drift: Option<bool>,
+    pub drift_tolerance: Option<serde_json::Number>,
+}
+
+impl MetaSpecPolicyRequest {
+    /// Validate the request fields and apply them onto `policy`.
+    /// Returns the parsed tolerance on success, or a 400-grade message.
+    fn apply_to(
+        &self,
+        policy: &mut crate::merge_policy::MetaSpecPolicy,
+    ) -> Result<(), String> {
+        if let Some(warn) = self.warn_on_drift {
+            policy.warn_on_drift = warn;
+        }
+        if let Some(block) = self.block_on_drift {
+            policy.block_on_drift = block;
+        }
+        if let Some(tol) = &self.drift_tolerance {
+            policy.drift_tolerance = crate::merge_policy::parse_drift_tolerance(tol.clone())?;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Deserialize)]
@@ -57,6 +96,23 @@ pub struct ListWorkspacesQuery {
     pub tenant_id: Option<String>,
     /// Filter by workspace slug (for cross-workspace spec link resolution).
     pub slug: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct MetaSpecPolicyResponse {
+    pub warn_on_drift: bool,
+    pub block_on_drift: bool,
+    pub drift_tolerance: u32,
+}
+
+impl From<crate::merge_policy::MetaSpecPolicy> for MetaSpecPolicyResponse {
+    fn from(p: crate::merge_policy::MetaSpecPolicy) -> Self {
+        Self {
+            warn_on_drift: p.warn_on_drift,
+            block_on_drift: p.block_on_drift,
+            drift_tolerance: p.drift_tolerance,
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -73,6 +129,12 @@ pub struct WorkspaceResponse {
     pub llm_model: Option<String>,
     pub created_at: u64,
     pub compute_target_id: Option<String>,
+    /// §9 merge-gate drift policy (meta-spec-reconciliation.md §9),
+    /// loaded from the merge-policy store — the same policy the merge
+    /// processor enforces. Always present (the §9 default when nothing
+    /// is stored), so the workspace settings drift-policy form
+    /// round-trips for real.
+    pub meta_spec_policy: MetaSpecPolicyResponse,
 }
 
 impl From<Workspace> for WorkspaceResponse {
@@ -90,8 +152,24 @@ impl From<Workspace> for WorkspaceResponse {
             llm_model: ws.llm_model,
             created_at: ws.created_at,
             compute_target_id: ws.compute_target_id.map(|id| id.to_string()),
+            // Callers that can await load the real stored policy via
+            // `workspace_response`; the synchronous conversion seeds the
+            // §9 default (a workspace with no stored policy).
+            meta_spec_policy: MetaSpecPolicyResponse::from(
+                crate::merge_policy::MetaSpecPolicy::default(),
+            ),
         }
     }
+}
+
+/// Build a [`WorkspaceResponse`] carrying the workspace's REAL stored §9
+/// merge policy (default when nothing is stored / the store is
+/// unavailable — the same degradation the merge processor applies).
+async fn workspace_response(state: &AppState, ws: Workspace) -> WorkspaceResponse {
+    let policy = crate::merge_policy::merge_policy_or_default(state, &ws.id).await;
+    let mut resp = WorkspaceResponse::from(ws);
+    resp.meta_spec_policy = MetaSpecPolicyResponse::from(policy);
+    resp
 }
 
 #[derive(Deserialize)]
@@ -217,12 +295,19 @@ pub async fn list_workspaces(
     } else {
         workspaces
     };
-    Ok(Json(
-        workspaces
-            .into_iter()
-            .map(WorkspaceResponse::from)
-            .collect(),
-    ))
+    Ok(Json(workspace_responses(&state, workspaces).await))
+}
+
+/// Build workspace responses with each workspace's stored §9 merge policy.
+async fn workspace_responses(
+    state: &AppState,
+    workspaces: Vec<Workspace>,
+) -> Vec<WorkspaceResponse> {
+    let mut out = Vec::with_capacity(workspaces.len());
+    for ws in workspaces {
+        out.push(workspace_response(state, ws).await);
+    }
+    out
 }
 
 pub async fn get_workspace(
@@ -239,7 +324,7 @@ pub async fn get_workspace(
     if !auth.roles.contains(&UserRole::Admin) && ws.tenant_id != Id::new(&auth.tenant_id) {
         return Err(ApiError::NotFound(format!("workspace {id} not found")));
     }
-    Ok(Json(WorkspaceResponse::from(ws)))
+    Ok(Json(workspace_response(&state, ws).await))
 }
 
 pub async fn update_workspace(
@@ -296,6 +381,33 @@ pub async fn update_workspace(
     if let Some(name) = req.name {
         ws.name = name;
     }
+    // §9 MetaSpecPolicy (meta-spec-reconciliation.md §9) — the same
+    // governance control `PUT /workspaces/:id/merge-policy` manages, so
+    // the same Admin gate applies here: the drift policy decides whether
+    // in-flight MRs can merge during reconciliation, and non-Admin
+    // callers (Developers, Agents) must not be able to flip it through
+    // the workspace surface (the workspace settings UI saves it via
+    // PUT /workspaces/:id). The global system token (no user identity,
+    // Admin role) is allowed, mirroring the merge-policy endpoint.
+    let meta_spec_policy_req = req.meta_spec_policy;
+    if meta_spec_policy_req.is_some() && !auth.roles.contains(&UserRole::Admin) {
+        return Err(ApiError::Forbidden(
+            "only Admin role may update workspace merge policy".to_string(),
+        ));
+    }
+    // §9 policy update: load, validate, and materialize the target policy
+    // BEFORE any workspace-row write — an invalid tolerance (400) must not
+    // leave a partially-applied update behind.
+    let meta_spec_policy_update = match meta_spec_policy_req {
+        Some(policy_req) => {
+            let mut policy = crate::merge_policy::get_merge_policy(&state, &ws.id).await?;
+            policy_req
+                .apply_to(&mut policy)
+                .map_err(ApiError::InvalidInput)?;
+            Some(policy)
+        }
+        None => None,
+    };
     if let Some(desc) = req.description {
         ws.description = Some(desc);
     }
@@ -425,7 +537,15 @@ pub async fn update_workspace(
         state.workspaces.update(&ws).await?;
     }
 
-    Ok(Json(WorkspaceResponse::from(ws)))
+    // §9 MetaSpecPolicy: the validated target policy, persisted through
+    // the merge-policy KV store — the exact document the merge processor
+    // reads on every merge-queue cycle, so the workspace settings save
+    // round-trips for real (no silent serde drop).
+    if let Some(policy) = meta_spec_policy_update {
+        crate::merge_policy::set_merge_policy(&state, &ws.id, &policy).await?;
+    }
+
+    Ok(Json(workspace_response(&state, ws).await))
 }
 
 pub async fn delete_workspace(
@@ -546,26 +666,47 @@ pub async fn get_workspace_presence(
 
 #[derive(Serialize)]
 pub struct MergePolicyResponse {
+    /// Legacy strict-mode view of the policy (block on ANY drift) — kept
+    /// for pre-§9-full clients; exactly `block_on_drift &&
+    /// drift_tolerance == 0`.
     pub require_current_meta_spec_set: bool,
+    /// §9 MetaSpecPolicy in full (meta-spec-reconciliation.md §9).
+    pub warn_on_drift: bool,
+    pub block_on_drift: bool,
+    pub drift_tolerance: u32,
 }
 
-impl From<crate::merge_policy::WorkspaceMergePolicy> for MergePolicyResponse {
-    fn from(p: crate::merge_policy::WorkspaceMergePolicy) -> Self {
+impl From<crate::merge_policy::MetaSpecPolicy> for MergePolicyResponse {
+    fn from(p: crate::merge_policy::MetaSpecPolicy) -> Self {
         Self {
-            require_current_meta_spec_set: p.require_current_meta_spec_set,
+            require_current_meta_spec_set: p.blocks_on_any_drift(),
+            warn_on_drift: p.warn_on_drift,
+            block_on_drift: p.block_on_drift,
+            drift_tolerance: p.drift_tolerance,
         }
     }
 }
 
 #[derive(Deserialize)]
 pub struct UpdateMergePolicyRequest {
+    /// Legacy strict-mode flag (partial update): `true` maps to
+    /// `block_on_drift: true, drift_tolerance: 0` (block on any drift —
+    /// the old single-boolean semantics); `false` clears blocking.
+    /// Applied before the §9 fields, so an explicit `drift_tolerance` in
+    /// the same request wins.
     pub require_current_meta_spec_set: Option<bool>,
+    pub warn_on_drift: Option<bool>,
+    pub block_on_drift: Option<bool>,
+    /// Raw JSON number so invalid values (negative, fractional) are
+    /// rejected with 400 rather than a serde 422.
+    pub drift_tolerance: Option<serde_json::Number>,
 }
 
 /// GET /api/v1/workspaces/:id/merge-policy
 ///
-/// Returns the workspace merge policy — the §9 strict-mode switch for the
-/// meta-spec drift merge gate. Default: warn only.
+/// Returns the workspace merge policy — the §9 MetaSpecPolicy
+/// (warn_on_drift / block_on_drift / drift_tolerance) plus the legacy
+/// `require_current_meta_spec_set` view. Default: warn only.
 pub async fn get_merge_policy(
     State(state): State<Arc<AppState>>,
     auth: AuthenticatedAgent,
@@ -589,11 +730,14 @@ pub async fn get_merge_policy(
 
 /// PUT /api/v1/workspaces/:id/merge-policy (Admin only)
 ///
-/// Update the workspace merge policy (partial update). Admin-only: the
-/// strict-mode flag converts the §9 meta-spec drift warning into a hard
-/// merge block — a governance control that determines whether in-flight MRs
-/// can merge during reconciliation, so non-Admin callers (Developers,
-/// Agents) must not be able to flip it (same NEW-26 rule as the meta-spec-set
+/// Update the workspace merge policy (partial update): the §9
+/// MetaSpecPolicy fields (warn_on_drift / block_on_drift /
+/// drift_tolerance, tolerance validated ≥ 0) and/or the legacy
+/// `require_current_meta_spec_set` boolean. Admin-only: the drift policy
+/// converts the §9 meta-spec drift warning into a hard merge block — a
+/// governance control that determines whether in-flight MRs can merge
+/// during reconciliation, so non-Admin callers (Developers, Agents) must
+/// not be able to flip it (same NEW-26 rule as the meta-spec-set
 /// binding).
 pub async fn set_merge_policy(
     State(state): State<Arc<AppState>>,
@@ -620,10 +764,29 @@ pub async fn set_merge_policy(
         return Err(ApiError::NotFound(format!("workspace {id} not found")));
     }
 
-    // Apply partial update.
+    // Apply partial update: the legacy strict flag first (its tolerance-0
+    // mapping is the old single-boolean semantics), then the §9 fields —
+    // an explicit drift_tolerance in the same request wins.
     let mut policy = crate::merge_policy::get_merge_policy(&state, &workspace_id).await?;
-    if let Some(require) = req.require_current_meta_spec_set {
-        policy.require_current_meta_spec_set = require;
+    match req.require_current_meta_spec_set {
+        Some(true) => {
+            policy.block_on_drift = true;
+            policy.drift_tolerance = 0;
+        }
+        Some(false) => {
+            policy.block_on_drift = false;
+        }
+        None => {}
+    }
+    if let Some(warn) = req.warn_on_drift {
+        policy.warn_on_drift = warn;
+    }
+    if let Some(block) = req.block_on_drift {
+        policy.block_on_drift = block;
+    }
+    if let Some(tol) = req.drift_tolerance {
+        policy.drift_tolerance =
+            crate::merge_policy::parse_drift_tolerance(tol).map_err(ApiError::InvalidInput)?;
     }
     crate::merge_policy::set_merge_policy(&state, &workspace_id, &policy).await?;
 
@@ -1321,6 +1484,11 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let policy = body_json(resp).await;
         assert_eq!(policy["require_current_meta_spec_set"], false);
+        // Full §9 shape: the opinionated default (warn always, block
+        // never, tolerance 1).
+        assert_eq!(policy["warn_on_drift"], true);
+        assert_eq!(policy["block_on_drift"], false);
+        assert_eq!(policy["drift_tolerance"], 1);
 
         // A Developer-role JWT must not flip the strict-mode flag.
         let dev_token = sign_test_jwt(
@@ -1382,6 +1550,11 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let policy = body_json(resp).await;
         assert_eq!(policy["require_current_meta_spec_set"], true);
+        // The legacy strict flag maps to the §9 shape: block on any drift
+        // (tolerance 0), warnings on.
+        assert_eq!(policy["block_on_drift"], true);
+        assert_eq!(policy["drift_tolerance"], 0);
+        assert_eq!(policy["warn_on_drift"], true);
 
         // GET reflects the persisted strict mode.
         let resp = crate::api::api_router()
@@ -1398,6 +1571,261 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let policy = body_json(resp).await;
         assert_eq!(policy["require_current_meta_spec_set"], true);
+    }
+
+    /// §9 MetaSpecPolicy round-trip through the workspace surface: PUT
+    /// /workspaces/:id with meta_spec_policy persists it (no silent serde
+    /// drop) and GET returns exactly the stored policy — the wiring the
+    /// workspace settings drift-policy form saves through.
+    #[tokio::test]
+    async fn workspace_meta_spec_policy_roundtrip_via_update_workspace() {
+        use crate::abac_middleware::seed_builtin_policies;
+        use crate::auth::test_helpers::{make_test_state_with_jwt, sign_test_jwt};
+        let state = make_test_state_with_jwt();
+        let _ = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(seed_builtin_policies(&state))
+        });
+
+        let ws_resp = crate::api::api_router()
+            .with_state(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"name":"ws-msp","slug":"ws-msp"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ws_resp.status(), StatusCode::CREATED);
+        let ws_json = body_json(ws_resp).await;
+        let ws_id = ws_json["id"].as_str().unwrap().to_string();
+        // A fresh workspace carries the §9 default policy.
+        assert_eq!(ws_json["meta_spec_policy"]["warn_on_drift"], true);
+        assert_eq!(ws_json["meta_spec_policy"]["block_on_drift"], false);
+        assert_eq!(ws_json["meta_spec_policy"]["drift_tolerance"], 1);
+
+        // The exact payload the WorkspaceSettings drift-policy form saves.
+        let resp = crate::api::api_router()
+            .with_state(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/workspaces/{ws_id}"))
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"meta_spec_policy": {"warn_on_drift": true, "block_on_drift": true, "drift_tolerance": 1}}"#
+                            .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let updated = body_json(resp).await;
+        assert_eq!(updated["meta_spec_policy"]["warn_on_drift"], true);
+        assert_eq!(updated["meta_spec_policy"]["block_on_drift"], true);
+        assert_eq!(updated["meta_spec_policy"]["drift_tolerance"], 1);
+
+        // GET returns exactly the persisted policy — no silent drop.
+        let resp = crate::api::api_router()
+            .with_state(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/workspaces/{ws_id}"))
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let got = body_json(resp).await;
+        assert_eq!(
+            got["meta_spec_policy"],
+            serde_json::json!({
+                "warn_on_drift": true,
+                "block_on_drift": true,
+                "drift_tolerance": 1,
+            }),
+            "GET workspace must return exactly the stored §9 policy"
+        );
+
+        // The same document the merge processor enforces: the
+        // merge-policy endpoint sees the identical policy.
+        let resp = crate::api::api_router()
+            .with_state(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/workspaces/{ws_id}/merge-policy"))
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let policy = body_json(resp).await;
+        assert_eq!(policy["warn_on_drift"], true);
+        assert_eq!(policy["block_on_drift"], true);
+        assert_eq!(policy["drift_tolerance"], 1);
+        // Tolerance-1 blocking is NOT the legacy strict view.
+        assert_eq!(policy["require_current_meta_spec_set"], false);
+
+        // Invalid tolerance (< 0) is rejected 400, not a serde 422, and
+        // changes nothing.
+        let resp = crate::api::api_router()
+            .with_state(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/workspaces/{ws_id}"))
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"meta_spec_policy": {"drift_tolerance": -1}}"#.to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // A non-Admin caller must not flip the drift policy through the
+        // workspace surface (same governance gate as the merge-policy
+        // endpoint).
+        let dev_token = sign_test_jwt(
+            &serde_json::json!({
+                "sub": "dev-sub",
+                "preferred_username": "developer-user",
+                "realm_access": { "roles": ["developer"] }
+            }),
+            3600,
+        );
+        let resp = crate::api::api_router()
+            .with_state(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/workspaces/{ws_id}"))
+                    .header("authorization", format!("Bearer {dev_token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"meta_spec_policy": {"block_on_drift": false}}"#.to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // Neither rejected request changed the stored policy.
+        let resp = crate::api::api_router()
+            .with_state(state)
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/workspaces/{ws_id}"))
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let got = body_json(resp).await;
+        assert_eq!(got["meta_spec_policy"]["block_on_drift"], true);
+        assert_eq!(got["meta_spec_policy"]["drift_tolerance"], 1);
+    }
+
+    /// The merge-policy endpoint accepts the full §9 shape and rejects an
+    /// invalid drift_tolerance with 400.
+    #[tokio::test]
+    async fn merge_policy_full_shape_and_tolerance_validation() {
+        use crate::abac_middleware::seed_builtin_policies;
+        use crate::auth::test_helpers::make_test_state_with_jwt;
+        let state = make_test_state_with_jwt();
+        let _ = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(seed_builtin_policies(&state))
+        });
+
+        let ws_resp = crate::api::api_router()
+            .with_state(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"name":"ws-mp2","slug":"ws-mp2"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let ws_json = body_json(ws_resp).await;
+        let ws_id = ws_json["id"].as_str().unwrap().to_string();
+
+        // Full-shape update.
+        let resp = crate::api::api_router()
+            .with_state(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/workspaces/{ws_id}/merge-policy"))
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"warn_on_drift": false, "block_on_drift": true, "drift_tolerance": 2}"#
+                            .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let policy = body_json(resp).await;
+        assert_eq!(policy["warn_on_drift"], false);
+        assert_eq!(policy["block_on_drift"], true);
+        assert_eq!(policy["drift_tolerance"], 2);
+        assert_eq!(policy["require_current_meta_spec_set"], false);
+
+        // Invalid tolerance (negative) → 400; fractional → 400.
+        for body in [
+            r#"{"drift_tolerance": -1}"#,
+            r#"{"drift_tolerance": 1.5}"#,
+        ] {
+            let resp = crate::api::api_router()
+                .with_state(state.clone())
+                .oneshot(
+                    Request::builder()
+                        .method("PUT")
+                        .uri(format!("/api/v1/workspaces/{ws_id}/merge-policy"))
+                        .header("authorization", "Bearer test-token")
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "body: {body}");
+        }
+
+        // The rejected updates changed nothing.
+        let resp = crate::api::api_router()
+            .with_state(state)
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/workspaces/{ws_id}/merge-policy"))
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let policy = body_json(resp).await;
+        assert_eq!(policy["drift_tolerance"], 2);
+        assert_eq!(policy["block_on_drift"], true);
+        assert_eq!(policy["warn_on_drift"], false);
     }
 
     // -- Compute target binding (agent-runtime.md §3) --------------------------

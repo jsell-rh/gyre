@@ -363,6 +363,13 @@ pub struct AgentPromptSetRecord {
     pub spec_path: Option<String>,
     pub set_sha: String,
     pub assembled_at: u64,
+    /// The itemized meta-spec usage (id, kind, content_hash, version) the
+    /// agent ran under — the merge-time `meta_specs_used` source. Defaulted
+    /// so pre-itemization records (hash-only `set_sha`, no per-meta-spec
+    /// versions) still parse: such legacy provenance cannot prove currency
+    /// at the §9 merge gate and is treated as unverifiable drift there
+    /// (blocked under `block_on_drift`, warned otherwise) — never skipped.
+    #[serde(default)]
     pub meta_specs_used: Vec<MetaSpecUsed>,
     /// The rendered meta-spec system prompt (the persona section of the
     /// agent-runtime.md §5 prompt structure) as delivered to the agent at

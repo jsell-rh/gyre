@@ -85,12 +85,11 @@ pub struct GraphDependencyEdge {
 /// (meta-spec-reconciliation.md §9).
 #[derive(Serialize)]
 pub struct MetaSpecDriftWarning {
-    /// Meta-spec snapshot labels (`{kind}:{id}@v{version}`) recorded for the
-    /// MR's author agent (the `meta_specs_used` array).
-    pub produced: Vec<String>,
-    /// Snapshot labels of currently-required meta-specs not matched by the
-    /// recorded usage.
-    pub current: Vec<String>,
+    /// §9 per-meta-spec version-transition labels (e.g.
+    /// `"persona backend-developer v3 -> v4"`; `v?` marks an
+    /// unverifiable recorded version), parsed from the recorded drift
+    /// warning gate result.
+    pub transitions: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -350,12 +349,9 @@ pub async fn get_queue_graph(
                 .and_then(|r| r.output.as_deref())
                 .and_then(crate::reconciliation::parse_meta_spec_drift_warning)
                 .map(|d| MetaSpecDriftWarning {
-                    // Snapshot labels ("{kind}:{id}@v{version}") recorded for
-                    // the MR's author agent.
-                    produced: d.produced.iter().map(|s| s.label()).collect(),
-                    // Snapshot labels of required meta-specs not matched by
-                    // the recorded usage.
-                    current: d.current.iter().map(|s| s.label()).collect(),
+                    // §9 version-named transition labels parsed from the
+                    // recorded warning gate result.
+                    transitions: d.labels(),
                 });
             nodes.push(GraphNode {
                 mr_id: mr.id.to_string(),

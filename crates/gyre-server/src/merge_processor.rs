@@ -851,7 +851,7 @@ async fn record_meta_spec_drift_warning(
 
     warn!(
         mr_id = %mr.id,
-        drifted = ?drift.current,
+        transitions = ?drift.labels(),
         "meta-spec drift detected (warn only, merge proceeds)"
     );
 }
@@ -2071,7 +2071,7 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
             // hold only after selection and returning early starves the
             // shared queue — `update_status` does not rotate
             // `enqueued_at`, so a drifted head-of-queue entry under
-            // `require_current_meta_spec_set` would be re-selected and
+            // `block_on_drift` would be re-selected and
             // re-blocked every cycle, denying merge service to later
             // entries in the same workspace and to entries in other
             // workspaces. Warn-only drift (the default) records the §9
@@ -2081,7 +2081,7 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
                     entry_id = %candidate.id,
                     mr_id = %candidate.merge_request_id,
                     %reason,
-                    "meta-spec drift: holding merge under strict workspace policy, trying next candidate"
+                    "meta-spec drift: holding merge under block_on_drift workspace policy, trying next candidate"
                 );
                 state
                     .merge_queue
@@ -4683,18 +4683,23 @@ async fn selection_trust_hold(
     Ok(None)
 }
 
-/// meta-spec-reconciliation.md §9 — strict-policy meta-spec drift hold,
+/// meta-spec-reconciliation.md §9 — meta-spec drift policy evaluation,
 /// evaluated DURING candidate selection (task-159 review repair), exactly
 /// like `selection_trust_hold` above. Expands atomic-group candidates to
 /// all group members (the group merges — or is held — as a unit).
-/// Returns `Some(reason)` when any member is drifted under a workspace
-/// merge policy with `require_current_meta_spec_set: true`; the caller
-/// requeues the entry with the reason and tries the next candidate in the
-/// SAME cycle, so a strictly-blocked head-of-queue entry cannot starve the
-/// shared merge queue. Warn-only drift (the default, §9 "warn, don't
-/// block") records the `[WARN] meta-spec-drift` gate result here and
-/// never blocks. MRs without an attestation and workspaces without a
-/// bound set skip the check gracefully.
+/// Under the workspace's `MetaSpecPolicy`:
+/// - `block_on_drift` with the drift exceeding `drift_tolerance` (some
+///   meta-spec MORE than `tolerance` versions behind, or an unverifiable
+///   recorded version) returns `Some(reason)` — the caller requeues the
+///   entry with the reason and tries the next candidate in the SAME
+///   cycle, so a blocked head-of-queue entry cannot starve the shared
+///   merge queue. The warning is ALWAYS recorded alongside the block
+///   (§9: "Always on in strict mode") so the held MR names its drift.
+/// - Otherwise (within tolerance, or the default warn-only policy) the
+///   `[WARN] meta-spec-drift` gate result is recorded — unless
+///   `warn_on_drift: false` suppresses it — and the merge proceeds.
+/// MRs without an attestation and workspaces without a bound set skip
+/// the check gracefully.
 async fn selection_meta_spec_drift_hold(
     state: &AppState,
     candidate_mr: &MergeRequest,
@@ -4716,24 +4721,29 @@ async fn selection_meta_spec_drift_hold(
         if let Some(drift) = crate::reconciliation::mr_meta_spec_drift(state, mr).await? {
             let policy =
                 crate::merge_policy::merge_policy_or_default(state, &mr.workspace_id).await;
-            if policy.require_current_meta_spec_set {
+            if policy.block_on_drift && drift.exceeds_tolerance(policy.drift_tolerance) {
+                // "Always on in strict mode": the warning is recorded
+                // alongside the block regardless of warn_on_drift, so the
+                // held MR's gate results name the drift that held it.
+                record_meta_spec_drift_warning(state, mr, &drift).await;
                 warn!(
                     mr_id = %mr.id,
-                    drifted = ?drift.current,
-                    "meta-spec drift blocked merge (strict workspace policy)"
+                    transitions = ?drift.labels(),
+                    drift_tolerance = policy.drift_tolerance,
+                    "meta-spec drift blocked merge (block_on_drift workspace policy)"
                 );
                 return Ok(Some(format!(
-                    "meta-spec drift: required meta-specs not matched by the recorded \
-                     meta_specs_used: {} (require_current_meta_spec_set)",
-                    drift
-                        .current
-                        .iter()
-                        .map(|s| s.label())
-                        .collect::<Vec<_>>()
-                        .join(", ")
+                    "meta-spec drift: {} (block_on_drift, drift_tolerance {})",
+                    drift.labels().join(", "),
+                    policy.drift_tolerance
                 )));
             }
-            record_meta_spec_drift_warning(state, mr, &drift).await;
+            // Within tolerance or warn-only: record the [WARN] gate result
+            // unless the workspace disabled drift warnings (non-strict
+            // mode only — strict mode recorded it above).
+            if policy.warn_on_drift {
+                record_meta_spec_drift_warning(state, mr, &drift).await;
+            }
         }
     }
     Ok(None)
@@ -10842,23 +10852,15 @@ mod tests {
             .expect("drift gate result must be recorded");
         assert_eq!(drift.status, GateStatus::Passed);
         let output = drift.output.as_deref().expect("warning output");
-        let expected = crate::reconciliation::format_meta_spec_drift_warning(
-            &crate::reconciliation::MetaSpecDrift {
-                produced: vec![gyre_domain::MetaSpecSnapshot {
-                    meta_spec_id: ms.id.to_string(),
-                    kind: ms.kind.as_str().to_string(),
-                    content_hash: "old-hash".to_string(),
-                    version: 0,
-                }],
-                current: vec![gyre_domain::MetaSpecSnapshot {
-                    meta_spec_id: ms.id.to_string(),
-                    kind: ms.kind.as_str().to_string(),
-                    content_hash: ms.content_hash.clone(),
-                    version: ms.version,
-                }],
-            },
+        // §9 naming: the warning names the per-meta-spec version
+        // transition (`{kind} {name} v{old} -> v{new}`), derived from the
+        // recorded meta_specs_used version vs the current registry
+        // version — not a set SHA.
+        assert_eq!(
+            output,
+            "[WARN] meta-spec-drift: persona backend-developer v0 -> v1. \
+             Reconciliation may be needed."
         );
-        assert_eq!(output, expected);
         assert!(output.starts_with("[WARN] meta-spec-drift: "));
 
         // Warn only — the MR still merges.
@@ -10875,9 +10877,10 @@ mod tests {
         );
     }
 
-    /// §9: with `require_current_meta_spec_set: true`, drift converts to a
-    /// hard block — the entry stays queued with the drift reason and the MR
-    /// does not merge.
+    /// §9: with `block_on_drift` (tolerance 0), drift converts to a hard
+    /// block — the entry stays queued with the drift reason and the MR
+    /// does not merge (the warning is recorded alongside the block:
+    /// "Always on in strict mode").
     #[tokio::test]
     async fn meta_spec_drift_hard_blocks_under_strict_workspace_policy() {
         let state = test_state();
@@ -10907,12 +10910,16 @@ mod tests {
         .await;
         enqueue_mr(&state, "mr-drift-block", 50, 1000).await;
 
-        // Strict workspace policy: drift blocks.
+        // Strict workspace policy: drift blocks (tolerance 0 = block on
+        // any drift — the same semantics the legacy
+        // `require_current_meta_spec_set: true` flag mapped to).
         crate::merge_policy::set_merge_policy(
             &state,
             &Id::new(ws_id),
-            &crate::merge_policy::WorkspaceMergePolicy {
-                require_current_meta_spec_set: true,
+            &crate::merge_policy::MetaSpecPolicy {
+                warn_on_drift: true,
+                block_on_drift: true,
+                drift_tolerance: 0,
             },
         )
         .await
@@ -10935,7 +10942,13 @@ mod tests {
             .expect("drift reason recorded");
         assert!(reason.contains("meta-spec drift"), "reason: {reason}");
         assert!(
-            reason.contains("require_current_meta_spec_set"),
+            reason.contains("block_on_drift"),
+            "reason: {reason}"
+        );
+        // §9 naming: the block reason names the per-meta-spec version
+        // transition (recorded v0 -> current v1), not a set SHA.
+        assert!(
+            reason.contains("persona backend-developer v0 -> v1"),
             "reason: {reason}"
         );
 
@@ -10948,8 +10961,9 @@ mod tests {
             .expect("mr exists");
         assert_eq!(updated.status, MrStatus::Open);
 
-        // The block path records no drift gate result (it returns before
-        // the warn-only recording).
+        // "Always on in strict mode": the block path records the drift
+        // warning gate result alongside the block, so the held MR names
+        // the drift that held it.
         let results = state
             .gate_results
             .list_by_mr_id("mr-drift-block")
@@ -10958,8 +10972,8 @@ mod tests {
         assert!(
             results
                 .iter()
-                .all(|r| r.gate_id.as_str() != crate::reconciliation::META_SPEC_DRIFT_GATE_ID),
-            "blocked drift must not record a Passed warn gate result"
+                .any(|r| r.gate_id.as_str() == crate::reconciliation::META_SPEC_DRIFT_GATE_ID),
+            "blocked drift must record the warning alongside the block"
         );
 
         // Relaxing the policy lets the same entry merge on the next cycle
@@ -10967,7 +10981,7 @@ mod tests {
         crate::merge_policy::set_merge_policy(
             &state,
             &Id::new(ws_id),
-            &crate::merge_policy::WorkspaceMergePolicy::default(),
+            &crate::merge_policy::MetaSpecPolicy::default(),
         )
         .await
         .unwrap();
@@ -11185,8 +11199,10 @@ mod tests {
         crate::merge_policy::set_merge_policy(
             &state,
             &Id::new(ws_a),
-            &crate::merge_policy::WorkspaceMergePolicy {
-                require_current_meta_spec_set: true,
+            &crate::merge_policy::MetaSpecPolicy {
+                warn_on_drift: true,
+                block_on_drift: true,
+                drift_tolerance: 0,
             },
         )
         .await
@@ -11349,8 +11365,10 @@ mod tests {
         crate::merge_policy::set_merge_policy(
             &state,
             &Id::new(ws_a),
-            &crate::merge_policy::WorkspaceMergePolicy {
-                require_current_meta_spec_set: true,
+            &crate::merge_policy::MetaSpecPolicy {
+                warn_on_drift: true,
+                block_on_drift: true,
+                drift_tolerance: 0,
             },
         )
         .await
