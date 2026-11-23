@@ -2,8 +2,8 @@
 title: "Spec API read path: linked_tasks under both spellings and per-spec open task counts in the generated index"
 spec_ref: "Spec gap spec-c08e139362b99830187a32b4 / spec-api-read-completion / a458cd7cdf30"
 depends_on: []
-progress: not-started
-commits: []
+progress: ready-for-review
+commits: ["ce06830d0dc0a0a2d4dd274fdd61c1a2b23ad1cd"]
 ---
 
 ## Required behavior
@@ -83,3 +83,29 @@ Canonical spec: `specs/system/spec-registry.md`. Source: `52d7b66b7b2f0a4dc1d63a
     ]
   }
 ]
+
+## Shipped
+
+### Behavior
+
+Both spec API read-path defects are closed in `crates/gyre-server/src/api/specs.rs` (commit `ce06830d`):
+
+- **Dual-spelling linked_tasks.** New helpers `spec_path_spellings()` (returns both the ledger's manifest-relative spelling `system/x.md` and the post-receive hook's git-rooted spelling `specs/system/x.md`) and `tasks_linked_to_spec()` (queries `TaskRepository::list_by_spec_path` under each spelling, dedupes by id) apply the same dual-spelling resolution the spec-lifecycle patrol uses (`spec_lifecycle_patrol::spec_has_live_task`). `get_spec` (GET /api/v1/specs/{path}) now populates `linked_tasks` through it, so hook-created drift-review/implementation tasks appear in the single-spec response; `get_spec_progress` (GET /api/v1/specs/{path}/progress — the linked-tasks read path at the referenced specs.rs:2191) uses the same helper for its task listing. Note: the task text calls that endpoint "history"; line 2191 at the base commit is the `:path/progress` handler (the approval-history endpoint has no linked_tasks field — its data comes from the approval-event store, not the task store).
+- **Open-task-count column.** `spec_index` (GET /api/v1/specs/index) now queries the task repository once and renders an `Open Tasks` column per row: the count of tasks whose `spec_path` matches either spelling and whose status is not Done/Cancelled. Grouping by directory, per-spec approval status, and links to spec files are unchanged; the table header is now `| Spec | Status | SHA | Open Tasks |`.
+
+### Test evidence
+
+Three focused tests in the `specs.rs` test module (mem-backed `test_state`, real router via `api_router().with_state`):
+
+- `get_spec_lists_hook_created_tasks_in_linked_tasks` — seeds ledger entry `system/design-principles.md` plus a task with `spec_path = "specs/system/design-principles.md"` (the hook's spelling); asserts GET /api/v1/specs/system%2Fdesign-principles.md returns `["hook-task-1"]` in linked_tasks. Fails on the pre-fix single-spelling query (empty linked_tasks).
+- `spec_progress_lists_hook_created_tasks` — same seed; asserts the `:path/progress` task listing contains the hook-created task id.
+- `spec_index_counts_open_tasks_per_spec` — seeds two specs; one carries two open hook-spelling tasks plus one Done ledger-spelling task, the other none. Asserts the `Open Tasks` column header exists, the first spec's row shows 2 (Done excluded), and the taskless spec's row shows 0. Fails at the base (no task-count column at all).
+
+### Deferred verification
+
+This sandbox has no crates.io access and no vendored/cached crate sources, so `cargo check`/`cargo test` could not run here (probe output recorded in /tmp/stage/review-evidence/task-336-deferred-probes.md on the controller artifact path). The independent verifier must run:
+
+- `cargo check -p gyre-server`
+- `cargo test -p gyre-server --lib api::specs` (covers the three new tests plus the existing spec API suite, including `spec_index_returns_markdown` which still passes — its assertions are a subset of the new row shape)
+
+Formatting was applied locally with `cargo fmt -p gyre-server` (clean). No routes, exemptions, or verifier surfaces were changed; no new durable state, migrations, or MessageKinds.
