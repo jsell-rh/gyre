@@ -3,7 +3,7 @@ title: "Blast radius computed from provenance: version-discriminated affected wo
 spec_ref: "Spec gap spec-556a0b49e9f2803bf0e2ff3d / blast-radius-provenance / b288723d2f73"
 depends_on: [task-302]
 progress: ready-for-review
-commits: ["8c86b5d90bd39edc02e54a803219062bdec36e4a", "7a50c0883a88557c15e6612901f55f3a3b4a917c", "0e3bd11882ac6d540f3076d505a06cfdb77b58bc", "ded8ebc8ec3ce1578fbf2160ff2b26f12eb472a5"]
+commits: ["508a821b9df142ba1dfde5ae54e4425918345c45", "8c86b5d90bd39edc02e54a803219062bdec36e4a", "7a50c0883a88557c15e6612901f55f3a3b4a917c", "0e3bd11882ac6d540f3076d505a06cfdb77b58bc", "ded8ebc8ec3ce1578fbf2160ff2b26f12eb472a5"]
 ---
 
 ## Required behavior
@@ -110,32 +110,44 @@ repos-with-work list; totals exact),
 (tenant_inheritance vs workspace_binding labels, counts computed
 identically for both), `blast_radius_rejects_backwards_version_range`.
 
-### Repair round: SQLite bound clamp (commit 7a50c088)
+### Repair rounds
 
-Review found a mem/SQLite port-contract divergence: the u64::MAX "no
-upper bound" sentinel wrapped to -1 in the SQLite adapter's
-`chain_attestations.find_by_repo` i64 predicate, so that provenance
-surface always returned empty on production SQLite while mem-backed
-tests stayed green. Fixed by clamping `since`/`until` into the
-i64-representable range in the SQLite adapter and using an
-`i64::MAX as u64` sentinel at the blast-radius call site, with a new
-SQLite-backed guard test (`find_by_repo_u64_max_bound_matches_rows`)
-verified to fail with the naive cast and pass with the clamp.
-
-### Finalizer round: rustfmt (commit 8c86b5d9)
-
-The retained verification run (7cfa23affad248999a075aa8b55652ef, exit 1)
-failed only its rustfmt gate: changed lines in the task-327
-blast-radius test code needed formatting. Fixed formatting-only (line
-wrapping of `get_blast_radius` call sites, one collapsed iterator chain,
-two wrapped `seed_spec_binding` calls); no behavior change;
-`cargo fmt --check -p gyre-server -p gyre-adapters` is now clean.
-Evidence: /tmp/stage/review-evidence/rustfmt-fix.txt.
+- **SQLite bound clamp (commit 7a50c088).** Review found a mem/SQLite
+  port-contract divergence: the u64::MAX "no upper bound" sentinel
+  wrapped to -1 in the SQLite adapter's `chain_attestations.find_by_repo`
+  i64 predicate, so that provenance surface always returned empty on
+  production SQLite while mem-backed tests stayed green. Fixed by
+  clamping `since`/`until` into the i64-representable range in the
+  SQLite adapter and using an `i64::MAX as u64` sentinel at the
+  blast-radius call site, with a new SQLite-backed guard test
+  (`find_by_repo_u64_max_bound_matches_rows`) verified to fail with the
+  naive cast and pass with the clamp.
+- **rustfmt (commit 8c86b5d9).** The retained verification run
+  (7cfa23affad248999a075aa8b55652ef, exit 1) failed only its rustfmt
+  gate on changed blast-radius test lines; fixed formatting-only.
+- **Missing workspace row (commit 508a821b).** Review found
+  `blast_radius_defaults_superseded_version_to_registry_current` never
+  created the workspace row `ws-br-dc-own`: `require_for_ws` creates
+  only the Workspace-scoped required meta-spec, and the handler resolves
+  Workspace-scoped required flags by matching `ms.scope_id` against
+  `workspaces.list()`, which returns only stored rows — so
+  `affected_workspaces` was empty for the own-required query and the
+  test's id/reason/binding/pinned_version assertions could not pass.
+  Fixed by seeding the workspace via `make_workspace_in_tenant` before
+  the binding; with the row present the handler marks it affected at
+  `from_version` (defaults to the spec's current version 2), reason
+  `workspace_binding`, binding `required_workspace`, pinned 2.
+  Verified by source trace against the handler
+  (`required_binding_reason(MetaSpecScope::Workspace)` →
+  `workspace_binding`), `cargo check -p gyre-server --tests` clean, and
+  `rustfmt --check` clean.
 
 ### Deferred to the independent verifier
 
-Server test binaries exceed this sandbox's build budget. The verifier
-should run the focused server test set:
+Server test binaries exceed this sandbox's build budget (blocked by the
+build wrapper; evidence:
+/tmp/stage/review-evidence/blast-radius-test.log). The verifier should
+run the focused server test set:
 
     cargo test -p gyre-server reconciliation::tests::blast_radius
 
