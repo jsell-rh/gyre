@@ -3,7 +3,7 @@ title: "Blast radius computed from provenance: version-discriminated affected wo
 spec_ref: "Spec gap spec-556a0b49e9f2803bf0e2ff3d / blast-radius-provenance / b288723d2f73"
 depends_on: [task-302]
 progress: ready-for-review
-commits: ["7a50c0883a88557c15e6612901f55f3a3b4a917c", "0e3bd11882ac6d540f3076d505a06cfdb77b58bc", "ded8ebc8ec3ce1578fbf2160ff2b26f12eb472a5"]
+commits: ["ded8ebc8ec3ce1578fbf2160ff2b26f12eb472a5", "0e3bd11882ac6d540f3076d505a06cfdb77b58bc", "7a50c0883a88557c15e6612901f55f3a3b4a917c", "8c86b5d90bd39edc02e54a803219062bdec36e4a"]
 ---
 
 ## Required behavior
@@ -97,78 +97,46 @@ Delivered on the task-302 registry model (this task's `depends_on`), in
   GET route, still mapped in the ABAC resolver; no new route, no
   exemption entries.
 
-### Repair round (review finding ec80689a0fc849feb61d3f5f5c05f593)
+Tests (in `crates/gyre-server/src/reconciliation.rs`):
+`blast_radius_version_discriminates_and_counts_provenance` (the full A/B
+acceptance scenario: workspace B pinned at v2 reported skipped with its
+pinned version and excluded from totals; workspace A affected with
+per-repo spec/commit counts equal to the seeded provenance across chain
+attestations, merge attestation bundles, and agent-commit provenance; the
+no-provenance repo of A carries zero counts and stays off the
+repos-with-work list; totals exact),
+`blast_radius_defaults_superseded_version_to_registry_current`,
+`blast_radius_labels_and_counts_from_chain_and_merge_attestations`
+(tenant_inheritance vs workspace_binding labels, counts computed
+identically for both), `blast_radius_rejects_backwards_version_range`.
 
-The review found a mem/SQLite port-contract divergence:
-`blast_radius_repo_provenance` passed `u64::MAX` as the "no upper bound"
-sentinel to `chain_attestations.find_by_repo`, but the SQLite adapter
-filters `created_at.le(until as i64)` and `u64::MAX as i64 == -1`, so the
-chain-attestation provenance surface always returned an empty set on
-production SQLite while the u64-comparing mem adapter kept the tests
-green. Fixed in commit 7a50c088:
+### Repair round: SQLite bound clamp (commit 7a50c088)
 
-- `crates/gyre-server/src/api/meta_specs.rs`: the upper bound is now
-  `i64::MAX as u64` (cast-safe sentinel), with a comment documenting the
-  wrap hazard.
-- `crates/gyre-adapters/src/sqlite/chain_attestation.rs`
-  (`find_by_repo`): `since`/`until` are clamped into the
-  i64-representable range (`.min(i64::MAX as u64) as i64`) before the
-  SQL predicate, so a u64 "no upper bound" sentinel can never wrap to -1
-  on any caller — this also cures the six pre-existing
-  `find_by_repo(..., 0, u64::MAX)` calls in `specs.rs` carrying the same
-  latent divergence.
-- **SQLite-backed adapter guard** (the divergence cannot recur silently):
-  new test `find_by_repo_u64_max_bound_matches_rows` seeds one
-  attestation and asserts `find_by_repo(repo, 0, u64::MAX)` returns it
-  (plus the `i64::MAX as u64` idiom, and that a `since` bound above
-  every timestamp still excludes rows). Verified to FAIL (0 rows,
-  exit 101) with the clamp reverted to the naive cast and PASS with it —
-  it reproduces the exact production empty-set divergence, so the
-  SQLite backend can no longer ship with the bound broken while
-  mem-backed tests stay green.
+Review found a mem/SQLite port-contract divergence: the u64::MAX "no
+upper bound" sentinel wrapped to -1 in the SQLite adapter's
+`chain_attestations.find_by_repo` i64 predicate, so that provenance
+surface always returned empty on production SQLite while mem-backed
+tests stayed green. Fixed by clamping `since`/`until` into the
+i64-representable range in the SQLite adapter and using an
+`i64::MAX as u64` sentinel at the blast-radius call site, with a new
+SQLite-backed guard test (`find_by_repo_u64_max_bound_matches_rows`)
+verified to fail with the naive cast and pass with the clamp.
 
-### Verification evidence
+### Finalizer round: rustfmt (commit 8c86b5d9)
 
-- `cargo test -p gyre-adapters --lib sqlite::chain_attestation`
-  (build wrapper): exit 0 — 17 passed, 0 failed, including the new
-  `find_by_repo_u64_max_bound_matches_rows` guard. Probe transcripts in
-  `/tmp/stage/review-evidence/` (with-fix run, without-clamp failure,
-  repair notes).
-- `cargo check -p gyre-server` (build wrapper): exit 0, no errors, no
-  warnings — after the handler change and again after rustfmt.
-- rustfmt clean on both touched files (`meta_specs.rs` also carried
-  three pre-existing rustfmt diffs from the candidate; applied —
-  formatting only, behavior preserved).
-- Server-side blast-radius tests (reconciliation.rs tests module):
-  `blast_radius_version_discriminates_and_counts_provenance` (the A/B
-  acceptance scenario: B pinned v2 skipped with pinned version reported
-  and excluded from totals; A's two repos carry spec/commit counts equal
-  to the seeded provenance — the v2-recorded commit in repo A excluded;
-  the no-provenance repo of A present in the flat scan with zero counts
-  but omitted from the repos-with-work list; exact totals
-  {repos:2, specs:2, commits:3}),
-  `blast_radius_defaults_superseded_version_to_registry_current`,
-  `blast_radius_labels_and_counts_from_chain_and_merge_attestations`
-  (AC3: inherited vs own labels with identical counting over the chain
-  and merge-attestation surfaces),
-  `blast_radius_rejects_backwards_version_range` (400).
-- **Deferred to the independent verifier (sandbox 4 GiB constraint):**
-  the cargo build wrapper refuses gyre-server test compilation, so the
-  server-side tests are type-checked here (`cargo check -p gyre-server`
-  exit 0) but must be EXECUTED by the verifier:
+The retained verification run (7cfa23affad248999a075aa8b55652ef, exit 1)
+failed only its rustfmt gate: changed lines in the task-327
+blast-radius test code needed formatting. Fixed formatting-only (line
+wrapping of `get_blast_radius` call sites, one collapsed iterator chain,
+two wrapped `seed_spec_binding` calls); no behavior change;
+`cargo fmt --check -p gyre-server -p gyre-adapters` is now clean.
+Evidence: /tmp/stage/review-evidence/rustfmt-fix.txt.
 
-      cargo test -p gyre-server --lib blast_radius
+### Deferred to the independent verifier
 
-  (covers all four blast-radius tests plus the pre-existing
-  `blast_radius_covers_required_scopes_and_spec_bindings` and
-  `blast_radius_empty`; `cargo test -p gyre-server --lib reconciliation::`
-  as the wider regression scope). Full workspace suites, architecture
-  checks, all-target Clippy, and GitHub CI are verifier/executor-owned.
+Server test binaries exceed this sandbox's build budget. The verifier
+should run the focused server test set:
 
-### Docs and coverage
+    cargo test -p gyre-server reconciliation::tests::blast_radius
 
-- `docs/api-reference.md`: the blast-radius row documents the query
-  parameters and the full response shape (skipped workspaces, per-repo
-  counts, totals, binding kinds).
-- `specs/coverage/system/meta-spec-reconciliation.md` row 8 (§4) updated
-  from Partial to the task-327 implementation with source evidence.
+plus `cargo fmt --check` and the standing workspace gates.
