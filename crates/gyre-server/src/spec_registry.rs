@@ -438,6 +438,26 @@ pub fn parse_cross_workspace_target(target: &str) -> CrossWorkspaceTarget {
 // Ledger sync — called after a push to the default branch
 // ---------------------------------------------------------------------------
 
+/// Record the durable pending-since marker when the sync has a KV store
+/// (task-339): every call site is a (re-)entry into `pending`.
+async fn sync_mark_pending(
+    kv: Option<&Arc<dyn gyre_ports::KvJsonStore>>,
+    spec_path: &str,
+    now: u64,
+) {
+    if let Some(kv) = kv {
+        crate::spec_pending_since::mark_pending(kv, spec_path, now).await;
+    }
+}
+
+/// Clear the durable pending-since marker when the sync has a KV store
+/// (task-339): the entry left `pending`.
+async fn sync_clear_pending(kv: Option<&Arc<dyn gyre_ports::KvJsonStore>>, spec_path: &str) {
+    if let Some(kv) = kv {
+        crate::spec_pending_since::clear_pending(kv, spec_path).await;
+    }
+}
+
 /// Sync the spec ledger from the manifest committed at HEAD of the given repo.
 ///
 /// Reads `specs/manifest.yaml` from the new HEAD via `git show`, parses it,
@@ -473,26 +493,6 @@ pub fn parse_cross_workspace_target(target: &str) -> CrossWorkspaceTarget {
 ///   staleness checker (which cannot recover the pushing principal from the link
 ///   row) never silently flips them "active".
 #[allow(clippy::too_many_arguments)]
-/// Record the durable pending-since marker when the sync has a KV store
-/// (task-339): every call site is a (re-)entry into `pending`.
-async fn sync_mark_pending(
-    kv: Option<&Arc<dyn gyre_ports::KvJsonStore>>,
-    spec_path: &str,
-    now: u64,
-) {
-    if let Some(kv) = kv {
-        crate::spec_pending_since::mark_pending(kv, spec_path, now).await;
-    }
-}
-
-/// Clear the durable pending-since marker when the sync has a KV store
-/// (task-339): the entry left `pending`.
-async fn sync_clear_pending(kv: Option<&Arc<dyn gyre_ports::KvJsonStore>>, spec_path: &str) {
-    if let Some(kv) = kv {
-        crate::spec_pending_since::clear_pending(kv, spec_path).await;
-    }
-}
-
 pub async fn sync_spec_ledger(
     ledger: &Arc<dyn gyre_ports::SpecLedgerRepository>,
     links_store: &SpecLinksStore,
