@@ -2,8 +2,8 @@
 title: "Remove orchestrator agent-spawning and carry out the spec amendment table"
 spec_ref: "Spec gap spec-41a92c20354c6a108e6074e3 / orchestrator-boundary-amendments / 4a3f940495a8"
 depends_on: [task-302]
-progress: ready-for-review
-commits: ["e822f5417041018c32c286a22e87664b47c175d4", "1167df20681ee579878dbf704587a97befec7633", "071353fe866168d84e605b15c84108e083c2844f"]
+progress: not-started
+commits: []
 ---
 
 ## Required behavior
@@ -127,102 +127,3 @@ Canonical spec: `specs/system/agent-runtime.md`. Source: `678a8ac3e3bfeafeb66cdb
     ]
   }
 ]
-
-## Shipped
-
-Progress: `ready-for-review` — implementation complete on this branch
-(checkpoints `071353fe`, `1167df20`; repair round `e822f541`). Independent
-verification pending: gyre-server test binaries exceed this sandbox's 4 GiB
-build budget; the exact command list is recorded in
-/tmp/stage/review-evidence/task-298-repair-round2.md.
-
-### Amendment-table carry-out (checkpoints 071353fe + 1167df20)
-
-1. **gyre_spawn_worker removed**: MCP catalog entry, tools/call dispatch,
-   scope validation, prompt references (api/prompts.rs, api/spawn.rs), and
-   tests. No MCP tool handler available to a repo-orchestrator JWT creates
-   agent records; the mechanical Phase-4 scheduler is the only task→agent
-   path. Decomposition machinery untouched.
-   Test: `mcp_spawn_worker_removed_from_catalog_and_dispatch` (mcp.rs).
-2. **/api/v1/personas removed; registry carries personas**: routes/module
-   gone (404); MetaSpec carries the Persona operational fields
-   model/temperature/max_tokens/budget (migration 000072, SQLite+PG+mem
-   adapters); `sync_persona_from_meta_spec` materializes/adopts the Persona
-   read model spawn-time resolution consumes. Consumers migrated:
-   - CLI bootstrap: find/create/approve via `/api/v1/meta-specs` with
-     `kind=meta:persona`; `bootstrap::registry_persona_name` registers a
-     name whose derived slug equals the built-in slug so the sync ADOPTS
-     the startup-seeded persona (unit test
-     `registry_persona_names_derive_to_builtin_slugs`; 25 CLI bootstrap
-     tests pass).
-   - Web client: dead `/personas` methods removed from api.js (MetaSpecs
-     component already used the registry surface).
-   - Server tests: `create_tenant_seeds_builtin_personas` verifies through
-     the persona port; the abac live test whose fixture was the removed
-     approve endpoint is replaced by
-     `persona_approval_via_registry_denies_agent`.
-   - New e2e test `registry_meta_persona_is_spawn_bindable` (spawn.rs):
-     registry POST with operational fields → synced Pending persona →
-     spawn refused while Pending → registry approval + operational-field
-     edit mirrored to the read model → spawn binds the registry-created
-     persona by derived slug.
-3. **archive ABAC action**: action vocabulary + resolver mappings for repo
-   archive/unarchive; exemption-file entries removed (frozen count
-   38→36). Test: `archive_action_deny_blocks_repo_archive_through_middleware`.
-4. **Ralph-loop supersession**: `specs/system/ralph-loop.md` and its
-   coverage file deleted; authorization-provenance.md and the
-   meta-spec-reconciliation.md example re-pointed to agent-runtime.md §1;
-   remaining `ralph-loop.md` grep hits in specs/ and docs/ are only
-   agent-runtime.md's own canonical supersession statement and historical
-   task/coverage/milestone records.
-5. **hierarchy-enforcement.md §3/§4 amendments**: compute-target and
-   meta-spec CRUD route families added to the §4 route table with
-   auth-context notes; meta_spec_versions/meta_spec_bindings/
-   compute_targets added to the §3 tenant-filter configuration; KvJsonStore
-   note corrected (compute_targets is a tenant_id-bearing table since
-   migration 000033).
-6. **Dependency close-out (task-302 clauses)**: no workspace/tenant
-   meta-spec-set routes remain; no production writer to
-   meta_spec_sets/tenant_meta_spec_sets; merge-time drift enforcement
-   compares merge-attestation meta_specs_used against current required
-   meta-spec versions (verified on this head; test
-   `retired_meta_spec_set_endpoints_return_404`).
-
-### Repair round (e822f541) — review findings 1 and 2
-
-`GyreClient::approve_persona` sent `{"approval_status": "approved"}`
-(lowercase) while the server parsed approval_status case-sensitively, so
-the admin-token CLI bootstrap aborted step 5 with 400 and never converged,
-and the deferred e2e test `registry_meta_persona_is_spawn_bindable`
-asserted OK on the same invalid payload. Fix:
-
-- `parse_approval_status` (api/meta_specs.rs) now lowercases at the API
-  edge — the same leniency `parse_kind`/`parse_scope` already apply; the
-  domain `MetaSpecApprovalStatus::parse` stays case-sensitive for
-  DB-stored canonical values. New unit test
-  `approval_status_parse_accepts_any_case` pins the leniency.
-- `approve_persona` (CLI client.rs) now sends the canonical `"Approved"`.
-- The spawn.rs e2e payload stays lowercase deliberately, documented as
-  pinning the edge case-insensitivity end-to-end.
-
-### Test evidence (in-sandbox, via build wrapper)
-
-- `cargo check -p gyre-server -p gyre-cli` — exit 0.
-- `cargo check -p gyre-server --tests` — exit 0 (type-checks the new and
-  edited tests without producing binaries).
-- `cargo test -p gyre-cli` — 223 + 1 passed, 0 failed.
-- `scripts/check-mcp-write-tools.sh`, `scripts/check-abac-route-registry.sh`,
-  `scripts/check-abac-exempt-handlers.sh`, `scripts/check-arch.sh` — all OK.
-
-Deferred to the independent verifier (exact list in
-/tmp/stage/review-evidence/task-298-repair-round2.md):
-`approval_status_parse_accepts_any_case`,
-`registry_meta_persona_is_spawn_bindable`,
-`mcp_spawn_worker_removed_from_catalog_and_dispatch`,
-`archive_action_deny_blocks_repo_archive_through_middleware`,
-`persona_approval_via_registry_denies_agent`,
-`create_tenant_seeds_builtin_personas`,
-`retired_meta_spec_set_endpoints_return_404`, the full `-p gyre-server`
-suite, `--test git_integration` (`push_to_archived_repo_rejected`), and a
-real-server `gyre bootstrap` twice (fresh + resume-with-Pending) to prove
-step 5 convergence.
