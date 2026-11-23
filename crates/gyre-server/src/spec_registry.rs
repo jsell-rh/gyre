@@ -344,18 +344,15 @@ fn is_valid_human_approval(
     entry: &SpecEntry,
     current_sha: &str,
 ) -> bool {
-    event.approver_type == "human"
-        && event.spec_sha == current_sha
-        && event.is_active()
-        && {
-            let approvers: &[String] = match entry.approval.as_ref() {
-                Some(a) if !a.human_approvers.is_empty() => &a.human_approvers,
-                // Manifest Schema default: `approval.human_approvers`
-                // defaults to `[owner]` (owner is a required field).
-                _ => std::slice::from_ref(&entry.owner),
-            };
-            approvers.iter().any(|a| a == &event.approver_id)
-        }
+    event.approver_type == "human" && event.spec_sha == current_sha && event.is_active() && {
+        let approvers: &[String] = match entry.approval.as_ref() {
+            Some(a) if !a.human_approvers.is_empty() => &a.human_approvers,
+            // Manifest Schema default: `approval.human_approvers`
+            // defaults to `[owner]` (owner is a required field).
+            _ => std::slice::from_ref(&entry.owner),
+        };
+        approvers.iter().any(|a| a == &event.approver_id)
+    }
 }
 
 /// An agent approval is valid when it is active, matches `current_sha`, and
