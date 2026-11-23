@@ -3,7 +3,7 @@ title: "Remove orchestrator agent-spawning and carry out the spec amendment tabl
 spec_ref: "Spec gap spec-41a92c20354c6a108e6074e3 / orchestrator-boundary-amendments / 4a3f940495a8"
 depends_on: [task-302]
 progress: ready-for-review
-commits: ["1167df20681ee579878dbf704587a97befec7633", "071353fe866168d84e605b15c84108e083c2844f"]
+commits: ["071353fe866168d84e605b15c84108e083c2844f", "1167df20681ee579878dbf704587a97befec7633", "e822f5417041018c32c286a22e87664b47c175d4"]
 ---
 
 ## Required behavior
@@ -130,89 +130,99 @@ Canonical spec: `specs/system/agent-runtime.md`. Source: `678a8ac3e3bfeafeb66cdb
 
 ## Shipped
 
-Progress: `ready-for-review` (implementation complete on this branch; independent
-verification pending — server test binaries exceed this sandbox's build budget,
-exact command list recorded in /tmp/stage/review-evidence/task-298-finalize.md).
+Progress: `ready-for-review` — implementation complete on this branch
+(checkpoints `071353fe`, `1167df20`; repair round `e822f541`). Independent
+verification pending: gyre-server test binaries exceed this sandbox's 4 GiB
+build budget; the exact command list is recorded in
+/tmp/stage/review-evidence/task-298-repair-round2.md.
 
-### What shipped
+### Amendment-table carry-out (checkpoints 071353fe + 1167df20)
 
-Continued from the saved source checkpoint (`071353fe`, attribution record
-`bb75ab28`) and completed the assignment:
-
-1. **gyre_spawn_worker removed** (checkpoint): MCP catalog entry, tools/call
-   dispatch, scope validation, prompt references (api/prompts.rs, api/spawn.rs),
-   and tests. No MCP tool handler available to a repo-orchestrator JWT creates
-   agent records; the mechanical Phase-4 scheduler is the only task→agent path.
-   The decomposition machinery is untouched. This round cleaned the remaining
-   stale spawn.rs comments referencing the tool as a live path.
+1. **gyre_spawn_worker removed**: MCP catalog entry, tools/call dispatch,
+   scope validation, prompt references (api/prompts.rs, api/spawn.rs), and
+   tests. No MCP tool handler available to a repo-orchestrator JWT creates
+   agent records; the mechanical Phase-4 scheduler is the only task→agent
+   path. Decomposition machinery untouched.
    Test: `mcp_spawn_worker_removed_from_catalog_and_dispatch` (mcp.rs).
-2. **/api/v1/personas removed; registry carries personas** (checkpoint +
-   this round): routes/module gone (404); MetaSpec carries the Persona
-   operational fields model/temperature/max_tokens/budget (migration 000072,
-   SQLite+PG+mem adapters); `sync_persona_from_meta_spec` materializes/adopts
-   the Persona read model. This round migrated the remaining consumers:
+2. **/api/v1/personas removed; registry carries personas**: routes/module
+   gone (404); MetaSpec carries the Persona operational fields
+   model/temperature/max_tokens/budget (migration 000072, SQLite+PG+mem
+   adapters); `sync_persona_from_meta_spec` materializes/adopts the Persona
+   read model spawn-time resolution consumes. Consumers migrated:
    - CLI bootstrap: find/create/approve via `/api/v1/meta-specs` with
-     `kind=meta:persona`; new `bootstrap::registry_persona_name` registers a
-     name whose derived slug equals the built-in slug so the sync ADOPTS the
-     startup-seeded persona instead of duplicating it (unit test
-     `registry_persona_names_derive_to_builtin_slugs`); resume test rewritten
-     against the registry surface (25 CLI bootstrap tests pass).
-   - Web client: dead `/personas` methods removed from api.js (no component or
-     test used them; MetaSpecs.svelte already uses the registry surface — 120
-     MetaSpecs web tests pass).
-   - Server tests: `create_tenant_seeds_builtin_personas` verifies through the
-     persona port (the HTTP listing is gone); the abac live test
-     `builtin_persona_human_approval_denies_agent_live` (whose fixture route
-     was the removed approve endpoint) is replaced by
-     `persona_approval_via_registry_denies_agent` — a real agent JWT PUTting
-     `approval_status` on a meta:persona through the production router gets
-     403 and the record stays Pending.
-   - New end-to-end test `registry_meta_persona_is_spawn_bindable` (spawn.rs):
-     registry POST with operational fields → synced Pending persona (same id,
-     derived slug, prompt, operational fields) → spawn refused while Pending →
-     registry approval + operational-field edit mirrored to the read model →
-     spawn binds the registry-created persona by derived slug
-     (`agent.persona_id` == meta-spec id).
-3. **archive ABAC action** (checkpoint): action vocabulary + resolver mappings
-   for repo archive/unarchive; exemption-file entries removed (frozen count
+     `kind=meta:persona`; `bootstrap::registry_persona_name` registers a
+     name whose derived slug equals the built-in slug so the sync ADOPTS
+     the startup-seeded persona (unit test
+     `registry_persona_names_derive_to_builtin_slugs`; 25 CLI bootstrap
+     tests pass).
+   - Web client: dead `/personas` methods removed from api.js (MetaSpecs
+     component already used the registry surface).
+   - Server tests: `create_tenant_seeds_builtin_personas` verifies through
+     the persona port; the abac live test whose fixture was the removed
+     approve endpoint is replaced by
+     `persona_approval_via_registry_denies_agent`.
+   - New e2e test `registry_meta_persona_is_spawn_bindable` (spawn.rs):
+     registry POST with operational fields → synced Pending persona →
+     spawn refused while Pending → registry approval + operational-field
+     edit mirrored to the read model → spawn binds the registry-created
+     persona by derived slug.
+3. **archive ABAC action**: action vocabulary + resolver mappings for repo
+   archive/unarchive; exemption-file entries removed (frozen count
    38→36). Test: `archive_action_deny_blocks_repo_archive_through_middleware`.
-4. **Ralph-loop supersession** (this round): `specs/system/ralph-loop.md` and
-   its coverage file deleted; authorization-provenance.md and
-   meta-spec-reconciliation.md example re-pointed; remaining `ralph-loop.md`
-   grep hits in specs/ and docs/ are only agent-runtime.md's own canonical
-   supersession statement and historical task/coverage/milestone records.
-5. **hierarchy-enforcement.md §3/§4 amendments** (this round): compute-target
-   and meta-spec CRUD route families added to the §4 route table with
-   auth-context notes; meta_spec_versions/meta_spec_bindings/compute_targets
-   added to the §3 tenant-filter configuration; KvJsonStore note corrected
-   (compute_targets is a tenant_id-bearing table since migration 000033).
-6. **Dependency close-out verification** (task-302 clauses, verified on this
-   head): no workspace/tenant meta-spec-set routes remain; no production
-   writer to the meta_spec_sets/tenant_meta_spec_sets stores (only the distinct
-   `agent_meta_spec_sets` prompt-set record namespace remains); merge-time
-   drift compares merge-attestation `meta_specs_used` against current required
-   versions (reconciliation.rs `mr_recorded_meta_specs_used`).
+4. **Ralph-loop supersession**: `specs/system/ralph-loop.md` and its
+   coverage file deleted; authorization-provenance.md and the
+   meta-spec-reconciliation.md example re-pointed to agent-runtime.md §1;
+   remaining `ralph-loop.md` grep hits in specs/ and docs/ are only
+   agent-runtime.md's own canonical supersession statement and historical
+   task/coverage/milestone records.
+5. **hierarchy-enforcement.md §3/§4 amendments**: compute-target and
+   meta-spec CRUD route families added to the §4 route table with
+   auth-context notes; meta_spec_versions/meta_spec_bindings/
+   compute_targets added to the §3 tenant-filter configuration; KvJsonStore
+   note corrected (compute_targets is a tenant_id-bearing table since
+   migration 000033).
+6. **Dependency close-out (task-302 clauses)**: no workspace/tenant
+   meta-spec-set routes remain; no production writer to
+   meta_spec_sets/tenant_meta_spec_sets; merge-time drift enforcement
+   compares merge-attestation meta_specs_used against current required
+   meta-spec versions (verified on this head; test
+   `retired_meta_spec_set_endpoints_return_404`).
 
-Also fixed in this round: missing MetaSpec field initializers in the
-sqlite adapter test (E0063), `cargo fmt` on all touched Rust files.
+### Repair round (e822f541) — review findings 1 and 2
 
-### Test evidence
+`GyreClient::approve_persona` sent `{"approval_status": "approved"}`
+(lowercase) while the server parsed approval_status case-sensitively, so
+the admin-token CLI bootstrap aborted step 5 with 400 and never converged,
+and the deferred e2e test `registry_meta_persona_is_spawn_bindable`
+asserted OK on the same invalid payload. Fix:
 
-- In-sandbox (exit codes in /tmp/stage/review-evidence/):
-  `cargo check --workspace --tests` clean; `cargo test -p gyre-cli bootstrap`
-  25 passed; `cargo test -p gyre-domain` 588 passed; `cargo test -p
-  gyre-adapters --lib` 608 passed; vitest MetaSpecs.test.js 120 passed;
-  all mechanical gates green (check-mcp-write-tools, check-abac-route-registry
-  at frozen count 36, check-abac-exempt-handlers, check-arch,
-  check-migration-versions/portability, and the remaining invariant checks).
-- Deferred to the independent verifier (gyre-server test binaries exceed the
-  sandbox build budget; list in /tmp/stage/review-evidence/task-298-finalize.md):
-  `mcp_spawn_worker_removed_from_catalog_and_dispatch`,
-  `archive_action_deny_blocks_repo_archive_through_middleware`,
-  `persona_approval_via_registry_denies_agent`,
-  `create_tenant_seeds_builtin_personas`,
-  `registry_meta_persona_is_spawn_bindable`, the api::meta_specs registry
-  suite, api::tenants, and the `scheduler_*` decomposition regression sweep.
-- web/dist untouched (restored to the assignment base after a build.rs
-  side rebuild during cargo check); final asset rebuild is the executor's
-  remote stage.
+- `parse_approval_status` (api/meta_specs.rs) now lowercases at the API
+  edge — the same leniency `parse_kind`/`parse_scope` already apply; the
+  domain `MetaSpecApprovalStatus::parse` stays case-sensitive for
+  DB-stored canonical values. New unit test
+  `approval_status_parse_accepts_any_case` pins the leniency.
+- `approve_persona` (CLI client.rs) now sends the canonical `"Approved"`.
+- The spawn.rs e2e payload stays lowercase deliberately, documented as
+  pinning the edge case-insensitivity end-to-end.
+
+### Test evidence (in-sandbox, via build wrapper)
+
+- `cargo check -p gyre-server -p gyre-cli` — exit 0.
+- `cargo check -p gyre-server --tests` — exit 0 (type-checks the new and
+  edited tests without producing binaries).
+- `cargo test -p gyre-cli` — 223 + 1 passed, 0 failed.
+- `scripts/check-mcp-write-tools.sh`, `scripts/check-abac-route-registry.sh`,
+  `scripts/check-abac-exempt-handlers.sh`, `scripts/check-arch.sh` — all OK.
+
+Deferred to the independent verifier (exact list in
+/tmp/stage/review-evidence/task-298-repair-round2.md):
+`approval_status_parse_accepts_any_case`,
+`registry_meta_persona_is_spawn_bindable`,
+`mcp_spawn_worker_removed_from_catalog_and_dispatch`,
+`archive_action_deny_blocks_repo_archive_through_middleware`,
+`persona_approval_via_registry_denies_agent`,
+`create_tenant_seeds_builtin_personas`,
+`retired_meta_spec_set_endpoints_return_404`, the full `-p gyre-server`
+suite, `--test git_integration` (`push_to_archived_repo_rejected`), and a
+real-server `gyre bootstrap` twice (fresh + resume-with-Pending) to prove
+step 5 convergence.
