@@ -2,7 +2,7 @@
 title: "Publish reviewed spec backlog for specs/development/agent-experience.md"
 spec_ref: "GOAL.md — real implementations and meaningful verification"
 depends_on: []
-progress: complete
+progress: ready-for-review
 commits: []
 ---
 
@@ -568,4 +568,15 @@ Publish exactly the independently reviewed missing-work plan below. Only create 
 
 ## Shipped
 
-Task definitions and explicit bindings only; no product implementation claimed.
+Task definitions and explicit bindings only; no product implementation claimed. The reviewed backlog (task-343 through task-347, each carrying its assigned section binding, required behavior, acceptance criteria, and negative probe) is published unchanged from the independently reviewed plan.
+
+### Merge reconciliation
+
+The previously published candidate conflicted with current main (main merged the specs/system/dependency-graph.md backlog as task-341/task-342, which also edits specs/task-spec-inputs.json). Resolved as a verbatim union: all five agent-experience `backlog/<section-id>` entries and their `bindings` keys from this branch, plus the dependency-graph entries from main, with every entry byte-identical to its parent and no existing binding rewritten (registry sections 329 shared + 5 + 1 = 335; bindings 272 + 5 + 1 = 278). The canonical spec specs/development/agent-experience.md and specs/coverage/ are untouched relative to both parents; no product file, gate, coverage status, or existing task changed. New tasks remain not-started.
+
+### Verification evidence
+
+- Resolved specs/task-spec-inputs.json parses as valid JSON and is exactly the union of both parents' entries (programmatic comparison: no missing, no extra, no rewritten entries).
+- Each of the five task documents matches the reviewed plan verbatim: title, mapped depends_on (task-344 → task-343; task-347 → task-346), not-started progress, required_behavior, every acceptance criterion, negative_probe, and spec_ref binding.
+- No duplicate active assignment: each of the five backlog section ids is referenced by exactly one binding in the registry.
+- scripts/test_pipeline_spec_backlog.py (the durable stage chain that validates backlog publication manifests, including `validate_manifest`'s no-rewrite rules): 40 tests, all pass (`python3 -m unittest test_pipeline_spec_backlog` in scripts/, exit 0).
