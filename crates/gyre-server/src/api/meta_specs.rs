@@ -575,7 +575,9 @@ pub async fn get_meta_spec_blast_radius(
         let (reason, binding) = if own_at_from {
             (BLAST_RADIUS_WORKSPACE_BINDING, "spec_binding")
         } else {
-            let (kind, _) = ev.required.expect("checked: required_at_from implies required");
+            let (kind, _) = ev
+                .required
+                .expect("checked: required_at_from implies required");
             (required_binding_reason(ms_scope.clone()), kind)
         };
 
@@ -592,9 +594,14 @@ pub async fn get_meta_spec_blast_radius(
             .unwrap_or_default();
         let mut work: Vec<BlastRadiusRepoWork> = Vec::new();
         for repo in &repos {
-            let (specs, commits) =
-                blast_radius_repo_provenance(&state, &ms_id, from_version, &repo.id, &mut prompt_records)
-                    .await;
+            let (specs, commits) = blast_radius_repo_provenance(
+                &state,
+                &ms_id,
+                from_version,
+                &repo.id,
+                &mut prompt_records,
+            )
+            .await;
             let spec_count = specs.len() as u64;
             let commit_count = commits.len() as u64;
             affected_repos.push(AffectedRepo {
@@ -697,12 +704,11 @@ async fn blast_radius_repo_provenance(
 
     // True when the recorded governing meta-spec versions include the
     // changed meta-spec at the superseded version.
-    let used_at_superseded =
-        |rec: &crate::prompt_assembly::AgentPromptSetRecord| {
-            rec.meta_specs_used
-                .iter()
-                .any(|u| u.id == *meta_spec_id && u.version == superseded_version)
-        };
+    let used_at_superseded = |rec: &crate::prompt_assembly::AgentPromptSetRecord| {
+        rec.meta_specs_used
+            .iter()
+            .any(|u| u.id == *meta_spec_id && u.version == superseded_version)
+    };
 
     // Surface 1 — agent-commit provenance: the commit from the
     // agent-to-commit mapping, the governing versions and the spec
@@ -726,9 +732,16 @@ async fn blast_radius_repo_provenance(
     // attestation itself (the signed input's spec_path, the attested
     // commit SHA), governing versions from the author agent's prompt-set
     // record.
+    //
+    // The upper bound is `i64::MAX as u64`, NOT `u64::MAX`: the SQLite
+    // adapter stores `created_at` as i64 and casts the bound
+    // (`until as i64`), and `u64::MAX as i64 == -1`, so a `u64::MAX`
+    // bound would filter `created_at <= -1` and match no positive
+    // timestamp — silently emptying this provenance surface in
+    // production while the u64-comparing mem adapter stays green.
     if let Ok(chain) = state
         .chain_attestations
-        .find_by_repo(repo_id.as_str(), 0, u64::MAX)
+        .find_by_repo(repo_id.as_str(), 0, i64::MAX as u64)
         .await
     {
         for att in &chain {

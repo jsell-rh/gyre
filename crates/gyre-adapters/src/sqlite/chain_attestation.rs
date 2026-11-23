@@ -256,13 +256,24 @@ impl ChainAttestationRepository for SqliteStorage {
         let pool = Arc::clone(&self.pool);
         let tenant_id = self.tenant_id.clone();
         let repo_id = repo_id.to_string();
+        // `created_at` is stored as i64. Clamp the u64 bounds into the
+        // i64-representable range before casting: a u64 "no upper bound"
+        // sentinel (`u64::MAX`) cast with `as i64` wraps to -1, making the
+        // predicate `created_at <= -1` — satisfiable by no positive
+        // timestamp, so every caller passing it silently gets an empty
+        // set on SQLite while the u64-comparing mem adapter returns rows
+        // (port-contract divergence). Clamping preserves the u64 contract
+        // on both backends: bounds beyond i64::MAX are indistinguishable
+        // from i64::MAX for any storable timestamp.
+        let since_i64 = since.min(i64::MAX as u64) as i64;
+        let until_i64 = until.min(i64::MAX as u64) as i64;
         tokio::task::spawn_blocking(move || -> Result<Vec<Attestation>> {
             let mut conn = pool.get().context("get db connection")?;
             let rows = chain_attestations::table
                 .filter(chain_attestations::tenant_id.eq(&tenant_id))
                 .filter(chain_attestations::repo_id.eq(&repo_id))
-                .filter(chain_attestations::created_at.ge(since as i64))
-                .filter(chain_attestations::created_at.le(until as i64))
+                .filter(chain_attestations::created_at.ge(since_i64))
+                .filter(chain_attestations::created_at.le(until_i64))
                 .order(chain_attestations::created_at.asc())
                 .load::<ChainAttestationRow>(&mut *conn)
                 .context("find chain attestations by repo")?;
@@ -420,6 +431,48 @@ mod tests {
             .unwrap();
         assert_eq!(narrow.len(), 1);
         assert_eq!(narrow[0].id, "sha256:a1");
+    }
+
+    /// Guard against the u64/i64 bound-cast divergence: `created_at` is
+    /// stored as i64, and `u64::MAX as i64 == -1`, so an unguarded
+    /// `until as i64` cast turns the u64 "no upper bound" sentinel into
+    /// `created_at <= -1` — matching no positive timestamp. The mem
+    /// adapter compares the same bound in u64 semantics and returns the
+    /// row, so only this SQLite-backed test catches the divergence (the
+    /// blast-radius provenance query in gyre-server shipped with exactly
+    /// this bug: SQLite always returned an empty set while the
+    /// mem-backed tests stayed green).
+    #[tokio::test]
+    async fn find_by_repo_u64_max_bound_matches_rows() {
+        let (_tmp, storage) = tmp_storage();
+        let att = sample_signed_attestation("sha256:a1", "TASK-001", "commit1");
+        storage.save(&att).await.unwrap();
+
+        // The exact call the blast-radius handler makes: full history,
+        // no upper bound, expressed as the u64 sentinel.
+        let all = storage.find_by_repo("repo-1", 0, u64::MAX).await.unwrap();
+        assert_eq!(
+            all.len(),
+            1,
+            "u64::MAX upper bound must include every stored attestation \
+             (i64 storage must clamp, not cast-wrap, the bound)"
+        );
+        assert_eq!(all[0].id, "sha256:a1");
+
+        // The cast-safe idiom used by the handler after the repair.
+        let all = storage
+            .find_by_repo("repo-1", 0, i64::MAX as u64)
+            .await
+            .unwrap();
+        assert_eq!(all.len(), 1);
+
+        // A since bound above every timestamp must still exclude rows
+        // (clamping must not widen a real, satisfiable range).
+        let none = storage
+            .find_by_repo("repo-1", u64::MAX, u64::MAX)
+            .await
+            .unwrap();
+        assert!(none.is_empty());
     }
 
     #[tokio::test]
