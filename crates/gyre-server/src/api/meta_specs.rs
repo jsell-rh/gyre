@@ -18,7 +18,7 @@ use gyre_domain::{
     Repository, UserRole, Workspace,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::{auth::AuthenticatedAgent, AppState};
@@ -42,26 +42,127 @@ pub struct UpdateRolloutPolicyRequest {
     pub auto_merge: Option<bool>,
 }
 
-/// An affected repo entry in a blast radius response.
+/// §8 amendment reason label: the workspace's OWN binding put the changed
+/// meta-spec in its effective set — a Workspace-scoped required flag or a
+/// spec-level binding pinned by one of the workspace's specs.
+pub const BLAST_RADIUS_WORKSPACE_BINDING: &str = "workspace_binding";
+
+/// §8 amendment reason label: the binding was INHERITED from a scope above
+/// the workspace — a Global or Tenant-scoped required flag.
+pub const BLAST_RADIUS_TENANT_INHERITANCE: &str = "tenant_inheritance";
+
+/// §8 amendment label for a required-flag binding of the given scope:
+/// Workspace-scoped required flags are the workspace's own binding;
+/// Global/Tenant-scoped ones are inherited.
+fn required_binding_reason(scope: gyre_domain::meta_spec::MetaSpecScope) -> &'static str {
+    match scope {
+        gyre_domain::meta_spec::MetaSpecScope::Workspace => BLAST_RADIUS_WORKSPACE_BINDING,
+        _ => BLAST_RADIUS_TENANT_INHERITANCE,
+    }
+}
+
+/// Per-repo provenance work under the superseded version of a meta-spec
+/// change (§4): the distinct implementation specs and commits whose
+/// provenance records record the changed meta-spec at the superseded
+/// version. Only repos with at least one matching record are listed —
+/// counts derive from provenance records, never from workspace repo
+/// membership.
 #[derive(Clone, Serialize, Deserialize)]
-pub struct AffectedRepo {
+pub struct BlastRadiusRepoWork {
     pub id: String,
-    pub workspace_id: String,
-    pub reason: String,
+    pub spec_count: u64,
+    pub commit_count: u64,
 }
 
 /// An affected workspace entry in a blast radius response.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AffectedWorkspace {
     pub id: String,
+    /// §8 amendment label: `workspace_binding` (own binding) or
+    /// `tenant_inheritance` (inherited from a broader scope).
+    pub reason: String,
+    /// Granular registry-model binding kind that made the workspace
+    /// affected: `required_global`, `required_tenant`, `required_workspace`
+    /// or `spec_binding`.
+    pub binding: String,
+    /// Version of the changed meta-spec this workspace's effective binding
+    /// resolves to — the superseded version for affected workspaces.
+    pub pinned_version: u32,
+    /// Repos of this workspace with provenance work under the superseded
+    /// version (the §4 per-repo output shape). A repo with no provenance
+    /// under the superseded version is omitted — it contributes no counts.
+    pub repos: Vec<BlastRadiusRepoWork>,
+}
+
+/// An affected repo entry in a blast radius response (binding scan: every
+/// repo of every affected workspace, with its provenance work under the
+/// superseded version — zero counts when the repo has none).
+#[derive(Clone, Serialize, Deserialize)]
+pub struct AffectedRepo {
+    pub id: String,
+    pub workspace_id: String,
+    pub reason: String,
+    pub binding: String,
+    pub spec_count: u64,
+    pub commit_count: u64,
+}
+
+/// A workspace that binds the changed meta-spec at a version OTHER than the
+/// superseded one: reported as skipped / not-affected with its pinned
+/// version (the spec's "bound to v2, not affected" case) and excluded from
+/// every count and total.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct SkippedWorkspace {
+    pub id: String,
+    /// The version the workspace's effective binding resolves to.
+    pub pinned_version: u32,
+    /// §8 amendment label of the evaluated binding.
+    pub reason: String,
+    /// Granular registry-model binding kind of the evaluated binding.
+    pub binding: String,
+}
+
+/// Totals over provenance work under the superseded version (§4: "Total:
+/// 5 repos, 32 specs, 1605 commits"). Repos without provenance work under
+/// the superseded version are not counted.
+#[derive(Clone, Default, Serialize, Deserialize)]
+pub struct BlastRadiusTotals {
+    pub repos: u64,
+    pub specs: u64,
+    pub commits: u64,
 }
 
 /// Blast radius response for a meta-spec change.
 #[derive(Serialize)]
 pub struct BlastRadiusResponse {
     pub spec_path: String,
-    pub affected_repos: Vec<AffectedRepo>,
+    /// Superseded version of the changed meta-spec (§4 change context) —
+    /// carried by the request (`?from_version=`) or defaulted to the
+    /// registry's current version (the version a change moves FROM).
+    pub from_version: Option<u32>,
+    /// New version of the change, when the request carries one
+    /// (`?to_version=`). Informational.
+    pub to_version: Option<u32>,
     pub affected_workspaces: Vec<AffectedWorkspace>,
+    /// Every repo of every affected workspace (binding scan), each with its
+    /// provenance work under the superseded version.
+    pub affected_repos: Vec<AffectedRepo>,
+    /// Workspaces bound to the changed meta-spec at a version other than
+    /// the superseded one — not affected by this change.
+    pub skipped_workspaces: Vec<SkippedWorkspace>,
+    pub totals: BlastRadiusTotals,
+}
+
+/// Query parameters of GET /api/v1/meta-specs/{path}/blast-radius — the
+/// §4 change context. `from_version` is the SUPERSEDED version of the
+/// changed meta-spec: a workspace is affected when its effective binding
+/// requires/pins the meta-spec at that version. When omitted, the registry
+/// supplies it as the meta-spec's current version. `to_version` is the
+/// version the change moves TO.
+#[derive(Deserialize)]
+pub struct BlastRadiusQuery {
+    pub from_version: Option<u32>,
+    pub to_version: Option<u32>,
 }
 
 // ---------------------------------------------------------------------------
@@ -294,77 +395,92 @@ pub async fn put_rollout_policy(
 }
 
 // ---------------------------------------------------------------------------
-// GET /api/v1/meta-specs/{path}/blast-radius
+// GET /api/v1/meta-specs/{path}/blast-radius  (meta-spec-reconciliation §4)
 // ---------------------------------------------------------------------------
 
+/// Query parameters: the §4 change context.
 pub async fn get_meta_spec_blast_radius(
     State(state): State<Arc<AppState>>,
     _auth: AuthenticatedAgent,
     Path(spec_path): Path<String>,
-) -> Json<BlastRadiusResponse> {
+    Query(query): Query<BlastRadiusQuery>,
+) -> Result<Json<BlastRadiusResponse>, ApiError> {
     let mut affected_workspaces: Vec<AffectedWorkspace> = Vec::new();
     let mut affected_repos: Vec<AffectedRepo> = Vec::new();
+    let mut skipped_workspaces: Vec<SkippedWorkspace> = Vec::new();
+    let mut totals = BlastRadiusTotals::default();
 
     // Registry model (meta-spec-reconciliation.md amendments row): the
     // retired meta-spec-set KV model is replaced by registry required flags
-    // plus spec-level bindings. A workspace is affected by a change to this
-    // meta-spec when either surface references it:
-    // - required flags: a Global required meta-spec affects every workspace;
-    //   a Tenant-scoped required one affects its tenant's workspaces
-    //   (tenant inheritance); a Workspace-scoped required one affects its
-    //   own workspace;
-    // - spec-level bindings: a spec bound to this meta-spec drags its
-    //   owning workspace in (the binding injects the meta-spec into every
-    //   agent spawned for that spec).
+    // plus spec-level bindings. A workspace binds this meta-spec when either
+    // surface references it:
+    // - required flags: a Global required meta-spec binds every workspace;
+    //   a Tenant-scoped required one binds its tenant's workspaces
+    //   (tenant inheritance); a Workspace-scoped required one binds its own
+    //   workspace. Required meta-specs apply at the registry's CURRENT
+    //   version — there is no pin.
+    // - spec-level bindings: a spec bound to this meta-spec at
+    //   `pinned_version` binds its owning workspace (per the ledger entry's
+    //   workspace scope) at exactly that version.
     let ms = crate::reconciliation::find_meta_spec_by_name(&state, &spec_path)
         .await
         .ok()
         .flatten();
     let Some(ms) = ms else {
-        return Json(BlastRadiusResponse {
+        return Ok(Json(BlastRadiusResponse {
             spec_path,
-            affected_repos,
+            from_version: query.from_version,
+            to_version: query.to_version,
             affected_workspaces,
-        });
+            affected_repos,
+            skipped_workspaces,
+            totals,
+        }));
     };
     let ms_id = ms.id.clone();
+    let ms_scope = ms.scope.clone();
 
-    // (workspace_id, reason) pairs, deduplicated by workspace with the
-    // first (most specific) reason winning.
-    let mut affected: Vec<(Id, &str)> = Vec::new();
-    let push_ws = |ws_id: Id, reason: &'static str, affected: &mut Vec<(Id, &'static str)>| {
-        if !affected.iter().any(|(id, _)| *id == ws_id) {
-            affected.push((ws_id, reason));
-        }
-    };
-
-    let workspaces = state.workspaces.list().await.unwrap_or_default();
-    if ms.required {
-        match ms.scope {
-            MetaSpecScope::Global => {
-                for ws in &workspaces {
-                    push_ws(ws.id.clone(), "required_global", &mut affected);
-                }
-            }
-            MetaSpecScope::Tenant => {
-                if let Some(tenant_id) = ms.scope_id.as_deref() {
-                    for ws in &workspaces {
-                        if ws.tenant_id.as_str() == tenant_id {
-                            push_ws(ws.id.clone(), "required_tenant", &mut affected);
-                        }
-                    }
-                }
-            }
-            MetaSpecScope::Workspace => {
-                if let Some(ws_id) = ms.scope_id.as_deref() {
-                    push_ws(Id::new(ws_id), "required_workspace", &mut affected);
-                }
-            }
+    // §4 change context: the superseded version of the changed meta-spec.
+    // Carried by the request (`?from_version=`) or supplied by the registry
+    // as the current version — the version a change moves FROM.
+    let from_version = query.from_version.unwrap_or(ms.version);
+    if let (Some(from), Some(to)) = (query.from_version, query.to_version) {
+        if to <= from {
+            return Err(ApiError::InvalidInput(format!(
+                "to_version ({to}) must be greater than from_version ({from}) — a meta-spec \
+                 change moves to a LATER version"
+            )));
         }
     }
 
-    // Spec-level bindings: every spec bound to this meta-spec drags its
-    // owning workspace (per the ledger entry's workspace scope) in.
+    // Per-workspace binding evaluation for THIS meta-spec.
+    struct WsBindingEval {
+        /// Pinned versions of spec-level bindings owned by the workspace.
+        own_pins: Vec<u32>,
+        /// `(granular kind, effective version)` when the required flag is
+        /// visible from the workspace — always at the registry's current
+        /// version (required meta-specs are injected at current versions;
+        /// there is no pin to read).
+        required: Option<(&'static str, u32)>,
+    }
+
+    let workspaces = state.workspaces.list().await.unwrap_or_default();
+    let mut evals: HashMap<Id, WsBindingEval> = workspaces
+        .iter()
+        .map(|ws| {
+            (
+                ws.id.clone(),
+                WsBindingEval {
+                    own_pins: Vec::new(),
+                    required: None,
+                },
+            )
+        })
+        .collect();
+
+    // Spec-level bindings: every spec bound to this meta-spec contributes
+    // its pin to the owning workspace (per the ledger entry's workspace
+    // scope).
     let bindings = state
         .meta_spec_bindings
         .list_all()
@@ -376,34 +492,296 @@ pub async fn get_meta_spec_blast_radius(
         }
         if let Ok(Some(entry)) = state.spec_ledger.find_by_path(&binding.spec_id).await {
             if let Some(ws_id) = entry.workspace_id.as_deref() {
-                push_ws(Id::new(ws_id), "spec_binding", &mut affected);
+                if let Some(ev) = evals.get_mut(&Id::new(ws_id)) {
+                    ev.own_pins.push(binding.pinned_version);
+                }
             }
         }
     }
 
-    for (ws_id, reason) in affected {
-        affected_workspaces.push(AffectedWorkspace {
-            id: ws_id.to_string(),
-        });
-        let repos = state
-            .repos
-            .list_by_workspace(&ws_id)
-            .await
-            .unwrap_or_default();
-        for repo in &repos {
-            affected_repos.push(AffectedRepo {
-                id: repo.id.to_string(),
-                workspace_id: ws_id.to_string(),
-                reason: reason.to_string(),
-            });
+    // Required flags (registry model): a required meta-spec visible from a
+    // scope binds every workspace there, at the registry's current version.
+    if ms.required {
+        for ws in &workspaces {
+            let (visible, kind) = match ms.scope {
+                MetaSpecScope::Global => (true, "required_global"),
+                MetaSpecScope::Tenant => (
+                    ms.scope_id.as_deref() == Some(ws.tenant_id.as_str()),
+                    "required_tenant",
+                ),
+                MetaSpecScope::Workspace => (
+                    ms.scope_id.as_deref() == Some(ws.id.as_str()),
+                    "required_workspace",
+                ),
+            };
+            if visible {
+                if let Some(ev) = evals.get_mut(&ws.id) {
+                    ev.required = Some((kind, ms.version));
+                }
+            }
         }
     }
 
-    Json(BlastRadiusResponse {
+    // §4 version discrimination + provenance counts. A workspace is
+    // affected when its effective binding requires/pins the changed
+    // meta-spec at the SUPERSEDED version; workspaces bound at other
+    // versions are reported as skipped/not-affected with their pinned
+    // version (the spec's "bound to v2, not affected" case) and excluded
+    // from every count and total. Own bindings win the reason label
+    // (pre-registry-model semantics): a workspace that pins the meta-spec
+    // itself is affected by its own binding; otherwise the affectation
+    // flows from the inherited required flag.
+    //
+    // `prompt_records` caches prompt-set record loads per agent id — the
+    // same agent's record is consulted once per request even when it has
+    // many commits/attestations across the scanned repos.
+    let mut prompt_records: HashMap<String, Option<crate::prompt_assembly::AgentPromptSetRecord>> =
+        HashMap::new();
+    for ws in &workspaces {
+        let Some(ev) = evals.get(&ws.id) else {
+            continue;
+        };
+        let own_at_from = ev.own_pins.contains(&from_version);
+        let required_at_from = ev.required.map(|(_, v)| v == from_version).unwrap_or(false);
+
+        if !(own_at_from || required_at_from) {
+            // Bound at some other version, or unbound. Only bound
+            // workspaces are reported as skipped; the reported pin is the
+            // workspace's own binding when one exists (the most specific
+            // binding), else the required-flag version.
+            if let Some(pinned) = ev
+                .own_pins
+                .iter()
+                .copied()
+                .max()
+                .or_else(|| ev.required.map(|(_, v)| v))
+            {
+                let (reason, binding) = if ev.own_pins.is_empty() {
+                    let (kind, _) = ev.required.expect("checked: required is Some here");
+                    (required_binding_reason(ms_scope.clone()), kind)
+                } else {
+                    (BLAST_RADIUS_WORKSPACE_BINDING, "spec_binding")
+                };
+                skipped_workspaces.push(SkippedWorkspace {
+                    id: ws.id.to_string(),
+                    pinned_version: pinned,
+                    reason: reason.to_string(),
+                    binding: binding.to_string(),
+                });
+            }
+            continue;
+        }
+
+        let (reason, binding) = if own_at_from {
+            (BLAST_RADIUS_WORKSPACE_BINDING, "spec_binding")
+        } else {
+            let (kind, _) = ev
+                .required
+                .expect("checked: required_at_from implies required");
+            (required_binding_reason(ms_scope.clone()), kind)
+        };
+
+        // §4 provenance half: per-repo spec/commit counts under the
+        // superseded version, computed from real provenance records
+        // (agent-commit provenance, chain attestations, merge attestation
+        // bundles) — never from workspace repo membership. A repo with no
+        // provenance under the superseded version contributes zero counts
+        // and is not listed among the repos with work.
+        let repos = state
+            .repos
+            .list_by_workspace(&ws.id)
+            .await
+            .unwrap_or_default();
+        let mut work: Vec<BlastRadiusRepoWork> = Vec::new();
+        for repo in &repos {
+            let (specs, commits) = blast_radius_repo_provenance(
+                &state,
+                &ms_id,
+                from_version,
+                &repo.id,
+                &mut prompt_records,
+            )
+            .await;
+            let spec_count = specs.len() as u64;
+            let commit_count = commits.len() as u64;
+            affected_repos.push(AffectedRepo {
+                id: repo.id.to_string(),
+                workspace_id: ws.id.to_string(),
+                reason: reason.to_string(),
+                binding: binding.to_string(),
+                spec_count,
+                commit_count,
+            });
+            if spec_count > 0 || commit_count > 0 {
+                totals.repos += 1;
+                totals.specs += spec_count;
+                totals.commits += commit_count;
+                work.push(BlastRadiusRepoWork {
+                    id: repo.id.to_string(),
+                    spec_count,
+                    commit_count,
+                });
+            }
+        }
+
+        affected_workspaces.push(AffectedWorkspace {
+            id: ws.id.to_string(),
+            reason: reason.to_string(),
+            binding: binding.to_string(),
+            pinned_version: from_version,
+            repos: work,
+        });
+    }
+
+    Ok(Json(BlastRadiusResponse {
         spec_path,
-        affected_repos,
+        from_version: Some(from_version),
+        to_version: query.to_version,
         affected_workspaces,
-    })
+        affected_repos,
+        skipped_workspaces,
+        totals,
+    }))
+}
+
+/// Spec identity of a `path@sha` spec reference: the path part. A reference
+/// without `@` is already a bare path. Splitting on `@` never slices inside
+/// a multi-byte character (the separator is ASCII).
+fn spec_identity(spec_ref: &str) -> &str {
+    match spec_ref.rsplit_once('@') {
+        Some((path, _)) => path,
+        None => spec_ref,
+    }
+}
+
+/// The author agent's spawn-time prompt-set record, cached per agent id for
+/// the duration of one blast-radius request.
+async fn cached_prompt_record(
+    state: &AppState,
+    cache: &mut HashMap<String, Option<crate::prompt_assembly::AgentPromptSetRecord>>,
+    agent_id: &str,
+) -> Option<crate::prompt_assembly::AgentPromptSetRecord> {
+    if let Some(rec) = cache.get(agent_id) {
+        return rec.clone();
+    }
+    let rec = crate::prompt_assembly::load_prompt_set_record(state, agent_id).await;
+    cache.insert(agent_id.to_string(), rec.clone());
+    rec
+}
+
+/// Per-repo provenance work under the superseded version of a meta-spec
+/// change (§4): the distinct spec identities and commit SHAs recorded in
+/// provenance whose recorded governing meta-spec versions include the
+/// superseded version of the changed meta-spec. Three real storage
+/// surfaces are queried:
+///
+/// - agent-commit provenance (`agent_commits`), joined with the author
+///   agent's spawn-time prompt-set record — the `meta_specs_used` array
+///   that records exactly which meta-spec versions the agent ran under
+///   (the same array merge attestations persist at merge time);
+/// - chain attestations (`chain_attestations`): the commit SHA and spec
+///   identity (the signed input's `spec_path`) come from the attestation
+///   itself, the governing versions from the author agent's prompt-set
+///   record — the same resolution the §9 drift check performs;
+/// - merge attestation bundles (`attestation_store`): the bundle's own
+///   `meta_specs_used` array, its merge commit SHA, and the MR's spec
+///   reference.
+///
+/// Commit SHAs and spec identities are deduplicated across surfaces (a
+/// merge commit attested on two surfaces counts once). A repo with no
+/// matching records on any surface contributes nothing — counts are never
+/// derived from workspace repo membership.
+#[allow(clippy::type_complexity)]
+async fn blast_radius_repo_provenance(
+    state: &AppState,
+    meta_spec_id: &Id,
+    superseded_version: u32,
+    repo_id: &Id,
+    prompt_records: &mut HashMap<String, Option<crate::prompt_assembly::AgentPromptSetRecord>>,
+) -> (HashSet<String>, HashSet<String>) {
+    let mut specs: HashSet<String> = HashSet::new();
+    let mut commits: HashSet<String> = HashSet::new();
+
+    // True when the recorded governing meta-spec versions include the
+    // changed meta-spec at the superseded version.
+    let used_at_superseded = |rec: &crate::prompt_assembly::AgentPromptSetRecord| {
+        rec.meta_specs_used
+            .iter()
+            .any(|u| u.id == *meta_spec_id && u.version == superseded_version)
+    };
+
+    // Surface 1 — agent-commit provenance: the commit from the
+    // agent-to-commit mapping, the governing versions and the spec
+    // identity from the author agent's prompt-set record.
+    if let Ok(agent_commits) = state.agent_commits.find_by_repo(repo_id).await {
+        for ac in &agent_commits {
+            if let Some(rec) =
+                cached_prompt_record(state, prompt_records, ac.agent_id.as_str()).await
+            {
+                if used_at_superseded(&rec) {
+                    commits.insert(ac.commit_sha.clone());
+                    if let Some(spec_path) = rec.spec_path.as_deref() {
+                        specs.insert(spec_path.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    // Surface 2 — chain attestations: commit + spec identity from the
+    // attestation itself (the signed input's spec_path, the attested
+    // commit SHA), governing versions from the author agent's prompt-set
+    // record.
+    //
+    // The upper bound is `i64::MAX as u64`, NOT `u64::MAX`: the SQLite
+    // adapter stores `created_at` as i64 and casts the bound
+    // (`until as i64`), and `u64::MAX as i64 == -1`, so a `u64::MAX`
+    // bound would filter `created_at <= -1` and match no positive
+    // timestamp — silently emptying this provenance surface in
+    // production while the u64-comparing mem adapter stays green.
+    if let Ok(chain) = state
+        .chain_attestations
+        .find_by_repo(repo_id.as_str(), 0, i64::MAX as u64)
+        .await
+    {
+        for att in &chain {
+            let under = cached_prompt_record(state, prompt_records, &att.metadata.agent_id)
+                .await
+                .map(|rec| used_at_superseded(&rec))
+                .unwrap_or(false);
+            if under {
+                commits.insert(att.output.commit_sha.clone());
+                if let gyre_common::AttestationInput::Signed(si) = &att.input {
+                    specs.insert(si.content.spec_path.clone());
+                }
+            }
+        }
+    }
+
+    // Surface 3 — merge attestation bundles: the bundle's own
+    // `meta_specs_used` array records the governing versions directly;
+    // the merge commit SHA and the MR's spec reference carry the work.
+    if let Ok(mrs) = state.merge_requests.list_by_repo(repo_id).await {
+        for mr in &mrs {
+            let Ok(Some(bundle)) = state.attestation_store.find_by_mr_id(mr.id.as_str()).await
+            else {
+                continue;
+            };
+            let att = &bundle.attestation;
+            if att
+                .meta_specs_used
+                .iter()
+                .any(|u| u.id == *meta_spec_id && u.version == superseded_version)
+            {
+                commits.insert(att.merge_commit_sha.clone());
+                if let Some(spec_ref) = att.spec_ref.as_deref() {
+                    specs.insert(spec_identity(spec_ref).to_string());
+                }
+            }
+        }
+    }
+
+    (specs, commits)
 }
 
 // ---------------------------------------------------------------------------
