@@ -2,8 +2,8 @@
 title: "Remove orchestrator agent-spawning and carry out the spec amendment table"
 spec_ref: "Spec gap spec-41a92c20354c6a108e6074e3 / orchestrator-boundary-amendments / 4a3f940495a8"
 depends_on: [task-302]
-progress: not-started
-commits: ["071353fe866168d84e605b15c84108e083c2844f"]
+progress: ready-for-review
+commits: ["071353fe866168d84e605b15c84108e083c2844f", "1167df20681ee579878dbf704587a97befec7633"]
 ---
 
 ## Required behavior
@@ -127,3 +127,92 @@ Canonical spec: `specs/system/agent-runtime.md`. Source: `678a8ac3e3bfeafeb66cdb
     ]
   }
 ]
+
+## Shipped
+
+Progress: `ready-for-review` (implementation complete on this branch; independent
+verification pending — server test binaries exceed this sandbox's build budget,
+exact command list recorded in /tmp/stage/review-evidence/task-298-finalize.md).
+
+### What shipped
+
+Continued from the saved source checkpoint (`071353fe`, attribution record
+`bb75ab28`) and completed the assignment:
+
+1. **gyre_spawn_worker removed** (checkpoint): MCP catalog entry, tools/call
+   dispatch, scope validation, prompt references (api/prompts.rs, api/spawn.rs),
+   and tests. No MCP tool handler available to a repo-orchestrator JWT creates
+   agent records; the mechanical Phase-4 scheduler is the only task→agent path.
+   The decomposition machinery is untouched. This round cleaned the remaining
+   stale spawn.rs comments referencing the tool as a live path.
+   Test: `mcp_spawn_worker_removed_from_catalog_and_dispatch` (mcp.rs).
+2. **/api/v1/personas removed; registry carries personas** (checkpoint +
+   this round): routes/module gone (404); MetaSpec carries the Persona
+   operational fields model/temperature/max_tokens/budget (migration 000072,
+   SQLite+PG+mem adapters); `sync_persona_from_meta_spec` materializes/adopts
+   the Persona read model. This round migrated the remaining consumers:
+   - CLI bootstrap: find/create/approve via `/api/v1/meta-specs` with
+     `kind=meta:persona`; new `bootstrap::registry_persona_name` registers a
+     name whose derived slug equals the built-in slug so the sync ADOPTS the
+     startup-seeded persona instead of duplicating it (unit test
+     `registry_persona_names_derive_to_builtin_slugs`); resume test rewritten
+     against the registry surface (25 CLI bootstrap tests pass).
+   - Web client: dead `/personas` methods removed from api.js (no component or
+     test used them; MetaSpecs.svelte already uses the registry surface — 120
+     MetaSpecs web tests pass).
+   - Server tests: `create_tenant_seeds_builtin_personas` verifies through the
+     persona port (the HTTP listing is gone); the abac live test
+     `builtin_persona_human_approval_denies_agent_live` (whose fixture route
+     was the removed approve endpoint) is replaced by
+     `persona_approval_via_registry_denies_agent` — a real agent JWT PUTting
+     `approval_status` on a meta:persona through the production router gets
+     403 and the record stays Pending.
+   - New end-to-end test `registry_meta_persona_is_spawn_bindable` (spawn.rs):
+     registry POST with operational fields → synced Pending persona (same id,
+     derived slug, prompt, operational fields) → spawn refused while Pending →
+     registry approval + operational-field edit mirrored to the read model →
+     spawn binds the registry-created persona by derived slug
+     (`agent.persona_id` == meta-spec id).
+3. **archive ABAC action** (checkpoint): action vocabulary + resolver mappings
+   for repo archive/unarchive; exemption-file entries removed (frozen count
+   38→36). Test: `archive_action_deny_blocks_repo_archive_through_middleware`.
+4. **Ralph-loop supersession** (this round): `specs/system/ralph-loop.md` and
+   its coverage file deleted; authorization-provenance.md and
+   meta-spec-reconciliation.md example re-pointed; remaining `ralph-loop.md`
+   grep hits in specs/ and docs/ are only agent-runtime.md's own canonical
+   supersession statement and historical task/coverage/milestone records.
+5. **hierarchy-enforcement.md §3/§4 amendments** (this round): compute-target
+   and meta-spec CRUD route families added to the §4 route table with
+   auth-context notes; meta_spec_versions/meta_spec_bindings/compute_targets
+   added to the §3 tenant-filter configuration; KvJsonStore note corrected
+   (compute_targets is a tenant_id-bearing table since migration 000033).
+6. **Dependency close-out verification** (task-302 clauses, verified on this
+   head): no workspace/tenant meta-spec-set routes remain; no production
+   writer to the meta_spec_sets/tenant_meta_spec_sets stores (only the distinct
+   `agent_meta_spec_sets` prompt-set record namespace remains); merge-time
+   drift compares merge-attestation `meta_specs_used` against current required
+   versions (reconciliation.rs `mr_recorded_meta_specs_used`).
+
+Also fixed in this round: missing MetaSpec field initializers in the
+sqlite adapter test (E0063), `cargo fmt` on all touched Rust files.
+
+### Test evidence
+
+- In-sandbox (exit codes in /tmp/stage/review-evidence/):
+  `cargo check --workspace --tests` clean; `cargo test -p gyre-cli bootstrap`
+  25 passed; `cargo test -p gyre-domain` 588 passed; `cargo test -p
+  gyre-adapters --lib` 608 passed; vitest MetaSpecs.test.js 120 passed;
+  all mechanical gates green (check-mcp-write-tools, check-abac-route-registry
+  at frozen count 36, check-abac-exempt-handlers, check-arch,
+  check-migration-versions/portability, and the remaining invariant checks).
+- Deferred to the independent verifier (gyre-server test binaries exceed the
+  sandbox build budget; list in /tmp/stage/review-evidence/task-298-finalize.md):
+  `mcp_spawn_worker_removed_from_catalog_and_dispatch`,
+  `archive_action_deny_blocks_repo_archive_through_middleware`,
+  `persona_approval_via_registry_denies_agent`,
+  `create_tenant_seeds_builtin_personas`,
+  `registry_meta_persona_is_spawn_bindable`, the api::meta_specs registry
+  suite, api::tenants, and the `scheduler_*` decomposition regression sweep.
+- web/dist untouched (restored to the assignment base after a build.rs
+  side rebuild during cargo check); final asset rebuild is the executor's
+  remote stage.
