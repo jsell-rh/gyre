@@ -2,7 +2,7 @@
 title: "Blast radius computed from provenance: version-discriminated affected workspaces plus per-repo spec/commit counts from real attestation queries"
 spec_ref: "Spec gap spec-556a0b49e9f2803bf0e2ff3d / blast-radius-provenance / b288723d2f73"
 depends_on: [task-302]
-progress: not-started
+progress: ready-for-review
 commits: ["ded8ebc8ec3ce1578fbf2160ff2b26f12eb472a5"]
 ---
 
@@ -46,3 +46,100 @@ Canonical spec: `specs/system/meta-spec-reconciliation.md`. Source: `50575cf65e6
     ]
   }
 ]
+
+## Shipped
+
+No acceptance-criterion checkboxes are ticked; independent review and
+deterministic gates decide approval.
+
+### §4 blast radius: version discrimination + provenance counts
+
+Delivered on the task-302 registry model (this task's `depends_on`), in
+`crates/gyre-server/src/api/meta_specs.rs`
+(`get_meta_spec_blast_radius` + `blast_radius_repo_provenance`):
+
+- **Change context (deliverable 1).** `GET /api/v1/meta-specs/{path}/blast-radius`
+  accepts `?from_version=&to_version=`; `from_version` is the SUPERSEDED
+  version (defaulted to the registry's current version), and a
+  `to_version <= from_version` is a 400 (a meta-spec change moves to a
+  LATER version). A workspace is affected only when its effective binding
+  requires/pins the changed meta-spec at the superseded version:
+  spec-level `meta_spec_bindings` pins (joined to the ledger entry's
+  workspace scope) at exactly that version, or required-flag visibility
+  (Global/Tenant/Workspace) at the registry's current version. Workspaces
+  bound at other versions are reported in `skipped_workspaces` with their
+  pinned version and excluded from every count and total — the spec's
+  "internal-tools on v2 is skipped for a v3→v4 change" case.
+- **Per-repo counts from provenance (deliverable 2).**
+  `blast_radius_repo_provenance` queries three real storage surfaces per
+  repo: agent-commit provenance (`agent_commits.find_by_repo`) joined with
+  the author agent's spawn-time prompt-set record (`meta_specs_used`),
+  chain attestations (`chain_attestations.find_by_repo` — commit SHA from
+  the attestation, spec identity from the signed input's `spec_path`),
+  and merge attestation bundles (`attestation_store.find_by_mr_id` — the
+  bundle's own `meta_specs_used` array, merge commit SHA, and MR spec
+  reference). It counts distinct spec identities and distinct commit SHAs
+  whose recorded governing meta-spec versions include the superseded
+  version of the changed meta-spec, deduplicated across surfaces. The
+  response carries per-workspace `repos: [{id, spec_count,
+  commit_count}]`, a flat `affected_repos` binding scan, and
+  `totals {repos, specs, commits}` — all computed from storage, never
+  fabricated: a repo with no provenance under the superseded version gets
+  zero counts in `affected_repos` and is omitted from the workspace's
+  repos-with-work list (it does not increment `totals.repos`).
+- **§8 labels preserved (deliverable 3).** `reason` stays
+  `workspace_binding` vs `tenant_inheritance` (own spec-level pins and
+  Workspace-scoped required flags are own bindings; broader-scope
+  required flags are inherited), with a granular `binding` field
+  (`required_global` / `required_tenant` / `required_workspace` /
+  `spec_binding`). Counts are computed identically for both classes.
+- **Read-only + ABAC (deliverable 4).** The endpoint is an unchanged
+  GET route, still mapped in the ABAC resolver
+  (`abac_middleware.rs:805`); no new route, no exemption entries.
+
+### Verification evidence
+
+- `cargo check -p gyre-server --all-targets` (build wrapper): exit 0, no
+  errors, no warnings — includes type-checking of the new tests.
+- Mechanical gates pass: check-arch, check-abac-route-registry,
+  check-abac-exempt-handlers, check-inert-enforcement,
+  check-byte-slice-truncation, check-fabricated-scope-defaults,
+  check-scope-literal-defaults, check-lossy-secret-conversion,
+  check-relative-path-defaults, check-fail-open-ref-resolution,
+  check-in-memory-state-stores, check-unbounded-external-http,
+  check-dead-message-kinds, check-mem-port-contracts.
+- New tests in `crates/gyre-server/src/reconciliation.rs` (in the tests
+  module):
+  `blast_radius_version_discriminates_and_counts_provenance` (the A/B
+  acceptance scenario: B pinned v2 skipped with pinned version reported
+  and excluded from totals; A's two repos carry spec/commit counts equal
+  to the seeded provenance — the v2-recorded commit in repo A excluded;
+  the no-provenance repo of A present in the flat scan with zero counts
+  but omitted from the repos-with-work list; exact totals
+  {repos:2, specs:2, commits:3}),
+  `blast_radius_defaults_superseded_version_to_registry_current`,
+  `blast_radius_labels_and_counts_from_chain_and_merge_attestations`
+  (AC3: inherited vs own labels with identical counting over the chain
+  and merge-attestation surfaces),
+  `blast_radius_rejects_backwards_version_range` (400).
+- **Deferred to the independent verifier (sandbox constraint):** the
+  cargo build wrapper refuses gyre-server code generation ("exceeds
+  4 GiB ... Server builds/tests belong to the independent verifier"), so
+  the new tests are type-checked here but must be EXECUTED by the
+  verifier. Required probe, recorded in
+  `/tmp/stage/review-evidence/task-327-verifier-tests.txt`:
+
+      cargo test -p gyre-server --lib blast_radius
+
+  (covers all four new tests plus the pre-existing
+  `blast_radius_covers_required_scopes_and_spec_bindings` and
+  `blast_radius_empty`; `cargo test -p gyre-server --lib reconciliation::`
+  as the wider regression scope).
+
+### Docs and coverage
+
+- `docs/api-reference.md`: the blast-radius row now documents the query
+  parameters and the full response shape (skipped workspaces, per-repo
+  counts, totals, binding kinds).
+- `specs/coverage/system/meta-spec-reconciliation.md` row 8 (§4) updated
+  from Partial to the task-327 implementation with source evidence.
