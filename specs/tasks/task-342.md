@@ -2,7 +2,7 @@
 title: "Publish reviewed spec backlog for specs/system/dependency-graph.md"
 spec_ref: "GOAL.md — real implementations and meaningful verification"
 depends_on: []
-progress: ready-for-review
+progress: complete
 commits: []
 ---
 
