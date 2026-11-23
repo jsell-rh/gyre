@@ -111,7 +111,7 @@ impl From<DependencyEdge> for DependencyEdgeResponse {
     }
 }
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct GraphNode {
     pub repo_id: String,
     pub name: String,
@@ -119,7 +119,7 @@ pub struct GraphNode {
 
 /// Breaking-change summary attached to a graph edge (dependency-graph.md §UI
 /// dependency detail panel: "breaking changes, acknowledgment status").
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct BreakingChangeSummary {
     pub id: String,
     pub commit_sha: String,
@@ -144,7 +144,7 @@ impl From<gyre_domain::BreakingChange> for BreakingChangeSummary {
     }
 }
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct GraphEdgeResponse {
     pub id: String,
     pub source: String,
@@ -166,7 +166,7 @@ pub struct GraphEdgeResponse {
     pub breaking_changes: Vec<BreakingChangeSummary>,
 }
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct GraphResponse {
     pub nodes: Vec<GraphNode>,
     pub edges: Vec<GraphEdgeResponse>,
@@ -498,6 +498,40 @@ async fn require_repo_tenant_containment(
     Ok(())
 }
 
+/// Per-handler tenant containment for the `?workspace={id}` query form of
+/// the graph endpoint (task-282 review F1): load the named workspace and
+/// compare its tenant against the caller's — Forbidden on mismatch,
+/// fail-closed NotFound when the workspace does not exist. The dedicated
+/// `/api/v1/workspaces/{id}/dependency-graph` route resolves
+/// `resource.workspace_id` from its path segment, so the middleware's
+/// scope chain (workspace → tenant → builtin tenant-isolation policy)
+/// contains it; the query-parameter form carries the scope in the query
+/// string, which the middleware never consults for scope attributes —
+/// `resource.tenant_id` stays unset, tenant-isolation never fires, and
+/// the role bands allow the read. The handler therefore performs the
+/// containment itself (same fix class as require_repo_tenant_containment
+/// above).
+async fn require_workspace_tenant_containment(
+    state: &AppState,
+    auth: &crate::auth::AuthenticatedAgent,
+    workspace_id: &str,
+) -> Result<(), ApiError> {
+    let workspace = state
+        .workspaces
+        .find_by_id(&Id::new(workspace_id))
+        .await
+        .map_err(ApiError::Internal)?
+        .ok_or_else(|| ApiError::NotFound(format!("workspace {workspace_id} not found")))?;
+
+    if workspace.tenant_id.as_str() != auth.tenant_id {
+        return Err(ApiError::Forbidden(format!(
+            "workspace {workspace_id} belongs to tenant {}, not the caller's tenant {}",
+            workspace.tenant_id, auth.tenant_id
+        )));
+    }
+    Ok(())
+}
+
 /// POST /api/v1/deps/manual — declare a manual dependency edge
 /// (dependency-graph.md §API). Same edge-creation core as
 /// POST /api/v1/repos/{id}/dependencies; the flat spec path carries the
@@ -544,8 +578,13 @@ pub async fn add_manual_dependency(
         ));
     }
 
-    // Per-handler tenant containment on the caller-supplied source repo.
+    // Per-handler tenant containment on BOTH ends of the edge (task-282
+    // review F2): the source (the caller's declared dependency) AND the
+    // target. A caller in tenant A must not be able to declare an edge
+    // into a tenant-B repo — the edge would enter tenant-B's dependents,
+    // blast-radius, and cascade-test surface.
     require_repo_tenant_containment(&state, &auth, &source_repo_id).await?;
+    require_repo_tenant_containment(&state, &auth, &target_repo_id).await?;
 
     // Token-scope containment (platform-model.md §1): a repo-scoped token
     // may only declare edges FROM its own repo; a workspace-scoped token
@@ -644,12 +683,19 @@ pub struct GraphQuery {
 
 /// GET /api/v1/dependencies/graph — full tenant-wide dependency graph.
 /// GET /api/v1/deps/graph — same graph at the spec-literal path; the SAME
-/// path accepts `?workspace={id}` for the workspace-scoped graph.
+/// path accepts `?workspace={id}` for the workspace-scoped graph. The
+/// query-parameter scope is caller-visible data selection, so it is
+/// tenant-contained in the handler (require_workspace_tenant_containment
+/// — the middleware cannot resolve `resource.tenant_id` from a query
+/// string; task-282 review F1): a workspace outside the caller's tenant
+/// is Forbidden, never graph data.
 pub async fn get_graph(
     State(state): State<Arc<AppState>>,
+    auth: crate::auth::AuthenticatedAgent,
     axum::extract::Query(query): axum::extract::Query<GraphQuery>,
 ) -> Result<Json<GraphResponse>, ApiError> {
     if let Some(ws_id) = query.workspace.filter(|w| !w.is_empty()) {
+        require_workspace_tenant_containment(&state, &auth, &ws_id).await?;
         let graph = workspace_scoped_graph(&state, &ws_id).await?;
         return Ok(Json(graph));
     }
@@ -3907,6 +3953,7 @@ import "google/protobuf/empty.proto";
         // Tenant-wide: both edges.
         let Json(all) = get_graph(
             State(state.clone()),
+            auth_in_tenant("tenant-1"),
             axum::extract::Query(GraphQuery::default()),
         )
         .await
@@ -3919,6 +3966,7 @@ import "google/protobuf/empty.proto";
         // ("edges where at least one endpoint is in the workspace").
         let Json(scoped) = get_graph(
             State(state.clone()),
+            auth_in_tenant("tenant-1"),
             axum::extract::Query(GraphQuery {
                 workspace: Some("ws-dg-x".to_string()),
             }),
@@ -3955,6 +4003,7 @@ import "google/protobuf/empty.proto";
         // crossing edge a→c is included (at least one endpoint in scope).
         let Json(scoped_y) = get_graph(
             State(state.clone()),
+            auth_in_tenant("tenant-1"),
             axum::extract::Query(GraphQuery {
                 workspace: Some("ws-dg-y".to_string()),
             }),
@@ -3967,6 +4016,7 @@ import "google/protobuf/empty.proto";
         // Unknown workspace: 404, not an empty graph.
         let err = get_graph(
             State(state.clone()),
+            auth_in_tenant("tenant-1"),
             axum::extract::Query(GraphQuery {
                 workspace: Some("no-such-ws".to_string()),
             }),
@@ -3974,6 +4024,228 @@ import "google/protobuf/empty.proto";
         .await
         .expect_err("unknown workspace");
         assert!(matches!(err, ApiError::NotFound(_)), "got: {err}");
+    }
+
+    /// Create a workspace in an ARBITRARY tenant (unlike
+    /// ensure_test_workspace, which is hardwired to tenant-1) — fixtures
+    /// for cross-tenant containment probes.
+    async fn create_workspace_in_tenant(state: &Arc<AppState>, ws_id: &str, tenant: &str) {
+        let ws = gyre_domain::Workspace::new(
+            gyre_common::Id::new(ws_id),
+            gyre_common::Id::new(tenant),
+            format!("Workspace {ws_id}"),
+            ws_id,
+            0,
+        );
+        state.workspaces.create(&ws).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn deps_graph_workspace_query_is_tenant_contained() {
+        // Task-282 review F1: the `?workspace={id}` query form must not
+        // disclose another tenant's graph. The middleware cannot contain
+        // it (the scope rides the query string, which is never consulted
+        // for resource attributes), so the handler must: a caller gets
+        // Forbidden for a workspace outside their tenant, and their own
+        // tenant's workspace still resolves.
+        let state = setup();
+        // Own-tenant (tenant-1) workspace with one edge.
+        let a = create_repo_in_workspace(&state, "dg-c-a", "ws-dg-own").await;
+        let b = create_repo_in_workspace(&state, "dg-c-b", "ws-dg-own").await;
+        // Foreign (tenant-2) workspace with its own repos and edge.
+        create_workspace_in_tenant(&state, "ws-dg-foreign", "tenant-2").await;
+        let x = create_repo_in_workspace(&state, "dg-c-x", "ws-dg-foreign").await;
+        let y = create_repo_in_workspace(&state, "dg-c-y", "ws-dg-foreign").await;
+
+        for (src, tgt) in [(a.clone(), b.clone()), (x.clone(), y.clone())] {
+            state
+                .dependencies
+                .save(&DependencyEdge::new(
+                    Id::new(uuid::Uuid::new_v4().to_string()),
+                    src,
+                    tgt,
+                    DependencyType::Code,
+                    "Cargo.toml",
+                    "crate",
+                    DetectionMethod::CargoToml,
+                    1000,
+                ))
+                .await
+                .unwrap();
+        }
+
+        // Cross-tenant query: Forbidden — pre-fix this returned the
+        // foreign tenant's full graph (repo names, edges, versions,
+        // breaking changes).
+        let err = get_graph(
+            State(state.clone()),
+            auth_in_tenant("tenant-1"),
+            axum::extract::Query(GraphQuery {
+                workspace: Some("ws-dg-foreign".to_string()),
+            }),
+        )
+        .await
+        .expect_err("cross-tenant workspace query must be refused");
+        assert!(matches!(err, ApiError::Forbidden(_)), "got: {err}");
+
+        // Symmetrically, a tenant-2 caller cannot read tenant-1's graph.
+        let err = get_graph(
+            State(state.clone()),
+            auth_in_tenant("tenant-2"),
+            axum::extract::Query(GraphQuery {
+                workspace: Some("ws-dg-own".to_string()),
+            }),
+        )
+        .await
+        .expect_err("cross-tenant workspace query must be refused");
+        assert!(matches!(err, ApiError::Forbidden(_)), "got: {err}");
+
+        // Own-tenant query still resolves (containment is not
+        // over-broad): tenant-1 sees the ws-dg-own edge only.
+        let Json(own) = get_graph(
+            State(state.clone()),
+            auth_in_tenant("tenant-1"),
+            axum::extract::Query(GraphQuery {
+                workspace: Some("ws-dg-own".to_string()),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(own.edges.len(), 1);
+        assert_eq!(own.edges[0].source, a.to_string());
+        assert_eq!(own.edges[0].target, b.to_string());
+
+        // And tenant-2 sees its own workspace's graph.
+        let Json(foreign_own) = get_graph(
+            State(state.clone()),
+            auth_in_tenant("tenant-2"),
+            axum::extract::Query(GraphQuery {
+                workspace: Some("ws-dg-foreign".to_string()),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(foreign_own.edges.len(), 1);
+        assert_eq!(foreign_own.edges[0].source, x.to_string());
+        assert_eq!(foreign_own.edges[0].target, y.to_string());
+    }
+
+    #[tokio::test]
+    async fn deps_graph_workspace_query_cross_tenant_killed_at_router() {
+        // Task-282 review F1 kill probe, at ROUTER level (the full
+        // production stack: require_auth → ABAC → handler). The global
+        // test token authenticates as the system Admin in tenant
+        // "default"; a workspace in another tenant must yield 403 on the
+        // `?workspace=` query form — on BOTH paths that share get_graph
+        // (/api/v1/deps/graph and /api/v1/dependencies/graph). Pre-fix
+        // this probe got 200 with the foreign tenant's graph.
+        use axum::body::Body;
+        use http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        let state = setup();
+        crate::abac_middleware::seed_builtin_policies(&state)
+            .await
+            .expect("seed builtin policies");
+
+        // Own-tenant workspace ("default" — the system principal's
+        // tenant) and a foreign one (tenant-2), each with an edge.
+        create_workspace_in_tenant(&state, "ws-sys-own", "default").await;
+        let a = create_repo_in_workspace(&state, "dg-r-a", "ws-sys-own").await;
+        let b = create_repo_in_workspace(&state, "dg-r-b", "ws-sys-own").await;
+        create_workspace_in_tenant(&state, "ws-r-foreign", "tenant-2").await;
+        let x = create_repo_in_workspace(&state, "dg-r-x", "ws-r-foreign").await;
+        let y = create_repo_in_workspace(&state, "dg-r-y", "ws-r-foreign").await;
+
+        for (src, tgt) in [(a.clone(), b.clone()), (x.clone(), y.clone())] {
+            state
+                .dependencies
+                .save(&DependencyEdge::new(
+                    Id::new(uuid::Uuid::new_v4().to_string()),
+                    src,
+                    tgt,
+                    DependencyType::Code,
+                    "Cargo.toml",
+                    "crate",
+                    DetectionMethod::CargoToml,
+                    1000,
+                ))
+                .await
+                .unwrap();
+        }
+
+        let app = crate::build_router(state.clone());
+
+        // Foreign workspace on the spec-literal path: 403.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/deps/graph?workspace=ws-r-foreign")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "cross-tenant ?workspace= query must be Forbidden at the router, got {}",
+            resp.status()
+        );
+
+        // Same leak surface on the legacy path (both share get_graph): 403.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/dependencies/graph?workspace=ws-r-foreign")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "cross-tenant ?workspace= query on /dependencies/graph must be Forbidden, got {}",
+            resp.status()
+        );
+
+        // Positive control through the same stack: the caller's own
+        // tenant's workspace still returns the scoped graph (200, one
+        // edge), proving the 403s above are tenant containment, not a
+        // blanket refusal.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/deps/graph?workspace=ws-sys-own")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "own-tenant ?workspace= query must pass, got {}",
+            resp.status()
+        );
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            body["edges"].as_array().map(|e| e.len()),
+            Some(1),
+            "own-tenant scoped graph has exactly the ws-sys-own edge"
+        );
     }
 
     #[tokio::test]
@@ -4040,6 +4312,79 @@ import "google/protobuf/empty.proto";
         .await
         .expect_err("unknown source repo");
         assert!(matches!(err, ApiError::NotFound(_)), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn deps_manual_endpoint_refuses_cross_tenant_target() {
+        // Task-282 review F2: containment must cover BOTH ends of the
+        // declared edge. A tenant-1 caller whose source repo is in their
+        // own tenant must not be able to declare an edge INTO a tenant-2
+        // repo — the edge would enter the target tenant's dependents,
+        // blast-radius, and cascade-test surface.
+        let state = setup();
+        let a = create_repo(&state, "man-ct-a").await; // workspace proj-1, tenant-1
+        create_workspace_in_tenant(&state, "ws-man-foreign", "tenant-2").await;
+        let foreign = create_repo_in_workspace(&state, "man-ct-f", "ws-man-foreign").await;
+
+        let req = AddManualDependencyRequest {
+            source_repo_id: a.to_string(),
+            target_repo_id: foreign.to_string(),
+            dependency_type: DependencyType::Manual,
+            source_artifact: None,
+            target_artifact: None,
+        };
+
+        // Same-tenant source, cross-tenant target: Forbidden, and no
+        // edge is created in either direction.
+        let err = add_manual_dependency(
+            State(state.clone()),
+            auth_in_tenant("tenant-1"),
+            Json(req.clone()),
+        )
+        .await
+        .expect_err("cross-tenant target must be refused");
+        assert!(matches!(err, ApiError::Forbidden(_)), "got: {err}");
+        assert!(
+            state
+                .dependencies
+                .list_by_repo(&a)
+                .await
+                .unwrap()
+                .is_empty(),
+            "refused declaration must leave no edge from the source"
+        );
+        assert!(
+            state
+                .dependencies
+                .list_dependents(&foreign)
+                .await
+                .unwrap()
+                .is_empty(),
+            "refused declaration must not enter the foreign repo's dependents"
+        );
+
+        // Positive control: a tenant-2 caller declaring the same edge
+        // from a source in their own tenant succeeds — proving the 403
+        // above is target-tenant containment, not a blanket refusal. We
+        // need a tenant-2 source repo.
+        let src2 = create_repo_in_workspace(&state, "man-ct-src2", "ws-man-foreign").await;
+        let (code, _body) = add_manual_dependency(
+            State(state.clone()),
+            auth_in_tenant("tenant-2"),
+            Json(AddManualDependencyRequest {
+                source_repo_id: src2.to_string(),
+                target_repo_id: foreign.to_string(),
+                dependency_type: DependencyType::Manual,
+                source_artifact: None,
+                target_artifact: None,
+            }),
+        )
+        .await
+        .expect("same-tenant declaration must succeed");
+        assert_eq!(code, StatusCode::CREATED);
+        let dependents = state.dependencies.list_dependents(&foreign).await.unwrap();
+        assert_eq!(dependents.len(), 1);
+        assert_eq!(dependents[0].source_repo_id, src2);
     }
 
     #[tokio::test]
