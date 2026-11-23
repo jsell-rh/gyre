@@ -3,7 +3,7 @@ title: "Remove orchestrator agent-spawning and carry out the spec amendment tabl
 spec_ref: "Spec gap spec-41a92c20354c6a108e6074e3 / orchestrator-boundary-amendments / 4a3f940495a8"
 depends_on: [task-302]
 progress: ready-for-review
-commits: ["e822f5417041018c32c286a22e87664b47c175d4", "1167df20681ee579878dbf704587a97befec7633", "071353fe866168d84e605b15c84108e083c2844f"]
+commits: ["071353fe866168d84e605b15c84108e083c2844f", "1167df20681ee579878dbf704587a97befec7633", "e822f5417041018c32c286a22e87664b47c175d4", "d750e2e564303902eac010d96c13da0b52d2b6cb"]
 ---
 
 ## Required behavior
@@ -131,10 +131,12 @@ Canonical spec: `specs/system/agent-runtime.md`. Source: `678a8ac3e3bfeafeb66cdb
 ## Shipped
 
 Progress: `ready-for-review` — implementation complete on this branch
-(checkpoints `071353fe`, `1167df20`; repair round `e822f541`). Independent
-verification pending: gyre-server test binaries exceed this sandbox's 4 GiB
-build budget; the exact command list is recorded in
-/tmp/stage/review-evidence/task-298-repair-round2.md.
+(checkpoints `071353fe`, `1167df20`; repair rounds `e822f541`,
+`d750e2e5`). Independent verification pending: gyre-server test binaries
+exceed this sandbox's 4 GiB build budget; the exact command list is
+recorded in /tmp/stage/review-evidence/task-298-repair-round2.md, and the
+round-3 lint-fix evidence in
+/tmp/stage/review-evidence/task-298-repair-round3.md.
 
 ### Amendment-table carry-out (checkpoints 071353fe + 1167df20)
 
@@ -188,41 +190,20 @@ build budget; the exact command list is recorded in
    meta-spec versions (verified on this head; test
    `retired_meta_spec_set_endpoints_return_404`).
 
-### Repair round (e822f541) — review findings 1 and 2
+### Repair rounds
 
-`GyreClient::approve_persona` sent `{"approval_status": "approved"}`
-(lowercase) while the server parsed approval_status case-sensitively, so
-the admin-token CLI bootstrap aborted step 5 with 400 and never converged,
-and the deferred e2e test `registry_meta_persona_is_spawn_bindable`
-asserted OK on the same invalid payload. Fix:
-
-- `parse_approval_status` (api/meta_specs.rs) now lowercases at the API
-  edge — the same leniency `parse_kind`/`parse_scope` already apply; the
-  domain `MetaSpecApprovalStatus::parse` stays case-sensitive for
-  DB-stored canonical values. New unit test
-  `approval_status_parse_accepts_any_case` pins the leniency.
-- `approve_persona` (CLI client.rs) now sends the canonical `"Approved"`.
-- The spawn.rs e2e payload stays lowercase deliberately, documented as
-  pinning the edge case-insensitivity end-to-end.
-
-### Test evidence (in-sandbox, via build wrapper)
-
-- `cargo check -p gyre-server -p gyre-cli` — exit 0.
-- `cargo check -p gyre-server --tests` — exit 0 (type-checks the new and
-  edited tests without producing binaries).
-- `cargo test -p gyre-cli` — 223 + 1 passed, 0 failed.
-- `scripts/check-mcp-write-tools.sh`, `scripts/check-abac-route-registry.sh`,
-  `scripts/check-abac-exempt-handlers.sh`, `scripts/check-arch.sh` — all OK.
-
-Deferred to the independent verifier (exact list in
-/tmp/stage/review-evidence/task-298-repair-round2.md):
-`approval_status_parse_accepts_any_case`,
-`registry_meta_persona_is_spawn_bindable`,
-`mcp_spawn_worker_removed_from_catalog_and_dispatch`,
-`archive_action_deny_blocks_repo_archive_through_middleware`,
-`persona_approval_via_registry_denies_agent`,
-`create_tenant_seeds_builtin_personas`,
-`retired_meta_spec_set_endpoints_return_404`, the full `-p gyre-server`
-suite, `--test git_integration` (`push_to_archived_repo_rejected`), and a
-real-server `gyre bootstrap` twice (fresh + resume-with-Pending) to prove
-step 5 convergence.
+- `e822f541` (round 2): `approval_status` accepted in any case at the
+  registry API edge (`registry_meta_persona_is_spawn_bindable` exercises
+  the mixed-case path end to end).
+- `d750e2e5` (round 3, this round): resolved the verification clippy
+  findings on changed files — redundant_closure (postgres/sqlite
+  meta_spec budget serialization), needless_borrow (three
+  search_indexer call sites in api/meta_specs.rs), doc_lazy_continuation
+  (CLI persona-lookup doc comment). Behavior-preserving;
+  `cargo fmt --check`, `cargo clippy -p gyre-adapters -p gyre-cli --lib`,
+  `cargo check -p gyre-server --lib`, and
+  `cargo clippy -p gyre-server --lib` all exit 0 with zero remaining
+  lints in the changed files; `scripts/check-abac-route-registry.sh`
+  exits 0 with no stale-exemption WARN at this head (the findings' WARN
+  listed archive/unarchive entries at the pre-checkpoint repair base;
+  they are absent here and the resolver mappings are live).
