@@ -1,0 +1,48 @@
+---
+title: "Blast radius computed from provenance: version-discriminated affected workspaces plus per-repo spec/commit counts from real attestation queries"
+spec_ref: "Spec gap spec-556a0b49e9f2803bf0e2ff3d / blast-radius-provenance / b288723d2f73"
+depends_on: [task-302]
+progress: not-started
+commits: []
+---
+
+## Required behavior
+
+Per §4, the blast radius is a database query over provenance records + bindings — computed, not guessed. Today GET /api/v1/meta-specs/:path/blast-radius (meta_specs.rs:650-745) does a path-membership check on effective set pins only: no provenance store is queried, there are no per-repo spec/commit counts, and no version discrimination (a workspace pinned to any version counts as affected; the spec's 'bound to v2, skipped' case is not skipped). COORDINATION: active task-302 replaces the path@sha set-binding basis with the registry model (required flags + spec-level bindings, versioned tuples); deliver the §4 behavior on the model present after task-302. Deliverables: (1) Version discrimination — the blast-radius request carries (or the registry supplies) the change context: the superseded version/SHA of the changed meta-spec; a workspace is affected when its effective binding requires/pins the changed meta-spec at the SUPERSEDED version; workspaces bound to other versions are reported as skipped/not-affected with their pinned version, matching the spec's example (internal-tools on v2 is skipped for a v3→v4 change). (2) Per-repo counts from provenance — for each affected workspace, per repo: the count of distinct implementation specs with provenance produced under the superseded version (distinct spec identity in provenance records — chain/merge attestations, agent-commit provenance — whose recorded governing meta-spec versions include the superseded version of the changed meta-spec) and the count of commits under it; the response carries per-workspace/per-repo spec and commit counts plus totals (repos, specs, commits), all computed from real storage queries. (3) The existing workspace_binding vs tenant_inheritance reason labels are preserved (§8 amendment). (4) The endpoint stays read-only and ABAC-mapped; counts never fabricated — a repo with no provenance under the superseded version contributes zero/omitted even though it belongs to an affected workspace.
+
+## Acceptance Criteria
+
+- [ ] Workspace A requiring the changed meta-spec at v3 (provenance: 2 distinct specs, N commits across 2 repos) and workspace B bound at v2: GET blast-radius for the v3→v4 change reports A affected with per-repo spec/commit counts matching the seeded provenance and correct totals; B appears as skipped/not-affected with pinned v2 and is excluded from totals.
+- [ ] A repo in A with no provenance under v3 contributes no counts and is not listed among affected repos with work — counts derive from provenance records, not workspace repo membership.
+- [ ] Inherited bindings are still labeled tenant_inheritance and own bindings workspace_binding, with counts computed identically for both.
+
+## Verification intent
+
+Seed the A/B scenario and call GET /api/v1/meta-specs/{path}/blast-radius for the v3→v4 change; assert B is absent from affected workspaces and A's repos carry spec/commit counts equal to the seeded provenance. At the base both assertions fail: the handler's entire affected-workspace test is a path-membership check (effective.personas.values().any(|e| e.path == spec_path) || … over principles/standards/process) so B — which pins the path at v2 — is reported affected exactly like A, and the handler's only data sources are workspaces.list, the set stores, and repos.list_by_workspace (no chain_attestations, attestation_store, or agent-commit query anywhere in the body), so no spec or commit count can be produced at all.
+
+Update the relevant coverage rows only after implementing the behavior, with concrete source evidence. Do not mark unrelated rows complete or claim independent verification before it occurs.
+
+## Discovery evidence
+
+Canonical spec: `specs/system/meta-spec-reconciliation.md`. Source: `50575cf65e6491279049052901a65c68a4d2993d`; plan: `c2ceefa3b1c58d079ded6a7ee7cd9311539758965f2e1d0edd37b7ffdd4c9071`.
+
+[
+  {
+    "id": "3662e9dd04c597d5db7d61f0",
+    "decision": "gap",
+    "requirement_quote": "This is a database query over provenance records + workspace meta-spec set bindings. The blast radius is computed, not guessed.",
+    "detail": "Requires blast radius computed from provenance records plus set bindings, with per-repo spec/commit counts under the superseded version and version-diff reasoning (the example skips a workspace 'bound to v2, not affected'). What exists: GET /api/v1/meta-specs/:path/blast-radius does a real binding scan — it lists all workspaces, resolves each one's effective set (tenant defaults merged with workspace overrides), checks whether any personas/principles/standards/process entry references the path, labels the reason workspace_binding vs tenant_inheritance (the §8 amendment), and lists the repos of affected workspaces. What is missing: the provenance half — the handler (inspected in full, meta_specs.rs 650-745) never queries attestation/provenance stores, so there are no per-repo spec counts, no commit counts under the superseded version, and no version discrimination at all: a workspace pinned to any version of the path counts as affected (the 'bound to v2, skipped' case is not skipped), and the response carries only affected repo/workspace ids with a reason string — no totals over provenance. The binding half is real; the 'database query over provenance records' half is absent.",
+    "evidence": [
+      {
+        "file": "crates/gyre-server/src/api/meta_specs.rs",
+        "quote": "let references_spec = effective.personas.values().any(|e| e.path == spec_path)",
+        "detail": "The entire affected-workspace test is a path-membership check on the effective set's pinned entries (|| principles/standards/process any()). No comparison of the pinned sha against the changed version, no provenance lookup — a workspace pinned to an old version is reported affected exactly like one pinned to the new version."
+      },
+      {
+        "file": "crates/gyre-server/src/api/meta_specs.rs",
+        "quote": "let workspaces = state.workspaces.list().await.unwrap_or_default();",
+        "detail": "Handler data sources, inspected across the full body (meta_specs.rs 650-745): workspaces.list, meta_spec_sets.get, tenant_meta_spec_sets.get, repos.list_by_workspace. No chain_attestations / attestation_store / spec ledger provenance query appears anywhere in the handler, so the spec/commit counts and 'commits under v3' figures of the §4 output shape cannot be produced by this endpoint."
+      }
+    ]
+  }
+]
