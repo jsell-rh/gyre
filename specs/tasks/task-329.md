@@ -3,7 +3,7 @@ title: "§9 MetaSpecPolicy in full: warn_on_drift/block_on_drift/drift_tolerance
 spec_ref: "Spec gap spec-556a0b49e9f2803bf0e2ff3d / merge-gate-drift-policy / b288723d2f73"
 depends_on: [task-302]
 progress: ready-for-review
-commits: ["532681145499d676af92b79f405dec8c678591d8", "1d00568b"]
+commits: ["1d00568be42553a4f25433fb0e40f175d0b81dd6", "532681145499d676af92b79f405dec8c678591d8"]
 ---
 
 ## Required behavior
