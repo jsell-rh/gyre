@@ -4109,7 +4109,7 @@ async fn resource_permissions_me(state: &AppState, auth: &AuthenticatedAgent) ->
     for resource_type in resource_types {
         let mut allowed_actions = Vec::new();
         for action in PERMISSION_ACTIONS {
-            let result = policy_engine::evaluate(policies.clone(), &ctx, action, resource_type);
+            let result = policy_engine::evaluate(policies.clone(), &ctx, action, &resource_type);
             if result.effect == PolicyEffect::Allow {
                 allowed_actions.push(*action);
             }
@@ -12338,8 +12338,14 @@ concepts:
         // repo-orchestrator JWT calling the retired name must get the
         // unknown-tool error, the same shape as any other nonexistent tool.
         let state = orch_state().await;
-        let (_id, token) =
-            register_orchestrator(&state, "repo-orch", "r-1", None, "repo_orchestrator").await;
+        let (_id, token) = register_orchestrator(
+            &state,
+            "repo-orch",
+            "ws-1",
+            Some("r-1"),
+            "repo_orchestrator",
+        )
+        .await;
         let app = crate::build_router(state.clone());
 
         // tools/list must not advertise it.

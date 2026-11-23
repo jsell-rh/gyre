@@ -9913,6 +9913,12 @@ exit 1\n"
     #[tokio::test]
     async fn registry_meta_persona_is_spawn_bindable() {
         let state = test_state();
+        // The registry persona below is Tenant-scoped at "default" — the
+        // tenant the global test token resolves to. require_registry_scope
+        // resolves the scope against the REAL tenant store (never a
+        // fabricated scope); production bootstraps the default tenant at
+        // startup (hierarchy-enforcement.md §1), so the fixture must too.
+        crate::bootstrap_default_tenant(&state).await;
         let app = crate::api::api_router().with_state(state.clone());
 
         let (app, ws_id) = create_workspace(app, "registry-persona-ws").await;

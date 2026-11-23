@@ -2002,15 +2002,39 @@ pub fn init_resolver() {
     RESOURCE_RESOLVER.get_or_init(ResourceResolver::new);
 }
 
-/// The canonical ABAC resource-type vocabulary (distinct non-exempt route
-/// registry resource types; see
-/// [`ResourceResolver::distinct_resource_types`]). Initialises the resolver
-/// on first use so the vocabulary is available on every surface, not only
-/// after [`init_resolver`] ran.
-pub fn all_resource_types() -> Vec<&'static str> {
-    RESOURCE_RESOLVER
+/// The canonical ABAC resource-type vocabulary: the distinct non-exempt
+/// route registry resource types (see
+/// [`ResourceResolver::distinct_resource_types`]) UNIONED with the
+/// resource types the code-owned builtin policy set addresses. The union
+/// matters when a route family is retired while its resource type stays
+/// specced: the /api/v1/personas routes were removed (agent-runtime.md
+/// amendments row — personas are managed through the meta-spec registry),
+/// but `persona` remains in abac-policy-engine.md's `resource.type`
+/// examples and the immutable `persona-human-approval` builtin Deny still
+/// targets it, so it must stay probe-able on the permissions:// surfaces.
+/// Wildcards ("*") are excluded — they address types by name, not as a
+/// vocabulary entry. Initialises the resolver on first use so the
+/// vocabulary is available on every surface, not only after
+/// [`init_resolver`] ran.
+pub fn all_resource_types() -> Vec<String> {
+    let mut types: Vec<String> = RESOURCE_RESOLVER
         .get_or_init(ResourceResolver::new)
         .distinct_resource_types()
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    for policy in m34_builtin_policies()
+        .into_iter()
+        .chain(domain_builtin_policies())
+    {
+        for resource_type in &policy.resource_types {
+            if resource_type != "*" && !types.contains(resource_type) {
+                types.push(resource_type.clone());
+            }
+        }
+    }
+    types.sort();
+    types
 }
 
 /// Identity-security.md §Impersonation: attribute calls made under an
@@ -6464,7 +6488,11 @@ pub mod tests {
     /// principal before any handler code runs.
     #[tokio::test(flavor = "multi_thread")]
     async fn archive_action_deny_blocks_repo_archive_through_middleware() {
-        let state = test_state();
+        // setup_membership_state (not bare test_state): the signed
+        // member_jwt() needs a state with a JWT config, and the auth
+        // extractor needs the user row the token resolves to — without
+        // them the middleware 401s before any policy evaluation.
+        let (state, _user_id) = setup_membership_state().await;
 
         // Seed a repo in the caller's workspace so resource resolution
         // addresses a real entity (tenant t-1 → ws-1 → repo-archive-1).
@@ -7347,6 +7375,13 @@ pub mod tests {
             let h = tokio::runtime::Handle::current();
             h.block_on(seed_builtin_policies(&state)).expect("seed");
         });
+        // The seeded meta-spec is Tenant-scoped at "default" — the tenant
+        // the agent token resolves to. require_registry_scope must find a
+        // REAL tenant row (never a fabricated scope); production
+        // bootstraps it at startup (hierarchy-enforcement.md §1 Bootstrap
+        // Behavior), so the fixture must too — without it the handler
+        // 404s before the write gate can deny the agent.
+        crate::bootstrap_default_tenant(&state).await;
 
         // Seed a Tenant-scoped meta:persona at the default tenant (the
         // tenant the agent token below resolves to) — the approval target.
