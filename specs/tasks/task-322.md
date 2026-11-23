@@ -2,7 +2,7 @@
 title: "Close the unmet Edge Types table rows: class-inheritance Implements (Python superclasses, TypeScript extends), Returns for Go/Python/TypeScript, and Python RoutesTo"
 spec_ref: "Spec gap spec-b89674dbcb695eb34e8d5e15 / edge-rows-inheritance-returns-routesto / d96599f10659"
 depends_on: []
-progress: ready-for-review
+progress: complete
 commits: ["72910c3df20e0ea6d9ebc3b3189d8a3a833120d0", "cc8e5ff826f4fe5d58086aa5e425631707739641"]
 ---
 
