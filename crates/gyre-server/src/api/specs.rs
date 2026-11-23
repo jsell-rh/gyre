@@ -1107,8 +1107,8 @@ pub async fn approve_spec(
 /// no members — is kept verbatim in the approver list: no human approval
 /// ever records a `team:{slug}` approver id, so the §9 resolver can never
 /// match it and the approval stays Pending (fail-closed). Dropping it
-/// instead would leave an empty `human_approvers` list, which the resolver
-/// treats as "any human may approve" — a fail-open.
+/// instead would fall back to the `[owner]` default, which could widen
+/// approval to a user the manifest never named — still a fail-open class.
 async fn expand_team_approvers(
     state: &crate::AppState,
     workspace_id: &gyre_common::Id,
@@ -1201,11 +1201,31 @@ async fn resolve_new_approval_status(
         };
     };
 
+    let mut manifest_entry = manifest_entry;
+
+    // Manifest Schema default: the effective human-approver set is
+    // `approval.human_approvers` when non-empty, otherwise `[owner]` — an
+    // omitted/empty list reserves approval to the spec owner. Materialized
+    // here, before team expansion, so a `team:{slug}` owner composes with
+    // the default (the team's members become the approvers). Entries with
+    // no approval config at all get the full schema default set
+    // (mode human_and_agent + human_approvers [owner]).
+    if let Some(approval) = manifest_entry.approval.as_mut() {
+        if approval.human_approvers.is_empty() {
+            approval.human_approvers = vec![manifest_entry.owner.clone()];
+        }
+    } else {
+        manifest_entry.approval = Some(crate::spec_registry::ApprovalConfig {
+            mode: crate::spec_registry::ApprovalMode::HumanAndAgent,
+            human_approvers: vec![manifest_entry.owner.clone()],
+            agent_approvers: Vec::new(),
+        });
+    }
+
     // Spec ownership via teams (user-management.md §Team Management): a
     // `team:{slug}` entry in `human_approvers` counts every member of that
     // team as an approver. Expanded before the pure §9 resolver so the
     // resolver's membership check stays repository-free.
-    let mut manifest_entry = manifest_entry;
     if let Some(approval) = manifest_entry.approval.as_mut() {
         if approval
             .human_approvers
@@ -4310,6 +4330,52 @@ specs:
             .approval_status
     }
 
+    /// GET /api/v1/specs/{path} → the entry's `approval_status` string.
+    async fn spec_status_via_api(app: &Router, spec_path: &str) -> String {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/specs/{}", spec_path.replace('/', "%2F")))
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        json["approval_status"]
+            .as_str()
+            .unwrap_or_else(|| panic!("no approval_status for {spec_path}"))
+            .to_string()
+    }
+
+    /// GET /api/v1/specs (list) → the named entry's `approval_status` string.
+    async fn list_status_via_api(app: &Router, spec_path: &str) -> String {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/specs")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        json.as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["path"] == spec_path)
+            .unwrap_or_else(|| panic!("list has no entry for {spec_path}"))["approval_status"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
     /// Seed a real human user `jsell` (Admin) with an API key registered in
     /// the auth-resolving store, so a human approval flows through the real
     /// API-key auth path and resolves to `user:jsell` — matching the
@@ -4484,6 +4550,197 @@ specs:
             ApprovalStatus::Pending,
             "an unresolvable team reference must fail closed"
         );
+    }
+
+    /// Manifest Schema: `approval.human_approvers` defaults to `[owner]` —
+    /// a manifest entry that sets an approval mode but omits
+    /// `human_approvers` reserves approval to the spec owner. The default
+    /// composes with `team:{slug}` resolution: a non-empty list still
+    /// resolves teams through membership, and an unresolvable team owner
+    /// (the default applied to `owner: team:nonexistent`) approves nobody.
+    ///
+    /// Real git manifest repo, real ledger, real team + membership created
+    /// through the team API, real API-key human and agent approvals, and
+    /// the resolved status asserted through the real GET /api/v1/specs
+    /// endpoints (list + single-spec), not just the ledger store.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn omitted_human_approvers_default_to_owner_e2e() {
+        let manifest = r#"
+version: 1
+defaults:
+  requires_approval: true
+specs:
+  - path: system/owner-default.md
+    title: Owner Default
+    owner: user:alice
+    approval:
+      mode: human_only
+  - path: system/owner-default-both.md
+    title: Owner Default Both
+    owner: user:alice
+    approval:
+      mode: human_and_agent
+      agent_approvers:
+        - persona: accountability
+  - path: system/owner-team-missing.md
+    title: Owner Team Missing
+    owner: team:nonexistent
+    approval:
+      mode: human_only
+  - path: system/team-plus-default.md
+    title: Team Plus Default
+    owner: user:alice
+    approval:
+      mode: human_only
+      human_approvers:
+        - team:eng
+"#;
+        let state = test_state();
+        let (dir, shas) = make_manifest_repo_with(
+            manifest,
+            &[
+                "system/owner-default.md",
+                "system/owner-default-both.md",
+                "system/owner-team-missing.md",
+                "system/team-plus-default.md",
+            ],
+        )
+        .await;
+        seed_e2e_specs(&state, &dir, &shas).await;
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // Humans: the spec owner (alice), a non-owner workspace member
+        // (bob), and a team member (carol).
+        let alice_key = register_e2e_human_as(&state, "user-alice", "alice").await;
+        let bob_key = register_e2e_human_as(&state, "user-bob", "bob").await;
+        let carol_key = register_e2e_human_as(&state, "user-carol", "carol").await;
+
+        // Workspace membership for all three (team member resolution never
+        // expands access beyond workspace membership).
+        for uid in ["user-alice", "user-bob", "user-carol"] {
+            let m = gyre_domain::WorkspaceMembership::new(
+                gyre_common::Id::new(format!("mem-{uid}")),
+                gyre_common::Id::new(uid),
+                gyre_common::Id::new("ws-e2e"),
+                gyre_domain::WorkspaceRole::Developer,
+                gyre_common::Id::new("system"),
+                0,
+            );
+            state.workspace_memberships.create(&m).await.unwrap();
+        }
+
+        // Create team `eng` with member carol — through the real team API.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces/ws-e2e/teams")
+                    .header("Authorization", "Bearer test-token")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"name": "Eng", "lead": "user-alice"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let team = serde_json::from_slice::<serde_json::Value>(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(team["slug"], "eng");
+        let team_id = team["id"].as_str().unwrap().to_string();
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/workspaces/ws-e2e/teams/{team_id}/members"))
+                    .header("Authorization", "Bearer test-token")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"user_id": "user-carol"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        // Agent approval for the human_and_agent spec — persona
+        // accountability at level 3 satisfies the default minimum.
+        let agent_jwt = register_e2e_agent(&state, "agent-e2e-owner", "sha256:free", 3).await;
+
+        // --- human_only, omitted human_approvers: reserved to the owner ---
+        let spec = "system/owner-default.md";
+        let resp = approve_via_api(&app, &bob_key, spec, &shas[spec], None).await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        assert_eq!(
+            ledger_status(&state, spec).await,
+            ApprovalStatus::Pending,
+            "a non-owner's approval must not approve a spec whose \
+             human_approvers default to [owner]"
+        );
+        // GET /api/v1/specs and GET /api/v1/specs/{path} agree.
+        assert_eq!(spec_status_via_api(&app, spec).await, "pending");
+        assert_eq!(list_status_via_api(&app, spec).await, "pending");
+
+        let resp = approve_via_api(&app, &alice_key, spec, &shas[spec], None).await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        assert_eq!(ledger_status(&state, spec).await, ApprovalStatus::Approved);
+        assert_eq!(spec_status_via_api(&app, spec).await, "approved");
+        assert_eq!(list_status_via_api(&app, spec).await, "approved");
+
+        // --- human_and_agent, omitted human_approvers: the human half of
+        // the pair is owner-scoped ---
+        let spec = "system/owner-default-both.md";
+        let resp =
+            approve_via_api(&app, &agent_jwt, spec, &shas[spec], Some("accountability")).await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let resp = approve_via_api(&app, &bob_key, spec, &shas[spec], None).await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        assert_eq!(
+            ledger_status(&state, spec).await,
+            ApprovalStatus::Pending,
+            "agent + non-owner human must not approve a spec whose \
+             human_approvers default to [owner]"
+        );
+        assert_eq!(spec_status_via_api(&app, spec).await, "pending");
+
+        let resp = approve_via_api(&app, &alice_key, spec, &shas[spec], None).await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        assert_eq!(ledger_status(&state, spec).await, ApprovalStatus::Approved);
+        assert_eq!(spec_status_via_api(&app, spec).await, "approved");
+
+        // --- team refs still work alongside the default: a non-empty
+        // human_approvers list with team:eng resolves through membership ---
+        let spec = "system/team-plus-default.md";
+        let resp = approve_via_api(&app, &carol_key, spec, &shas[spec], None).await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        assert_eq!(
+            ledger_status(&state, spec).await,
+            ApprovalStatus::Approved,
+            "a team member's approval must still approve a team-listed spec"
+        );
+
+        // --- the owner default composed with an unresolvable team owner:
+        // team:nonexistent does not resolve, so the [owner] default
+        // approves nobody, fail-closed ---
+        let spec = "system/owner-team-missing.md";
+        let resp = approve_via_api(&app, &alice_key, spec, &shas[spec], None).await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        assert_eq!(
+            ledger_status(&state, spec).await,
+            ApprovalStatus::Pending,
+            "an unresolvable team owner must approve nobody even though the \
+             [owner] default applies"
+        );
+        assert_eq!(spec_status_via_api(&app, spec).await, "pending");
     }
 
     #[tokio::test(flavor = "multi_thread")]

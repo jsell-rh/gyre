@@ -292,8 +292,10 @@ pub async fn read_manifest(repo_path: &str, sha: &str) -> Option<SpecManifest> {
 /// - when the approver pins a `stack_hash`, the event's recorded stack hash
 ///   matches exactly.
 ///
-/// Human-approval validity requires `approver_type == "human"` and, when the
-/// manifest lists `human_approvers`, the `approver_id` must be in that list.
+/// Human-approval validity requires `approver_type == "human"` and the
+/// `approver_id` to be in the effective human-approver set: the manifest's
+/// `approval.human_approvers` list when non-empty, otherwise the schema
+/// default `[owner]` (an omitted list reserves approval to the spec owner).
 ///
 /// Status by mode:
 /// - `human_only`        → Approved with ≥1 valid human approval
@@ -315,7 +317,7 @@ pub fn resolve_approval_status(
     let approval = entry.approval.as_ref();
     let has_valid_human = events
         .iter()
-        .any(|e| is_valid_human_approval(e, approval, current_sha));
+        .any(|e| is_valid_human_approval(e, entry, current_sha));
     let has_valid_agent = events
         .iter()
         .any(|e| is_valid_agent_approval(e, approval, current_sha));
@@ -332,19 +334,28 @@ pub fn resolve_approval_status(
     }
 }
 
-/// A human approval is valid when it is active, matches `current_sha`, and the
-/// approver is in `human_approvers` (when that list is non-empty).
+/// A human approval is valid when it is active, matches `current_sha`, and
+/// the approver is in the entry's effective human-approver set:
+/// `approval.human_approvers` when that list is non-empty, otherwise the
+/// Manifest Schema default `[owner]` — an omitted/empty list reserves
+/// approval to the spec owner, it never widens it to any human.
 fn is_valid_human_approval(
     event: &SpecApprovalEvent,
-    approval: Option<&ApprovalConfig>,
+    entry: &SpecEntry,
     current_sha: &str,
 ) -> bool {
     event.approver_type == "human"
         && event.spec_sha == current_sha
         && event.is_active()
-        && approval
-            .map(|a| a.human_approvers.is_empty() || a.human_approvers.contains(&event.approver_id))
-            .unwrap_or(true)
+        && {
+            let approvers: &[String] = match entry.approval.as_ref() {
+                Some(a) if !a.human_approvers.is_empty() => &a.human_approvers,
+                // Manifest Schema default: `approval.human_approvers`
+                // defaults to `[owner]` (owner is a required field).
+                _ => std::slice::from_ref(&entry.owner),
+            };
+            approvers.iter().any(|a| a == &event.approver_id)
+        }
 }
 
 /// An agent approval is valid when it is active, matches `current_sha`, and
@@ -2860,6 +2871,18 @@ specs:
       mode: human_only
       human_approvers:
         - user:jsell
+  - path: system/owner-default.md
+    title: Owner Default
+    owner: user:alice
+    approval:
+      mode: human_only
+  - path: system/owner-default-both.md
+    title: Owner Default Both
+    owner: user:alice
+    approval:
+      mode: human_and_agent
+      agent_approvers:
+        - persona: accountability
   - path: system/agent-only.md
     title: Agent Only
     owner: user:jsell
@@ -2962,6 +2985,53 @@ specs:
         assert_eq!(
             resolve_approval_status(entry, &m.defaults, SHA, &[ev]),
             ApprovalStatus::Pending
+        );
+    }
+
+    #[test]
+    fn test_resolve_omitted_human_approvers_reserve_to_owner() {
+        // Manifest Schema: `approval.human_approvers` defaults to `[owner]` —
+        // omitting the list reserves approval to the owner; it must not
+        // widen to "any human may approve".
+        let m = approval_manifest();
+        let entry = manifest_entry(&m, "system/owner-default.md");
+
+        // A non-owner human approval (bob) does not approve the spec.
+        let bob = approval_event("e1", SHA, "human", "user:bob");
+        assert_eq!(
+            resolve_approval_status(entry, &m.defaults, SHA, &[bob]),
+            ApprovalStatus::Pending
+        );
+
+        // The owner's (alice's) approval does.
+        let alice = approval_event("e2", SHA, "human", "user:alice");
+        assert_eq!(
+            resolve_approval_status(entry, &m.defaults, SHA, &[alice]),
+            ApprovalStatus::Approved
+        );
+    }
+
+    #[test]
+    fn test_resolve_omitted_human_approvers_owner_scopes_human_and_agent() {
+        // Same [owner] default under mode human_and_agent: the human half of
+        // the required pair is owner-scoped, not any-human.
+        let m = approval_manifest();
+        let entry = manifest_entry(&m, "system/owner-default-both.md");
+        let mut agent = agent_event("e2", SHA, "accountability");
+        agent.attestation_level = Some(3);
+
+        // Valid agent + non-owner human (bob) → still Pending.
+        let bob = approval_event("e1", SHA, "human", "user:bob");
+        assert_eq!(
+            resolve_approval_status(entry, &m.defaults, SHA, &[bob, agent.clone()]),
+            ApprovalStatus::Pending
+        );
+
+        // Valid agent + owner human (alice) → Approved.
+        let alice = approval_event("e3", SHA, "human", "user:alice");
+        assert_eq!(
+            resolve_approval_status(entry, &m.defaults, SHA, &[alice, agent]),
+            ApprovalStatus::Approved
         );
     }
 
