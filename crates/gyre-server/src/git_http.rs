@@ -11594,8 +11594,7 @@ specs:
 
         // Config: enabled (default) with auto_invalidate_approvals = true
         // (default) — at the base this revoked the approvals.
-        let approval_id =
-            seed_active_approval(&state, "apr-m334-a", "system/payments.md").await;
+        let approval_id = seed_active_approval(&state, "apr-m334-a", "system/payments.md").await;
 
         process_spec_lifecycle(
             &state,
@@ -11625,7 +11624,10 @@ specs:
             1,
             "manifest entry with auto_create_tasks: true must create the drift-review task, got: {drift:?}"
         );
-        assert_eq!(drift[0].spec_path.as_deref(), Some("specs/system/payments.md"));
+        assert_eq!(
+            drift[0].spec_path.as_deref(),
+            Some("specs/system/payments.md")
+        );
 
         // The approval survives: the manifest entry's
         // auto_invalidate_on_change: false supersedes
@@ -11747,8 +11749,7 @@ specs:
             .await
             .unwrap();
 
-        let registered =
-            seed_active_approval(&state, "apr-m334-reg", "system/payments.md").await;
+        let registered = seed_active_approval(&state, "apr-m334-reg", "system/payments.md").await;
         let unregistered =
             seed_active_approval(&state, "apr-m334-unreg", "system/unregistered.md").await;
 
