@@ -3006,9 +3006,14 @@ async fn run_bootstrap(args: BootstrapArgs) -> Result<()> {
     step.advance("register personas");
 
     // ── Step 5: register built-in personas (pre-approved; resume: skip existing) ──
-    // The resume lookup is scoped to THIS tenant: the unscoped persona list
-    // spans all tenants, which made a second tenant's bootstrap skip
-    // registration and die at spawn with a persona 404 (round-3 finding 3).
+    // The /api/v1/personas routes are removed (agent-runtime.md amendments
+    // row) — the meta-spec registry's meta:persona kind is the persona
+    // surface: find/create/approve all go through /api/v1/meta-specs, and
+    // the server syncs each registry entry into the Persona read model
+    // spawn-time resolution consumes. The resume lookup is scoped to THIS
+    // tenant: the unscoped listing spans all tenants, which made a second
+    // tenant's bootstrap skip registration and die at spawn with a persona
+    // 404 (round-3 finding 3).
     for persona in bootstrap::BUILTIN_PERSONAS {
         match client_api
             .find_persona_by_slug_in_tenant(persona.slug, &summary.tenant_id)
@@ -3019,10 +3024,10 @@ async fn run_bootstrap(args: BootstrapArgs) -> Result<()> {
                     println!("  Persona '{}' already registered - skipping", persona.slug);
                 } else {
                     // A run interrupted between create_persona and
-                    // approve_persona leaves a Pending persona: spawn would
-                    // 409 on it (persona Pending, NOT "orchestrator already
-                    // live"). Approve it here so a resume converges instead
-                    // of exiting 0 with zero orchestrators.
+                    // approve_persona leaves a Pending registry entry: spawn
+                    // would 409 on it (persona Pending, NOT "orchestrator
+                    // already live"). Approve it here so a resume converges
+                    // instead of exiting 0 with zero orchestrators.
                     println!(
                         "  Persona '{}' registered but {} - approving",
                         persona.slug, existing.approval_status
@@ -3036,12 +3041,9 @@ async fn run_bootstrap(args: BootstrapArgs) -> Result<()> {
             None => {
                 let created = client_api
                     .create_persona(
-                        persona.name,
-                        persona.slug,
+                        &bootstrap::registry_persona_name(persona),
                         &summary.tenant_id,
                         persona.system_prompt,
-                        persona.capabilities,
-                        persona.protocols,
                     )
                     .await
                     .map_err(|e| step.fail(e))?;
@@ -7531,8 +7533,14 @@ mod tests {
         dir
     }
 
-    fn persona_list(slug: &str, status: &str) -> String {
-        format!(r#"[{{"id":"p-{slug}","slug":"{slug}","approval_status":"{status}"}}]"#)
+    /// A tenant-scoped meta:persona registry listing (the replacement for
+    /// the removed /api/v1/personas list): one entry whose name derives to
+    /// the given slug (the registry has no slug field — the server derives
+    /// it from the name, mirrored by bootstrap::derive_slug).
+    fn persona_registry_list(slug: &str, status: &str) -> String {
+        format!(
+            r#"[{{"id":"p-{slug}","name":"{slug}","approval_status":"{status}","kind":"meta:persona"}}]"#
+        )
     }
 
     const BOOTSTRAP_SPAWN_JSON: &str = r#"{
@@ -7593,18 +7601,21 @@ mod tests {
             // Persona resume: approved, PENDING (approve follows), approved, approved.
             (
                 "200 OK".to_string(),
-                persona_list("workspace-orchestrator", "Approved"),
+                persona_registry_list("workspace-orchestrator", "Approved"),
             ),
             (
                 "200 OK".to_string(),
-                persona_list("repo-orchestrator", "Pending"),
+                persona_registry_list("repo-orchestrator", "Pending"),
             ),
             ("200 OK".to_string(), "{}".to_string()), // approve
             (
                 "200 OK".to_string(),
-                persona_list("accountability", "Approved"),
+                persona_registry_list("accountability", "Approved"),
             ),
-            ("200 OK".to_string(), persona_list("security", "Approved")),
+            (
+                "200 OK".to_string(),
+                persona_registry_list("security", "Approved"),
+            ),
             // Gate resume: cargo-test already configured -> only clippy is created.
             (
                 "200 OK".to_string(),
@@ -7648,9 +7659,11 @@ mod tests {
             .headers
             .to_ascii_lowercase()
             .contains("authorization: bearer saved-tok"));
-        // A Pending persona from an interrupted run is approved, not skipped.
+        // A Pending registry persona from an interrupted run is approved,
+        // not skipped (through the registry surface — the /api/v1/personas
+        // routes are removed).
         assert_eq!(
-            reqs[8].request_line, "POST /api/v1/personas/p-repo-orchestrator/approve HTTP/1.1",
+            reqs[8].request_line, "PUT /api/v1/meta-specs/p-repo-orchestrator HTTP/1.1",
             "Pending persona must be approved on resume"
         );
         // Gates: exactly one create (the missing one), for the right name.

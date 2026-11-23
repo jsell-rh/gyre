@@ -850,6 +850,6 @@ Authorization provenance is introduced incrementally:
 - **Human-System Interface** (`human-system-interface.md`): Constraint editing in spec approval UI, provenance chain visualization in Explorer (§7.6).
 - **Observability** (`observability.md`): New provenance and identity audit event categories (§7.7).
 - **Source Control** (`source-control.md`): Pre-accept validation extended with constraint verification (§6.1).
-- **Ralph Loop** (`ralph-loop.md`): Re-spawn produces `DerivedInput` from same parent, preserving constraint chain (§4.2).
+- **Agent Runtime — re-spawn** (`agent-runtime.md` §1, which supersedes the retired Ralph Loop spec): Re-spawn produces `DerivedInput` from same parent, preserving constraint chain (§4.2).
 - **Spec Lifecycle** (`spec-lifecycle.md`): Spec modification invalidates existing `SignedInput` (new SHA requires new approval and new signed authorization).
 - **Design Principles** (`design-principles.md`): "Specs first, always" becomes cryptographically enforced end-to-end, not just at the spec-to-MR reference level.

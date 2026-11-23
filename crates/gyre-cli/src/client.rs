@@ -168,10 +168,10 @@ pub struct RepoResponse {
 #[derive(Deserialize, Debug, Clone)]
 pub struct PersonaResponse {
     pub id: String,
-    pub slug: String,
-    /// "Pending" | "Approved" | "Deprecated" — the resume path reads it:
-    /// a Pending persona from an interrupted run must be approved, not
-    /// skipped (spawn 409s on it).
+    pub name: String,
+    /// "Pending" | "Approved" | "Rejected" — the resume path reads it:
+    /// a Pending registry persona from an interrupted run must be
+    /// approved, not skipped (spawn 409s on it).
     pub approval_status: String,
 }
 
@@ -1827,15 +1827,23 @@ impl GyreClient {
         serde_json::from_str(&text).context("parsing spec sync response")
     }
 
-    /// GET /api/v1/personas?scope=tenant&scope_id=<tenant> - find an existing
-    /// persona by slug within the bootstrap tenant (resume path: bootstrap
-    /// re-runs skip re-registering built-in personas).
+    /// GET /api/v1/meta-specs?scope=tenant&scope_id=<tenant>&kind=meta:persona
+    /// - find an existing registry persona entry for a built-in persona
+    /// slug within the bootstrap tenant (resume path: bootstrap re-runs
+    /// skip re-registering built-in personas).
     ///
-    /// The scope filter is mandatory, not cosmetic: the unscoped endpoint
-    /// lists personas across ALL tenants, so an unscoped lookup makes the
-    /// second tenant's bootstrap skip persona registration ("already
-    /// registered") and then fail at spawn with a persona 404 (round-3
-    /// finding 3 — cross-tenant resume defect).
+    /// The /api/v1/personas routes are removed (agent-runtime.md amendments
+    /// row) — the meta-spec registry's `meta:persona` kind is the persona
+    /// surface. A registry entry has no slug field: the persona slug is
+    /// DERIVED from the entry's name (the server's persona_slug_from_name,
+    /// mirrored by bootstrap::derive_slug), so the lookup matches on the
+    /// derived slug.
+    ///
+    /// The scope filter stays mandatory, not cosmetic: the unscoped listing
+    /// spans ALL tenants, so an unscoped lookup makes the second tenant's
+    /// bootstrap skip persona registration ("already registered") and then
+    /// fail at spawn with a persona 404 (round-3 finding 3 — cross-tenant
+    /// resume defect).
     pub async fn find_persona_by_slug_in_tenant(
         &self,
         slug: &str,
@@ -1844,7 +1852,7 @@ impl GyreClient {
         let resp = self
             .client
             .get(format!(
-                "{}/api/v1/personas?scope=tenant&scope_id={tenant_id}",
+                "{}/api/v1/meta-specs?scope=tenant&scope_id={tenant_id}&kind=meta:persona",
                 self.base_url
             ))
             .header("Authorization", self.auth_header())
@@ -1854,11 +1862,13 @@ impl GyreClient {
         let status = resp.status();
         let text = resp.text().await?;
         if !status.is_success() {
-            anyhow::bail!("list personas failed (HTTP {status}): {text}");
+            anyhow::bail!("list persona meta-specs failed (HTTP {status}): {text}");
         }
-        let personas: Vec<PersonaResponse> =
-            serde_json::from_str(&text).context("parsing persona list")?;
-        Ok(personas.into_iter().find(|p| p.slug == slug))
+        let entries: Vec<PersonaResponse> =
+            serde_json::from_str(&text).context("parsing persona meta-spec list")?;
+        Ok(entries
+            .into_iter()
+            .find(|e| crate::bootstrap::derive_slug(&e.name) == slug))
     }
 
     /// POST /api/v1/users - create the admin user bound to a tenant; the
@@ -1987,27 +1997,31 @@ impl GyreClient {
         serde_json::from_str(&text).context("parsing repo response")
     }
 
-    /// POST /api/v1/personas - register a built-in persona.
+    /// POST /api/v1/meta-specs (kind=meta:persona) - register a built-in
+    /// persona as a registry entry (the /api/v1/personas routes are
+    /// removed; the registry's `meta:persona` kind is the persona write
+    /// surface). The registry derives the persona slug from the entry's
+    /// name, so `name` must be a name whose derived slug is the built-in's
+    /// slug — see bootstrap::registry_persona_name; that is also what
+    /// makes the server-side persona sync ADOPT the startup-seeded
+    /// built-in persona (same slug+scope) instead of creating a duplicate
+    /// row. The entry is created Pending; approve_persona pre-approves it.
     pub async fn create_persona(
         &self,
         name: &str,
-        slug: &str,
         tenant_id: &str,
         system_prompt: &str,
-        capabilities: &[&str],
-        protocols: &[&str],
     ) -> Result<PersonaResponse> {
         let body = serde_json::json!({
+            "kind": "meta:persona",
             "name": name,
-            "slug": slug,
-            "scope": { "kind": "Tenant", "id": tenant_id },
-            "system_prompt": system_prompt,
-            "capabilities": capabilities,
-            "protocols": protocols,
+            "scope": "tenant",
+            "scope_id": tenant_id,
+            "prompt": system_prompt,
         });
         let resp = self
             .client
-            .post(format!("{}/api/v1/personas", self.base_url))
+            .post(format!("{}/api/v1/meta-specs", self.base_url))
             .header("Authorization", self.auth_header())
             .json(&body)
             .send()
@@ -2016,28 +2030,27 @@ impl GyreClient {
         let status = resp.status();
         let text = resp.text().await?;
         if !status.is_success() {
-            anyhow::bail!("create persona failed (HTTP {status}): {text}");
+            anyhow::bail!("create persona meta-spec failed (HTTP {status}): {text}");
         }
-        serde_json::from_str(&text).context("parsing persona response")
+        serde_json::from_str(&text).context("parsing persona meta-spec response")
     }
 
-    /// POST /api/v1/personas/:id/approve - pre-approve a registered persona.
+    /// PUT /api/v1/meta-specs/:id (approval_status=approved) - pre-approve a
+    /// registered persona entry (the registry replacement for the retired
+    /// POST /api/v1/personas/:id/approve).
     pub async fn approve_persona(&self, persona_id: &str) -> Result<()> {
         let resp = self
             .client
-            .post(format!(
-                "{}/api/v1/personas/{persona_id}/approve",
-                self.base_url
-            ))
+            .put(format!("{}/api/v1/meta-specs/{persona_id}", self.base_url))
             .header("Authorization", self.auth_header())
-            .json(&serde_json::json!({}))
+            .json(&serde_json::json!({ "approval_status": "approved" }))
             .send()
             .await
             .context("connecting to Gyre server")?;
         let status = resp.status();
         if !status.is_success() {
             let text = resp.text().await?;
-            anyhow::bail!("approve persona failed (HTTP {status}): {text}");
+            anyhow::bail!("approve persona meta-spec failed (HTTP {status}): {text}");
         }
         Ok(())
     }

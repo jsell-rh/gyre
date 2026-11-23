@@ -621,19 +621,10 @@ export const api = {
     request(`/workspaces/${id}/teams/${teamId}/members`, { method: 'POST', body: JSON.stringify({ user_id: userId }) }),
   removeTeamMember: (id, teamId, userId) =>
     request(`/workspaces/${id}/teams/${teamId}/members/${userId}`, { method: 'DELETE' }),
-  // Personas (M22.5)
-  personas: () => request('/personas'),
-  persona: (id) => request(`/personas/${id}`),
-  createPersona: (data) =>
-    request('/personas', { method: 'POST', body: JSON.stringify(data) }),
-  updatePersona: (id, data) =>
-    request(`/personas/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
-  deletePersona: (id) =>
-    request(`/personas/${id}`, { method: 'DELETE' }),
-  approvePersona: (id) =>
-    request(`/personas/${id}/approve`, { method: 'POST' }),
-  resolvePersona: (slug, scopeKind, scopeId) =>
-    request(`/personas/resolve?slug=${encodeURIComponent(slug)}&scope_kind=${encodeURIComponent(scopeKind)}&scope_id=${encodeURIComponent(scopeId)}`),
+  // Personas (M22.5): the /personas routes are REMOVED (agent-runtime.md
+  // amendments row) — replaced entirely by the meta-specs registry surface
+  // (metaSpecs.* below, kind=meta:persona). No persona-specific client
+  // methods remain.
   // Dependency graph (M22.5)
   dependencyGraph: () => request('/dependencies/graph'),
   workspaceDependencyGraph: (wsId) => request(`/workspaces/${wsId}/dependency-graph`),

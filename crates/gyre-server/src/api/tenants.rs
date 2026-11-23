@@ -393,7 +393,12 @@ mod tests {
     }
 
     /// platform-model.md §2: creating a tenant seeds the four built-in
-    /// personas at that tenant's scope, pre-approved.
+    /// personas at that tenant's scope, pre-approved. Verified through the
+    /// persona repository port directly: the /api/v1/personas listing
+    /// routes are removed (agent-runtime.md amendments row — replaced
+    /// entirely by /api/v1/meta-specs?kind=meta:persona), and the seeded
+    /// built-ins are Persona read-model rows the spawn-time resolution
+    /// chain consumes, not registry entries.
     #[tokio::test]
     async fn create_tenant_seeds_builtin_personas() {
         let state = crate::mem::test_state();
@@ -417,27 +422,17 @@ mod tests {
         let created = body_json(create_resp).await;
         let tenant_id = created["id"].as_str().unwrap().to_string();
 
-        // List personas at the new tenant's scope.
-        let list_resp = app
-            .oneshot(
-                Request::builder()
-                    .uri(format!(
-                        "/api/v1/personas?scope=tenant&scope_id={tenant_id}"
-                    ))
-                    .header("authorization", "Bearer test-token")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+        // List personas at the new tenant's scope through the port (the
+        // HTTP listing route is removed; the seed target is the persona
+        // read model spawn resolution consumes).
+        let personas = state
+            .personas
+            .list_by_scope(&gyre_domain::PersonaScope::Tenant(gyre_common::Id::new(
+                tenant_id.clone(),
+            )))
             .await
             .unwrap();
-        assert_eq!(list_resp.status(), StatusCode::OK);
-        let list = body_json(list_resp).await;
-        let mut slugs: Vec<String> = list
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|p| p["slug"].as_str().unwrap().to_string())
-            .collect();
+        let mut slugs: Vec<String> = personas.iter().map(|p| p.slug.clone()).collect();
         slugs.sort();
         assert_eq!(
             slugs,
@@ -448,8 +443,11 @@ mod tests {
                 "workspace-orchestrator"
             ]
         );
-        for p in list.as_array().unwrap() {
-            assert_eq!(p["approval_status"], "Approved");
+        for p in &personas {
+            assert_eq!(
+                p.approval_status,
+                gyre_domain::PersonaApprovalStatus::Approved
+            );
         }
     }
 }

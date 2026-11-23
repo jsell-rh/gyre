@@ -12,6 +12,7 @@ use std::path::Path;
 // consolidated the CLI's private copies here — two independent embeds of
 // the four personas could drift, restoring different prompts on
 // re-registration than a server restart re-seeds.
+use gyre_domain::BuiltinPersonaDef;
 pub use gyre_domain::BUILTIN_PERSONA_DEFS as BUILTIN_PERSONAS;
 
 // ─── Slug derivation ──────────────────────────────────────────────────────────
@@ -28,6 +29,35 @@ pub fn derive_slug(name: &str) -> String {
         .filter(|s| !s.is_empty())
         .collect::<Vec<_>>()
         .join("-")
+}
+
+/// The meta-spec registry name for a built-in persona. The registry's
+/// `meta:persona` kind (the replacement for the removed /api/v1/personas
+/// routes) has no slug field — the persona slug is DERIVED from the
+/// entry's name (the server's `persona_slug_from_name`, the same
+/// algorithm as `derive_slug`) — so the registered name must derive to
+/// the built-in's slug. That is also what makes the server-side persona
+/// sync ADOPT the startup-seeded built-in persona (same slug+scope)
+/// instead of creating a duplicate row. Most built-in names already
+/// derive to their slug ("Repo Orchestrator" → "repo-orchestrator");
+/// the rest fall back to the title-cased slug ("accountability" →
+/// "Accountability").
+pub fn registry_persona_name(p: &BuiltinPersonaDef) -> String {
+    if derive_slug(p.name) == p.slug {
+        p.name.to_string()
+    } else {
+        p.slug
+            .split('-')
+            .map(|seg| {
+                let mut chars = seg.chars();
+                match chars.next() {
+                    Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                    None => String::new(),
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
 }
 
 // ─── Default gate detection ───────────────────────────────────────────────────
@@ -586,6 +616,30 @@ mod tests {
             assert!(
                 !p.capabilities.is_empty(),
                 "persona {} needs capabilities",
+                p.slug
+            );
+        }
+    }
+
+    /// The registry name for every built-in must derive (server-side
+    /// `persona_slug_from_name`, mirrored by `derive_slug`) to the
+    /// built-in's own slug — that is what makes the server-side persona
+    /// sync ADOPT the startup-seeded built-in (same slug+scope) instead of
+    /// creating a duplicate row, and what makes the bootstrap resume
+    /// lookup (find_persona_by_slug_in_tenant) find the entry a previous
+    /// run registered. Killing direction: a name that derives to a
+    /// different slug re-registers on every re-run and duplicates the
+    /// seeded persona ("Accountability Agent" → "accountability-agent"
+    /// instead of "accountability").
+    #[test]
+    fn registry_persona_names_derive_to_builtin_slugs() {
+        for p in BUILTIN_PERSONAS {
+            let name = registry_persona_name(p);
+            assert_eq!(
+                derive_slug(&name),
+                p.slug,
+                "registry name '{name}' for builtin '{}' must derive to slug '{}'",
+                p.slug,
                 p.slug
             );
         }

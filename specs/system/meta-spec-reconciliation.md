@@ -84,7 +84,7 @@ meta_spec_set:
     - meta/standards/coding.md@9abcde
     - meta/standards/error-handling.md@f01234
   process:
-    - meta/process/ralph-loop.md@567890
+    - meta/process/re-spawn.md@567890
     - meta/process/escalation.md@abcdef
 ```
 

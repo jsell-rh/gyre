@@ -144,7 +144,15 @@ For the single-tenant bootstrap (M34), Option A is not yet needed — the defaul
 
 `scripts/check-tenant-filter.sh` scans all Diesel query methods in `crates/gyre-adapters/src/sqlite/` and `crates/gyre-adapters/src/pg/` for the pattern `.filter(table::tenant_id.eq(`. Any query method that builds a Diesel query without this filter fails the check.
 
-**KvJsonStore gap:** The generic `KvJsonStore` (used for agent_tokens, compute_targets, abac_policies, etc.) uses namespace+key lookups with no `tenant_id` column. These stores are not covered by the Diesel lint script. `agent_messages` is replaced by the unified message bus (`message-bus.md`). The remaining KvJsonStore namespaces should be migrated to proper port traits with tenant-scoped adapters when multi-tenant support is prioritized — tracked as a backlog item, not part of M34.
+**KvJsonStore gap:** The generic `KvJsonStore` (used for agent_tokens, abac_policies, etc.) uses namespace+key lookups with no `tenant_id` column. These stores are not covered by the Diesel lint script. `agent_messages` is replaced by the unified message bus (`message-bus.md`), and `compute_targets` no longer belongs on this list: it is a proper `tenant_id`-bearing table since migration `000033` (`UNIQUE(tenant_id, name)`, with `workspaces.compute_target_id` referencing it), covered by the Diesel tenant-filter lint like every other table adapter. The remaining KvJsonStore namespaces should be migrated to proper port traits with tenant-scoped adapters when multi-tenant support is prioritized — tracked as a backlog item, not part of M34.
+
+**Amendment (agent-runtime.md §Relationship to Existing Specs):** the DB-backed registry and compute-target tables are part of the tenant-filter configuration:
+
+| Table | Tenant-filter mechanism |
+|---|---|
+| `compute_targets` | Direct `tenant_id` column (migration `000033`); the adapter's Diesel queries filter by it |
+| `meta_spec_versions` | No `tenant_id` column of its own — structurally isolated through `meta_spec_id`, which resolves through `meta_specs.scope`/`scope_id`; every HTTP path onto it runs the registry's per-handler scope validation first (the same structural-isolation class as `MessageRepository`) |
+| `meta_spec_bindings` | Same structural isolation — keyed by `spec_id` (the spec's repo/workspace) and `meta_spec_id` (the registry entry's scope); reached only through scope-validated lookups |
 
 Additionally, an integration test (`tests/tenant_isolation.rs`) creates two tenants, populates entities in both, and verifies that listing/finding through one tenant's storage never returns the other tenant's entities.
 
@@ -236,6 +244,13 @@ struct RouteResourceMapping {
 For routes with an entity ID (`:id`), the middleware does a single lookup to get the entity's `workspace_id`. This lookup is cached in the request extensions so the handler doesn't repeat it. For repo-scoped routes (e.g., `POST /repos/:repo_id/specs/assist`), the middleware resolves the repo's `workspace_id` via the same entity lookup mechanism — the `id_param` points to the repo ID, and the entity lookup returns the repo's workspace.
 
 For routes without an entity ID (collection/create endpoints), the middleware resolves workspace context from the URL path (e.g., `POST /api/v1/workspaces/:workspace_id/tasks`). Per `api-conventions.md` §1.1, create endpoints use the workspace-scoped route form — there are no flat `POST /api/v1/tasks` create routes. Admin-only endpoints (no workspace context) fall back to tenant-level scoping.
+
+**Amendment (agent-runtime.md §Relationship to Existing Specs):** two CRUD families resolve their resource context with **no path scope param at all**:
+
+| Route family | Resource type | Auth-context note |
+|---|---|---|
+| `/api/v1/compute-targets`, `/api/v1/compute-targets/:id` (and the `/api/v1/admin/compute-targets*` variants) | `compute_target` | Tenant context comes from the authenticated caller (the JWT's `tenant_id`) — there is no path param; the resolver scopes the `compute_target` resource to the caller's tenant |
+| `/api/v1/meta-specs`, `/api/v1/meta-specs/:id`, `/api/v1/meta-specs/:id/versions`, `/api/v1/meta-specs/:id/versions/:version` | `meta_spec` | Scope comes from the `scope_id` query param (list) or request body (create); the ID-based routes derive it from the persisted meta-spec's own `scope`/`scope_id` — no workspace path param. Per-handler gates (`require_registry_scope` / `authorize_registry_write`) validate the caller against that scope |
 
 #### Action Resolution
 

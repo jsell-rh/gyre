@@ -640,7 +640,7 @@ pub(crate) async fn spawn_agent_core(
     // matching the caller's `task_id` claim, or the token carrying an
     // explicit spawn scope (`repo:{name}:spawn` / `workspace:{id}:spawn`)
     // covering the target task's repo/workspace (the same claim-level
-    // right the MCP gyre_spawn_worker path validates via
+    // right the orchestrator spawn surfaces validate via
     // validate_tool_scope). Without this check the spawn surface is
     // contained only by the absence of 'spawn' from the Agent-role builtin
     // ABAC allow — a policy default, not code. Human/system/orchestrator
@@ -936,8 +936,8 @@ pub(crate) async fn spawn_agent_core(
     // source `evaluate_persona_reviews` (gate_executor) uses to decide
     // whether a reviewer runs a manifest gate's required persona. A
     // caller-supplied string recorded verbatim would let any
-    // spawn-capable caller (a repo orchestrator via gyre_spawn_worker, any
-    // Developer via the REST route) mint a gate-satisfiable persona
+    // spawn-capable caller (a repo orchestrator via the orchestrator
+    // spawn surface, any Developer via the REST route) mint a gate-satisfiable persona
     // identity: spawn a worker labeled `security`, self-approve the MR,
     // merge — the weakened-persona scenario the manifest gate constraints
     // exist to prevent. Fail-closed exactly like `persona_slug`: the name
@@ -1263,7 +1263,7 @@ pub(crate) async fn spawn_agent_core(
         // automatic rebase (source-control.md §4) cannot operate on.
         // New-branch spawns are the designed-for common case (the agent
         // entrypoint's `git checkout -b` fallback, the git-worktree
-        // fallback's `git worktree add -b`, MCP gyre_spawn_worker's
+        // fallback's `git worktree add -b`, the repo orchestrator's
         // orchestrator-chosen branch). Create the branch from the repo
         // HEAD when missing — the same base the git-worktree fallback
         // uses — so jj and the plain-git surface (refs, can_merge,
@@ -3156,7 +3156,7 @@ pub(crate) async fn launch_taskless_agent_process(
 /// POST /api/v1/agents/spawn
 ///
 /// Orchestrated agent provisioning in one call (see spawn_agent_core for
-/// MCP tool gyre_spawn_worker shares them.
+/// the shared machinery; the repo orchestrator spawn surface shares them.
 pub async fn spawn_agent(
     State(state): State<Arc<AppState>>,
     auth: AuthenticatedAgent,
@@ -4908,7 +4908,7 @@ mod tests {
     /// F9 pin: an agent spawned on a branch that does not yet exist in the
     /// bare git repo — the designed-for common case (the agent entrypoint's
     /// `git checkout -b` fallback, the git-worktree fallback's
-    /// `git worktree add -b`, MCP gyre_spawn_worker's orchestrator-chosen
+    /// `git worktree add -b`, the repo orchestrator's orchestrator-chosen
     /// branch) — must still get a jj workspace. `jj workspace add -r
     /// <branch>` resolves the branch against the bare repo's imported git
     /// refs; the spawn path therefore creates the branch from the repo HEAD
@@ -9896,13 +9896,225 @@ exit 1\n"
         );
     }
 
+    /// agent-runtime.md amendments row: the /api/v1/personas routes are
+    /// removed — persona creation, editing (including the operational
+    /// fields), and approval happen via the meta-spec registry's
+    /// `meta:persona` kind, and spawn-time persona resolution keeps
+    /// working against the registry-synced Persona read model. This test
+    /// walks the whole chain through the production HTTP surfaces:
+    /// registry POST (with operational fields) → synced Pending persona
+    /// row (same id, derived slug) → spawn refused while Pending →
+    /// registry approval → spawn binds the registry-created persona by
+    /// its derived slug. Killing directions: without
+    /// `sync_persona_from_meta_spec` the persona row never appears and the
+    /// spawn fails "not found in scope chain"; without the approval
+    /// mirror the spawn 400s after the registry PUT; without the
+    /// operational-fields sync the persona row carries defaults.
+    #[tokio::test]
+    async fn registry_meta_persona_is_spawn_bindable() {
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+
+        let (app, ws_id) = create_workspace(app, "registry-persona-ws").await;
+        let (app, repo_id) = create_repo_in_workspace(app, &ws_id).await;
+        let (app, task_id) = create_task(app, "Registry persona binding").await;
+        let auth = "Bearer test-token";
+
+        // Operational fields are only valid for meta:persona — a
+        // meta:principle entry carrying them is rejected.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/meta-specs")
+                    .header("content-type", "application/json")
+                    .header("Authorization", auth)
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "kind": "meta:principle",
+                            "name": "Not a persona",
+                            "scope": "tenant",
+                            "scope_id": "default",
+                            "prompt": "be principled",
+                            "model": "claude"
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "operational fields must be rejected on non-persona kinds"
+        );
+
+        // Create the registry persona entry with operational fields.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/meta-specs")
+                    .header("content-type", "application/json")
+                    .header("Authorization", auth)
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "kind": "meta:persona",
+                            "name": "Registry Worker",
+                            "scope": "tenant",
+                            "scope_id": "default",
+                            "prompt": "You are the registry-worker persona.",
+                            "model": "test-model",
+                            "temperature": 0.2,
+                            "max_tokens": 4096
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let ms = body_json(resp).await;
+        let ms_id = ms["id"].as_str().unwrap().to_string();
+        assert_eq!(ms["model"], "test-model");
+        assert_eq!(ms["temperature"], 0.2);
+        assert_eq!(ms["max_tokens"], 4096);
+
+        // The registry entry syncs a Persona read-model row: same id,
+        // derived slug ("Registry Worker" → "registry-worker"), prompt,
+        // operational fields, Pending approval.
+        let persona = state
+            .personas
+            .find_by_slug_and_scope(
+                "registry-worker",
+                &gyre_domain::PersonaScope::Tenant(Id::new("default")),
+            )
+            .await
+            .unwrap()
+            .expect("registry entry must sync a persona row");
+        assert_eq!(persona.id.as_str(), ms_id);
+        assert_eq!(
+            persona.system_prompt,
+            "You are the registry-worker persona."
+        );
+        assert_eq!(persona.model.as_deref(), Some("test-model"));
+        assert_eq!(persona.temperature, Some(0.2));
+        assert_eq!(persona.max_tokens, Some(4096));
+        assert_eq!(
+            persona.approval_status,
+            gyre_domain::PersonaApprovalStatus::Pending
+        );
+
+        // Spawn is refused while the registry persona is Pending
+        // (fail-closed Approved-only resolution, like any persona).
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/agents/spawn")
+                    .header("content-type", "application/json")
+                    .header("Authorization", auth)
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "name": "worker-registry-pending",
+                            "repo_id": repo_id,
+                            "task_id": task_id,
+                            "branch": "feat/registry-pending",
+                            "persona_slug": "registry-worker"
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "a Pending registry persona must reject the spawn"
+        );
+
+        // Approve through the registry surface (the replacement for the
+        // removed POST /api/v1/personas/:id/approve) and edit an
+        // operational field in the same PUT-shaped flow.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/meta-specs/{ms_id}"))
+                    .header("content-type", "application/json")
+                    .header("Authorization", auth)
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({ "approval_status": "approved" }))
+                            .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/meta-specs/{ms_id}"))
+                    .header("content-type", "application/json")
+                    .header("Authorization", auth)
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({ "model": "test-model-2" }))
+                            .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // The read model mirrors approval and the edited operational field.
+        let persona = state
+            .personas
+            .find_by_id(&Id::new(&ms_id))
+            .await
+            .unwrap()
+            .expect("synced persona must survive the registry edits");
+        assert_eq!(
+            persona.approval_status,
+            gyre_domain::PersonaApprovalStatus::Approved
+        );
+        assert_eq!(persona.model.as_deref(), Some("test-model-2"));
+
+        // Spawn now binds the registry-created persona by derived slug.
+        create_worktree_dir(&state, &ws_id, "wt-repo", "feat/registry-worker");
+        let (_app, json) = do_spawn_with_persona(
+            app,
+            "worker-registry-persona",
+            &repo_id,
+            &task_id,
+            "feat/registry-worker",
+            None,
+            "registry-worker",
+        )
+        .await;
+        assert_eq!(
+            json["agent"]["persona_id"], ms_id,
+            "spawn must bind the registry-created persona (same id as the meta-spec)"
+        );
+    }
+
     /// Review repair (manifest gates): the bare `persona` field feeds the
     /// `agent_personas` KV namespace — the trust source the manifest-gate
     /// persona check (`evaluate_persona_reviews`) reads. A caller-supplied
     /// name that does not resolve to an Approved persona must reject the
     /// spawn BEFORE any state is created, and must never be recorded:
-    /// otherwise any spawn-capable caller (repo orchestrator via
-    /// gyre_spawn_worker, any Developer via REST) could mint a
+    /// otherwise any spawn-capable caller (a repo orchestrator via the
+    /// orchestrator spawn surface, any Developer via REST) could mint a
     /// gate-satisfiable persona identity and self-approve an MR.
     #[tokio::test]
     async fn spawn_bare_persona_fails_closed() {

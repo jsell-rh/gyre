@@ -8143,10 +8143,7 @@ fn reject_persona_fields_on_other_kinds(
     budget: &Option<gyre_domain::BudgetConfig>,
 ) -> Result<(), ApiError> {
     if *kind != MetaSpecKind::Persona
-        && (model.is_some()
-            || temperature.is_some()
-            || max_tokens.is_some()
-            || budget.is_some())
+        && (model.is_some() || temperature.is_some() || max_tokens.is_some() || budget.is_some())
     {
         return Err(ApiError::BadRequest(
             "model/temperature/max_tokens/budget are persona operational fields; \

@@ -589,6 +589,10 @@ mod tests {
             created_by: "system".to_string(),
             created_at: now,
             updated_at: now,
+            model: None,
+            temperature: None,
+            max_tokens: None,
+            budget: None,
         }
     }
 

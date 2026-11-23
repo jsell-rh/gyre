@@ -2167,7 +2167,8 @@ fn persona_slug(persona: &str) -> &str {
 }
 
 /// Resolve a review persona nearest-wins (repo → workspace → tenant) for the
-/// MR's workspace, mirroring `personas::resolve_persona`.
+/// MR's workspace, mirroring the registry-synced persona read model's
+/// resolution chain (`sync_persona_from_meta_spec` in api/meta_specs.rs).
 ///
 /// A workspace that cannot be loaded has no resolvable tenant: the tenant
 /// scope is skipped (logged) rather than fabricated as `"default"` — a

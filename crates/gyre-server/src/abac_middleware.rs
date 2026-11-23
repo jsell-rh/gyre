@@ -7325,18 +7325,54 @@ pub mod tests {
         );
     }
 
-    /// `persona-human-approval` (live): an agent token POSTing the persona
-    /// approve route is denied by the seeded builtin alone — no custom
-    /// policy, and despite the agent role allow at 700 covering `approve`.
+    /// Persona approval is human-only (live): the /api/v1/personas routes
+    /// are REMOVED (agent-runtime.md amendments row — replaced entirely by
+    /// /api/v1/meta-specs?kind=meta:persona), so an agent token can no
+    /// longer POST a persona approve route. The invariant survives on the
+    /// replacement surface: approving a `meta:persona` is a registry write
+    /// (PUT /api/v1/meta-specs/:id with `approval_status`), and the
+    /// registry's scope-level write gate restricts it to tenant/workspace
+    /// Admins — a real agent JWT is denied end-to-end through the
+    /// production router (the seeded `persona-human-approval` builtin
+    /// keeps guarding any future persona-resource route; its semantics
+    /// are covered by policy_engine's unit test).
     #[tokio::test(flavor = "multi_thread")]
-    async fn builtin_persona_human_approval_denies_agent_live() {
-        use axum::routing::post;
+    async fn persona_approval_via_registry_denies_agent() {
+        use gyre_domain::meta_spec::{
+            MetaSpec, MetaSpecApprovalStatus, MetaSpecKind, MetaSpecScope,
+        };
 
         let state = crate::mem::test_state();
         tokio::task::block_in_place(|| {
             let h = tokio::runtime::Handle::current();
             h.block_on(seed_builtin_policies(&state)).expect("seed");
         });
+
+        // Seed a Tenant-scoped meta:persona at the default tenant (the
+        // tenant the agent token below resolves to) — the approval target.
+        let ms = MetaSpec {
+            id: gyre_common::Id::new("ms-persona-approve"),
+            kind: MetaSpecKind::Persona,
+            name: "Repo Orchestrator".to_string(),
+            scope: MetaSpecScope::Tenant,
+            scope_id: Some("default".to_string()),
+            prompt: "You orchestrate.".to_string(),
+            version: 1,
+            content_hash: gyre_domain::merge_attestation::sha256_hex(b"You orchestrate."),
+            required: false,
+            approval_status: MetaSpecApprovalStatus::Pending,
+            approved_by: None,
+            approved_at: None,
+            approved_content_hash: None,
+            created_by: "system".to_string(),
+            created_at: 1,
+            updated_at: 1,
+            model: None,
+            temperature: None,
+            max_tokens: None,
+            budget: None,
+        };
+        state.meta_specs.create(&ms).await.unwrap();
 
         // Mint and register a real agent token (same path as
         // agent_jwt_claims_reach_live_evaluation).
@@ -7366,25 +7402,22 @@ pub mod tests {
             .await
             .unwrap();
 
-        init_resolver();
-        async fn ok_handler() -> StatusCode {
-            StatusCode::OK
-        }
-        let app = Router::new()
-            .route("/api/v1/personas/:id/approve", post(ok_handler))
-            .layer(axum::middleware::from_fn_with_state(
-                state.clone(),
-                abac_middleware,
-            ))
-            .with_state(state);
-
+        // The production router: middleware evaluation plus the registry
+        // write gate — the agent must not get the persona approved.
+        let app = crate::api::api_router().with_state(state.clone());
         let resp = app
             .oneshot(
                 Request::builder()
-                    .method("POST")
-                    .uri("/api/v1/personas/persona-x/approve")
+                    .method("PUT")
+                    .uri("/api/v1/meta-specs/ms-persona-approve")
                     .header("Authorization", format!("Bearer {token}"))
-                    .body(Body::empty())
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "approval_status": "approved"
+                        }))
+                        .unwrap(),
+                    ))
                     .unwrap(),
             )
             .await
@@ -7392,8 +7425,18 @@ pub mod tests {
         assert_eq!(
             resp.status(),
             StatusCode::FORBIDDEN,
-            "the seeded persona-human-approval builtin must deny agent persona approvals"
+            "an agent JWT must not approve a persona through the registry surface"
         );
+
+        // And the record is unchanged — still Pending, no approver.
+        let after = state
+            .meta_specs
+            .get_by_id(&gyre_common::Id::new("ms-persona-approve"))
+            .await
+            .unwrap()
+            .expect("meta-spec must survive the denied approval");
+        assert_eq!(after.approval_status, MetaSpecApprovalStatus::Pending);
+        assert!(after.approved_by.is_none());
     }
 
     /// `agent-repo-scope` (live): a worker agent's JWT carries its spawn
