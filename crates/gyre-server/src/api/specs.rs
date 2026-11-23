@@ -1055,11 +1055,8 @@ pub async fn approve_spec(
                     target_entry.updated_at = now;
                     let _ = state.spec_ledger.save(&target_entry).await;
                     // Deprecation ends any pending period (task-339).
-                    crate::spec_pending_since::clear_pending(
-                        &state.kv_store,
-                        &link.target_path,
-                    )
-                    .await;
+                    crate::spec_pending_since::clear_pending(&state.kv_store, &link.target_path)
+                        .await;
 
                     // task-288: the target losing Approved status can cease
                     // a both-approved conflicts_with pair involving it —

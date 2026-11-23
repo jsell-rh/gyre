@@ -404,9 +404,13 @@ async fn check_stale_manifest_entries(
     for ctx in repo_ctxs {
         for entry in &ctx.manifest.specs {
             let rooted = normalize_spec_path(&entry.path);
-            let blob =
-                crate::spec_registry::get_blob_sha(&git_bin, &ctx.repo_path, &ctx.head_sha, &rooted)
-                    .await;
+            let blob = crate::spec_registry::get_blob_sha(
+                &git_bin,
+                &ctx.repo_path,
+                &ctx.head_sha,
+                &rooted,
+            )
+            .await;
             if blob.is_some() {
                 continue;
             }
@@ -579,13 +583,12 @@ async fn check_modified_specs_without_tasks(
         // to the config's watched prefixes. A ledger path the current
         // manifest does not declare is never task-eligible (the hook would
         // not have created a task for it either).
-        let task_eligible =
-            match entry.repo_id.as_deref().and_then(|r| ctx_by_repo.get(r)) {
-                Some(ctx) => crate::spec_registry::manifest_entry_for_path(&ctx.manifest, &path)
-                    .map(|e| e.effective_auto_create_tasks(&ctx.manifest.defaults))
-                    .unwrap_or(false),
-                None => config.is_watched(&path),
-            };
+        let task_eligible = match entry.repo_id.as_deref().and_then(|r| ctx_by_repo.get(r)) {
+            Some(ctx) => crate::spec_registry::manifest_entry_for_path(&ctx.manifest, &path)
+                .map(|e| e.effective_auto_create_tasks(&ctx.manifest.defaults))
+                .unwrap_or(false),
+            None => config.is_watched(&path),
+        };
         if !task_eligible {
             continue;
         }
