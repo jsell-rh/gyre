@@ -8286,7 +8286,7 @@ async fn sync_persona_from_meta_spec(state: &AppState, ms: &MetaSpec) {
                 tracing::warn!("meta:persona sync update failed: {e}");
                 return;
             }
-            crate::search_indexer::index(&state, crate::search_indexer::persona_document(&persona))
+            crate::search_indexer::index(state, crate::search_indexer::persona_document(&persona))
                 .await;
         }
         None => {
@@ -8311,7 +8311,7 @@ async fn sync_persona_from_meta_spec(state: &AppState, ms: &MetaSpec) {
                 tracing::warn!("meta:persona sync create failed: {e}");
                 return;
             }
-            crate::search_indexer::index(&state, crate::search_indexer::persona_document(&persona))
+            crate::search_indexer::index(state, crate::search_indexer::persona_document(&persona))
                 .await;
             // Persona approval is requested at creation (same notification
             // the retired POST /api/v1/personas issued): a Pending persona
@@ -8338,7 +8338,7 @@ async fn delete_persona_synced_from_meta_spec(state: &AppState, ms: &MetaSpec) {
             if let Err(e) = state.personas.delete(&ms.id).await {
                 tracing::warn!("meta:persona sync delete failed: {e}");
             } else {
-                crate::search_indexer::deindex(&state, "persona", ms.id.as_str()).await;
+                crate::search_indexer::deindex(state, "persona", ms.id.as_str()).await;
             }
         }
         Ok(None) => {}

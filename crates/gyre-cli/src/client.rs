@@ -1829,8 +1829,8 @@ impl GyreClient {
 
     /// GET /api/v1/meta-specs?scope=tenant&scope_id=<tenant>&kind=meta:persona
     /// - find an existing registry persona entry for a built-in persona
-    /// slug within the bootstrap tenant (resume path: bootstrap re-runs
-    /// skip re-registering built-in personas).
+    ///   slug within the bootstrap tenant (resume path: bootstrap re-runs
+    ///   skip re-registering built-in personas).
     ///
     /// The /api/v1/personas routes are removed (agent-runtime.md amendments
     /// row) — the meta-spec registry's `meta:persona` kind is the persona

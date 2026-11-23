@@ -222,7 +222,7 @@ impl MetaSpecRepository for SqliteStorage {
         let budget = meta_spec
             .budget
             .as_ref()
-            .map(|b| serde_json::to_string(b))
+            .map(serde_json::to_string)
             .transpose()
             .context("serialize meta_spec budget JSON")?;
         tokio::task::spawn_blocking(move || -> Result<()> {
@@ -325,7 +325,7 @@ impl MetaSpecRepository for SqliteStorage {
         let budget = meta_spec
             .budget
             .as_ref()
-            .map(|b| serde_json::to_string(b))
+            .map(serde_json::to_string)
             .transpose()
             .context("serialize meta_spec budget JSON")?;
         tokio::task::spawn_blocking(move || -> Result<()> {
