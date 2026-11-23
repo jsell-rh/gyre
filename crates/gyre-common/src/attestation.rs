@@ -80,7 +80,10 @@ pub struct InputContent {
     /// Required persona(s) for implementation.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub persona_constraints: Vec<PersonaRef>,
-    /// Hash of the bound meta-spec set at approval time.
+    /// SHA-256 over the registry's effective (required, approved, visible)
+    /// meta-spec set at approval time — the registry-model replacement for
+    /// the retired workspace meta-spec-set hash. Empty when no required
+    /// meta-specs applied at approval time.
     pub meta_spec_set_sha: String,
     /// What parts of the repo this authorization covers.
     pub scope: ScopeConstraint,

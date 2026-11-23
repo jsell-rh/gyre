@@ -2,8 +2,8 @@
 title: "Spec bindings as registry metadata with re-approval cascade, UI panel, and meta-spec-set retirement"
 spec_ref: "Spec gap spec-41a92c20354c6a108e6074e3 / bindings-registry-cascade / 4a3f940495a8"
 depends_on: [task-301]
-progress: not-started
-commits: []
+progress: complete
+commits: ["f9a9acbeea6133316947daf5b94a9a715e305d1c", "cf18529cfea018e5d9cb8b1d7259b825076e068e", "0160a25e5ce31515fb553963f06843d357dfcc91", "443e75a84d6f56f47a31fe374a7ee0e52c3d7480", "cd6787dd8b8db7eabfb426449a0e0a26d850af77", "58c89154f14ea2bff7349db6093e38b31e395e2b", "0e90f42ca0bc43d8df82e90c27c296facc574ff1", "e68a426e306a876263f63298af11b33996bdf072", "4d3ed96b7a6960b5faedefa5a9163091075a1e6f", "b608ce334ec8d1516e571976d1a44ce34179f9e5"]
 ---
 
 ## Required behavior
@@ -82,3 +82,76 @@ Canonical spec: `specs/system/agent-runtime.md`. Source: `678a8ac3e3bfeafeb66cdb
     ]
   }
 ]
+
+## Shipped
+
+No acceptance-criterion checkboxes are ticked; independent review and
+deterministic gates decide approval.
+
+### Product surface (this branch, cumulative)
+
+- **Registry-metadata binding storage + re-approval cascade (AC1/AC3).**
+  `SpecLedgerEntry.bindings_sha` (gyre-domain/spec_ledger.rs) records the
+  canonical SHA over the binding set; `registry_sha()` derives the spec's
+  registry identity over content SHA + bindings SHA (equals `current_sha`
+  when unbound, so existing approvals stay valid). `put_spec_meta_spec_
+  bindings` (api/meta_specs.rs) writes the binding set AND the ledger: a
+  changed set updates `bindings_sha`, resets `approval_status` to Pending
+  via the existing content-edit invalidation machinery, and clears the
+  `stale_pin:{spec}:` dedup keys; the endpoint's validation semantics are
+  preserved (pin-version-exists, cross-workscope leak guard, role gating,
+  fail-closed unregistered-spec rejection). The spawn gate and merge gates
+  fail closed on non-Approved specs and ledger lookup errors; the existing
+  SpecApproved → orchestrator → delegation chain re-fires on re-approval.
+  The hourly stale-pin check keeps producing priority-6 drift alerts.
+- **Consistent registry SHA across the provenance chain (review repair,
+  cf18529c).** The approval event and the attestation root minted in the
+  same handler now record the SAME registry SHA: `InputContent.spec_sha`
+  is the registry SHA (was the content SHA, which made
+  verify_context_binding binding 3 reject every attested push for a bound
+  spec). `SpecLedgerResponse.registry_sha` exposes the identity a signing
+  client needs, and authorization-provenance.md §2.2/§2.4 name the
+  registry SHA as the recorded identity.
+- **Fail-closed required-meta-spec resolution (review repair, cf18529c).**
+  `required_meta_spec_snapshots` returns `Result`; merge-time drift
+  (`mr_meta_spec_drift` / strict `require_current_meta_spec_set` holds),
+  the §10 conformance sweep, approval-time `InputContent.meta_spec_set_sha`
+  stamping, the dry-run preview, and `build_agent_context` (push/merge
+  enforcement) all propagate resolution errors instead of reading them as
+  "no required meta-specs"; audit-only mirrors warn and skip.
+- **UI bindings panel (AC2, review repair f9a9acbe).** The Specs view Edit
+  flow's panel lists available meta-specs (Admin flat listing with
+  workspace-scoped fallback), pre-selects required ones locked, allows
+  optional selection + pinned versions, saves via the bindings endpoint,
+  and now normalizes the spec path (`specs/` prefix stripped) so Explorer
+  entry paths hit the ledger-keyed route.
+- **Meta-spec-set retirement (AC4/AC5/AC6).** Workspace/tenant set PUT/GET
+  routes removed (404), all production writers to the KV set stores
+  removed, `resolve_effective_meta_spec_set` / `run_conformance_sweep` /
+  `llm_helpers::workspace_meta_spec_context` migrated to the DB-backed
+  registry model; merge-time drift compares `meta_specs_used` against
+  current required versions with `{meta_spec_id, kind, content_hash,
+  version}` snapshot tuples. Reconciliation triggering by required-flag
+  changes and meta-spec approval is preserved — the fan-out now threads
+  registry ids end-to-end instead of re-resolving by name (review repair,
+  cf18529c).
+
+### Test evidence
+
+- Web (run in this sandbox): `vitest run` — 2593 passed / 41 skipped / 0
+  failed, including the strengthened bindings-panel URL assertions
+  (verified to fail at the base component: 2 tests fail with the raw-id
+  calls, proving the tests kill the bug).
+- Server (compilation verified here via `cargo check -p gyre-server
+  --tests`, clean; test EXECUTION is verifier-owned per the 4 GiB budget
+  rule and must be run by the independent verifier):
+  - `cargo test -p gyre-server --lib approve_spec_records_registry_sha_on_both_event_and_attestation_root`
+    (new — seeds a bound spec, approves with key binding + signature,
+    asserts root spec_sha == registry SHA == resolve_task_binding_context)
+  - `cargo test -p gyre-server --lib api::specs::tests`
+  - `cargo test -p gyre-server --lib reconciliation::`
+  - `cargo test -p gyre-server --lib constraint_check::`
+  - `cargo test -p gyre-server --lib merge_processor::`
+  - `cargo test -p gyre-server --lib api::meta_specs::tests`
+- Evidence artifacts: /tmp/stage/review-evidence (cargo check output, web
+  test bug-kill record).

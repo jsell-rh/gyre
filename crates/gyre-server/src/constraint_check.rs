@@ -127,8 +127,22 @@ pub async fn evaluate_push_constraints(
     };
 
     // Build agent context from the agent record, workspace meta-spec set, and
-    // workload attestation.
-    let agent_ctx = build_agent_context(state, agent_id, task_id, workspace_id).await;
+    // workload attestation. Audit-only mirror: an unresolvable required
+    // meta-spec set logs and skips — enforcement lives in
+    // enforce_push_constraints, which fails closed on the same error.
+    let agent_ctx = match build_agent_context(state, agent_id, task_id, workspace_id).await {
+        Ok(ctx) => ctx,
+        Err(e) => {
+            warn!(
+                task_id,
+                repo_id,
+                agent_id,
+                error = %e,
+                "failed to build agent context (audit-only): required meta-spec set unresolvable"
+            );
+            return;
+        }
+    };
 
     // Look up workspace trust level.
     let workspace = state
@@ -391,8 +405,15 @@ pub async fn enforce_push_constraints(
         }
     };
 
-    // Build agent context.
-    let agent_ctx = build_agent_context(state, agent_id, task_id, workspace_id).await;
+    // Build agent context. Fail closed: an unresolvable workspace required
+    // meta-spec set must not evaluate §3.2 constraints against a
+    // fabricated empty agent SHA — reject the push (the signer can retry
+    // once the store recovers).
+    let agent_ctx = build_agent_context(state, agent_id, task_id, workspace_id)
+        .await
+        .map_err(|e| {
+            format!("push rejected: failed to resolve agent context (workspace meta-spec set): {e}")
+        })?;
 
     // Workspace trust level.
     let workspace = state
@@ -650,7 +671,11 @@ pub async fn enforce_merge_constraints(
         }
     };
 
-    let agent_ctx = build_agent_context(state, &agent_id, &task_id, workspace_id).await;
+    let agent_ctx = build_agent_context(state, &agent_id, &task_id, workspace_id)
+        .await
+        .map_err(|e| {
+            format!("merge blocked: failed to resolve agent context (workspace meta-spec set): {e}")
+        })?;
 
     let workspace = state
         .workspaces
@@ -897,8 +922,20 @@ pub async fn evaluate_merge_constraints(
     };
 
     // Build agent context from the agent record, workspace meta-spec set, and
-    // workload attestation.
-    let agent_ctx = build_agent_context(state, &agent_id, &task_id, workspace_id).await;
+    // workload attestation. Audit-only mirror: an unresolvable required
+    // meta-spec set logs and skips — enforcement lives in
+    // enforce_merge_constraints, which fails closed on the same error.
+    let agent_ctx = match build_agent_context(state, &agent_id, &task_id, workspace_id).await {
+        Ok(ctx) => ctx,
+        Err(e) => {
+            warn!(
+                mr_id,
+                error = %e,
+                "failed to build agent context (audit-only): required meta-spec set unresolvable"
+            );
+            return;
+        }
+    };
 
     // Look up workspace trust level.
     let workspace = state
@@ -1042,7 +1079,7 @@ fn failed_binding_summary(result: &VerificationResult) -> String {
 /// Returns `(None, None)` when the task itself cannot be resolved — callers
 /// treating that as "no binding data" must still have the repo/workspace
 /// bindings enforced against the real push target.
-async fn resolve_task_binding_context(
+pub(crate) async fn resolve_task_binding_context(
     state: &AppState,
     task_id: &str,
 ) -> (Option<String>, Option<u32>) {
@@ -1210,15 +1247,23 @@ pub(crate) async fn get_repo_required_attestation_level(
 /// Build an `AgentContext` from the agent record, JWT claims, workspace
 /// meta-spec set, and workload attestation data.
 ///
-/// Populates `meta_spec_set_sha` from the workspace's current meta-spec set
-/// (SHA256 of the serialized JSON). Derives `attestation_level` from the
-/// agent's workload attestation record (supply-chain.md §2).
+/// Populates `meta_spec_set_sha` from the workspace's current effective
+/// (required, approved, visible) registry meta-spec set. Derives
+/// `attestation_level` from the agent's workload attestation record
+/// (supply-chain.md §2).
+///
+/// Fail closed: a required-set resolution error propagates instead of
+/// stamping an empty SHA — the §3.2 constraint compares
+/// `agent.meta_spec_set_sha == input.meta_spec_set_sha`, and an
+/// outage-masked empty SHA would falsely pass against an approval that
+/// stamped an empty set. Enforcement callers reject; audit-only mirrors
+/// log and skip.
 pub(crate) async fn build_agent_context(
     state: &AppState,
     agent_id: &str,
     task_id: &str,
     workspace_id: &Id,
-) -> AgentContext {
+) -> anyhow::Result<AgentContext> {
     let agent = state
         .agents
         .find_by_id(&Id::new(agent_id))
@@ -1237,11 +1282,25 @@ pub(crate) async fn build_agent_context(
         .flatten()
         .unwrap_or_default();
 
-    // Meta-spec set SHA: compute from the workspace's current meta-spec set.
-    // The agent runs in this workspace, so its meta-spec set is the workspace's
-    // current set. If no set is configured, the SHA is empty (correctly fails
-    // against a non-empty input SHA, indicating the set has changed).
-    let meta_spec_set_sha = crate::compute_meta_spec_set_sha(state, workspace_id).await;
+    // Meta-spec set SHA: compute from the workspace's current effective
+    // (required, approved, visible) registry meta-spec set. The agent runs
+    // in this workspace, so its set is the workspace's current set. If no
+    // required meta-specs apply, the SHA is empty (correctly fails against
+    // a non-empty input SHA, indicating the set has changed). A resolution
+    // ERROR is not "no required meta-specs" — it propagates (fail closed).
+    let meta_spec_set_sha = crate::reconciliation::meta_spec_snapshot_sha(
+        &crate::reconciliation::required_meta_spec_snapshots(state, workspace_id)
+            .await
+            .map_err(|e| {
+                warn!(
+                    agent_id,
+                    workspace_id = %workspace_id,
+                    error = %e,
+                    "agent context: required meta-spec set unresolvable — failing closed"
+                );
+                e
+            })?,
+    );
 
     // Workload attestation: populate container_id, image_hash, and stack_hash
     // from the KV-cached workload attestation record if available.
@@ -1266,7 +1325,7 @@ pub(crate) async fn build_agent_context(
         None => (String::new(), String::new(), String::new()),
     };
 
-    AgentContext {
+    Ok(AgentContext {
         id: agent_id.to_string(),
         persona,
         stack_hash,
@@ -1279,7 +1338,7 @@ pub(crate) async fn build_agent_context(
         task_id: task_id.to_string(),
         container_id,
         image_hash,
-    }
+    })
 }
 
 /// Compute the diff for a push (across all ref updates).
@@ -1954,18 +2013,10 @@ mod tests {
         String::from_utf8(out.stdout).unwrap().trim().to_string()
     }
 
-    /// Compute the SHA256 of a meta-spec set JSON string (same algorithm as
-    /// `compute_meta_spec_set_sha`).
-    fn meta_spec_sha(json: &str) -> String {
-        use sha2::{Digest, Sha256};
-        let mut hasher = Sha256::new();
-        hasher.update(json.as_bytes());
-        hex::encode(hasher.finalize())
-    }
-
-    /// Set up the state with a workspace meta-spec set and agent persona so
-    /// that `build_agent_context` populates these fields correctly during
-    /// constraint evaluation.
+    /// Set up the state with a workspace, a REQUIRED approved meta-spec
+    /// scoped to it, and an agent persona so that `build_agent_context`
+    /// populates these fields correctly during constraint evaluation.
+    /// Returns the expected effective-set SHA (registry model).
     async fn seed_agent_context(
         state: &crate::AppState,
         workspace_id: &str,
@@ -1994,19 +2045,30 @@ mod tests {
             .await
             .unwrap();
 
-        // Store a meta-spec set for the workspace (canonical serialization —
-        // the SHA is computed over the effective set's serialization).
-        let meta_set = crate::api::meta_specs::MetaSpecSet {
-            workspace_id: workspace_id.to_string(),
-            ..Default::default()
+        // A REQUIRED approved meta-spec scoped to the workspace — the
+        // registry-model effective set whose canonical snapshot SHA
+        // `build_agent_context` stamps (the retired KV set model hashed
+        // the stored set JSON instead).
+        let content_hash = format!("hash-{workspace_id}-v1");
+        let ms = gyre_domain::meta_spec::MetaSpec {
+            id: Id::new(format!("ms-{workspace_id}")),
+            kind: gyre_domain::meta_spec::MetaSpecKind::Persona,
+            name: format!("persona-{workspace_id}"),
+            scope: gyre_domain::meta_spec::MetaSpecScope::Workspace,
+            scope_id: Some(workspace_id.to_string()),
+            prompt: "be rigorous".to_string(),
+            version: 1,
+            content_hash: content_hash.clone(),
+            required: true,
+            approval_status: gyre_domain::meta_spec::MetaSpecApprovalStatus::Approved,
+            approved_by: Some("admin".to_string()),
+            approved_at: Some(1_700_000_000),
+            approved_content_hash: Some(content_hash.clone()),
+            created_by: "admin".to_string(),
+            created_at: 1_700_000_000,
+            updated_at: 1_700_000_000,
         };
-        let meta_set_json = serde_json::to_string(&meta_set).unwrap();
-        state
-            .meta_spec_sets
-            .upsert(&ws_id, &meta_set_json)
-            .await
-            .unwrap();
-        let sha = meta_spec_sha(&meta_set_json);
+        state.meta_specs.create(&ms).await.unwrap();
 
         // Store agent persona in KV (same key as build_agent_context reads).
         state
@@ -2015,7 +2077,15 @@ mod tests {
             .await
             .unwrap();
 
-        sha
+        // Expected SHA over the effective set's canonical snapshot tuple,
+        // constructed by hand from the seeded spec (not via the production
+        // resolver) so the assertion checks real resolution.
+        crate::reconciliation::meta_spec_snapshot_sha(&[gyre_domain::MetaSpecSnapshot {
+            meta_spec_id: ms.id.to_string(),
+            kind: ms.kind.as_str().to_string(),
+            content_hash,
+            version: 1,
+        }])
     }
 
     #[tokio::test]
@@ -2409,25 +2479,42 @@ mod tests {
             .await
             .unwrap();
 
-        // Store a meta-spec set for the workspace (canonical serialization).
-        let meta_set = crate::api::meta_specs::MetaSpecSet {
-            workspace_id: "ws-ctx-1".to_string(),
-            ..Default::default()
+        // A REQUIRED approved meta-spec scoped to the workspace — the
+        // registry-model effective set.
+        let content_hash = "hash-ws-ctx-1-v1".to_string();
+        let ms = gyre_domain::meta_spec::MetaSpec {
+            id: Id::new("ms-ws-ctx-1"),
+            kind: gyre_domain::meta_spec::MetaSpecKind::Standard,
+            name: "ctx-standard".to_string(),
+            scope: gyre_domain::meta_spec::MetaSpecScope::Workspace,
+            scope_id: Some("ws-ctx-1".to_string()),
+            prompt: "be rigorous".to_string(),
+            version: 1,
+            content_hash: content_hash.clone(),
+            required: true,
+            approval_status: gyre_domain::meta_spec::MetaSpecApprovalStatus::Approved,
+            approved_by: Some("admin".to_string()),
+            approved_at: Some(1_700_000_000),
+            approved_content_hash: Some(content_hash.clone()),
+            created_by: "admin".to_string(),
+            created_at: 1_700_000_000,
+            updated_at: 1_700_000_000,
         };
-        let meta_set_json = serde_json::to_string(&meta_set).unwrap();
-        state
-            .meta_spec_sets
-            .upsert(&ws_id, &meta_set_json)
+        state.meta_specs.create(&ms).await.unwrap();
+
+        // Expected SHA over the effective set's canonical snapshot tuple,
+        // constructed by hand from the seeded spec.
+        let expected_sha =
+            crate::reconciliation::meta_spec_snapshot_sha(&[gyre_domain::MetaSpecSnapshot {
+                meta_spec_id: ms.id.to_string(),
+                kind: ms.kind.as_str().to_string(),
+                content_hash,
+                version: 1,
+            }]);
+
+        let ctx = build_agent_context(&state, "agent-ctx-1", "TASK-CTX-1", &ws_id)
             .await
             .unwrap();
-
-        // Compute expected SHA256.
-        use sha2::{Digest, Sha256};
-        let mut hasher = Sha256::new();
-        hasher.update(meta_set_json.as_bytes());
-        let expected_sha = hex::encode(hasher.finalize());
-
-        let ctx = build_agent_context(&state, "agent-ctx-1", "TASK-CTX-1", &ws_id).await;
 
         assert_eq!(ctx.meta_spec_set_sha, expected_sha);
         assert!(!ctx.meta_spec_set_sha.is_empty());
@@ -2439,7 +2526,9 @@ mod tests {
         let ws_id = Id::new("ws-no-meta");
 
         // No meta-spec set stored → SHA should be empty.
-        let ctx = build_agent_context(&state, "agent-ctx-2", "TASK-CTX-2", &ws_id).await;
+        let ctx = build_agent_context(&state, "agent-ctx-2", "TASK-CTX-2", &ws_id)
+            .await
+            .unwrap();
 
         assert!(ctx.meta_spec_set_sha.is_empty());
     }
@@ -2472,7 +2561,9 @@ mod tests {
             .await
             .unwrap();
 
-        let ctx = build_agent_context(&state, "agent-wl-1", "TASK-WL-1", &ws_id).await;
+        let ctx = build_agent_context(&state, "agent-wl-1", "TASK-WL-1", &ws_id)
+            .await
+            .unwrap();
 
         assert_eq!(ctx.stack_hash, "sha256:stack-abc");
         assert_eq!(ctx.container_id, "container-xyz");
@@ -2646,7 +2737,9 @@ mod tests {
         let ws_id = Id::new("ws-att-level");
 
         // No workload → Level 0.
-        let ctx = build_agent_context(&state, "agent-no-wl", "TASK-1", &ws_id).await;
+        let ctx = build_agent_context(&state, "agent-no-wl", "TASK-1", &ws_id)
+            .await
+            .unwrap();
         assert_eq!(ctx.attestation_level, 0);
 
         // Level 2: stack hash, no container.
@@ -2674,7 +2767,9 @@ mod tests {
             )
             .await
             .unwrap();
-        let ctx2 = build_agent_context(&state, "agent-level2", "TASK-2", &ws_id).await;
+        let ctx2 = build_agent_context(&state, "agent-level2", "TASK-2", &ws_id)
+            .await
+            .unwrap();
         assert_eq!(ctx2.attestation_level, 2);
 
         // Level 3: stack + container + image.
@@ -2702,7 +2797,9 @@ mod tests {
             )
             .await
             .unwrap();
-        let ctx3 = build_agent_context(&state, "agent-level3", "TASK-3", &ws_id).await;
+        let ctx3 = build_agent_context(&state, "agent-level3", "TASK-3", &ws_id)
+            .await
+            .unwrap();
         assert_eq!(ctx3.attestation_level, 3);
     }
 

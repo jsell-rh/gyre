@@ -101,7 +101,7 @@ SignedInput {
 
 InputContent {
   spec_path:            string          -- e.g., "specs/system/payments.md"
-  spec_sha:             string          -- git blob SHA at approval time
+  spec_sha:             string          -- spec registry SHA at approval time: the git blob SHA plus the spec's meta-spec binding set (agent-runtime.md §2 Spec-Level Binding; equals the blob SHA when unbound). The same SHA the approval ledger records.
   workspace_id:         string          -- scoping boundary
   repo_id:              string          -- target repository
   persona_constraints:  PersonaRef[]    -- required persona(s) for implementation
@@ -153,7 +153,7 @@ The `platform_countersign` proves the binding was registered at a specific time 
 Each `SignedInput` is bound to a specific context:
 
 - `workspace_id` + `repo_id` — the input cannot be replayed to a different repo.
-- `spec_sha` — the input is bound to a specific spec version. A modified spec produces a different SHA, requiring a new approval and new `SignedInput`.
+- `spec_sha` — the input is bound to a specific spec version (the spec's registry SHA, covering content and meta-spec bindings). A modified spec or updated binding pin produces a different SHA, requiring a new approval and new `SignedInput`.
 - `expected_generation` — optional monotonic counter. If present, the input is only valid for a specific generation of the deployment (task assignment). Prevents replay of an old authorization after a task has been reassigned.
 - `valid_until` — hard expiry. After this time, the authorization is invalid regardless of other checks.
 
