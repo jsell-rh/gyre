@@ -126,6 +126,28 @@ default_priority_modified = "High"
 default_priority_deleted = "High"
 ```
 
+**Manifest supersession** (spec-registry.md §Integration/Spec Lifecycle: "The
+`[spec_lifecycle]` config block is superseded by the manifest's `defaults:`
+section"). When the pushed HEAD of a repo contains `specs/manifest.yaml`, the
+manifest is authoritative for the lifecycle hook and supersedes this config
+block where the two overlap:
+
+- **Hook eligibility (`enabled`):** `enabled = false` applies only to
+  manifest-less repos, where it governs the watched-prefix fallback. It does
+  **not** suppress manifest-driven lifecycle task creation for manifest
+  repos — which files trigger tasks is decided by the manifest entries'
+  effective `auto_create_tasks` (per-entry override, else `defaults:`).
+- **Approval invalidation (`auto_invalidate_approvals`):** for a spec
+  registered in the manifest, the entry's effective `auto_invalidate_on_change`
+  (per-entry override, else `defaults:`) decides whether the hook revokes
+  active approvals on M/D/R. `auto_invalidate_approvals` remains the fallback
+  for manifest-less repos and for `specs/` files not registered in the
+  manifest.
+
+Aspects the manifest does not express — watched/ignored prefixes for
+manifest-less repos, `dedup_open_tasks`, and the per-change-kind default
+priorities — remain config-governed.
+
 ## Implementation Notes
 
 This is a **forge-native feature** - it runs as part of the post-receive hook in `git_http.rs`, alongside commit provenance recording and domain event broadcasting. The hook:

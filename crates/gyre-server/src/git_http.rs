@@ -3395,15 +3395,16 @@ async fn process_spec_lifecycle(
     ref_updates: &[RefUpdate],
 ) {
     // Per-repo config (spec-lifecycle.md §Configuration); defaults when unset.
+    // NOTE: the config `enabled` flag is NOT a master switch anymore — it is
+    // evaluated per update below, after the manifest is read, so a manifest
+    // at the pushed HEAD can supersede it (spec-registry.md §Integration/
+    // Spec Lifecycle: "The `[spec_lifecycle]` config block is superseded by
+    // the manifest's `defaults:` section").
     let config = state
         .spec_lifecycle_configs
         .get_for_repo(repo_id)
         .await
         .unwrap_or_default();
-    if !config.enabled {
-        info!(repo_id, "spec-lifecycle: disabled for repo, skipping");
-        return;
-    }
 
     let default_ref = format!("refs/heads/{default_branch}");
     let relevant_updates: Vec<&RefUpdate> = ref_updates
@@ -3469,6 +3470,20 @@ async fn process_spec_lifecycle(
             );
         }
 
+        // Manifest supersession (spec-registry.md §Integration/Spec
+        // Lifecycle): when a manifest exists at the pushed HEAD it is
+        // authoritative for lifecycle policy, so the config `enabled` flag
+        // cannot suppress manifest-driven task creation. The flag keeps its
+        // meaning only for manifest-less repos, whose watched-prefix
+        // fallback it governs.
+        if manifest.is_none() && !config.enabled {
+            info!(
+                repo_id,
+                "spec-lifecycle: disabled for repo (no manifest at HEAD), skipping"
+            );
+            continue;
+        }
+
         // Resolve the repo's workspace scope once per push. Events are scoped
         // to the workspace the repo actually belongs to; if the repo cannot be
         // resolved there is no valid scope to emit under, so skip the events
@@ -3497,62 +3512,83 @@ async fn process_spec_lifecycle(
 
         for (status_char, path, old_path) in changes {
             // Auto-invalidate active spec approvals when the spec file is modified,
-            // deleted, or renamed (configurable, spec-lifecycle.md §Configuration).
-            if config.auto_invalidate_approvals {
-                // For renames, the old path is stale; for M/D, the current path is stale.
-                // Diff paths are git paths ("specs/system/foo.md"); approval rows are
-                // keyed by ledger paths ("system/foo.md" — spec_registry strips the
-                // specs/ prefix). Normalize so revocation actually matches rows.
-                fn ledger_path(p: &str) -> &str {
-                    p.strip_prefix("specs/").unwrap_or(p)
-                }
-                let stale_paths: Vec<&str> = match status_char {
-                    'M' | 'D' => vec![path.as_str()],
-                    'R' => old_path
-                        .as_deref()
-                        .map(|p| vec![p])
-                        .unwrap_or_else(|| vec![path.as_str()]),
-                    _ => vec![],
-                };
-                // Only `specs/…` files carry approval-ledger rows; the
-                // unfiltered diff also lists source and doc files, which
-                // have no approvals to invalidate.
-                let stale_paths: Vec<&str> = stale_paths
-                    .into_iter()
-                    .filter(|p| p.starts_with("specs/"))
-                    .collect();
+            // deleted, or renamed. For a spec registered in the manifest, the
+            // entry's effective `auto_invalidate_on_change` (per-entry override,
+            // else the manifest `defaults:` section) decides — the manifest
+            // supersedes `config.auto_invalidate_approvals` for manifest repos
+            // (spec-registry.md §Integration/Spec Lifecycle). The config flag
+            // remains the fallback for manifest-less repos and unregistered
+            // files.
+            // For renames, the old path is stale; for M/D, the current path is stale.
+            // Diff paths are git paths ("specs/system/foo.md"); approval rows are
+            // keyed by ledger paths ("system/foo.md" — spec_registry strips the
+            // specs/ prefix). Normalize so revocation actually matches rows.
+            fn ledger_path(p: &str) -> &str {
+                p.strip_prefix("specs/").unwrap_or(p)
+            }
+            let stale_paths: Vec<&str> = match status_char {
+                'M' | 'D' => vec![path.as_str()],
+                'R' => old_path
+                    .as_deref()
+                    .map(|p| vec![p])
+                    .unwrap_or_else(|| vec![path.as_str()]),
+                _ => vec![],
+            };
+            // Only `specs/…` files carry approval-ledger rows; the
+            // unfiltered diff also lists source and doc files, which
+            // have no approvals to invalidate.
+            let stale_paths: Vec<&str> = stale_paths
+                .into_iter()
+                .filter(|p| p.starts_with("specs/"))
+                .collect();
 
-                if !stale_paths.is_empty() {
-                    let reason = format!(
-                        "spec file {} in push to {}",
-                        match status_char {
-                            'M' => "modified",
-                            'D' => "deleted",
-                            'R' => "renamed",
-                            _ => "changed",
-                        },
-                        default_branch
-                    );
-                    let mut invalidated = 0usize;
-                    for stale_path in &stale_paths {
-                        let _ = state
-                            .spec_approvals
-                            .revoke_all_for_path(
-                                ledger_path(stale_path),
-                                "system:spec-lifecycle",
-                                &reason,
-                                now,
-                            )
-                            .await;
-                        invalidated += 1;
-                    }
-                    if invalidated > 0 {
-                        info!(
-                            spec_path = %path,
-                            invalidated,
-                            "spec-lifecycle: auto-invalidated stale spec approvals"
+            if !stale_paths.is_empty() {
+                let reason = format!(
+                    "spec file {} in push to {}",
+                    match status_char {
+                        'M' => "modified",
+                        'D' => "deleted",
+                        'R' => "renamed",
+                        _ => "changed",
+                    },
+                    default_branch
+                );
+                let mut invalidated = 0usize;
+                for stale_path in &stale_paths {
+                    // Manifest supersession: a registered spec keys on its
+                    // manifest entry's effective auto_invalidate_on_change;
+                    // manifest-less repos and unregistered files fall back to
+                    // config.auto_invalidate_approvals.
+                    let invalidate = match manifest.as_ref() {
+                        Some(m) => crate::spec_registry::manifest_entry_for_path(m, stale_path)
+                            .map(|e| e.effective_auto_invalidate(&m.defaults))
+                            .unwrap_or(config.auto_invalidate_approvals),
+                        None => config.auto_invalidate_approvals,
+                    };
+                    if !invalidate {
+                        debug!(
+                            spec_path = %stale_path,
+                            "spec-lifecycle: manifest auto_invalidate_on_change=false, existing approvals survive"
                         );
+                        continue;
                     }
+                    let _ = state
+                        .spec_approvals
+                        .revoke_all_for_path(
+                            ledger_path(stale_path),
+                            "system:spec-lifecycle",
+                            &reason,
+                            now,
+                        )
+                        .await;
+                    invalidated += 1;
+                }
+                if invalidated > 0 {
+                    info!(
+                        spec_path = %path,
+                        invalidated,
+                        "spec-lifecycle: auto-invalidated stale spec approvals"
+                    );
                 }
             }
 
@@ -11415,6 +11451,345 @@ specs:
                 .await
                 .is_err(),
             "revoked approval must fail verify_spec_ref"
+        );
+    }
+
+    // ── task-334: manifest supersedes the [spec_lifecycle] config block ──
+
+    /// Fixture for the manifest-supersession probes (task-334): a real git
+    /// repo on `main` whose commits carry `specs/manifest.yaml` and
+    /// `specs/system/payments.md`, plus any `extra_first_commit_files` (so a
+    /// second-commit rewrite of those files is a modification, not an add).
+    /// The second commit rewrites the files listed in `second_commit_files`.
+    /// Returns (state, repo_id, repo_path, tmp, old_sha, new_sha) — the
+    /// TempDir is returned so the repo outlives the fixture.
+    async fn manifest_lifecycle_fixture(
+        manifest_yaml: &str,
+        extra_first_commit_files: &[(&str, &str)],
+        second_commit_files: &[(&str, &str)],
+    ) -> (
+        Arc<crate::AppState>,
+        String,
+        String,
+        TempDir,
+        String,
+        String,
+    ) {
+        let state = test_state();
+        let tmp = TempDir::new().unwrap();
+        let repo_path = tmp.path().join("mrepo");
+        std::fs::create_dir_all(repo_path.join("specs/system")).unwrap();
+        std::fs::write(repo_path.join("specs/manifest.yaml"), manifest_yaml).unwrap();
+        std::fs::write(
+            repo_path.join("specs/system/payments.md"),
+            "# Payments v1\n",
+        )
+        .unwrap();
+        for (path, contents) in extra_first_commit_files {
+            std::fs::write(repo_path.join(path), contents).unwrap();
+        }
+
+        let repo_path_str = repo_path.to_str().unwrap().to_string();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&repo_path)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        git(&["init", "-b", "main"]);
+        git(&["config", "user.email", "test@test.com"]);
+        git(&["config", "user.name", "Test"]);
+        git(&["add", "."]);
+        git(&["commit", "-m", "v1"]);
+        let old_sha = git(&["rev-parse", "HEAD"]);
+
+        for (path, contents) in second_commit_files {
+            std::fs::write(repo_path.join(path), contents).unwrap();
+        }
+        git(&["add", "."]);
+        git(&["commit", "-m", "v2"]);
+        let new_sha = git(&["rev-parse", "HEAD"]);
+
+        let repo = Repository::new(
+            Id::new("repo-m334"),
+            Id::new("ws-test"),
+            "m334-repo",
+            &repo_path_str,
+            0,
+        );
+        state.repos.create(&repo).await.unwrap();
+
+        (
+            state,
+            "repo-m334".to_string(),
+            repo_path_str,
+            tmp,
+            old_sha,
+            new_sha,
+        )
+    }
+
+    /// Seed an active approval row keyed by the ledger path (as
+    /// `approve_spec` records) and return its id.
+    async fn seed_active_approval(
+        state: &Arc<crate::AppState>,
+        id: &str,
+        ledger_path: &str,
+    ) -> gyre_common::Id {
+        let approval = gyre_domain::SpecApproval::new(
+            gyre_common::Id::new(id),
+            ledger_path,
+            "b".repeat(40),
+            "user:approver",
+        );
+        state.spec_approvals.create(&approval).await.unwrap();
+        state
+            .spec_approvals
+            .approve(&approval.id, 1700000000)
+            .await
+            .unwrap()
+            .expect("entry exists");
+        assert!(state
+            .spec_approvals
+            .find_by_id(&approval.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_active());
+        approval.id
+    }
+
+    /// task-334 probe A (verification intent, mismatch case): a manifest
+    /// repo whose entry sets `auto_create_tasks: true` and
+    /// `auto_invalidate_on_change: false`, with repo config
+    /// `[spec_lifecycle]` enabled=true and auto_invalidate_approvals=true.
+    /// Pushing a modification to the spec must create the drift-review
+    /// task AND leave the existing approvals active — the manifest, not
+    /// the config block, decides invalidation for manifest repos.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn manifest_entry_spares_approvals_and_creates_task_despite_config() {
+        let manifest = r#"
+version: 1
+specs:
+  - path: system/payments.md
+    title: Payments
+    owner: user:test
+    auto_create_tasks: true
+    auto_invalidate_on_change: false
+"#;
+        let (state, repo_id, repo_path, _tmp, old_sha, new_sha) = manifest_lifecycle_fixture(
+            manifest,
+            &[],
+            &[("specs/system/payments.md", "# Payments v2\n")],
+        )
+        .await;
+
+        // Config: enabled (default) with auto_invalidate_approvals = true
+        // (default) — at the base this revoked the approvals.
+        let approval_id =
+            seed_active_approval(&state, "apr-m334-a", "system/payments.md").await;
+
+        process_spec_lifecycle(
+            &state,
+            &repo_id,
+            &repo_path,
+            "main",
+            &[RefUpdate {
+                old_sha,
+                new_sha,
+                refname: "refs/heads/main".to_string(),
+            }],
+        )
+        .await;
+
+        // The drift-review lifecycle task exists (manifest entry
+        // auto_create_tasks: true).
+        let tasks = state.tasks.list().await.unwrap();
+        let drift: Vec<&gyre_domain::Task> = tasks
+            .iter()
+            .filter(|t| {
+                t.repo_id.to_string() == repo_id
+                    && t.labels.contains(&"spec-drift-review".to_string())
+            })
+            .collect();
+        assert_eq!(
+            drift.len(),
+            1,
+            "manifest entry with auto_create_tasks: true must create the drift-review task, got: {drift:?}"
+        );
+        assert_eq!(drift[0].spec_path.as_deref(), Some("specs/system/payments.md"));
+
+        // The approval survives: the manifest entry's
+        // auto_invalidate_on_change: false supersedes
+        // config.auto_invalidate_approvals: true.
+        let reloaded = state
+            .spec_approvals
+            .find_by_id(&approval_id)
+            .await
+            .unwrap()
+            .expect("approval row survives");
+        assert!(
+            reloaded.is_active(),
+            "manifest auto_invalidate_on_change: false must spare the approval despite config auto_invalidate_approvals: true"
+        );
+    }
+
+    /// task-334 probe B (twin with enabled=false): the same manifest repo
+    /// with `[spec_lifecycle]` config enabled=false. The config flag must
+    /// NOT act as a master switch for manifest repos — the drift-review
+    /// task is still created (the flag keeps its meaning only for
+    /// manifest-less repos).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn manifest_supersedes_config_enabled_false_creates_task() {
+        let manifest = r#"
+version: 1
+specs:
+  - path: system/payments.md
+    title: Payments
+    owner: user:test
+    auto_create_tasks: true
+    auto_invalidate_on_change: false
+"#;
+        let (state, repo_id, repo_path, _tmp, old_sha, new_sha) = manifest_lifecycle_fixture(
+            manifest,
+            &[],
+            &[("specs/system/payments.md", "# Payments v2\n")],
+        )
+        .await;
+
+        // Disable via the same port the PUT handler writes through.
+        state
+            .spec_lifecycle_configs
+            .set_for_repo(
+                &repo_id,
+                gyre_domain::SpecLifecycleConfig {
+                    enabled: false,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        process_spec_lifecycle(
+            &state,
+            &repo_id,
+            &repo_path,
+            "main",
+            &[RefUpdate {
+                old_sha,
+                new_sha,
+                refname: "refs/heads/main".to_string(),
+            }],
+        )
+        .await;
+
+        let tasks = state.tasks.list().await.unwrap();
+        let drift: Vec<&gyre_domain::Task> = tasks
+            .iter()
+            .filter(|t| {
+                t.repo_id.to_string() == repo_id
+                    && t.labels.contains(&"spec-drift-review".to_string())
+            })
+            .collect();
+        assert_eq!(
+            drift.len(),
+            1,
+            "manifest repo must still create the drift-review task when config enabled=false, got: {drift:?}"
+        );
+    }
+
+    /// task-334: the manifest decides invalidation in the other direction
+    /// too. A manifest repo whose entry (via the `defaults:` section)
+    /// keeps auto_invalidate_on_change true, with config
+    /// auto_invalidate_approvals=false: the registered spec's approval is
+    /// revoked anyway, while an unregistered `specs/` file in the same
+    /// push falls back to the config flag and survives.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn manifest_auto_invalidate_true_overrides_config_false() {
+        let manifest = r#"
+version: 1
+specs:
+  - path: system/payments.md
+    title: Payments
+    owner: user:test
+"#;
+        let (state, repo_id, repo_path, _tmp, old_sha, new_sha) = manifest_lifecycle_fixture(
+            manifest,
+            // Seeded in the first commit so the second-commit rewrite is a
+            // modification (M) — only M/D/R reach the invalidation fallback.
+            &[("specs/system/unregistered.md", "# Unregistered v1\n")],
+            &[
+                ("specs/system/payments.md", "# Payments v2\n"),
+                ("specs/system/unregistered.md", "# Unregistered v2\n"),
+            ],
+        )
+        .await;
+
+        // Config turns invalidation off — the manifest must override it
+        // for the registered spec only.
+        state
+            .spec_lifecycle_configs
+            .set_for_repo(
+                &repo_id,
+                gyre_domain::SpecLifecycleConfig {
+                    auto_invalidate_approvals: false,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let registered =
+            seed_active_approval(&state, "apr-m334-reg", "system/payments.md").await;
+        let unregistered =
+            seed_active_approval(&state, "apr-m334-unreg", "system/unregistered.md").await;
+
+        process_spec_lifecycle(
+            &state,
+            &repo_id,
+            &repo_path,
+            "main",
+            &[RefUpdate {
+                old_sha,
+                new_sha,
+                refname: "refs/heads/main".to_string(),
+            }],
+        )
+        .await;
+
+        // Registered spec: manifest defaults.auto_invalidate_on_change
+        // (true) supersedes config.auto_invalidate_approvals=false.
+        let reg_reloaded = state
+            .spec_approvals
+            .find_by_id(&registered)
+            .await
+            .unwrap()
+            .expect("approval row survives");
+        assert_eq!(
+            reg_reloaded.status(),
+            gyre_domain::spec_approval::ApprovalStatus::Revoked,
+            "manifest auto_invalidate_on_change: true must revoke despite config auto_invalidate_approvals: false"
+        );
+
+        // Unregistered file: falls back to config.auto_invalidate_approvals
+        // (false) — approval survives.
+        let unreg_reloaded = state
+            .spec_approvals
+            .find_by_id(&unregistered)
+            .await
+            .unwrap()
+            .expect("approval row survives");
+        assert!(
+            unreg_reloaded.is_active(),
+            "unregistered specs/ file must fall back to config.auto_invalidate_approvals=false"
         );
     }
 
