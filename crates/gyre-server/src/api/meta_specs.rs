@@ -2196,6 +2196,31 @@ mod tests {
         body_json(resp).await["id"].as_str().unwrap().to_string()
     }
 
+    #[test]
+    fn approval_status_parse_accepts_any_case() {
+        // API-edge leniency (see parse_kind/parse_scope): the CLI bootstrap
+        // and other HTTP clients send `"approved"` in either case; the
+        // server must accept it and serialize canonically. The domain
+        // `MetaSpecApprovalStatus::parse` stays case-sensitive for
+        // DB-stored canonical values.
+        use gyre_domain::MetaSpecApprovalStatus;
+        for (input, expected) in [
+            ("approved", MetaSpecApprovalStatus::Approved),
+            ("Approved", MetaSpecApprovalStatus::Approved),
+            ("APPROVED", MetaSpecApprovalStatus::Approved),
+            ("pending", MetaSpecApprovalStatus::Pending),
+            ("Pending", MetaSpecApprovalStatus::Pending),
+            ("rejected", MetaSpecApprovalStatus::Rejected),
+        ] {
+            assert_eq!(
+                super::parse_approval_status(input).unwrap(),
+                expected,
+                "input {input:?} must parse"
+            );
+        }
+        assert!(super::parse_approval_status("bogus").is_err());
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn blast_radius_empty() {
         let resp = app()
@@ -8337,11 +8362,20 @@ fn parse_scope(s: &str) -> Result<MetaSpecScope, ApiError> {
 }
 
 fn parse_approval_status(s: &str) -> Result<MetaSpecApprovalStatus, ApiError> {
-    MetaSpecApprovalStatus::parse(s).ok_or_else(|| {
-        ApiError::BadRequest(format!(
+    // Case-insensitive (see parse_kind/parse_scope): HTTP clients send the
+    // approval status in either case (`"approved"` from the CLI bootstrap,
+    // `"Approved"` canonical); accept any case, serialize canonically. The
+    // domain `MetaSpecApprovalStatus::parse` stays case-sensitive (canonical
+    // form only, used for DB-stored values), so the leniency lives here at
+    // the API edge.
+    match s.to_ascii_lowercase().as_str() {
+        "pending" => Ok(MetaSpecApprovalStatus::Pending),
+        "approved" => Ok(MetaSpecApprovalStatus::Approved),
+        "rejected" => Ok(MetaSpecApprovalStatus::Rejected),
+        _ => Err(ApiError::BadRequest(format!(
             "invalid approval_status '{s}'; must be: Pending, Approved, or Rejected"
-        ))
-    })
+        ))),
+    }
 }
 
 // ---------------------------------------------------------------------------

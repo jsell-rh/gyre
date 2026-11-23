@@ -2035,7 +2035,7 @@ impl GyreClient {
         serde_json::from_str(&text).context("parsing persona meta-spec response")
     }
 
-    /// PUT /api/v1/meta-specs/:id (approval_status=approved) - pre-approve a
+    /// PUT /api/v1/meta-specs/:id (approval_status=Approved) - pre-approve a
     /// registered persona entry (the registry replacement for the retired
     /// POST /api/v1/personas/:id/approve).
     pub async fn approve_persona(&self, persona_id: &str) -> Result<()> {
@@ -2043,7 +2043,7 @@ impl GyreClient {
             .client
             .put(format!("{}/api/v1/meta-specs/{persona_id}", self.base_url))
             .header("Authorization", self.auth_header())
-            .json(&serde_json::json!({ "approval_status": "approved" }))
+            .json(&serde_json::json!({ "approval_status": "Approved" }))
             .send()
             .await
             .context("connecting to Gyre server")?;

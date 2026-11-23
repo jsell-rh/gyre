@@ -10041,7 +10041,11 @@ exit 1\n"
 
         // Approve through the registry surface (the replacement for the
         // removed POST /api/v1/personas/:id/approve) and edit an
-        // operational field in the same PUT-shaped flow.
+        // operational field in the same PUT-shaped flow. The lowercase
+        // `"approved"` payload is deliberate: it pins the API-edge
+        // case-insensitivity of parse_approval_status (same leniency as
+        // parse_kind/parse_scope) so payload forms HTTP clients document
+        // keep working end-to-end.
         let resp = app
             .clone()
             .oneshot(
