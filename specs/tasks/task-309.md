@@ -3,7 +3,7 @@ title: "Adopt the specced Svelte 5 + shadcn-svelte web UI stack, replacing the b
 spec_ref: "Spec gap spec-f907eda3bd014fe546b838e2 / shadcn-svelte-ui-stack / 4156114b8040"
 depends_on: []
 progress: ready-for-review
-commits: ["40fcedae4ccabed95f2575598d300eac859764e8", "f863a10dd81d4fb9e8e6ede73714c0f6f1e8b127", "9a56ebdfc15a3a9023d1356d21953d977f51c293", "ae5d3eb45e44bf40a01680b674fd2b821d6c9496", "4d5e209b474cc94fd5b4f26ba3144b742df9e55d", "493d1e10ad07c1705d4f015601848cce06f1159b", "b9bcaf5ee201e7969dc622867f757654a33b4946"]
+commits: ["37eccbca32317a7d5e8ce615df0377f099ff60b2", "b9bcaf5ee201e7969dc622867f757654a33b4946", "493d1e10ad07c1705d4f015601848cce06f1159b", "40fcedae4ccabed95f2575598d300eac859764e8", "f863a10dd81d4fb9e8e6ede73714c0f6f1e8b127", "9a56ebdfc15a3a9023d1356d21953d977f51c293", "ae5d3eb45e44bf40a01680b674fd2b821d6c9496", "4d5e209b474cc94fd5b4f26ba3144b742df9e55d"]
 ---
 
 ## Required behavior
