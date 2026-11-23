@@ -186,10 +186,7 @@ pub async fn set_merge_policy(
 ///
 /// Used by the merge processor, where a policy-store outage should surface as
 /// a logged degradation to the spec default rather than aborting the cycle.
-pub(crate) async fn merge_policy_or_default(
-    state: &AppState,
-    workspace_id: &Id,
-) -> MetaSpecPolicy {
+pub(crate) async fn merge_policy_or_default(state: &AppState, workspace_id: &Id) -> MetaSpecPolicy {
     match get_merge_policy(state, workspace_id).await {
         Ok(p) => p,
         Err(e) => {

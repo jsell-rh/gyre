@@ -10726,7 +10726,18 @@ mod tests {
     /// and return its snapshot — the current required meta-spec the merge
     /// gate's drift check compares the recorded usage against.
     async fn bind_required_spec(state: &AppState, ws_id: &str) -> gyre_domain::MetaSpec {
-        let content_hash = format!("hash-{ws_id}-v1");
+        bind_required_spec_at_version(state, ws_id, 1).await
+    }
+
+    /// Bind a REQUIRED approved meta-spec to the workspace at a specific
+    /// registry `version` — the §9 tolerance tests need multi-version
+    /// gaps (e.g. registry at v4, MRs recorded at v3 / v2).
+    async fn bind_required_spec_at_version(
+        state: &AppState,
+        ws_id: &str,
+        version: u32,
+    ) -> gyre_domain::MetaSpec {
+        let content_hash = format!("hash-{ws_id}-v{version}");
         let ms = gyre_domain::meta_spec::MetaSpec {
             id: Id::new(format!("ms-{ws_id}")),
             kind: gyre_domain::meta_spec::MetaSpecKind::Persona,
@@ -10734,7 +10745,7 @@ mod tests {
             scope: gyre_domain::meta_spec::MetaSpecScope::Workspace,
             scope_id: Some(ws_id.to_string()),
             prompt: "be a good backend developer".to_string(),
-            version: 1,
+            version,
             content_hash: content_hash.clone(),
             required: true,
             approval_status: gyre_domain::meta_spec::MetaSpecApprovalStatus::Approved,
@@ -10941,10 +10952,7 @@ mod tests {
             .as_deref()
             .expect("drift reason recorded");
         assert!(reason.contains("meta-spec drift"), "reason: {reason}");
-        assert!(
-            reason.contains("block_on_drift"),
-            "reason: {reason}"
-        );
+        assert!(reason.contains("block_on_drift"), "reason: {reason}");
         // §9 naming: the block reason names the per-meta-spec version
         // transition (recorded v0 -> current v1), not a set SHA.
         assert!(
@@ -11009,6 +11017,270 @@ mod tests {
                 .any(|r| r.gate_id.as_str() == crate::reconciliation::META_SPEC_DRIFT_GATE_ID),
             "warn-only path must record the drift gate result"
         );
+    }
+
+    /// §9 `drift_tolerance` version-count reasoning at the merge gate:
+    /// with `block_on_drift: true, drift_tolerance: 1`, an MR recorded
+    /// ONE version behind the registry merges with a `[WARN]` naming the
+    /// per-meta-spec transition, while an MR recorded TWO versions behind
+    /// is blocked and requeued with the drift reason.
+    #[tokio::test]
+    async fn meta_spec_drift_tolerance_one_warns_within_and_blocks_beyond() {
+        let state = test_state();
+        // Production policy set — see the warn-only drift test above: the
+        // within-tolerance MR must actually merge.
+        crate::abac_middleware::seed_builtin_policies(&state)
+            .await
+            .expect("seed built-in policies");
+        let ws_id = "ws-drift-tol";
+        let repo_one = create_repo_in_workspace(&state, "repo-drift-tol-one", ws_id).await;
+        let repo_two = create_repo_in_workspace(&state, "repo-drift-tol-two", ws_id).await;
+        // Registry at v4; the MRs below were authored at v3 and v2.
+        let ms = bind_required_spec_at_version(&state, ws_id, 4).await;
+
+        // One version behind (v3 vs v4): within tolerance 1.
+        create_drift_mr(
+            &state,
+            "mr-drift-tol-one",
+            ws_id,
+            &repo_one,
+            vec![gyre_domain::MetaSpecSnapshot {
+                meta_spec_id: ms.id.to_string(),
+                kind: ms.kind.as_str().to_string(),
+                content_hash: "hash-v3".to_string(),
+                version: 3,
+            }],
+        )
+        .await;
+        // Two versions behind (v2 vs v4): beyond tolerance 1.
+        create_drift_mr(
+            &state,
+            "mr-drift-tol-two",
+            ws_id,
+            &repo_two,
+            vec![gyre_domain::MetaSpecSnapshot {
+                meta_spec_id: ms.id.to_string(),
+                kind: ms.kind.as_str().to_string(),
+                content_hash: "hash-v2".to_string(),
+                version: 2,
+            }],
+        )
+        .await;
+
+        crate::merge_policy::set_merge_policy(
+            &state,
+            &Id::new(ws_id),
+            &crate::merge_policy::MetaSpecPolicy {
+                warn_on_drift: true,
+                block_on_drift: true,
+                drift_tolerance: 1,
+            },
+        )
+        .await
+        .unwrap();
+
+        // Higher priority first so the one-behind MR is selected and
+        // merged before the two-behind entry is held.
+        enqueue_mr(&state, "mr-drift-tol-one", 50, 1000).await;
+        enqueue_mr(&state, "mr-drift-tol-two", 40, 1001).await;
+
+        process_next(&state).await.unwrap();
+        process_next(&state).await.unwrap();
+
+        // One version behind → within tolerance → warn and proceed.
+        let updated = state
+            .merge_requests
+            .find_by_id(&Id::new("mr-drift-tol-one"))
+            .await
+            .unwrap()
+            .expect("mr exists");
+        assert_eq!(
+            updated.status,
+            MrStatus::Merged,
+            "one version behind must merge within drift_tolerance 1"
+        );
+        let results = state
+            .gate_results
+            .list_by_mr_id("mr-drift-tol-one")
+            .await
+            .unwrap();
+        let drift = results
+            .iter()
+            .find(|r| r.gate_id.as_str() == crate::reconciliation::META_SPEC_DRIFT_GATE_ID)
+            .expect("within-tolerance drift must record the [WARN] gate result");
+        assert_eq!(drift.status, GateStatus::Passed);
+        let output = drift.output.as_deref().expect("warning output");
+        assert_eq!(
+            output,
+            "[WARN] meta-spec-drift: persona backend-developer v3 -> v4. \
+             Reconciliation may be needed."
+        );
+
+        // Two versions behind → beyond tolerance → blocked and requeued
+        // with the drift reason naming the transition.
+        let updated = state
+            .merge_requests
+            .find_by_id(&Id::new("mr-drift-tol-two"))
+            .await
+            .unwrap()
+            .expect("mr exists");
+        assert_eq!(
+            updated.status,
+            MrStatus::Open,
+            "two versions behind must block beyond drift_tolerance 1"
+        );
+        let entry = state
+            .merge_queue
+            .find_by_id(&Id::new("entry-mr-drift-tol-two"))
+            .await
+            .unwrap()
+            .expect("entry exists");
+        assert_eq!(entry.status, MergeQueueEntryStatus::Queued);
+        let reason = entry
+            .error_message
+            .as_deref()
+            .expect("drift reason recorded");
+        assert!(
+            reason.contains("persona backend-developer v2 -> v4"),
+            "reason: {reason}"
+        );
+        assert!(reason.contains("drift_tolerance 1"), "reason: {reason}");
+    }
+
+    /// §9 `warn_on_drift`: `false` (non-strict) suppresses the `[WARN]`
+    /// drift gate result while the merge proceeds; `false` with
+    /// `block_on_drift: true` still records the warning alongside the
+    /// block ("Always on in strict mode").
+    #[tokio::test]
+    async fn warn_on_drift_false_suppresses_warning_except_in_strict_mode() {
+        // ── Non-strict: warn_on_drift: false suppresses the gate result.
+        let state = test_state();
+        // Production policy set — see the warn-only drift test above: the
+        // non-strict phase must actually merge the drifted MR.
+        crate::abac_middleware::seed_builtin_policies(&state)
+            .await
+            .expect("seed built-in policies");
+        let ws_id = "ws-drift-nowarn";
+        let repo = create_repo_in_workspace(&state, "repo-drift-nowarn", ws_id).await;
+        let ms = bind_required_spec(&state, ws_id).await;
+
+        create_drift_mr(
+            &state,
+            "mr-drift-nowarn",
+            ws_id,
+            &repo,
+            vec![gyre_domain::MetaSpecSnapshot {
+                meta_spec_id: ms.id.to_string(),
+                kind: ms.kind.as_str().to_string(),
+                content_hash: "old-hash".to_string(),
+                version: 0,
+            }],
+        )
+        .await;
+        enqueue_mr(&state, "mr-drift-nowarn", 50, 1000).await;
+
+        crate::merge_policy::set_merge_policy(
+            &state,
+            &Id::new(ws_id),
+            &crate::merge_policy::MetaSpecPolicy {
+                warn_on_drift: false,
+                block_on_drift: false,
+                drift_tolerance: 1,
+            },
+        )
+        .await
+        .unwrap();
+
+        process_next(&state).await.unwrap();
+
+        // Suppressed: no drift gate result, and the merge proceeded.
+        let results = state
+            .gate_results
+            .list_by_mr_id("mr-drift-nowarn")
+            .await
+            .unwrap();
+        assert!(
+            results
+                .iter()
+                .all(|r| r.gate_id.as_str() != crate::reconciliation::META_SPEC_DRIFT_GATE_ID),
+            "warn_on_drift: false (non-strict) must suppress the [WARN] gate result"
+        );
+        let updated = state
+            .merge_requests
+            .find_by_id(&Id::new("mr-drift-nowarn"))
+            .await
+            .unwrap()
+            .expect("mr exists");
+        assert_eq!(updated.status, MrStatus::Merged);
+
+        // ── Strict: warn_on_drift: false still records the warning
+        // alongside the block ("Always on in strict mode").
+        let ws2_id = "ws-drift-nowarn-strict";
+        let repo2 = create_repo_in_workspace(&state, "repo-drift-nowarn-strict", ws2_id).await;
+        let ms2 = bind_required_spec(&state, ws2_id).await;
+
+        create_drift_mr(
+            &state,
+            "mr-drift-nowarn-strict",
+            ws2_id,
+            &repo2,
+            vec![gyre_domain::MetaSpecSnapshot {
+                meta_spec_id: ms2.id.to_string(),
+                kind: ms2.kind.as_str().to_string(),
+                content_hash: "old-hash".to_string(),
+                version: 0,
+            }],
+        )
+        .await;
+        enqueue_mr(&state, "mr-drift-nowarn-strict", 50, 1000).await;
+
+        crate::merge_policy::set_merge_policy(
+            &state,
+            &Id::new(ws2_id),
+            &crate::merge_policy::MetaSpecPolicy {
+                warn_on_drift: false,
+                block_on_drift: true,
+                drift_tolerance: 0,
+            },
+        )
+        .await
+        .unwrap();
+
+        process_next(&state).await.unwrap();
+
+        // Blocked (entry requeued with the drift reason) AND the warning
+        // gate result is recorded despite warn_on_drift: false.
+        let entry = state
+            .merge_queue
+            .find_by_id(&Id::new("entry-mr-drift-nowarn-strict"))
+            .await
+            .unwrap()
+            .expect("entry exists");
+        assert_eq!(entry.status, MergeQueueEntryStatus::Queued);
+        assert!(entry
+            .error_message
+            .as_deref()
+            .expect("drift reason recorded")
+            .contains("meta-spec drift"));
+        let results = state
+            .gate_results
+            .list_by_mr_id("mr-drift-nowarn-strict")
+            .await
+            .unwrap();
+        assert!(
+            results
+                .iter()
+                .any(|r| r.gate_id.as_str() == crate::reconciliation::META_SPEC_DRIFT_GATE_ID),
+            "strict mode must record the warning alongside the block \
+             regardless of warn_on_drift"
+        );
+        let updated = state
+            .merge_requests
+            .find_by_id(&Id::new("mr-drift-nowarn-strict"))
+            .await
+            .unwrap()
+            .expect("mr exists");
+        assert_eq!(updated.status, MrStatus::Open);
     }
 
     /// §9: matching meta_spec_set_sha → pass, no warning gate result.

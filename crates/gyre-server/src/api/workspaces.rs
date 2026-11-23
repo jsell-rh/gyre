@@ -74,10 +74,7 @@ pub struct MetaSpecPolicyRequest {
 impl MetaSpecPolicyRequest {
     /// Validate the request fields and apply them onto `policy`.
     /// Returns the parsed tolerance on success, or a 400-grade message.
-    fn apply_to(
-        &self,
-        policy: &mut crate::merge_policy::MetaSpecPolicy,
-    ) -> Result<(), String> {
+    fn apply_to(&self, policy: &mut crate::merge_policy::MetaSpecPolicy) -> Result<(), String> {
         if let Some(warn) = self.warn_on_drift {
             policy.warn_on_drift = warn;
         }
@@ -1790,10 +1787,7 @@ mod tests {
         assert_eq!(policy["require_current_meta_spec_set"], false);
 
         // Invalid tolerance (negative) → 400; fractional → 400.
-        for body in [
-            r#"{"drift_tolerance": -1}"#,
-            r#"{"drift_tolerance": 1.5}"#,
-        ] {
+        for body in [r#"{"drift_tolerance": -1}"#, r#"{"drift_tolerance": 1.5}"#] {
             let resp = crate::api::api_router()
                 .with_state(state.clone())
                 .oneshot(

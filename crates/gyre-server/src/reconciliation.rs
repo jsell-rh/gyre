@@ -2188,9 +2188,7 @@ pub async fn mr_meta_spec_drift(
 
     let mut transitions: Vec<MetaSpecDriftTransition> = Vec::new();
     for cur in &current {
-        let recorded = produced
-            .iter()
-            .find(|p| p.meta_spec_id == cur.id.as_str());
+        let recorded = produced.iter().find(|p| p.meta_spec_id == cur.id.as_str());
         match recorded {
             // Matched at the current version AND content hash — pass.
             Some(p) if p.version == cur.version && p.content_hash == cur.content_hash => continue,
@@ -4952,8 +4950,14 @@ mod tests {
         assert_eq!(drift.transitions.len(), 1);
         assert_eq!(drift.transitions[0].recorded_version, None);
         assert_eq!(drift.transitions[0].versions_behind(), None);
-        assert_eq!(drift.transitions[0].label(), "persona backend-developer v? -> v4");
-        assert!(drift.exceeds_tolerance(u32::MAX), "unverifiable must block at any tolerance");
+        assert_eq!(
+            drift.transitions[0].label(),
+            "persona backend-developer v? -> v4"
+        );
+        assert!(
+            drift.exceeds_tolerance(u32::MAX),
+            "unverifiable must block at any tolerance"
+        );
 
         // No entry at all for the required meta-spec: same unverifiable
         // treatment (legacy hash-only provenance class).
