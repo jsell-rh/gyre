@@ -2,8 +2,8 @@
 title: "Blast radius computed from provenance: version-discriminated affected workspaces plus per-repo spec/commit counts from real attestation queries"
 spec_ref: "Spec gap spec-556a0b49e9f2803bf0e2ff3d / blast-radius-provenance / b288723d2f73"
 depends_on: [task-302]
-progress: not-started
-commits: []
+progress: complete
+commits: ["508a821b9df142ba1dfde5ae54e4425918345c45", "8c86b5d90bd39edc02e54a803219062bdec36e4a", "7a50c0883a88557c15e6612901f55f3a3b4a917c", "0e3bd11882ac6d540f3076d505a06cfdb77b58bc", "ded8ebc8ec3ce1578fbf2160ff2b26f12eb472a5"]
 ---
 
 ## Required behavior
@@ -46,3 +46,109 @@ Canonical spec: `specs/system/meta-spec-reconciliation.md`. Source: `50575cf65e6
     ]
   }
 ]
+
+## Shipped
+
+No acceptance-criterion checkboxes are ticked; independent review and
+deterministic gates decide approval.
+
+### §4 blast radius: version discrimination + provenance counts
+
+Delivered on the task-302 registry model (this task's `depends_on`), in
+`crates/gyre-server/src/api/meta_specs.rs`
+(`get_meta_spec_blast_radius` + `blast_radius_repo_provenance`):
+
+- **Change context (deliverable 1).** `GET /api/v1/meta-specs/{path}/blast-radius`
+  accepts `?from_version=&to_version=`; `from_version` is the SUPERSEDED
+  version (defaulted to the registry's current version), and a
+  `to_version <= from_version` is a 400 (a meta-spec change moves to a
+  LATER version). A workspace is affected only when its effective binding
+  requires/pins the changed meta-spec at the superseded version:
+  spec-level `meta_spec_bindings` pins (joined to the ledger entry's
+  workspace scope) at exactly that version, or required-flag visibility
+  (Global/Tenant/Workspace) at the registry's current version. Workspaces
+  bound at other versions are reported in `skipped_workspaces` with their
+  pinned version and excluded from every count and total — the spec's
+  "internal-tools on v2 is skipped for a v3→v4 change" case.
+- **Per-repo counts from provenance (deliverable 2).**
+  `blast_radius_repo_provenance` queries three real storage surfaces per
+  repo: agent-commit provenance (`agent_commits.find_by_repo`) joined with
+  the author agent's spawn-time prompt-set record (`meta_specs_used`),
+  chain attestations (`chain_attestations.find_by_repo` — commit SHA from
+  the attestation, spec identity from the signed input's `spec_path`),
+  and merge attestation bundles (`attestation_store.find_by_mr_id` — the
+  bundle's own `meta_specs_used` array, merge commit SHA, and MR spec
+  reference). It counts distinct spec identities and distinct commit SHAs
+  whose recorded governing meta-spec versions include the superseded
+  version of the changed meta-spec, deduplicated across surfaces. The
+  response carries per-workspace `repos: [{id, spec_count,
+  commit_count}]`, a flat `affected_repos` binding scan, and
+  `totals {repos, specs, commits}` — all computed from storage, never
+  fabricated: a repo with no provenance under the superseded version gets
+  zero counts in `affected_repos` and is omitted from the workspace's
+  repos-with-work list (it does not increment `totals.repos`).
+- **§8 labels preserved (deliverable 3).** `reason` stays
+  `workspace_binding` vs `tenant_inheritance` (own spec-level pins and
+  Workspace-scoped required flags are own bindings; broader-scope
+  required flags are inherited), with a granular `binding` field
+  (`required_global` / `required_tenant` / `required_workspace` /
+  `spec_binding`). Counts are computed identically for both classes.
+- **Read-only + ABAC (deliverable 4).** The endpoint is an unchanged
+  GET route, still mapped in the ABAC resolver; no new route, no
+  exemption entries.
+
+Tests (in `crates/gyre-server/src/reconciliation.rs`):
+`blast_radius_version_discriminates_and_counts_provenance` (the full A/B
+acceptance scenario: workspace B pinned at v2 reported skipped with its
+pinned version and excluded from totals; workspace A affected with
+per-repo spec/commit counts equal to the seeded provenance across chain
+attestations, merge attestation bundles, and agent-commit provenance; the
+no-provenance repo of A carries zero counts and stays off the
+repos-with-work list; totals exact),
+`blast_radius_defaults_superseded_version_to_registry_current`,
+`blast_radius_labels_and_counts_from_chain_and_merge_attestations`
+(tenant_inheritance vs workspace_binding labels, counts computed
+identically for both), `blast_radius_rejects_backwards_version_range`.
+
+### Repair rounds
+
+- **SQLite bound clamp (commit 7a50c088).** Review found a mem/SQLite
+  port-contract divergence: the u64::MAX "no upper bound" sentinel
+  wrapped to -1 in the SQLite adapter's `chain_attestations.find_by_repo`
+  i64 predicate, so that provenance surface always returned empty on
+  production SQLite while mem-backed tests stayed green. Fixed by
+  clamping `since`/`until` into the i64-representable range in the
+  SQLite adapter and using an `i64::MAX as u64` sentinel at the
+  blast-radius call site, with a new SQLite-backed guard test
+  (`find_by_repo_u64_max_bound_matches_rows`) verified to fail with the
+  naive cast and pass with the clamp.
+- **rustfmt (commit 8c86b5d9).** The retained verification run
+  (7cfa23affad248999a075aa8b55652ef, exit 1) failed only its rustfmt
+  gate on changed blast-radius test lines; fixed formatting-only.
+- **Missing workspace row (commit 508a821b).** Review found
+  `blast_radius_defaults_superseded_version_to_registry_current` never
+  created the workspace row `ws-br-dc-own`: `require_for_ws` creates
+  only the Workspace-scoped required meta-spec, and the handler resolves
+  Workspace-scoped required flags by matching `ms.scope_id` against
+  `workspaces.list()`, which returns only stored rows — so
+  `affected_workspaces` was empty for the own-required query and the
+  test's id/reason/binding/pinned_version assertions could not pass.
+  Fixed by seeding the workspace via `make_workspace_in_tenant` before
+  the binding; with the row present the handler marks it affected at
+  `from_version` (defaults to the spec's current version 2), reason
+  `workspace_binding`, binding `required_workspace`, pinned 2.
+  Verified by source trace against the handler
+  (`required_binding_reason(MetaSpecScope::Workspace)` →
+  `workspace_binding`), `cargo check -p gyre-server --tests` clean, and
+  `rustfmt --check` clean.
+
+### Deferred to the independent verifier
+
+Server test binaries exceed this sandbox's build budget (blocked by the
+build wrapper; evidence:
+/tmp/stage/review-evidence/blast-radius-test.log). The verifier should
+run the focused server test set:
+
+    cargo test -p gyre-server reconciliation::tests::blast_radius
+
+plus `cargo fmt --check` and the standing workspace gates.
