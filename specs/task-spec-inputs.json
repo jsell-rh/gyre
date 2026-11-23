@@ -2532,6 +2532,13 @@
         "Day-One Agent Experience Infrastructure",
         "Repository as System of Record"
       ]
+    },
+    "backlog/4390a1b94a03e318854cbbec": {
+      "file": "specs/system/dependency-graph.md",
+      "heading": [
+        "Cross-Repo Dependency Graph",
+        "Dependency Entity"
+      ]
     }
   },
   "bindings": {
@@ -3472,6 +3479,9 @@
     ],
     "Spec gap spec-8f4edcf188b12e2a350050e2 / doc-garden-quality-grades / fd38a2fca0f8": [
       "backlog/07a6866179016f8676c1640d"
+    ],
+    "Spec gap spec-cab97078efffe0fbfb7339be / dep-edge-orphaned-on-target-archive-delete / ed9f34316476": [
+      "backlog/4390a1b94a03e318854cbbec"
     ]
   }
 }
