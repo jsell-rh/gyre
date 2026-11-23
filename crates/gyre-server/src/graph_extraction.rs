@@ -2743,6 +2743,182 @@ mod tests {
         );
     }
 
+    /// task-322 (lsp-call-graph.md Edge Types table): the new Pass 1 edges —
+    /// class-inheritance Implements, signature Returns, and Flask RoutesTo —
+    /// must round-trip through the REAL end-to-end extraction pipeline
+    /// (extract_and_store_graph → run_all_extractors → GraphPort) and come
+    /// back from the graph API, exactly like the Contains/FieldOf edges that
+    /// preceded them. Drives a real git repo through the same harness as
+    /// compact_delta_records_true_removed_edge_count.
+    #[tokio::test]
+    async fn python_deferred_edges_round_trip_into_stored_graph() {
+        use crate::mem::MemSpecAssertionResultRepository;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let bare = tmp.path().join("repo.git");
+        std::fs::create_dir_all(&bare).unwrap();
+        assert!(
+            std::process::Command::new("git")
+                .arg("init")
+                .arg("--bare")
+                .arg(&bare)
+                .status()
+                .unwrap()
+                .success(),
+            "git init --bare failed"
+        );
+
+        let work = tmp.path().join("work");
+        std::process::Command::new("git")
+            .args(["clone", bare.to_str().unwrap(), work.to_str().unwrap()])
+            .output()
+            .unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(["-C", work.to_str().unwrap()])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&out.stderr)
+            );
+            out
+        };
+
+        // PythonExtractor.detect requires a Python project marker.
+        std::fs::write(work.join("requirements.txt"), "flask\n").unwrap();
+        std::fs::write(
+            work.join("models.py"),
+            "class User:\n    pass\n\nclass Admin(User):\n    pass\n\ndef build_user() -> User:\n    return User()\n",
+        )
+        .unwrap();
+        std::fs::write(
+            work.join("app.py"),
+            "from flask import Flask\napp = Flask(__name__)\n\n@app.route(\"/api/users\")\ndef list_users():\n    return []\n",
+        )
+        .unwrap();
+        git(&["add", "."]);
+        git(&[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-m",
+            "one",
+        ]);
+        let sha = String::from_utf8_lossy(&git(&["rev-parse", "HEAD"]).stdout)
+            .trim()
+            .to_string();
+
+        let store = Arc::new(MemGraphStore::new());
+        let repo_id = Id::new("repo-python-deferred-edges");
+        let results_repo = Arc::new(MemSpecAssertionResultRepository::default());
+        let telemetry = Arc::new(CallGraphTelemetry {
+            kv: Arc::new(crate::mem::MemKvStore::default()) as Arc<dyn KvJsonStore>,
+            metrics: Arc::new(crate::metrics::Metrics::new().unwrap()),
+        });
+        extract_and_store_graph(
+            work.to_str().unwrap(),
+            repo_id.as_str(),
+            &sha,
+            Arc::clone(&store) as Arc<dyn GraphPort>,
+            "git",
+            None,
+            None,
+            Arc::clone(&results_repo) as Arc<dyn gyre_ports::SpecAssertionResultRepository>,
+            None,
+            Arc::clone(&telemetry),
+        )
+        .await;
+
+        // Read the stored graph back through the port — the same API surface
+        // the graph HTTP handlers use.
+        let nodes = store.list_nodes(&repo_id, None).await.unwrap();
+        let edges = store.list_edges(&repo_id, None).await.unwrap();
+        let id_of = |qname: &str| {
+            nodes
+                .iter()
+                .find(|n| n.qualified_name == qname)
+                .map(|n| n.id.clone())
+                .unwrap_or_else(|| panic!("node {qname} must be stored"))
+        };
+
+        // Implements: Admin → User (class inheritance).
+        let implements = edges
+            .iter()
+            .filter(|e| e.edge_type == EdgeType::Implements)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            implements.len(),
+            1,
+            "exactly one Implements edge (Admin -> User) expected, got {}",
+            implements.len()
+        );
+        assert_eq!(implements[0].source_id, id_of("models.Admin"));
+        assert_eq!(implements[0].target_id, id_of("models.User"));
+
+        // Returns: build_user → User (function signature).
+        let returns = edges
+            .iter()
+            .filter(|e| e.edge_type == EdgeType::Returns)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            returns.len(),
+            1,
+            "exactly one Returns edge (build_user -> User) expected, got {}",
+            returns.len()
+        );
+        assert_eq!(returns[0].source_id, id_of("models.build_user"));
+        assert_eq!(returns[0].target_id, id_of("models.User"));
+
+        // RoutesTo: endpoint → handler Function node, with path/method metadata.
+        let routes = edges
+            .iter()
+            .filter(|e| e.edge_type == EdgeType::RoutesTo)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            routes.len(),
+            1,
+            "exactly one RoutesTo edge expected, got {}",
+            routes.len()
+        );
+        assert_eq!(routes[0].source_id, id_of("app.endpoint.list_users"));
+        assert_eq!(routes[0].target_id, id_of("app.list_users"));
+        let meta: serde_json::Value =
+            serde_json::from_str(routes[0].metadata.as_deref().unwrap_or("{}"))
+                .expect("RoutesTo metadata must be valid JSON");
+        assert_eq!(meta["path"], "/api/users");
+        assert_eq!(meta["method"], "route");
+
+        // A second extraction of the same commit must not duplicate any edge
+        // (merge/dedup unchanged: edges are keyed by stable endpoint ids + type).
+        extract_and_store_graph(
+            work.to_str().unwrap(),
+            repo_id.as_str(),
+            &sha,
+            Arc::clone(&store) as Arc<dyn GraphPort>,
+            "git",
+            None,
+            None,
+            results_repo as Arc<dyn gyre_ports::SpecAssertionResultRepository>,
+            None,
+            telemetry,
+        )
+        .await;
+        let edges_again = store.list_edges(&repo_id, None).await.unwrap();
+        assert_eq!(
+            edges_again.len(),
+            edges.len(),
+            "re-extraction must not duplicate edges (before: {}, after: {})",
+            edges.len(),
+            edges_again.len()
+        );
+    }
+
     #[tokio::test]
     async fn pass2_dedups_calls_edge_already_present_from_pass1() {
         let dir = tempfile::TempDir::new().unwrap();

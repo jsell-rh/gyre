@@ -2,8 +2,8 @@
 title: "Close the unmet Edge Types table rows: class-inheritance Implements (Python superclasses, TypeScript extends), Returns for Go/Python/TypeScript, and Python RoutesTo"
 spec_ref: "Spec gap spec-b89674dbcb695eb34e8d5e15 / edge-rows-inheritance-returns-routesto / d96599f10659"
 depends_on: []
-progress: not-started
-commits: []
+progress: complete
+commits: ["72910c3df20e0ea6d9ebc3b3189d8a3a833120d0", "cc8e5ff826f4fe5d58086aa5e425631707739641"]
 ---
 
 ## Required behavior
@@ -76,3 +76,81 @@ Canonical spec: `specs/system/lsp-call-graph.md`. Source: `8546a781f772f05c823bb
     ]
   }
 ]
+
+## Shipped
+
+All three unmet Edge Types rows are now produced by real Pass 1 extractor code
+in `gyre-domain` (plus one end-to-end integration test in `gyre-server`),
+closing the gap with no fabricated targets and no behavior change on files
+without the constructs.
+
+### Implements — class inheritance
+
+- Python (`python_extractor.rs` `extract_class`): reads the
+  `class_definition` `superclasses` field; each plain/dotted base name is
+  collected as `(class_id, base_name)` and resolved after all files via the
+  run-scoped name index. Multiple inheritance emits one edge per resolvable
+  base; `Generic[T]` subscripts, keyword args, and unresolvable bases
+  (stdlib/external) yield no edge.
+- TypeScript (`typescript_extractor.rs` `emit_class`): reads the class
+  heritage `extends_clause` value; plain identifier bases are deferred and
+  resolved the same way. Expression bases (mixin calls) yield no edge. The
+  `implements_clause` is explicitly skipped — it is owned solely by the
+  realized-model plan's graph-edge-emitters task (cross-plan boundary from
+  review feedback `1c20952c55f116d6b1839a84:ts-extends-implements-unowned`).
+- Shared machinery: new `crates/gyre-domain/src/edge_resolution.rs`
+  (`resolve_deferred_target`) — exact qualified-name match, then suffix match
+  with type-like-node preference and lexicographic tie-break for
+  determinism, `None` (no edge) when nothing resolves. Mirrors the Rust
+  extractor's `deferred_returns`/`resolve_returns` pattern; order-independent
+  because resolution happens only after every file is extracted.
+
+### Returns — function signatures
+
+- Go (`go_extractor.rs`): `function_declaration`/`method_declaration`
+  `result` — `User`, `*User`, `pkg.User` forms deferred and resolved;
+  multi-value results, slices/maps/interfaces, and builtins yield no edge.
+- Python (`python_extractor.rs`): `function_definition` `return_type`
+  annotation (`-> User`, `-> "User"`, `-> models.User`); generics strip to
+  the outer name which resolves to no repo node, primitives yield no edge.
+- TypeScript (`typescript_extractor.rs`): `return_type` annotation on
+  `function_declaration` and arrow/function-expression `export const`
+  declarations; same stripping/skip rules.
+
+### RoutesTo — framework patterns
+
+- Python (`python_extractor.rs`): `extract_endpoint_node` now takes the
+  method, stores it in the Endpoint node's metadata, defers
+  `(endpoint_id, handler_qname, {path, method})`, and resolves to the handler
+  Function node emitted by `extract_decorated` (the handler is emitted as a
+  real Function node). The endpoint node keeps a distinct qualified name
+  (`{parent}.endpoint.{name}`) so persistence's qname-keyed stable-ID remap
+  does not collapse endpoint and handler onto one ID.
+
+### Test evidence (this sandbox)
+
+- `cargo test -p gyre-domain`: 601 passed, 0 failed (+8 integration tests in
+  view_query_composition). Focused new-edge suites: edge_resolution 7,
+  Python class_inheritance 2 (both extraction orders),
+  TS class_extends 4 (both orders, unknown base, mixin), Go result_type 3
+  (function, method, multi-value-none), Python/TS return annotations 2,
+  flask_route 2 (endpoint + handler + RoutesTo with path/method metadata).
+- `cargo check -p gyre-server --lib --tests`: clean (includes the new
+  end-to-end test). `cargo fmt --check -p gyre-domain -p gyre-server`: clean.
+- `bash scripts/check-arch.sh`: passes — all new code in gyre-domain.
+- `cargo clippy -p gyre-domain --all-targets`: no warnings in new code (3
+  pre-existing warnings in functions unchanged at base c42bfe03).
+
+### Deferred to independent verifier (4 GiB budget)
+
+Server test compilation must run in the verifier after the model exits:
+- `cargo test -p gyre-server python_deferred_edges_round_trip_into_stored_graph`
+  — drives a real git repo through `extract_and_store_graph` → GraphPort and
+  asserts exactly one Implements (`models.Admin` → `models.User`), one
+  Returns (`models.build_user` → `models.User`), one RoutesTo
+  (`app.endpoint.list_users` → `app.list_users` carrying
+  `{"path":"/api/users","method":"route"}`), and no edge duplication on
+  re-extraction of the same commit.
+- `cargo test -p gyre-server graph_extraction` (existing suite, same module).
+
+Evidence retained at `/tmp/stage/review-evidence/task-322-evidence.txt`.
