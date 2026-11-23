@@ -4728,7 +4728,8 @@ pub(crate) async fn detect_dependencies_on_push(
     {
         let spec_links = detect_manifest_spec_links(&content);
         for (target_repo_name, target_path, _link_type) in &spec_links {
-            if let Some(target_repo) = matchable_repos.iter().find(|r| r.name == *target_repo_name) {
+            if let Some(target_repo) = matchable_repos.iter().find(|r| r.name == *target_repo_name)
+            {
                 detected_edges.push(DetectedEdge {
                     target_repo_id: target_repo.id.to_string(),
                     source_artifact: "specs/manifest.yaml".to_string(),
@@ -10123,7 +10124,7 @@ specs:
             )
             .with_state(state.clone());
 
-        let archive_target = |app: Router, id: &str| async move {
+        async fn archive_target(app: Router, id: &str) {
             let resp = app
                 .oneshot(
                     Request::builder()
@@ -10136,7 +10137,7 @@ specs:
                 .await
                 .unwrap();
             assert_eq!(resp.status(), StatusCode::OK);
-        };
+        }
 
         // Known tenant repos: repo-b (archived only after the first push),
         // repo-c (archived BEFORE any push — must never be matched), repo-e
@@ -10215,7 +10216,9 @@ specs:
         assert_eq!(edge_b.status, gyre_domain::DependencyStatus::Active);
         // ...but NO edge targets the archived repo-c.
         assert!(
-            edges.iter().all(|e| e.target_repo_id.as_str() != "repo-c-id"),
+            edges
+                .iter()
+                .all(|e| e.target_repo_id.as_str() != "repo-c-id"),
             "no edge may be created targeting an archived repo"
         );
 
@@ -10281,7 +10284,9 @@ specs:
             "an Orphaned edge whose target is archived must not be resurrected on re-push"
         );
         assert!(
-            edges.iter().all(|e| e.target_repo_id.as_str() != "repo-c-id"),
+            edges
+                .iter()
+                .all(|e| e.target_repo_id.as_str() != "repo-c-id"),
             "no edge may be created targeting an archived repo"
         );
 
@@ -10306,7 +10311,10 @@ specs:
         let sha3 = make_commit(
             &repo_path,
             &[
-                ("Cargo.toml", format!("{cargo_v1}repo-f = {{ path = \"../repo-f\" }}\n")),
+                (
+                    "Cargo.toml",
+                    format!("{cargo_v1}repo-f = {{ path = \"../repo-f\" }}\n"),
+                ),
                 ("README.md", "# v3\n".to_string()),
             ],
         )

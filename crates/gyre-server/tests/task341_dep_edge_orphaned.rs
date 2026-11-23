@@ -77,7 +77,13 @@ async fn make_workspace(state: &Arc<AppState>, id: &str) -> Id {
 }
 
 async fn make_repo(state: &Arc<AppState>, id: &str, name: &str, ws: &Id) -> Repository {
-    let repo = Repository::new(Id::new(id), ws.clone(), name, format!("/tmp/{id}.git"), 1000);
+    let repo = Repository::new(
+        Id::new(id),
+        ws.clone(),
+        name,
+        format!("/tmp/{id}.git"),
+        1000,
+    );
     state.repos.create(&repo).await.unwrap();
     repo
 }
@@ -95,11 +101,7 @@ fn active_edge(id: &str, source: &Id, target: &Id) -> DependencyEdge {
     )
 }
 
-async fn call(
-    app: &axum::Router,
-    method: Method,
-    uri: &str,
-) -> axum::response::Response {
+async fn call(app: &axum::Router, method: Method, uri: &str) -> axum::response::Response {
     app.clone()
         .oneshot(
             Request::builder()
@@ -235,12 +237,7 @@ async fn deleting_target_repo_keeps_edges_orphaned() {
     assert_eq!(resp.status(), StatusCode::NO_CONTENT);
 
     // The repo row is gone...
-    assert!(state
-        .repos
-        .find_by_id(&repo_b.id)
-        .await
-        .unwrap()
-        .is_none());
+    assert!(state.repos.find_by_id(&repo_b.id).await.unwrap().is_none());
     // ...but the edges targeting it survive the deletion, Orphaned.
     let dependents = state
         .dependencies

@@ -2,7 +2,7 @@
 title: "Dependency graph: transition dependents' edges to Orphaned when the target repo is archived or deleted"
 spec_ref: "Spec gap spec-cab97078efffe0fbfb7339be / dep-edge-orphaned-on-target-archive-delete / ed9f34316476"
 depends_on: []
-progress: not-started
+progress: ready-for-review
 commits: ["9ef33dea19f70e2a10cb8b121d5d81905f5299be"]
 ---
 
@@ -24,6 +24,29 @@ Per dependency-graph.md §Dependency Entity, DependencyStatus::Orphaned means "T
 Create a real detected Active edge A→B (push A containing `repo-b = { path = "../repo-b" }` in Cargo.toml with B a known tenant repo), then archive B and push A again. On current code this fails the specced behavior: archive_repo never touches dependency edges (the handler's post-archive work only cancels tasks and emits events), and detect_dependencies_on_push matches archived repos because state.repos.list() still includes them, so reconcile re-confirms the edge and would even un-orphan it (git_http.rs:4446). The probe asserts status == Orphaned after archive + re-push — it must fail before the fix and pass after it. A second probe for the monitor: remove the target repo row (a pre-fix deletion leaves exactly this state) and run dep_staleness_check — current code leaves the edge untouched (the job only skips already-Orphaned edges and never orphans anything; target_repo None yields target_version None with no status change), so asserting Orphaned there kills the real defect rather than checking a symbol exists.
 
 Update the relevant coverage rows only after implementing the behavior, with concrete source evidence. Do not mark unrelated rows complete or claim independent verification before it occurs.
+
+## Shipped
+
+`DependencyStatus::Orphaned` = "Target repo was deleted or archived" (dependency-graph.md §Dependency Entity) now actually happens on all four specced surfaces; no port-trait changes, no spec changes, no new routes.
+
+### Archive and delete handlers
+
+`orphan_dependent_edges` (crates/gyre-server/src/api/repos.rs) is called from `archive_repo` after the repo row transitions to archived, and from `delete_repo` after the repo row is deleted: it lists every stored edge with `target_repo_id == repo.id` via `state.dependencies.list_dependents`, marks each non-Orphaned edge Orphaned (`last_verified_at` bumped), and persists it through the existing `DependencyRepository.save` port. Edges are never deleted — the rows survive the repo-row deletion, per §4 Reconcile's "don't delete - might be a detection gap" — and the delete path also repairs edges stranded Active by pre-fix deletions. A per-edge save failure logs a warning without aborting the surrounding handler (best-effort discipline, matching the handlers' existing cleanup).
+
+### Detection excludes archived targets
+
+`detect_dependencies_on_push` (crates/gyre-server/src/git_http.rs) builds a single `matchable_repos` set (`!r.is_archived()` plus the existing self-exclusion) and every detection path — Cargo.toml path/git refs, package.json, go.mod, pyproject.toml, manifest spec links, openapi/proto/mcp contract matching — matches against it, so no new edge is created targeting an archived repo and reconcile cannot resurrect an Orphaned edge whose target is archived back to Active. Unarchive makes the target matchable again; the next push to the source re-activates the edge through the existing reconcile un-orphan path.
+
+### Continuous monitor
+
+`dep_staleness_check` (crates/gyre-server/src/dep_staleness.rs) now resolves each edge's target repo BEFORE the Breaking/Orphaned skip and transitions edges whose target no longer resolves in the repo list (deleted, including pre-fix strays) or is archived to Orphaned, so the skip only ever sees already-orphaned edges. A repo-list failure skips the cycle (returns Ok) instead of proceeding with an empty list, which would mass-orphan every edge.
+
+### Tests
+
+- `crates/gyre-server/tests/task341_dep_edge_orphaned.rs` (integration, real SQLite via `GYRE_DATABASE_URL` + `build_state`, no mem stand-in): archive handler orphans A→B visible via the port and `GET /api/v1/deps/repo/{B}/dependents` with the row surviving; delete keeps the edges Orphaned in storage (repo row gone, edge row present); `run_once` monitor orphans both an unresolvable-target and an archived-target edge.
+- `push_does_not_target_archived_repos_and_unarchive_reactivates` (git_http.rs tests, real git HTTP receive-pack + production archive/unarchive handlers on the same state): no edge is ever created targeting an archived repo; archiving B orphans the edge; re-pushing A with the declaration still present leaves it Orphaned with no duplicate; unarchiving B and pushing A returns it to Active (exactly one edge to B throughout).
+
+`cargo check -p gyre-server --tests` passes clean, `cargo fmt` clean, `scripts/check-arch.sh` passes, no new entries in any `scripts/*-exemptions.txt`. gyre-server test binaries are deferred to the independent verifier per the 4 GiB build budget — the verifier must run: `cargo test -p gyre-server --test task341_dep_edge_orphaned` and `cargo test -p gyre-server --lib -- dependency` (covers `push_does_not_target_archived_repos_and_unarchive_reactivates` plus the existing detection/reconcile/staleness suites for regressions). Evidence: /tmp/stage/review-evidence/task-341/.
 
 ## Discovery evidence
 
