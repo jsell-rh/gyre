@@ -5617,7 +5617,11 @@ mod tests {
 
         // A Workspace-scoped REQUIRED meta-spec is the workspace's own
         // binding: affected at its current version with the §8 label
-        // workspace_binding and granular kind required_workspace.
+        // workspace_binding and granular kind required_workspace. The
+        // workspace row must exist first: the handler resolves
+        // Workspace-scoped required flags by matching scope_id against
+        // workspaces.list().
+        let _ws_own = make_workspace_in_tenant(&state, "ws-br-dc-own", "default").await;
         let own = require_for_ws(&state, "ws-br-dc-own", "own-required", 2).await;
 
         let json = get_blast_radius(&state, "default-context-spec", "").await;
