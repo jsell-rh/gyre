@@ -49,7 +49,16 @@ where
     let mut policy_cache: HashMap<String, gyre_domain::DependencyPolicy> = HashMap::new();
 
     // Cache repo → workspace_id mapping.
-    let all_repos = state.repos.list().await.unwrap_or_default();
+    // A repo-list failure must not look like "every target was deleted":
+    // proceeding with an empty list would mass-orphan every edge through
+    // the unresolvable-target check below. Skip the cycle instead.
+    let all_repos = match state.repos.list().await {
+        Ok(repos) => repos,
+        Err(e) => {
+            warn!("dep_staleness: failed to list repos — skipping this cycle: {e}");
+            return Ok(());
+        }
+    };
     let repo_workspace: HashMap<String, String> = all_repos
         .iter()
         .map(|r| (r.id.to_string(), r.workspace_id.to_string()))
@@ -59,6 +68,41 @@ where
     let mut task_count = 0u32;
 
     for edge in &all_edges {
+        // dependency-graph.md §Dependency Entity: Orphaned = "Target repo
+        // was deleted or archived". The monitor transitions edges whose
+        // target repo no longer resolves in the repo list (deleted —
+        // including edges stranded by pre-fix deletions) or is archived to
+        // Orphaned, evaluated BEFORE the Breaking/Orphaned skip below so
+        // that skip only ever sees already-orphaned edges.
+        let target_repo = all_repos
+            .iter()
+            .find(|r| r.id.as_str() == edge.target_repo_id.as_str());
+        let target_unresolvable_or_archived = match target_repo {
+            None => true,
+            Some(repo) => repo.is_archived(),
+        };
+        if target_unresolvable_or_archived {
+            if edge.status != DependencyStatus::Orphaned {
+                let mut updated = edge.clone();
+                updated.status = DependencyStatus::Orphaned;
+                updated.last_verified_at = now;
+                if let Err(e) = state.dependencies.save(&updated).await {
+                    warn!(
+                        source = %edge.source_repo_id,
+                        target = %edge.target_repo_id,
+                        "dep_staleness: failed to orphan edge with deleted/archived target: {e}"
+                    );
+                } else {
+                    debug!(
+                        source = %edge.source_repo_id,
+                        target = %edge.target_repo_id,
+                        "dep_staleness: edge orphaned — target repo deleted or archived"
+                    );
+                }
+            }
+            continue;
+        }
+
         // Skip edges that are already in Breaking or Orphaned status — those are
         // managed by other systems.
         if edge.status == DependencyStatus::Breaking || edge.status == DependencyStatus::Orphaned {
@@ -86,10 +130,8 @@ where
         };
 
         // Resolve target repo's current version from its latest semver tag.
-        let target_repo = all_repos
-            .iter()
-            .find(|r| r.id.as_str() == edge.target_repo_id.as_str());
-
+        // (Target resolution happened above the orphan check — the target is
+        // known to exist and be active here.)
         let target_version = if let Some(repo) = target_repo {
             resolve_version(repo.path.clone()).await
         } else {

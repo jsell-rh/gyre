@@ -4602,12 +4602,22 @@ pub(crate) async fn detect_dependencies_on_push(
     let source_id = Id::new(repo_id);
     let now = crate::api::now_secs();
 
-    // Build list of known repo names for API contract matching.
-    let repo_names: Vec<&str> = all_repos
+    // dependency-graph.md §Dependency Entity: Orphaned = "Target repo was
+    // deleted or archived" — archived repos are excluded from the
+    // known-repo match set on EVERY detection path (Cargo.toml path/git
+    // refs, package.json, go.mod, pyproject.toml, manifest spec links,
+    // openapi/proto/mcp contract matching), so no new edge is created
+    // targeting an archived repo and reconcile does not resurrect an
+    // Orphaned edge whose target is archived back to Active. Unarchive
+    // makes the target matchable again; the next push to the source
+    // re-activates the edge through the existing reconcile un-orphan path.
+    let matchable_repos: Vec<&gyre_domain::Repository> = all_repos
         .iter()
-        .filter(|r| r.id.as_str() != repo_id)
-        .map(|r| r.name.as_str())
+        .filter(|r| r.id.as_str() != repo_id && !r.is_archived())
         .collect();
+
+    // Build list of known repo names for API contract matching.
+    let repo_names: Vec<&str> = matchable_repos.iter().map(|r| r.name.as_str()).collect();
 
     // Collect all detected edges and track which detection methods ran.
     let mut detected_edges: Vec<DetectedEdge> = Vec::new();
@@ -4627,17 +4637,15 @@ pub(crate) async fn detect_dependencies_on_push(
         {
             for dep in detect_cargo_deps(&content) {
                 let candidate = repo_name_from_reference(&dep.reference);
-                if let Some(target_repo) = all_repos.iter().find(|r| r.name == candidate) {
-                    if target_repo.id.as_str() != repo_id {
-                        detected_edges.push(DetectedEdge {
-                            target_repo_id: target_repo.id.to_string(),
-                            source_artifact: cargo_file.to_string(),
-                            target_artifact: candidate.to_string(),
-                            dep_type: DependencyType::Code,
-                            method: DetectionMethod::CargoToml,
-                            version: dep.version.clone(),
-                        });
-                    }
+                if let Some(target_repo) = matchable_repos.iter().find(|r| r.name == candidate) {
+                    detected_edges.push(DetectedEdge {
+                        target_repo_id: target_repo.id.to_string(),
+                        source_artifact: cargo_file.to_string(),
+                        target_artifact: candidate.to_string(),
+                        dep_type: DependencyType::Code,
+                        method: DetectionMethod::CargoToml,
+                        version: dep.version.clone(),
+                    });
                 }
             }
         }
@@ -4654,17 +4662,15 @@ pub(crate) async fn detect_dependencies_on_push(
             // the package name for `workspace:` refs, URL last segment
             // (`.git` stripped) for git refs.
             let candidate = repo_name_from_reference(ref_val);
-            if let Some(target_repo) = all_repos.iter().find(|r| r.name == candidate) {
-                if target_repo.id.as_str() != repo_id {
-                    detected_edges.push(DetectedEdge {
-                        target_repo_id: target_repo.id.to_string(),
-                        source_artifact: "package.json".to_string(),
-                        target_artifact: candidate.to_string(),
-                        dep_type: DependencyType::Code,
-                        method: DetectionMethod::PackageJson,
-                        version: version.clone(),
-                    });
-                }
+            if let Some(target_repo) = matchable_repos.iter().find(|r| r.name == candidate) {
+                detected_edges.push(DetectedEdge {
+                    target_repo_id: target_repo.id.to_string(),
+                    source_artifact: "package.json".to_string(),
+                    target_artifact: candidate.to_string(),
+                    dep_type: DependencyType::Code,
+                    method: DetectionMethod::PackageJson,
+                    version: version.clone(),
+                });
             }
         }
     }
@@ -4678,17 +4684,15 @@ pub(crate) async fn detect_dependencies_on_push(
         for (module_path, version) in &go_deps {
             // Extract the last path segment as repo name candidate.
             let candidate = module_path.rsplit('/').next().unwrap_or(module_path);
-            if let Some(target_repo) = all_repos.iter().find(|r| r.name == candidate) {
-                if target_repo.id.as_str() != repo_id {
-                    detected_edges.push(DetectedEdge {
-                        target_repo_id: target_repo.id.to_string(),
-                        source_artifact: "go.mod".to_string(),
-                        target_artifact: module_path.to_string(),
-                        dep_type: DependencyType::Code,
-                        method: DetectionMethod::GoMod,
-                        version: version.clone(),
-                    });
-                }
+            if let Some(target_repo) = matchable_repos.iter().find(|r| r.name == candidate) {
+                detected_edges.push(DetectedEdge {
+                    target_repo_id: target_repo.id.to_string(),
+                    source_artifact: "go.mod".to_string(),
+                    target_artifact: module_path.to_string(),
+                    dep_type: DependencyType::Code,
+                    method: DetectionMethod::GoMod,
+                    version: version.clone(),
+                });
             }
         }
     }
@@ -4703,17 +4707,15 @@ pub(crate) async fn detect_dependencies_on_push(
             // Repo-name candidate: final path segment for `file:` refs, URL
             // last segment (`.git` stripped) for git refs.
             let candidate = repo_name_from_reference(ref_val);
-            if let Some(target_repo) = all_repos.iter().find(|r| r.name == candidate) {
-                if target_repo.id.as_str() != repo_id {
-                    detected_edges.push(DetectedEdge {
-                        target_repo_id: target_repo.id.to_string(),
-                        source_artifact: "pyproject.toml".to_string(),
-                        target_artifact: pkg_name.as_deref().unwrap_or(candidate).to_string(),
-                        dep_type: DependencyType::Code,
-                        method: DetectionMethod::PyprojectToml,
-                        version: None,
-                    });
-                }
+            if let Some(target_repo) = matchable_repos.iter().find(|r| r.name == candidate) {
+                detected_edges.push(DetectedEdge {
+                    target_repo_id: target_repo.id.to_string(),
+                    source_artifact: "pyproject.toml".to_string(),
+                    target_artifact: pkg_name.as_deref().unwrap_or(candidate).to_string(),
+                    dep_type: DependencyType::Code,
+                    method: DetectionMethod::PyprojectToml,
+                    version: None,
+                });
             }
         }
     }
@@ -4726,17 +4728,15 @@ pub(crate) async fn detect_dependencies_on_push(
     {
         let spec_links = detect_manifest_spec_links(&content);
         for (target_repo_name, target_path, _link_type) in &spec_links {
-            if let Some(target_repo) = all_repos.iter().find(|r| r.name == *target_repo_name) {
-                if target_repo.id.as_str() != repo_id {
-                    detected_edges.push(DetectedEdge {
-                        target_repo_id: target_repo.id.to_string(),
-                        source_artifact: "specs/manifest.yaml".to_string(),
-                        target_artifact: target_path.to_string(),
-                        dep_type: DependencyType::Spec,
-                        method: DetectionMethod::ManifestLink,
-                        version: None,
-                    });
-                }
+            if let Some(target_repo) = matchable_repos.iter().find(|r| r.name == *target_repo_name) {
+                detected_edges.push(DetectedEdge {
+                    target_repo_id: target_repo.id.to_string(),
+                    source_artifact: "specs/manifest.yaml".to_string(),
+                    target_artifact: target_path.to_string(),
+                    dep_type: DependencyType::Spec,
+                    method: DetectionMethod::ManifestLink,
+                    version: None,
+                });
             }
         }
     }
@@ -4761,17 +4761,15 @@ pub(crate) async fn detect_dependencies_on_push(
         {
             let refs = detect_openapi_refs(&content, &repo_names);
             for ref_name in &refs {
-                if let Some(target_repo) = all_repos.iter().find(|r| r.name == *ref_name) {
-                    if target_repo.id.as_str() != repo_id {
-                        detected_edges.push(DetectedEdge {
-                            target_repo_id: target_repo.id.to_string(),
-                            source_artifact: api_file.to_string(),
-                            target_artifact: ref_name.to_string(),
-                            dep_type: DependencyType::Api,
-                            method: DetectionMethod::OpenApiRef,
-                            version: None,
-                        });
-                    }
+                if let Some(target_repo) = matchable_repos.iter().find(|r| r.name == *ref_name) {
+                    detected_edges.push(DetectedEdge {
+                        target_repo_id: target_repo.id.to_string(),
+                        source_artifact: api_file.to_string(),
+                        target_artifact: ref_name.to_string(),
+                        dep_type: DependencyType::Api,
+                        method: DetectionMethod::OpenApiRef,
+                        version: None,
+                    });
                 }
             }
         }
@@ -4791,17 +4789,15 @@ pub(crate) async fn detect_dependencies_on_push(
         {
             let refs = detect_proto_imports(&content, &repo_names);
             for ref_name in &refs {
-                if let Some(target_repo) = all_repos.iter().find(|r| r.name == *ref_name) {
-                    if target_repo.id.as_str() != repo_id {
-                        detected_edges.push(DetectedEdge {
-                            target_repo_id: target_repo.id.to_string(),
-                            source_artifact: proto_file.to_string(),
-                            target_artifact: ref_name.to_string(),
-                            dep_type: DependencyType::Schema,
-                            method: DetectionMethod::ProtoImport,
-                            version: None,
-                        });
-                    }
+                if let Some(target_repo) = matchable_repos.iter().find(|r| r.name == *ref_name) {
+                    detected_edges.push(DetectedEdge {
+                        target_repo_id: target_repo.id.to_string(),
+                        source_artifact: proto_file.to_string(),
+                        target_artifact: ref_name.to_string(),
+                        dep_type: DependencyType::Schema,
+                        method: DetectionMethod::ProtoImport,
+                        version: None,
+                    });
                 }
             }
         }
@@ -4818,17 +4814,15 @@ pub(crate) async fn detect_dependencies_on_push(
         {
             let refs = detect_mcp_refs(&content, &repo_names);
             for ref_name in &refs {
-                if let Some(target_repo) = all_repos.iter().find(|r| r.name == *ref_name) {
-                    if target_repo.id.as_str() != repo_id {
-                        detected_edges.push(DetectedEdge {
-                            target_repo_id: target_repo.id.to_string(),
-                            source_artifact: mcp_file.to_string(),
-                            target_artifact: ref_name.to_string(),
-                            dep_type: DependencyType::Api,
-                            method: DetectionMethod::McpToolRef,
-                            version: None,
-                        });
-                    }
+                if let Some(target_repo) = matchable_repos.iter().find(|r| r.name == *ref_name) {
+                    detected_edges.push(DetectedEdge {
+                        target_repo_id: target_repo.id.to_string(),
+                        source_artifact: mcp_file.to_string(),
+                        target_artifact: ref_name.to_string(),
+                        dep_type: DependencyType::Api,
+                        method: DetectionMethod::McpToolRef,
+                        version: None,
+                    });
                 }
             }
         }
@@ -10089,6 +10083,270 @@ specs:
         // Orphaned, never deleted: the edge is still present.
         let edges = state.dependencies.list_by_repo(&source_id).await.unwrap();
         assert_eq!(edges.len(), 1);
+    }
+
+    /// dependency-graph.md §Dependency Entity: `Orphaned` = "Target repo
+    /// was deleted or archived" — the push-side half of the transition.
+    /// Drives the REAL git HTTP receive-pack path plus the production
+    /// archive/unarchive handlers (mounted on the same state):
+    ///   - detection never creates an edge targeting an archived repo
+    ///     (repo-c is archived before any push);
+    ///   - archiving the target (repo-b) orphans the dependents' edge, and a
+    ///     re-push of the source with the declaration STILL PRESENT must not
+    ///     resurrect it to Active nor create a duplicate edge (reconcile's
+    ///     un-orphan path must not fire for an archived target);
+    ///   - unarchiving the target makes it matchable again, and the next
+    ///     push re-activates the edge through the existing reconcile
+    ///     un-orphan path.
+    ///
+    /// Completion signal for the spawned post-receive detection: each push
+    /// declares one NEW active target (repo-e, then repo-f) whose edge
+    /// creation marks that push's reconciliation as finished; repo-b is
+    /// declared FIRST in every manifest so its (non-)resurrection is
+    /// reconciled before the signal edge appears (detection preserves
+    /// manifest order).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn push_does_not_target_archived_repos_and_unarchive_reactivates() {
+        let (app, state, _tmp, ws_slug, repo_name, repo_path) = git_app_with_repo().await;
+
+        // The archive/unarchive API routes on the same state, so the
+        // target's archival runs through the production archive_repo
+        // handler (which orphans dependents' edges).
+        let api_app = Router::new()
+            .route(
+                "/api/v1/repos/:id/archive",
+                post(crate::api::repos::archive_repo),
+            )
+            .route(
+                "/api/v1/repos/:id/unarchive",
+                post(crate::api::repos::unarchive_repo),
+            )
+            .with_state(state.clone());
+
+        let archive_target = |app: Router, id: &str| async move {
+            let resp = app
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!("/api/v1/repos/{id}/archive"))
+                        .header("Authorization", "Bearer test-token")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+        };
+
+        // Known tenant repos: repo-b (archived only after the first push),
+        // repo-c (archived BEFORE any push — must never be matched), repo-e
+        // and repo-f (controls, always active — one new per push).
+        for (id, name) in [
+            ("repo-b-id", "repo-b"),
+            ("repo-c-id", "repo-c"),
+            ("repo-e-id", "repo-e"),
+            ("repo-f-id", "repo-f"),
+        ] {
+            let repo = Repository::new(
+                Id::new(id),
+                Id::new("ws-test"),
+                name,
+                format!("/nonexistent/{name}.git"),
+                0,
+            );
+            state.repos.create(&repo).await.unwrap();
+        }
+
+        // Archive repo-c before any push: no later push may create an edge
+        // targeting it.
+        archive_target(api_app.clone(), "repo-c-id").await;
+
+        // Push 1: Cargo.toml referencing repo-b (active), repo-c (archived)
+        // and repo-e (active, the completion signal).
+        let cargo_v1 = "[dependencies]\nrepo-b = { path = \"../repo-b\" }\nrepo-c = { path = \"../repo-c\" }\nrepo-e = { path = \"../repo-e\" }\n".to_string();
+        let sha1 = make_commit(&repo_path, &[("Cargo.toml", cargo_v1.clone())]).await;
+        let feature_ref = "refs/heads/feature/orphan";
+        let resp = push_ref_as(
+            app.clone(),
+            &ws_slug,
+            &repo_name,
+            "Bearer test-token",
+            &sha1,
+            feature_ref,
+            &repo_path,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let source_id = Id::new("repo-1");
+
+        let git = |args: &[&str]| -> String {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo_path)
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@t")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@t")
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+
+        // Detection of push 1 has completed once the repo-e edge exists.
+        let _ = wait_for_dependency_edge(&state, &source_id, |e| {
+            e.target_repo_id.as_str() == "repo-e-id"
+                && e.status == gyre_domain::DependencyStatus::Active
+        })
+        .await;
+
+        // Edges to the active targets exist...
+        let edges = state.dependencies.list_by_repo(&source_id).await.unwrap();
+        let edge_b = edges
+            .iter()
+            .find(|e| e.target_repo_id.as_str() == "repo-b-id")
+            .expect("edge to active repo-b");
+        assert_eq!(edge_b.status, gyre_domain::DependencyStatus::Active);
+        // ...but NO edge targets the archived repo-c.
+        assert!(
+            edges.iter().all(|e| e.target_repo_id.as_str() != "repo-c-id"),
+            "no edge may be created targeting an archived repo"
+        );
+
+        // Archive repo-b through the production handler: the dependents'
+        // edge must transition to Orphaned.
+        archive_target(api_app.clone(), "repo-b-id").await;
+        let edges = state.dependencies.list_by_repo(&source_id).await.unwrap();
+        let edge_b = edges
+            .iter()
+            .find(|e| e.target_repo_id.as_str() == "repo-b-id")
+            .expect("edge to repo-b after archive");
+        assert_eq!(edge_b.status, gyre_domain::DependencyStatus::Orphaned);
+
+        // Push 2: the declaration on repo-b is STILL present in the tree
+        // (plus a new repo-f declaration as the completion signal). The
+        // repo-b edge must stay Orphaned — no resurrection, no duplicate.
+        let cargo_v2 = format!("{cargo_v1}repo-f = {{ path = \"../repo-f\" }}\n");
+        let sha2 = make_commit(
+            &repo_path,
+            &[
+                ("Cargo.toml", cargo_v2.clone()),
+                ("README.md", "# v2\n".to_string()),
+            ],
+        )
+        .await;
+        let tree2 = git(&["rev-parse", &format!("{sha2}^{{tree}}")]);
+        let sha2p = git(&["commit-tree", &tree2, "-p", &sha1, "-m", "v2"]);
+        let line = format!("{sha1} {sha2p} {feature_ref}");
+        let mut body = pkt_line(&line);
+        body.extend_from_slice(b"0000");
+        body.extend_from_slice(&pack_objects_for(&repo_path, &sha2p));
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/git/{ws_slug}/{repo_name}/git-receive-pack"))
+                    .header("Authorization", "Bearer test-token")
+                    .header("content-type", "application/x-git-receive-pack-request")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Detection of push 2 has completed once the repo-f edge exists.
+        let _ = wait_for_dependency_edge(&state, &source_id, |e| {
+            e.target_repo_id.as_str() == "repo-f-id"
+                && e.status == gyre_domain::DependencyStatus::Active
+        })
+        .await;
+
+        let edges = state.dependencies.list_by_repo(&source_id).await.unwrap();
+        let b_edges: Vec<_> = edges
+            .iter()
+            .filter(|e| e.target_repo_id.as_str() == "repo-b-id")
+            .collect();
+        assert_eq!(b_edges.len(), 1, "no duplicate edge to the archived target");
+        assert_eq!(
+            b_edges[0].status,
+            gyre_domain::DependencyStatus::Orphaned,
+            "an Orphaned edge whose target is archived must not be resurrected on re-push"
+        );
+        assert!(
+            edges.iter().all(|e| e.target_repo_id.as_str() != "repo-c-id"),
+            "no edge may be created targeting an archived repo"
+        );
+
+        // Unarchive repo-b: the target becomes matchable again, and the
+        // next push re-activates the edge through the existing reconcile
+        // un-orphan path.
+        let resp = api_app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/repos/repo-b-id/unarchive")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Push 3: same declarations, README bumped.
+        let sha3 = make_commit(
+            &repo_path,
+            &[
+                ("Cargo.toml", format!("{cargo_v1}repo-f = {{ path = \"../repo-f\" }}\n")),
+                ("README.md", "# v3\n".to_string()),
+            ],
+        )
+        .await;
+        let tree3 = git(&["rev-parse", &format!("{sha3}^{{tree}}")]);
+        let sha3p = git(&["commit-tree", &tree3, "-p", &sha2p, "-m", "v3"]);
+        let line = format!("{sha2p} {sha3p} {feature_ref}");
+        let mut body = pkt_line(&line);
+        body.extend_from_slice(b"0000");
+        body.extend_from_slice(&pack_objects_for(&repo_path, &sha3p));
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/git/{ws_slug}/{repo_name}/git-receive-pack"))
+                    .header("Authorization", "Bearer test-token")
+                    .header("content-type", "application/x-git-receive-pack-request")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let edge_b = wait_for_dependency_edge(&state, &source_id, |e| {
+            e.target_repo_id.as_str() == "repo-b-id"
+                && e.status == gyre_domain::DependencyStatus::Active
+        })
+        .await;
+        assert_eq!(edge_b.status, gyre_domain::DependencyStatus::Active);
+        // Still exactly one edge to repo-b.
+        let edges = state.dependencies.list_by_repo(&source_id).await.unwrap();
+        assert_eq!(
+            edges
+                .iter()
+                .filter(|e| e.target_repo_id.as_str() == "repo-b-id")
+                .count(),
+            1
+        );
     }
 
     /// End-to-end detection at a pushed tip (called directly, bypassing the

@@ -5,7 +5,8 @@ use axum::{
 };
 use gyre_common::Id;
 use gyre_domain::{
-    AgentStatus, BranchInfo, CommitInfo, DiffResult, MrStatus, RepoStatus, Repository, TaskStatus,
+    AgentStatus, BranchInfo, CommitInfo, DependencyStatus, DiffResult, MrStatus, RepoStatus,
+    Repository, TaskStatus,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -353,6 +354,41 @@ pub async fn update_repo(
     Ok(Json(repo_response_with_clone_url(&state, repo).await))
 }
 
+/// dependency-graph.md §Dependency Entity: `DependencyStatus::Orphaned` =
+/// "Target repo was deleted or archived". Marks every stored edge whose
+/// target is `repo_id` Orphaned, persisted through the existing
+/// DependencyRepository port (`list_dependents` + `save`). Edges are never
+/// deleted — §4 Reconcile: "don't delete - might be a detection gap" — so
+/// the edge rows survive both the archive and the repo-row deletion.
+/// Best-effort, matching the handlers' cleanup discipline: a per-edge save
+/// failure logs a warning without aborting the surrounding archive/delete.
+async fn orphan_dependent_edges(state: &AppState, repo_id: &Id, now: u64) {
+    let dependents = match state.dependencies.list_dependents(repo_id).await {
+        Ok(edges) => edges,
+        Err(e) => {
+            tracing::warn!(
+                repo_id = %repo_id,
+                "failed to list dependent edges to orphan on target archive/delete: {e}"
+            );
+            return;
+        }
+    };
+    for mut edge in dependents {
+        if edge.status == DependencyStatus::Orphaned {
+            continue;
+        }
+        edge.status = DependencyStatus::Orphaned;
+        edge.last_verified_at = now;
+        if let Err(e) = state.dependencies.save(&edge).await {
+            tracing::warn!(
+                repo_id = %repo_id,
+                edge_id = %edge.id,
+                "failed to orphan dependent edge on target archive/delete: {e}"
+            );
+        }
+    }
+}
+
 /// POST /api/v1/repos/:id/archive
 ///
 /// By-effect task-scope surface (identity-security.md §Task-Scoped JWT
@@ -544,6 +580,13 @@ pub async fn archive_repo(
     repo.updated_at = now;
     state.repos.update(&repo).await?;
 
+    // 4. dependency-graph.md §Dependency Entity: Orphaned = "Target repo was
+    // deleted or archived" — every dependents' edge targeting this repo is
+    // marked Orphaned (never deleted). Unarchive makes the target matchable
+    // again; the next push to a dependent re-activates the edge through the
+    // existing reconcile un-orphan path.
+    orphan_dependent_edges(&state, &repo.id, now).await;
+
     Ok(Json(repo_response_with_clone_url(&state, repo).await))
 }
 
@@ -584,6 +627,13 @@ pub async fn delete_repo(
     }
 
     state.repos.delete(&repo.id).await?;
+
+    // dependency-graph.md §Dependency Entity: Orphaned = "Target repo was
+    // deleted or archived" — edges whose target is the deleted repo are
+    // marked Orphaned, NOT removed: the edge rows survive the repo row
+    // deletion (§4 Reconcile: "don't delete - might be a detection gap").
+    // This also repairs edges stranded Active by pre-fix deletions.
+    orphan_dependent_edges(&state, &repo.id, now_secs()).await;
 
     // Clean up the spec-link graph rows sourced from this repo (spec-links.md
     // §Forge-Maintained Spec Graph): durable table first, then the hot cache.
