@@ -3,7 +3,7 @@ title: "Dependency graph: transition dependents' edges to Orphaned when the targ
 spec_ref: "Spec gap spec-cab97078efffe0fbfb7339be / dep-edge-orphaned-on-target-archive-delete / ed9f34316476"
 depends_on: []
 progress: ready-for-review
-commits: ["9ef33dea19f70e2a10cb8b121d5d81905f5299be", "7d905416"]
+commits: ["7d90541644265e5cf72300f219a51b3a350e4e0c", "9ef33dea19f70e2a10cb8b121d5d81905f5299be"]
 ---
 
 ## Required behavior
