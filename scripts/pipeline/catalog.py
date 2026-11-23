@@ -103,6 +103,12 @@ def sync_checkout(store, checkout, revision=None):
                         repair={'category': 'requirements_changed', 'source': checkpoint,
                                 'id': gen, 'detail': 'Implement the current contract using the retained source checkpoint.'})
         store.put_task(path.stem, gen, body, data, expected=old)
+    # Dogfooding progression stage 1: upsert the refreshed catalog into the
+    # platform's task ledger (shared state) and reconcile lifecycle
+    # transitions whose push failed. A platform failure is recorded as a
+    # durable event and never breaks local discovery.
+    from . import platform
+    platform.sync(store)
 
 
 def discover(store, stage, base):
