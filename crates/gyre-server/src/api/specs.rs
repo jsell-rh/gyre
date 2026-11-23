@@ -916,9 +916,21 @@ pub async fn approve_spec(
             let prior_status = entry.approval_status.clone();
             let new_status = resolve_new_approval_status(&state, &spec_path, &entry).await;
             if entry.approval_status != new_status {
-                entry.approval_status = new_status;
+                entry.approval_status = new_status.clone();
                 entry.updated_at = now;
                 let _ = state.spec_ledger.save(&entry).await;
+                // Maintain the durable pending-since signal (task-339):
+                // entering pending starts a new period, leaving it ends the
+                // current one; a partial approval that stays pending keeps
+                // the original clock.
+                crate::spec_pending_since::on_transition(
+                    &state.kv_store,
+                    &spec_path,
+                    &prior_status,
+                    &new_status,
+                    now,
+                )
+                .await;
             }
 
             // Auto-track spec approval (analytics.md §Auto-Emitted Events).
@@ -1042,6 +1054,9 @@ pub async fn approve_spec(
                     target_entry.approval_status = ApprovalStatus::Deprecated;
                     target_entry.updated_at = now;
                     let _ = state.spec_ledger.save(&target_entry).await;
+                    // Deprecation ends any pending period (task-339).
+                    crate::spec_pending_since::clear_pending(&state.kv_store, &link.target_path)
+                        .await;
 
                     // task-288: the target losing Approved status can cease
                     // a both-approved conflicts_with pair involving it —
@@ -1375,11 +1390,23 @@ pub async fn revoke_spec_approval(
     // demote an otherwise-satisfied entry; revoking the last valid
     // approval demotes it to Pending.
     if let Some(mut entry) = state.spec_ledger.find_by_path(&spec_path).await? {
+        let prior_status = entry.approval_status.clone();
         let new_status = resolve_new_approval_status(&state, &spec_path, &entry).await;
         if entry.approval_status != new_status {
-            entry.approval_status = new_status;
+            entry.approval_status = new_status.clone();
             entry.updated_at = now;
             let _ = state.spec_ledger.save(&entry).await;
+            // Maintain the durable pending-since signal (task-339): a
+            // revocation that demotes the entry back to pending starts a
+            // new pending period; one that leaves it approved ends it.
+            crate::spec_pending_since::on_transition(
+                &state.kv_store,
+                &spec_path,
+                &prior_status,
+                &new_status,
+                now,
+            )
+            .await;
         }
     }
 
@@ -1442,6 +1469,8 @@ pub async fn reject_spec(
     entry.approval_status = ApprovalStatus::Rejected;
     entry.updated_at = now;
     let _ = state.spec_ledger.save(&entry).await;
+    // Rejection ends any pending period (task-339).
+    crate::spec_pending_since::clear_pending(&state.kv_store, &spec_path).await;
 
     // Wire the rejection into the durable spec-approvals ledger
     // (agent-gates.md §Spec Approval Ledger: Pending → Rejected and
