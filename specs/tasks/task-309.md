@@ -2,8 +2,8 @@
 title: "Adopt the specced Svelte 5 + shadcn-svelte web UI stack, replacing the bespoke component library"
 spec_ref: "Spec gap spec-f907eda3bd014fe546b838e2 / shadcn-svelte-ui-stack / 4156114b8040"
 depends_on: []
-progress: complete
-commits: ["f863a10dd81d4fb9e8e6ede73714c0f6f1e8b127", "9a56ebdfc15a3a9023d1356d21953d977f51c293", "ae5d3eb45e44bf40a01680b674fd2b821d6c9496", "4d5e209b474cc94fd5b4f26ba3144b742df9e55d", "40fcedae4ccabed95f2575598d300eac859764e8"]
+progress: ready-for-review
+commits: ["4d5e209b474cc94fd5b4f26ba3144b742df9e55d", "f863a10dd81d4fb9e8e6ede73714c0f6f1e8b127", "9a56ebdfc15a3a9023d1356d21953d977f51c293", "ae5d3eb45e44bf40a01680b674fd2b821d6c9496", "40fcedae4ccabed95f2575598d300eac859764e8", "3d2ce221fa265c8896658e1709ba67da67ca927f"]
 ---
 
 ## Required behavior
@@ -77,12 +77,12 @@ Canonical spec: `specs/development/architecture.md`. Source: `678a8ac3e3bfeafeb6
 ## Shipped
 
 The shadcn-svelte half of the architecture.md §Tech Stack requirement is
-implemented (commit 4d5e209b) and preserved through two merge repairs
-(d88b8fe0, then this round's 76110a31 against main 50575cf6). The
-Rust-half canonical conflict remains an open controller escalation (see
-the end of this section).
+implemented (commit 4d5e209b) and preserved through this round's merge
+repair (3d2ce221 against main 9cdd4b588, task-302). The Rust-half
+canonical conflict remains an open controller escalation — see the end of
+this section.
 
-### Implementation (retained, commit 4d5e209b)
+### Retained implementation (commit 4d5e209b, prior approved rounds)
 
 - `web/package.json` declares and the build genuinely uses `tailwindcss`
   ^4 + `@tailwindcss/vite`, `bits-ui`, `clsx`, `tailwind-merge`,
@@ -99,56 +99,66 @@ the end of this section).
   AccordionItem, Toast, Skeleton as cva-variant + Tailwind-utility
   components), so `web/src/components/*` and all views keep working. The
   bespoke `.btn`/`.card`/`.badge` class layer is retired from component
-  styling (legacy class names remain only as inert DOM hooks); the Red
-  Hat brand identity is preserved as the shadcn theme token values.
-  Verification probes: `web/src/__tests__/ShadcnUiStack.test.js` asserts
-  the cva/bits-ui rendering and the wired Tailwind pipeline.
+  styling; the Red Hat brand identity is preserved as the shadcn theme
+  token values. Verification probes: `web/src/__tests__/ShadcnUiStack.test.js`
+  asserts the cva/bits-ui rendering and the wired Tailwind pipeline.
 
-### This round: merge repair against current main (50575cf6, task-281)
+### This round: merge repair against current main (9cdd4b588, task-302)
 
-Merge commit 76110a31 resolves the DIRTY merge state. Source conflicts
-(web/src/components/ImpactAnalysisModal.svelte, web/src/lib/api.js,
-web/src/__tests__/ImpactAnalysisModal.test.js) were resolved preserving
-both sides: main's task-281 per-dependent cascade test status on top of
-the shadcn component tree. crates/ resolved identical to main (the
-branch carries no Rust delta). The web/dist conflicts were resolved by
-regenerating the bundle from the merged source rather than taking
-either side's stale build — the staged resolution had taken main's
-bespoke-CSS dist verbatim, which would have regressed the migrated UI;
-the committed dist now serves the Tailwind v4 build including task-281's
-features (evidence under /tmp/stage/review-evidence).
+Merge commit 3d2ce221 resolves the DIRTY merge state. Source resolution:
+main's task-302 web changes (DetailPanel spec-bindings panel, api.js
+meta-spec-bindings endpoints, locales, DetailPanel tests) merged on top
+of the shadcn component tree — main's DetailPanel consumes the
+shadcn-backed `./Button`/`./Tabs`/`./Badge`/`./Skeleton` primitives, so
+the merged tree is coherent. crates/ resolved identical to main (the
+branch carries no Rust delta; verified `git diff MERGE_HEAD -- crates/`
+is empty), so the merged Rust tree is main's already-verified code. The
+web/dist conflicts were resolved to main's dist verbatim per the
+executor's assignment-base restore; final integration rebuilds and
+publishes dist remotely from the merged source (a fresh
+`vite build` of the merged tree was verified in this round — see probe
+evidence — but not committed, per assignment rules).
 
-### Test evidence
+### Test evidence (merged tree, this round)
 
-- `cd web && npm ci && npx vitest run` (merged tree): 128 test files,
-  2599 tests passed, 41 skipped, 0 failed — includes the shadcn stack
-  probes (ShadcnUiStack, Modal, Toast, AccordionItem/Scoping) and the
-  merged task-285/281 ImpactAnalysisModal suite (23 tests).
-- Corroborating probe (verification intent): with `import './app.css'`
-  removed from main.js, `npm run build` emits CSS with no
-  `tailwindcss v4` marker and no shadcn theme tokens (unstyled output) —
-  the UI genuinely depends on the Tailwind pipeline, not dead config.
-  Restored afterwards; dist rebuilt from the intact source.
+- `cd web && npm ci && npx vitest run`: 128 test files, 2603 tests
+  passed, 41 skipped, 0 failed — includes the shadcn stack probes
+  (ShadcnUiStack, Modal, Toast, AccordionItem/Scoping) and main's merged
+  task-302 DetailPanel suite.
+- Corroborating probe (verification intent), run against the merged
+  tree with outputs under /tmp/stage/review-evidence:
+  - `npx vite build --outDir .../dist-with-tailwind`: emitted CSS
+    (767,370 bytes) begins with the `tailwindcss v4.3.5` banner and
+    carries the Tailwind utilities layer — the pipeline genuinely styles
+    the build.
+  - With `import './app.css'` removed from `main.js`, the rebuild's CSS
+    (738,862 bytes) has NO `tailwindcss v4` marker and no Tailwind
+    utilities — unstyled output, proving the UI depends on the Tailwind
+    pipeline rather than dead config. `main.js` restored afterwards;
+    working tree dist untouched (builds went to temp outDirs).
 
 ### Deferred to verifier / integration
 
-- Playwright e2e (`cd web && npm run test:e2e`): the webServer boots
+- Playwright e2e (`cd web && npm run test:e2e`): boots
   `cargo run -p gyre-server`, a large Rust build that must run in the
-  independent verifier per the 4 GiB budget. No visual baselines were
-  changed this round: main's task-281 touched no web/tests files, and
-  the explorer-visual baselines were already regenerated for the
-  shadcn restyle in the prior verified round. If task-281's modal
-  changes shift pixels in any screenshot, regenerate deliberately
-  (functional assertions are the anchor).
-- `SKIP_WEB_BUILD=1 cargo build -p gyre-server` serving the committed
-  web/dist (dist regenerated this round from the merged source).
+  independent verifier within the 4 GiB budget; screenshot baselines
+  regenerate deliberately at that stage if the restyle changes pixels
+  (functional assertions are the behavioral anchor).
+- `cargo test --all` and workspace gates (arch lint, clippy, fmt) — the
+  merged Rust tree is byte-identical to main's verified tree, but the
+  full suites are verifier-owned.
+- Committed web/dist rebuild/publication — executor restores dist from
+  the assignment base and final integration rebuilds remotely.
 
-### Rust-half escalation (open, not closed)
+### Open controller escalation (Rust half — NOT closed by this task)
 
-architecture.md's '(server, CLI, agent runtime)' Rust parenthetical
-conflicts with canonical specs/system/agent-runtime.md (Node.js
-in-container agent image, agent-runner.mjs entrypoint on the Claude
-Agent SDK, Nix-pinned Node.js). This task makes no code change and no
-coverage claim for that half; it remains an open controller
-spec-lifecycle escalation (review feedback id
-2a696c7f5c2ffc02e88742ae:rust-agent-runtime-reading-mischaracterized).
+architecture.md's 'Rust as the primary language (server, CLI, agent
+runtime)' parenthetical conflicts with canonical
+specs/system/agent-runtime.md, which mandates a Node.js in-container
+agent image (agent-runner.mjs entrypoint on the Claude Agent SDK, Node.js
+pinned by the Nix flake) — and the shipped runtime
+docker/gyre-agent/agent-runner.mjs is JavaScript. Server and CLI are
+Rust (satisfied). This is a spec-lifecycle amendment decision for the
+controller (amend architecture.md's parenthetical, or mandate a Rust
+in-container runner); no code or coverage claim in this task disposes of
+it either way.
