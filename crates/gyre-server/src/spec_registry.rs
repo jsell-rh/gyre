@@ -473,6 +473,26 @@ pub fn parse_cross_workspace_target(target: &str) -> CrossWorkspaceTarget {
 ///   staleness checker (which cannot recover the pushing principal from the link
 ///   row) never silently flips them "active".
 #[allow(clippy::too_many_arguments)]
+/// Record the durable pending-since marker when the sync has a KV store
+/// (task-339): every call site is a (re-)entry into `pending`.
+async fn sync_mark_pending(
+    kv: Option<&Arc<dyn gyre_ports::KvJsonStore>>,
+    spec_path: &str,
+    now: u64,
+) {
+    if let Some(kv) = kv {
+        crate::spec_pending_since::mark_pending(kv, spec_path, now).await;
+    }
+}
+
+/// Clear the durable pending-since marker when the sync has a KV store
+/// (task-339): the entry left `pending`.
+async fn sync_clear_pending(kv: Option<&Arc<dyn gyre_ports::KvJsonStore>>, spec_path: &str) {
+    if let Some(kv) = kv {
+        crate::spec_pending_since::clear_pending(kv, spec_path).await;
+    }
+}
+
 pub async fn sync_spec_ledger(
     ledger: &Arc<dyn gyre_ports::SpecLedgerRepository>,
     links_store: &SpecLinksStore,
@@ -571,6 +591,9 @@ pub async fn sync_spec_ledger(
                 existing.updated_at = now;
                 if auto_invalidate {
                     existing.approval_status = ApprovalStatus::Pending;
+                    // The new version needs a fresh approval: restart the
+                    // pending clock for it (task-339).
+                    sync_mark_pending(kv, &entry.path, now).await;
                     approval_changed_paths.push(entry.path.clone());
                     info!(spec_path = %entry.path, "spec-registry: approval invalidated (content changed)");
                 }
@@ -588,11 +611,17 @@ pub async fn sync_spec_ledger(
             if existing.approval_status == ApprovalStatus::Deprecated {
                 existing.approval_status = ApprovalStatus::Pending;
                 existing.updated_at = now;
+                // Re-entering pending after deprecation: a new pending
+                // period starts now (task-339).
+                sync_mark_pending(kv, &entry.path, now).await;
                 approval_changed_paths.push(entry.path.clone());
             }
             existing
         } else {
             info!(spec_path = %entry.path, "spec-registry: new spec registered");
+            // New specs start pending: the pending clock starts with them
+            // (task-339).
+            sync_mark_pending(kv, &entry.path, now).await;
             SpecLedgerEntry {
                 bindings_sha: String::new(),
                 path: entry.path.clone(),
@@ -622,6 +651,8 @@ pub async fn sync_spec_ledger(
                 info!(spec_path = %e.path, "spec-registry: spec deprecated (removed from manifest)");
                 e.approval_status = ApprovalStatus::Deprecated;
                 e.updated_at = now;
+                // Deprecation ends any pending period (task-339).
+                sync_clear_pending(kv, &e.path).await;
                 let _ = ledger.save(&e).await;
                 approval_changed_paths.push(e.path.clone());
             }
@@ -783,6 +814,8 @@ pub async fn sync_spec_ledger(
                     source_entry.drift_status = "drifted".to_string();
                     source_entry.approval_status = ApprovalStatus::Pending;
                     source_entry.updated_at = now;
+                    // Invalidation restarts the pending clock (task-339).
+                    sync_mark_pending(kv, &link.source_path, now).await;
                     let _ = ledger.save(&source_entry).await;
                     approval_changed_paths.push(link.source_path.clone());
                     info!(
@@ -974,6 +1007,8 @@ pub async fn sync_spec_ledger(
                     source_entry.drift_status = "drifted".to_string();
                     source_entry.approval_status = ApprovalStatus::Pending;
                     source_entry.updated_at = now;
+                    // Invalidation restarts the pending clock (task-339).
+                    sync_mark_pending(kv, &link.source_path, now).await;
                     let _ = ledger.save(&source_entry).await;
                     approval_changed_paths.push(link.source_path.clone());
                     info!(
@@ -1878,7 +1913,11 @@ pub(crate) async fn get_blob_sha(
 /// Uses `git ls-tree -r --name-only <sha> specs/` to enumerate spec files.
 /// Returns the list of relative spec paths (e.g. `"system/new-spec.md"`) that
 /// are NOT in the manifest.  Excludes `index.md`, `prior-art/`, `milestones/`.
-async fn find_unregistered_specs(
+///
+/// `pub(crate)`: also the file-scan class of the accountability patrol's
+/// orphan check (task-339) — the patrol must flag exactly the files the
+/// push-time coverage check would.
+pub(crate) async fn find_unregistered_specs(
     git_bin: &str,
     repo_path: &str,
     sha: &str,

@@ -1,4 +1,4 @@
-//! Spec-lifecycle accountability patrol — task-204.
+//! Spec-lifecycle accountability patrol — task-204, extended by task-339.
 //!
 //! spec-lifecycle.md §Accountability Integration: "The Accountability agent's
 //! patrol checks for:
@@ -10,11 +10,31 @@
 //! If any of these are found, the Accountability agent escalates to the workspace
 //! orchestrator."
 //!
-//! The three checks run against real storage — `TaskRepository` for the task-age
-//! checks and `SpecLedgerRepository` (`state.spec_ledger`, the same ledger the
-//! post-receive hook writes) for the modified-spec check — and every finding
-//! with a resolvable workspace produces a real `MessageKind::Escalation` on
-//! the message bus, addressed to the workspace orchestrator's event stream
+//! task-339 (spec-registry.md §Accountability Agent) adds the four
+//! manifest-aware checks, keyed on `specs/manifest.yaml` at each repo's
+//! HEAD rather than the repo's `SpecLifecycleConfig` watched prefixes:
+//! - orphan spec files — `specs/*.md` files at HEAD not registered in the
+//!   manifest (the same file-scan class as the push-time coverage check,
+//!   `spec_registry::find_unregistered_specs`)
+//! - stale manifest entries — manifest entries whose file does not exist
+//!   at HEAD (previously only a sync-time warning log)
+//! - specs with effective `requires_approval: true` pending for more than
+//!   one Ralph loop cycle, evaluated against the durable pending-since
+//!   signal (`spec_pending_since`, recorded by the sync/approve/reject
+//!   paths — never `updated_at`, which churns on unrelated writes)
+//! - specs with effective `auto_create_tasks: true` that were modified but
+//!   have no corresponding task (the former config-prefix-keyed check,
+//!   rekeyed to the manifest — mirroring `should_create_lifecycle_task`;
+//!   manifest-less repos keep the config watched-prefix fallback the hook
+//!   itself uses)
+//!
+//! The checks run against real storage — `TaskRepository` for the task-age
+//! checks, `SpecLedgerRepository` (`state.spec_ledger`, the same ledger the
+//! post-receive hook writes) for the modified-spec and pending-age checks,
+//! and each repo's on-disk git storage (HEAD manifest + file tree) for the
+//! coverage checks — and every finding with a resolvable workspace produces
+//! a real `MessageKind::Escalation` on the message bus, addressed to the
+//! workspace orchestrator's event stream
 //! (`GET /api/v1/workspaces/:id/messages`). Findings with no resolvable
 //! workspace are skipped and logged (never emitted under a fabricated
 //! scope), and still reach the caller through the patrol response.
@@ -84,7 +104,7 @@ pub struct SpecLifecyclePatrolRequest {
 // Patrol execution
 // ---------------------------------------------------------------------------
 
-/// Run the three spec-lifecycle accountability checks against real storage.
+/// Run the spec-lifecycle accountability checks against real storage.
 ///
 /// Returns `Err` rather than an empty finding list when a repository query
 /// fails: a patrol that cannot read its inputs must not report "nothing
@@ -95,13 +115,24 @@ pub async fn run_spec_lifecycle_patrol(
     drift_review_max_age_secs: u64,
     implementation_backlog_max_age_secs: u64,
 ) -> anyhow::Result<Vec<PatrolFinding>> {
-    // Checks 1/2 share one task scan (label + age filters). Check 3 resolves
-    // each candidate spec's task coverage through
+    // Checks 1/2 share one task scan (label + age filters). Checks 3-6
+    // resolve each candidate spec's coverage through
     // `TaskRepository::list_by_spec_path` — the contract's named mechanism —
     // so coverage is answered by the repository, not by a client-side replay
     // of its rows.
     let tasks = state.tasks.list().await?;
     let ledger = state.spec_ledger.list_all().await?;
+
+    // Per-repo manifest context at HEAD (task-339): the manifest is the key
+    // for the four manifest-aware checks. Repos whose storage cannot be
+    // read, or that carry no manifest, contribute no context — the
+    // ledger-keyed checks fall back to the config rules the lifecycle hook
+    // itself uses for manifest-less repos, never to a fabricated manifest.
+    let repo_ctxs = load_repo_manifest_contexts(state).await?;
+    let ctx_by_repo: HashMap<String, &RepoManifestContext> = repo_ctxs
+        .iter()
+        .map(|ctx| (ctx.repo_id.clone(), ctx))
+        .collect();
 
     let mut findings = Vec::new();
     check_stale_drift_review_tasks(&tasks, now_secs, drift_review_max_age_secs, &mut findings);
@@ -111,9 +142,21 @@ pub async fn run_spec_lifecycle_patrol(
         implementation_backlog_max_age_secs,
         &mut findings,
     );
+    check_orphan_spec_files(&repo_ctxs, &mut findings).await;
+    check_stale_manifest_entries(&repo_ctxs, &mut findings).await;
+    check_pending_beyond_cycle(
+        state,
+        &ledger,
+        &ctx_by_repo,
+        now_secs,
+        drift_review_max_age_secs,
+        &mut findings,
+    )
+    .await?;
     check_modified_specs_without_tasks(
         state,
         &ledger,
+        &ctx_by_repo,
         now_secs,
         drift_review_max_age_secs,
         &mut findings,
@@ -127,6 +170,93 @@ pub async fn run_spec_lifecycle_patrol(
         "spec_lifecycle_patrol: patrol complete"
     );
     Ok(findings)
+}
+
+// ---------------------------------------------------------------------------
+// Per-repo manifest context (task-339)
+// ---------------------------------------------------------------------------
+
+/// A repo's manifest at HEAD, plus the resolution context needed to turn
+/// manifest-keyed findings into escalations (the repo's workspace scope).
+///
+/// Built once per patrol run from real storage: the repo row (workspace
+/// scope), the repo's on-disk git storage (HEAD SHA), and the manifest
+/// parsed from that HEAD — the same manifest the push-time hook and ledger
+/// sync read.
+struct RepoManifestContext {
+    repo_id: String,
+    workspace_id: String,
+    repo_path: String,
+    head_sha: String,
+    manifest: crate::spec_registry::SpecManifest,
+}
+
+/// Load the manifest context for every repo whose storage and manifest can
+/// be resolved at HEAD.
+///
+/// Fails (rather than returning an empty list) when the repo repository
+/// itself cannot be read: a patrol that cannot read its inputs must not
+/// report "nothing wrong". Individual repos whose git storage is missing,
+/// has no commits, or carries no `specs/manifest.yaml` are skipped with a
+/// log line — they simply have no manifest-aware checks to run (the
+/// ledger-keyed checks fall back to the config rules for such repos).
+async fn load_repo_manifest_contexts(state: &AppState) -> anyhow::Result<Vec<RepoManifestContext>> {
+    let repos = state.repos.list().await?;
+    let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
+
+    let mut ctxs = Vec::new();
+    for repo in repos {
+        if repo.path.is_empty() || !std::path::Path::new(&repo.path).exists() {
+            tracing::debug!(
+                repo_id = %repo.id,
+                "spec_lifecycle_patrol: repo storage not on disk — skipping manifest checks"
+            );
+            continue;
+        }
+        let Some(head_sha) = resolve_head_sha(&git_bin, &repo.path).await else {
+            warn!(
+                repo_id = %repo.id,
+                "spec_lifecycle_patrol: cannot resolve repo HEAD — skipping manifest checks"
+            );
+            continue;
+        };
+        let Some(manifest) = crate::spec_registry::read_manifest(&repo.path, &head_sha).await
+        else {
+            tracing::debug!(
+                repo_id = %repo.id,
+                "spec_lifecycle_patrol: no specs/manifest.yaml at HEAD — manifest-keyed \
+                 checks fall back to config rules"
+            );
+            continue;
+        };
+        ctxs.push(RepoManifestContext {
+            repo_id: repo.id.to_string(),
+            workspace_id: repo.workspace_id.to_string(),
+            repo_path: repo.path.clone(),
+            head_sha,
+            manifest,
+        });
+    }
+    Ok(ctxs)
+}
+
+/// Resolve a repo's current HEAD commit SHA (`git rev-parse HEAD`).
+///
+/// `None` when the repo has no commits (unborn HEAD) or git fails — the
+/// caller skips the repo's manifest checks rather than guessing a revision.
+async fn resolve_head_sha(git_bin: &str, repo_path: &str) -> Option<String> {
+    let out = tokio::process::Command::new(git_bin)
+        .arg("-C")
+        .arg(repo_path)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .await
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!sha.is_empty()).then_some(sha)
 }
 
 /// Check 1 — `spec-drift-review` tasks open longer than one Ralph loop cycle.
@@ -214,10 +344,192 @@ fn check_stale_implementation_backlog_tasks(
     }
 }
 
-/// Check 3 — watched specs with no corresponding task (defense in depth).
+/// Check 3a — orphan spec files (task-339, spec-registry.md §Accountability
+/// Agent: "Spec files that exist but aren't in the manifest").
 ///
-/// spec-lifecycle.md: "Specs that were modified but have no corresponding task
-/// (should never happen if the hook works, but defense in depth)."
+/// Reuses the push-time coverage check's file-scan class
+/// (`spec_registry::find_unregistered_specs`, `git ls-tree` at HEAD), so the
+/// patrol flags exactly the files a push would be warned/rejected about —
+/// including its exclusions (`index.md`, `prior-art/`, `milestones/`, and
+/// non-`.md` files such as `manifest.yaml` itself, which is therefore never
+/// flagged however it is registered).
+async fn check_orphan_spec_files(
+    repo_ctxs: &[RepoManifestContext],
+    findings: &mut Vec<PatrolFinding>,
+) {
+    let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
+    for ctx in repo_ctxs {
+        let manifest_paths: std::collections::HashSet<String> =
+            ctx.manifest.specs.iter().map(|e| e.path.clone()).collect();
+        for rel in crate::spec_registry::find_unregistered_specs(
+            &git_bin,
+            &ctx.repo_path,
+            &ctx.head_sha,
+            &manifest_paths,
+        )
+        .await
+        {
+            findings.push(PatrolFinding {
+                finding_type: "orphan_spec_file".to_string(),
+                severity: "warning".to_string(),
+                spec_path: normalize_spec_path(&rel),
+                detail: format!(
+                    "Spec file 'specs/{rel}' exists at HEAD of repo {} but is not \
+                     registered in specs/manifest.yaml",
+                    ctx.repo_id
+                ),
+                suggested_action: format!(
+                    "Register 'specs/{rel}' in specs/manifest.yaml (or delete the file) \
+                     so the spec registry's lifecycle tracking covers it"
+                ),
+                task_id: None,
+                workspace_id: Some(ctx.workspace_id.clone()),
+            });
+        }
+    }
+}
+
+/// Check 3b — stale manifest entries (task-339, spec-registry.md
+/// §Accountability Agent: "Manifest entries whose files don't exist").
+///
+/// `sync_spec_ledger` already logs a warning for these at push time; this
+/// check surfaces them as patrol findings escalated to the workspace
+/// orchestrator, resolved against the same storage the sync reads (the
+/// blob SHA at HEAD via `git rev-parse`).
+async fn check_stale_manifest_entries(
+    repo_ctxs: &[RepoManifestContext],
+    findings: &mut Vec<PatrolFinding>,
+) {
+    let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
+    for ctx in repo_ctxs {
+        for entry in &ctx.manifest.specs {
+            let rooted = normalize_spec_path(&entry.path);
+            let blob =
+                crate::spec_registry::get_blob_sha(&git_bin, &ctx.repo_path, &ctx.head_sha, &rooted)
+                    .await;
+            if blob.is_some() {
+                continue;
+            }
+            findings.push(PatrolFinding {
+                finding_type: "stale_manifest_entry".to_string(),
+                severity: "warning".to_string(),
+                spec_path: rooted.clone(),
+                detail: format!(
+                    "Manifest entry '{rooted}' in repo {} has no corresponding file \
+                     at HEAD",
+                    ctx.repo_id
+                ),
+                suggested_action: format!(
+                    "Remove the stale '{rooted}' entry from specs/manifest.yaml (or \
+                     restore the file) — the ledger cannot track a spec with no content"
+                ),
+                task_id: None,
+                workspace_id: Some(ctx.workspace_id.clone()),
+            });
+        }
+    }
+}
+
+/// Check 3c — specs with effective `requires_approval: true` pending for
+/// more than one Ralph loop cycle (task-339, spec-registry.md §Accountability
+/// Agent).
+///
+/// The age is evaluated against the durable pending-since signal maintained
+/// by the sync/approve/reject paths (`spec_pending_since`) — never against
+/// `updated_at`, which churns on unrelated writes, and never unconditionally:
+/// a spec pending less than the bound produces no finding, and a pending
+/// spec with no recorded signal (a row older than the signal itself) is
+/// skipped and logged rather than guessed at. The bound is the patrol's
+/// one-cycle threshold (`drift_review_max_age_secs`, default
+/// [`DEFAULT_DRIFT_REVIEW_MAX_AGE_SECS`], overridable per request).
+///
+/// `requires_approval` is effective manifest policy: the manifest at the
+/// entry's repo HEAD decides (per-entry override or `defaults:`), and an
+/// entry whose manifest cannot be resolved is skipped — there is no
+/// config-prefix fallback because the config has no `requires_approval`
+/// notion to fall back to.
+async fn check_pending_beyond_cycle(
+    state: &AppState,
+    ledger: &[gyre_domain::SpecLedgerEntry],
+    ctx_by_repo: &HashMap<String, &RepoManifestContext>,
+    now_secs: u64,
+    cycle_bound_secs: u64,
+    findings: &mut Vec<PatrolFinding>,
+) -> anyhow::Result<()> {
+    for entry in ledger {
+        if entry.approval_status != gyre_domain::ApprovalStatus::Pending {
+            continue;
+        }
+        let Some(ctx) = entry.repo_id.as_deref().and_then(|r| ctx_by_repo.get(r)) else {
+            continue;
+        };
+        let path = normalize_spec_path(&entry.path);
+        let Some(manifest_entry) =
+            crate::spec_registry::manifest_entry_for_path(&ctx.manifest, &path)
+        else {
+            continue;
+        };
+        if !manifest_entry.effective_requires_approval(&ctx.manifest.defaults) {
+            continue;
+        }
+        let Some(pending_since) =
+            crate::spec_pending_since::pending_since(&state.kv_store, &entry.path).await?
+        else {
+            tracing::debug!(
+                spec_path = %entry.path,
+                "spec_lifecycle_patrol: pending entry has no recorded pending-since \
+                 signal — skipping pending-age check (cannot evaluate age)"
+            );
+            continue;
+        };
+        let age_secs = now_secs.saturating_sub(pending_since);
+        if age_secs <= cycle_bound_secs {
+            continue;
+        }
+        findings.push(PatrolFinding {
+            finding_type: "spec_pending_beyond_cycle".to_string(),
+            severity: "warning".to_string(),
+            spec_path: path.clone(),
+            detail: format!(
+                "Spec '{}' (effective requires_approval: true) has been pending for \
+                 {}s, exceeding the {}s one-cycle bound",
+                path, age_secs, cycle_bound_secs
+            ),
+            suggested_action: format!(
+                "Review the pending spec '{}' — approve or reject it; a spec pending \
+                 longer than one Ralph loop cycle means no judgment is being exercised \
+                 on it",
+                path
+            ),
+            task_id: None,
+            workspace_id: entry
+                .workspace_id
+                .clone()
+                .filter(|ws| !ws.trim().is_empty())
+                .or_else(|| Some(ctx.workspace_id.clone())),
+        });
+    }
+    Ok(())
+}
+
+/// Check 3 — modified specs with no corresponding task (defense in depth).
+///
+/// spec-registry.md §Accountability Agent (task-339): "Specs with
+/// `auto_create_tasks: true` that were modified but have no corresponding
+/// task." spec-lifecycle.md: "Specs that were modified but have no
+/// corresponding task (should never happen if the hook works, but defense
+/// in depth)."
+///
+/// Task-eligibility is keyed on the MANIFEST at the spec's repo HEAD — the
+/// same key `should_create_lifecycle_task` uses — not on the repo
+/// `SpecLifecycleConfig` watched prefixes: a manifest entry with
+/// `auto_create_tasks: true` must be examined even when the repo's config
+/// watches no prefixes, and a manifest entry with `auto_create_tasks: false`
+/// must never be. Repos whose manifest cannot be resolved (no repo row, no
+/// storage, no manifest at HEAD) fall back to the config's watched-prefix
+/// rules — exactly the fallback the lifecycle hook itself applies to
+/// manifest-less repos, so the patrol and the hook can never disagree
+/// about which specs are supposed to have tasks.
 ///
 /// "Has a corresponding task" = at least one non-`Cancelled` task whose
 /// `spec_path` names this spec, resolved per spec via
@@ -230,32 +542,27 @@ fn check_stale_implementation_backlog_tasks(
 /// repo — otherwise an identically-named spec in another repo would mask the gap.
 ///
 /// Deliberate exclusions (each is "not a modification awaiting a task"):
-/// - paths the entry's repo does not watch — the post-receive hook only
-///   creates tasks for paths the repo's `SpecLifecycleConfig` watches
-///   (spec-lifecycle.md §Configuration / §What This Does NOT Do), so anything
-///   else can never have a task; repos with the lifecycle hook disabled
-///   (`enabled = false`) are skipped entirely, mirroring
-///   `git_http::process_spec_lifecycle`'s early return;
+/// - repos with the lifecycle hook disabled (`enabled = false`) — skipped
+///   entirely, mirroring `process_spec_lifecycle`'s early return;
 /// - `Deprecated` entries — removal is handled by the hook's `spec-deprecated`
 ///   task at deprecation time, and that task closing would otherwise leave a
 ///   permanently un-actionable finding;
 /// - entries with no `current_sha` — a manifest entry with no file at HEAD is
-///   not a modified spec;
+///   not a modified spec (the stale-entry check owns that finding);
 /// - entries updated within the drift-review window — the hook runs in the same
 ///   tick as the push, so a just-written ledger row must not be flagged before
 ///   its task exists (same grace the check-1 threshold expresses).
 async fn check_modified_specs_without_tasks(
     state: &AppState,
     ledger: &[gyre_domain::SpecLedgerEntry],
+    ctx_by_repo: &HashMap<String, &RepoManifestContext>,
     now_secs: u64,
     grace_secs: u64,
     findings: &mut Vec<PatrolFinding>,
 ) -> anyhow::Result<()> {
-    // Per-repo watched-path configuration, cached per patrol run: the same
-    // config the post-receive hook consults (`process_spec_lifecycle`), so
-    // the patrol and the hook can never disagree about which specs are
-    // supposed to have tasks. Absent rows mean "defaults"
-    // (`SpecLifecycleRepository::get_for_repo` contract).
+    // Per-repo watched-path configuration, cached per patrol run — only the
+    // fallback for repos whose manifest cannot be resolved (the same
+    // fallback `process_spec_lifecycle` applies to manifest-less repos).
     let mut config_cache: HashMap<String, SpecLifecycleConfig> = HashMap::new();
 
     for entry in ledger {
@@ -266,7 +573,20 @@ async fn check_modified_specs_without_tasks(
             // tasks are configured behavior, not an accountability gap.
             continue;
         }
-        if !config.is_watched(&path) {
+        // Manifest-keyed eligibility (task-339), mirroring
+        // `should_create_lifecycle_task`: the manifest at HEAD decides via
+        // `effective_auto_create_tasks`; only manifest-less repos fall back
+        // to the config's watched prefixes. A ledger path the current
+        // manifest does not declare is never task-eligible (the hook would
+        // not have created a task for it either).
+        let task_eligible =
+            match entry.repo_id.as_deref().and_then(|r| ctx_by_repo.get(r)) {
+                Some(ctx) => crate::spec_registry::manifest_entry_for_path(&ctx.manifest, &path)
+                    .map(|e| e.effective_auto_create_tasks(&ctx.manifest.defaults))
+                    .unwrap_or(false),
+                None => config.is_watched(&path),
+            };
+        if !task_eligible {
             continue;
         }
         if entry.approval_status == gyre_domain::ApprovalStatus::Deprecated {
@@ -1197,5 +1517,334 @@ mod tests {
             vec!["specs/milestones/m36.md"],
             "watched paths must come from the repo's config, not a hardcoded list: {findings:?}"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // task-339: manifest-aware checks (orphans, stale entries, pending age,
+    // manifest-keyed modified-without-task)
+    // -----------------------------------------------------------------------
+
+    /// Create a real git repo with the given files committed on `main`, and
+    /// return the directory plus the HEAD SHA (the same fixture shape
+    /// `spec_registry`'s tests use — the patrol reads real git storage).
+    async fn make_git_repo(files: &[(&str, &str)]) -> (tempfile::TempDir, String) {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().to_str().unwrap();
+        let run = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(path)
+                .output()
+                .expect("git command failed");
+            assert!(
+                out.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+
+        run(&["init", "-b", "main"]);
+        run(&["config", "user.email", "test@test.com"]);
+        run(&["config", "user.name", "Test"]);
+        for (file_path, content) in files {
+            let full = dir.path().join(file_path);
+            std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+            std::fs::write(&full, content).unwrap();
+            run(&["add", file_path]);
+        }
+        run(&["commit", "-m", "initial"]);
+        let sha = run(&["rev-parse", "HEAD"]);
+        (dir, sha)
+    }
+
+    /// Register a repo row pointing at real on-disk git storage, so the
+    /// patrol's manifest resolution reads the actual HEAD.
+    async fn register_repo(state: &AppState, id: &str, ws_id: &str, path: &str) {
+        let repo = gyre_domain::Repository::new(
+            Id::new(id),
+            Id::new(ws_id),
+            format!("repo-{id}"),
+            path.to_string(),
+            1_000_000,
+        );
+        state.repos.create(&repo).await.unwrap();
+    }
+
+    /// AC 1 (task-339): an unregistered `specs/orphan.md` on disk and a
+    /// manifest entry pointing at a missing `specs/ghost.md` — one patrol
+    /// run returns BOTH findings and emits real escalations to the owning
+    /// workspace orchestrator's event stream. `manifest.yaml` and
+    /// `index.md` must never be flagged as orphans (the push-time scan's
+    /// exclusions), and the registered spec with its file present produces
+    /// nothing.
+    #[tokio::test]
+    async fn flags_orphan_files_and_stale_manifest_entries_with_escalations() {
+        let state = test_state();
+        state
+            .workspaces
+            .create(&make_workspace("ws1"))
+            .await
+            .unwrap();
+        let (dir, _sha) = make_git_repo(&[
+            (
+                "specs/manifest.yaml",
+                "version: 1\nspecs:\n  - path: system/real.md\n    title: Real\n    owner: user:test\n  - path: system/ghost.md\n    title: Ghost\n    owner: user:test\n",
+            ),
+            ("specs/system/real.md", "# Real\n"),
+            ("specs/orphan.md", "# Orphan\n"),
+            ("specs/index.md", "# Index\n"),
+        ])
+        .await;
+        register_repo(&state, "repo1", "ws1", dir.path().to_str().unwrap()).await;
+
+        let response = run_and_escalate(&state, NOW, DRIFT_MAX, BACKLOG_MAX)
+            .await
+            .expect("patrol should succeed");
+
+        let mut flagged: Vec<String> = response
+            .findings
+            .iter()
+            .map(|f| format!("{}:{}", f.finding_type, f.spec_path))
+            .collect();
+        flagged.sort();
+        assert_eq!(
+            flagged,
+            vec![
+                "orphan_spec_file:specs/orphan.md",
+                "stale_manifest_entry:specs/system/ghost.md",
+            ],
+            "exactly the orphan file and the stale manifest entry: {findings:?}",
+            findings = response.findings
+        );
+
+        // Real escalation rows on the orchestrator's stream, one per
+        // finding, payload identifying each.
+        let messages = state
+            .messages
+            .list_by_workspace(&Id::new("ws1"), Some("escalation"), None, None, None, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            messages.len(),
+            2,
+            "both findings must escalate, not merely log: {messages:?}"
+        );
+        let payloads: Vec<String> = messages
+            .iter()
+            .map(|m| m.payload.as_ref().expect("escalation payload").to_string())
+            .collect();
+        for needle in [
+            "orphan_spec_file",
+            "specs/orphan.md",
+            "stale_manifest_entry",
+            "specs/system/ghost.md",
+            ESCALATION_SOURCE,
+        ] {
+            assert!(
+                payloads.iter().any(|p| p.contains(needle)),
+                "escalation payload must identify {needle}: {payloads:?}"
+            );
+        }
+        for msg in &messages {
+            MessageKind::Escalation
+                .validate_payload(msg.payload.as_ref())
+                .expect("escalation payload must satisfy the message-bus escalation schema");
+        }
+    }
+
+    /// AC 2 (task-339): a `requires_approval: true` spec pending longer than
+    /// the cycle bound produces a pending-age finding; the SAME spec pending
+    /// less than the bound does not. The age comes from the durable
+    /// pending-since signal recorded by the ledger sync (a real push-path
+    /// write), not from `updated_at` and not unconditionally — a
+    /// `requires_approval: false` pending spec and a pending entry with no
+    /// recorded signal are never flagged.
+    #[tokio::test]
+    async fn flags_pending_beyond_cycle_only_when_the_recorded_age_exceeds_it() {
+        let state = test_state();
+        state
+            .workspaces
+            .create(&make_workspace("ws1"))
+            .await
+            .unwrap();
+        let (dir, sha) = make_git_repo(&[
+            (
+                "specs/manifest.yaml",
+                "version: 1\nspecs:\n  - path: system/slow.md\n    title: Slow\n    owner: user:test\n    requires_approval: true\n    auto_create_tasks: false\n  - path: system/fast.md\n    title: Fast\n    owner: user:test\n    requires_approval: false\n    auto_create_tasks: false\n  - path: system/legacy.md\n    title: Legacy\n    owner: user:test\n    requires_approval: true\n    auto_create_tasks: false\n",
+            ),
+            ("specs/system/slow.md", "# Slow\n"),
+            ("specs/system/fast.md", "# Fast\n"),
+            ("specs/system/legacy.md", "# Legacy\n"),
+        ])
+        .await;
+        register_repo(&state, "repo1", "ws1", dir.path().to_str().unwrap()).await;
+
+        // Real ledger sync (the push path): registers all three specs as
+        // Pending and records their pending-since at T0 in the durable KV
+        // store.
+        const T0: u64 = 1_700_000_000;
+        crate::spec_registry::sync_spec_ledger(
+            &state.spec_ledger,
+            &state.spec_links_store,
+            &state.spec_link_repo,
+            dir.path().to_str().unwrap(),
+            &sha,
+            T0,
+            Some("repo1"),
+            Some("ws1"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(&state.kv_store),
+            Some(&state.tasks),
+        )
+        .await;
+
+        // A pending row older than the pending-since signal itself (written
+        // before task-339): no recorded signal, so the age cannot be
+        // evaluated — the entry must be skipped, not flagged via updated_at.
+        crate::spec_pending_since::clear_pending(&state.kv_store, "system/legacy.md").await;
+
+        // Fresh pending (minutes old, well under the bound): NO findings at
+        // all — this is the probe's non-target state (c).
+        let fresh = run_spec_lifecycle_patrol(&state, T0 + 300, DRIFT_MAX, BACKLOG_MAX)
+            .await
+            .unwrap();
+        assert!(
+            fresh.is_empty(),
+            "a spec pending 300s must not be flagged (and nothing else may fire): {fresh:?}"
+        );
+
+        // Pending beyond the cycle bound: exactly slow.md (requires_approval
+        // true, recorded pending-since past the bound). fast.md is pending
+        // too but requires_approval: false; legacy.md has no recorded signal.
+        let response = run_and_escalate(&state, T0 + DRIFT_MAX + 1, DRIFT_MAX, BACKLOG_MAX)
+            .await
+            .unwrap();
+        let pending: Vec<&str> = response
+            .findings
+            .iter()
+            .map(|f| f.finding_type.as_str())
+            .collect();
+        assert_eq!(
+            pending,
+            vec!["spec_pending_beyond_cycle"],
+            "only the over-bound requires_approval spec: {findings:?}",
+            findings = response.findings
+        );
+        assert_eq!(response.findings[0].spec_path, "specs/system/slow.md");
+
+        // The finding escalates to the owning workspace orchestrator.
+        let messages = state
+            .messages
+            .list_by_workspace(&Id::new("ws1"), Some("escalation"), None, None, None, None)
+            .await
+            .unwrap();
+        assert_eq!(messages.len(), 1, "exactly one escalation: {messages:?}");
+        let payload = messages[0]
+            .payload
+            .as_ref()
+            .expect("escalation payload")
+            .to_string();
+        assert!(
+            payload.contains("spec_pending_beyond_cycle")
+                && payload.contains("specs/system/slow.md"),
+            "escalation must identify the pending spec: {payload}"
+        );
+    }
+
+    /// AC 3 (task-339): a spec with `auto_create_tasks: true` whose SHA
+    /// changed but whose lifecycle task was deleted produces the
+    /// modified-without-task finding EVEN when the repo's `[spec_lifecycle]`
+    /// config watches no prefixes — the check is manifest-keyed, not
+    /// config-keyed. A manifest entry with `auto_create_tasks: false` is
+    /// never flagged.
+    #[tokio::test]
+    async fn modified_without_task_is_keyed_on_the_manifest_not_the_config() {
+        let state = test_state();
+        state
+            .workspaces
+            .create(&make_workspace("ws1"))
+            .await
+            .unwrap();
+        let (dir, _sha) = make_git_repo(&[
+            (
+                "specs/manifest.yaml",
+                "version: 1\nspecs:\n  - path: system/manifest-watched.md\n    title: A\n    owner: user:test\n  - path: system/opted-out.md\n    title: B\n    owner: user:test\n    auto_create_tasks: false\n",
+            ),
+            ("specs/system/manifest-watched.md", "# A\n"),
+            ("specs/system/opted-out.md", "# B\n"),
+        ])
+        .await;
+        register_repo(&state, "repo1", "ws1", dir.path().to_str().unwrap()).await;
+
+        // The repo's [spec_lifecycle] config watches NO prefixes: under the
+        // pre-task-339 config-prefix keying neither spec is ever examined.
+        // (ignored_paths cleared so nothing masks the manifest key.)
+        state
+            .spec_lifecycle_configs
+            .set_for_repo(
+                "repo1",
+                SpecLifecycleConfig {
+                    watched_paths: vec![],
+                    ignored_paths: vec![],
+                    ..SpecLifecycleConfig::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        // Ledger rows for specs modified past the grace window whose
+        // lifecycle tasks were deleted (no task references either path).
+        let old = NOW - DRIFT_MAX - 1;
+        state
+            .spec_ledger
+            .save(&make_ledger_entry(
+                "system/manifest-watched.md",
+                Some("ws1"),
+                old,
+                ApprovalStatus::Approved,
+            ))
+            .await
+            .unwrap();
+        state
+            .spec_ledger
+            .save(&make_ledger_entry(
+                "system/opted-out.md",
+                Some("ws1"),
+                old,
+                ApprovalStatus::Approved,
+            ))
+            .await
+            .unwrap();
+
+        let response = run_and_escalate(&state, NOW, DRIFT_MAX, BACKLOG_MAX)
+            .await
+            .unwrap();
+        let flagged: Vec<&str> = response
+            .findings
+            .iter()
+            .filter(|f| f.finding_type == "spec_without_task")
+            .map(|f| f.spec_path.as_str())
+            .collect();
+        assert_eq!(
+            flagged,
+            vec!["specs/system/manifest-watched.md"],
+            "manifest auto_create_tasks must decide, not the config's watched \
+             prefixes: {findings:?}",
+            findings = response.findings
+        );
+
+        // The manifest-keyed finding escalates like every other.
+        let messages = state
+            .messages
+            .list_by_workspace(&Id::new("ws1"), Some("escalation"), None, None, None, None)
+            .await
+            .unwrap();
+        assert_eq!(messages.len(), 1, "exactly one escalation: {messages:?}");
     }
 }
