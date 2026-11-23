@@ -3,7 +3,7 @@ title: "Remove orchestrator agent-spawning and carry out the spec amendment tabl
 spec_ref: "Spec gap spec-41a92c20354c6a108e6074e3 / orchestrator-boundary-amendments / 4a3f940495a8"
 depends_on: [task-302]
 progress: ready-for-review
-commits: ["071353fe866168d84e605b15c84108e083c2844f", "1167df20681ee579878dbf704587a97befec7633"]
+commits: ["1167df20681ee579878dbf704587a97befec7633", "071353fe866168d84e605b15c84108e083c2844f"]
 ---
 
 ## Required behavior
