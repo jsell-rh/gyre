@@ -2,7 +2,7 @@
 title: "Publish reviewed spec backlog for specs/system/agent-runtime.md"
 spec_ref: "GOAL.md — real implementations and meaningful verification"
 depends_on: []
-progress: complete
+progress: ready-for-review
 commits: []
 ---
 
@@ -1693,4 +1693,8 @@ Publish exactly the independently reviewed missing-work plan below. Only create 
 
 ## Shipped
 
-Task definitions and explicit bindings only; no product implementation claimed.
+Backlog publication only: task-349 (amendment-table-docs-and-binding) and this task-350 document carrying the reviewed plan; the amendment-table-docs-and-binding section binding added to specs/task-spec-inputs.json. Existing tasks (297, 298, 300, 303) and every prior binding are preserved untouched — their contract revisions are carried by this document's plan text for the executing workers. No product behavior, spec, coverage status, or gate changed.
+
+### Merge reconciliation
+
+The published candidate (d59d94b9) conflicted with current main (f3ca7db3, which merged the dependency-graph backlog task-341/task-342). Resolved specs/task-spec-inputs.json as a union of both sides' appended backlog bindings — the agent-runtime amendment-table-docs-and-binding entry and the dependency-graph dep-edge-orphaned-on-target-archive-delete entry are both retained; JSON validity verified with python3 json.load. task-349.md is byte-identical to the published candidate; task-350.md differs only in the progress field (reset to ready-for-review for this review round). No Rust or web artifacts were affected, so no rebuild was needed.

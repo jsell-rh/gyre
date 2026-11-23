@@ -2497,6 +2497,13 @@
         "Integration with Existing Specs",
         "Accountability Agent (personas/accountability.md)"
       ]
+    },
+    "backlog/4390a1b94a03e318854cbbec": {
+      "file": "specs/system/dependency-graph.md",
+      "heading": [
+        "Cross-Repo Dependency Graph",
+        "Dependency Entity"
+      ]
     }
   },
   "bindings": {
@@ -3425,6 +3432,9 @@
     ],
     "Spec gap spec-41a92c20354c6a108e6074e3 / amendment-table-docs-and-binding / e2624c4730e7": [
       "backlog/a40446f46dbb0536f3c30ed0"
+    ],
+    "Spec gap spec-cab97078efffe0fbfb7339be / dep-edge-orphaned-on-target-archive-delete / ed9f34316476": [
+      "backlog/4390a1b94a03e318854cbbec"
     ]
   }
 }
