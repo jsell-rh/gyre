@@ -3,7 +3,7 @@ title: "Human-approver default [owner]: omitted human_approvers reserves approva
 spec_ref: "Spec gap spec-c08e139362b99830187a32b4 / approver-owner-default / a458cd7cdf30"
 depends_on: []
 progress: not-started
-commits: []
+commits: ["9ac5e048d2b8d02f77070ed8df0415ab4609ea1a"]
 ---
 
 ## Required behavior
