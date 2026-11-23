@@ -5,8 +5,12 @@
 //! - Types (`class` definitions)
 //! - Functions (`def` at module level, exported if not prefixed with `_`)
 //! - Methods (`def` inside a class body)
-//! - Endpoints (decorated with Flask/FastAPI route decorators)
+//! - Endpoints (decorated with Flask/FastAPI route decorators, with a
+//!   RoutesTo edge to the handler function node)
+//! - Implements edges from class inheritance (`class Admin(User)`)
+//! - Returns edges from function return annotations (`def f() -> User`)
 
+use crate::edge_resolution::{node_type_index, resolve_deferred_target};
 use crate::extractor::{
     shallow_scan_for_marker, ExtractionError, ExtractionResult, LanguageExtractor,
 };
@@ -66,10 +70,19 @@ impl LanguageExtractor for PythonExtractor {
             edges: Vec::new(),
             errors: Vec::new(),
             name_to_id: HashMap::new(),
+            deferred_implements: Vec::new(),
+            deferred_returns: Vec::new(),
+            deferred_routes: Vec::new(),
         };
 
         // Pass 1: tree-sitter extraction (declarations + Contains edges).
         ctx.extract_python_files();
+        // Deferred-edge resolution: superclasses, return annotations, and
+        // route handlers can reference nodes extracted later in the run, so
+        // they are resolved only after every file has been extracted.
+        ctx.resolve_deferred_implements();
+        ctx.resolve_deferred_returns();
+        ctx.resolve_deferred_routes();
 
         ExtractionResult {
             nodes: ctx.nodes,
@@ -92,6 +105,17 @@ struct ExtractionContext {
     errors: Vec<ExtractionError>,
     /// Map qualified name → node Id for edge resolution.
     name_to_id: HashMap<String, Id>,
+    /// Deferred Implements edges: (class_id, base_class_name) collected from
+    /// `class Admin(User)` superclass lists, resolved after all files are
+    /// extracted (the base class may live in a later file).
+    deferred_implements: Vec<(Id, String)>,
+    /// Deferred Returns edges: (function_id, return_type_name) collected from
+    /// `-> Type` annotations, resolved after all files are extracted.
+    deferred_returns: Vec<(Id, String)>,
+    /// Deferred RoutesTo edges: (endpoint_id, handler_qname, metadata) for
+    /// Flask/FastAPI route-decorated functions, resolved to the handler
+    /// Function node after all files are extracted.
+    deferred_routes: Vec<(Id, String, String)>,
 }
 
 impl ExtractionContext {
@@ -146,13 +170,23 @@ impl ExtractionContext {
     }
 
     fn make_edge(&self, edge_type: EdgeType, source_id: Id, target_id: Id) -> GraphEdge {
+        self.make_edge_with_meta(edge_type, source_id, target_id, None)
+    }
+
+    fn make_edge_with_meta(
+        &self,
+        edge_type: EdgeType,
+        source_id: Id,
+        target_id: Id,
+        metadata: Option<String>,
+    ) -> GraphEdge {
         GraphEdge {
             id: Self::new_id(),
             repo_id: Self::placeholder_repo_id(),
             source_id,
             target_id,
             edge_type,
-            metadata: None,
+            metadata,
             first_seen_at: 0,
             last_seen_at: 0,
             deleted_at: None,
@@ -342,6 +376,32 @@ impl ExtractionContext {
         // Contains edge: module → class.
         let edge = self.make_edge(EdgeType::Contains, module_id.clone(), class_id.clone());
         self.edges.push(edge);
+
+        // Superclass list: `class Admin(User, Base2)` → deferred Implements
+        // edges from this class to each resolvable base. Bases that resolve
+        // to no known node (stdlib/external imports, generic markers like
+        // `Generic`) yield no edge — no fabricated targets. Resolution is
+        // deferred because the base class may be extracted later in the run.
+        if let Some(supers) = class_node.child_by_field_name("superclasses") {
+            let mut cursor = supers.walk();
+            for base in supers.named_children(&mut cursor) {
+                match base.kind() {
+                    // Plain name (`User`) or dotted path (`models.User`).
+                    "identifier" | "attribute" => {
+                        if let Ok(text) = base.utf8_text(source) {
+                            let base_name = text.trim();
+                            if !base_name.is_empty() {
+                                self.deferred_implements
+                                    .push((class_id.clone(), base_name.to_string()));
+                            }
+                        }
+                    }
+                    // `Generic[T]` subscripts, `metaclass=...` keyword
+                    // arguments, and call expressions resolve to nothing.
+                    _ => {}
+                }
+            }
+        }
 
         // Track fields we've already seen to avoid duplicates.
         let mut seen_fields: HashSet<String> = HashSet::new();
@@ -601,6 +661,18 @@ impl ExtractionContext {
                             &path,
                             &method,
                         );
+                        // Emit the handler as a Function node too, so the
+                        // RoutesTo edge has a real handler target (mirrors
+                        // the Go/TypeScript/Rust RoutesTo emitters).
+                        self.extract_function_node(
+                            def_node,
+                            source,
+                            &name,
+                            rel_path,
+                            parent_qname,
+                            parent_id,
+                            false,
+                        );
                     } else if is_click_cmd {
                         self.extract_cli_endpoint_node(
                             def_node,
@@ -654,7 +726,7 @@ impl ExtractionContext {
     fn extract_function_node(
         &mut self,
         fn_node: tree_sitter::Node,
-        _source: &[u8],
+        source: &[u8],
         name: &str,
         rel_path: &str,
         parent_qname: &str,
@@ -682,8 +754,18 @@ impl ExtractionContext {
         self.name_to_id.insert(qname, node_id.clone());
         self.nodes.push(node);
 
-        let edge = self.make_edge(EdgeType::Contains, parent_id.clone(), node_id);
+        let edge = self.make_edge(EdgeType::Contains, parent_id.clone(), node_id.clone());
         self.edges.push(edge);
+
+        // Return annotation: `def f() -> User` → deferred Returns edge from
+        // this function to the return-type node. Unresolved names (primitives
+        // like int/str, external types) yield no edge. Deferred so the type
+        // can be defined in a file extracted later in the run.
+        if let Some(ret) = fn_node.child_by_field_name("return_type") {
+            if let Some(type_name) = python_return_type_name(ret, source) {
+                self.deferred_returns.push((node_id, type_name));
+            }
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -700,9 +782,14 @@ impl ExtractionContext {
         parent_qname: &str,
         parent_id: &Id,
         route_path: &str,
-        _method: &str,
+        method: &str,
     ) {
-        let qname = format!("{parent_qname}.{name}");
+        // The endpoint keeps a distinct qualified name from the handler
+        // function node (`{parent}.{name}`): both nodes are emitted for a
+        // route-decorated function, and graph persistence keys stable-ID
+        // remapping on qualified_name — a shared qname would collapse the
+        // two nodes onto one ID.
+        let qname = format!("{parent_qname}.endpoint.{name}");
         let line_start = fn_node.start_position().row as u32 + 1;
         let line_end = fn_node.end_position().row as u32 + 1;
 
@@ -719,19 +806,21 @@ impl ExtractionContext {
         self.name_to_id.insert(qname, node_id.clone());
         self.nodes.push(node);
 
-        let meta = serde_json::json!({ "path": route_path }).to_string();
-        let edge = GraphEdge {
-            id: Self::new_id(),
-            repo_id: Self::placeholder_repo_id(),
-            source_id: parent_id.clone(),
-            target_id: node_id,
-            edge_type: EdgeType::Contains,
-            metadata: Some(meta),
-            first_seen_at: 0,
-            last_seen_at: 0,
-            deleted_at: None,
-        };
+        let meta = serde_json::json!({ "path": route_path, "method": method }).to_string();
+        let edge = self.make_edge_with_meta(
+            EdgeType::Contains,
+            parent_id.clone(),
+            node_id.clone(),
+            Some(meta.clone()),
+        );
         self.edges.push(edge);
+
+        // RoutesTo edge: endpoint → handler function node. The handler node
+        // is emitted by the caller (extract_decorated) right after this;
+        // resolution is deferred to after all files so the edge is emitted
+        // through the same machinery as the other deferred edges.
+        let handler_qname = format!("{parent_qname}.{name}");
+        self.deferred_routes.push((node_id, handler_qname, meta));
     }
 
     // -----------------------------------------------------------------------
@@ -779,6 +868,73 @@ impl ExtractionContext {
             deleted_at: None,
         };
         self.edges.push(edge);
+    }
+
+    // -----------------------------------------------------------------------
+    // Deferred-edge resolution (after all files are extracted)
+    // -----------------------------------------------------------------------
+
+    /// Resolve deferred Implements edges: derived class → resolvable base.
+    fn resolve_deferred_implements(&mut self) {
+        let deferred = std::mem::take(&mut self.deferred_implements);
+        let id_to_type = node_type_index(&self.nodes);
+        let mut seen: HashSet<(String, String)> = HashSet::new();
+        for (class_id, base_name) in deferred {
+            let Some(target_id) =
+                resolve_deferred_target(&base_name, &self.name_to_id, &id_to_type, '.')
+            else {
+                continue;
+            };
+            // Skip degenerate self-inheritance and duplicate (class, base) pairs.
+            if class_id == target_id {
+                continue;
+            }
+            let key = (class_id.to_string(), target_id.to_string());
+            if seen.insert(key) {
+                let edge = self.make_edge(EdgeType::Implements, class_id, target_id);
+                self.edges.push(edge);
+            }
+        }
+    }
+
+    /// Resolve deferred Returns edges: function → return-type node.
+    fn resolve_deferred_returns(&mut self) {
+        let deferred = std::mem::take(&mut self.deferred_returns);
+        let id_to_type = node_type_index(&self.nodes);
+        let mut seen: HashSet<(String, String)> = HashSet::new();
+        for (fn_id, type_name) in deferred {
+            let Some(target_id) =
+                resolve_deferred_target(&type_name, &self.name_to_id, &id_to_type, '.')
+            else {
+                continue;
+            };
+            let key = (fn_id.to_string(), target_id.to_string());
+            if seen.insert(key) {
+                let edge = self.make_edge(EdgeType::Returns, fn_id, target_id);
+                self.edges.push(edge);
+            }
+        }
+    }
+
+    /// Resolve deferred RoutesTo edges: route endpoint → handler function.
+    fn resolve_deferred_routes(&mut self) {
+        let deferred = std::mem::take(&mut self.deferred_routes);
+        let mut seen: HashSet<(String, String)> = HashSet::new();
+        for (endpoint_id, handler_qname, meta) in deferred {
+            let Some(handler_id) = self.name_to_id.get(&handler_qname).cloned() else {
+                continue;
+            };
+            let key = (endpoint_id.to_string(), handler_id.to_string());
+            if seen.insert(key) {
+                let edge = self.make_edge_with_meta(
+                    EdgeType::RoutesTo,
+                    endpoint_id,
+                    handler_id,
+                    Some(meta),
+                );
+                self.edges.push(edge);
+            }
+        }
     }
 }
 
@@ -899,6 +1055,33 @@ fn extract_first_string_arg(call_node: tree_sitter::Node, source: &[u8]) -> Opti
         }
     }
     None
+}
+
+/// Normalize a Python return-annotation `type` node into a resolvable type name.
+///
+/// Handles the common annotation forms:
+/// - `-> User` → `User`
+/// - `-> models.User` → `models.User` (suffix resolution finds `src.models.User`)
+/// - `-> "User"` (postponed string annotation) → `User`
+/// - `-> Optional[User]` / `-> list[User]` → the outer name (`Optional`/`list`),
+///   which resolves to no repo node and therefore yields no edge — the same
+///   generics-stripping rule the Rust extractor applies to `Vec<T>`.
+///
+/// Returns `None` for empty/unknown annotations.
+fn python_return_type_name(ret_node: tree_sitter::Node, source: &[u8]) -> Option<String> {
+    let text = ret_node.utf8_text(source).ok()?.trim();
+    if text.is_empty() || text == "?" {
+        return None;
+    }
+    // Postponed annotations are string literals: strip the quotes.
+    let unquoted = strip_string_quotes(text);
+    // Strip generic parameters (`Optional[User]` → `Optional`).
+    let base = unquoted.split('[').next().unwrap_or(&unquoted).trim();
+    if base.is_empty() || base == "?" {
+        None
+    } else {
+        Some(base.to_string())
+    }
 }
 
 /// Find the first named child of a given kind.
@@ -1391,6 +1574,224 @@ def process_payment(payment_id: str):
         assert!(
             task_ep.is_some(),
             "should extract @app.task 'process_payment' as Endpoint node"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Implements edges (class inheritance)
+    // -----------------------------------------------------------------------
+
+    fn node_id_by_name(result: &ExtractionResult, name: &str) -> Option<Id> {
+        result
+            .nodes
+            .iter()
+            .find(|n| n.name == name)
+            .map(|n| n.id.clone())
+    }
+
+    fn has_edge(result: &ExtractionResult, et: EdgeType, from_name: &str, to_name: &str) -> bool {
+        match (
+            node_id_by_name(result, from_name),
+            node_id_by_name(result, to_name),
+        ) {
+            (Some(f), Some(t)) => result
+                .edges
+                .iter()
+                .any(|e| e.edge_type == et && e.source_id == f && e.target_id == t),
+            _ => false,
+        }
+    }
+
+    #[test]
+    fn class_inheritance_emits_implements_edge_with_base_defined_after() {
+        let dir = make_tempdir();
+        write_requirements(&dir);
+        // User is declared AFTER Admin in the same file: at the moment Admin
+        // is extracted, no User node exists yet. The deferred resolution must
+        // still produce the Implements edge (order-independence).
+        let code = "class Admin(User, Base2):\n    pass\n\nclass User:\n    pass\n\nclass Base2:\n    pass\n";
+        fs::write(dir.path().join("models.py"), code).unwrap();
+
+        let result = PythonExtractor.extract(dir.path(), "abc123");
+        assert!(
+            result.errors.is_empty(),
+            "unexpected errors: {:?}",
+            result.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+        assert!(
+            has_edge(&result, EdgeType::Implements, "Admin", "User"),
+            "class Admin(User) must emit an Implements edge Admin -> User"
+        );
+        // Multiple inheritance: one edge per resolvable base.
+        assert!(
+            has_edge(&result, EdgeType::Implements, "Admin", "Base2"),
+            "class Admin(User, Base2) must emit an Implements edge Admin -> Base2"
+        );
+    }
+
+    #[test]
+    fn class_inheritance_across_files_in_both_extraction_orders() {
+        // Base class in a separate file, derived class in another. The edge
+        // must exist no matter which file the walk visits first.
+        for (admin_first, label) in [(true, "admin file first"), (false, "user file first")] {
+            let dir = make_tempdir();
+            write_requirements(&dir);
+            let files: Vec<(&str, &str)> = if admin_first {
+                vec![
+                    (
+                        "admin.py",
+                        "from models import User\n\nclass Admin(User):\n    pass\n",
+                    ),
+                    ("models.py", "class User:\n    pass\n"),
+                ]
+            } else {
+                vec![
+                    ("models.py", "class User:\n    pass\n"),
+                    (
+                        "admin.py",
+                        "from models import User\n\nclass Admin(User):\n    pass\n",
+                    ),
+                ]
+            };
+            for (name, content) in files {
+                fs::write(dir.path().join(name), content).unwrap();
+            }
+
+            let result = PythonExtractor.extract(dir.path(), "abc123");
+            assert!(
+                result.errors.is_empty(),
+                "unexpected errors ({}): {:?}",
+                label,
+                result.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+            );
+            assert!(
+                has_edge(&result, EdgeType::Implements, "Admin", "User"),
+                "cross-file class Admin(User) must emit Implements edge ({label})"
+            );
+        }
+    }
+
+    #[test]
+    fn unresolvable_base_yields_no_implements_edge() {
+        let dir = make_tempdir();
+        write_requirements(&dir);
+        // No node named ExternalBase or Generic exists in the repo — no
+        // fabricated targets.
+        let code = "from typing import Generic\n\nclass Foo(ExternalBase, Generic[T]):\n    pass\n";
+        fs::write(dir.path().join("models.py"), code).unwrap();
+
+        let result = PythonExtractor.extract(dir.path(), "abc123");
+        assert!(
+            result.errors.is_empty(),
+            "unexpected errors: {:?}",
+            result.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+        let implements_count = result
+            .edges
+            .iter()
+            .filter(|e| e.edge_type == EdgeType::Implements)
+            .count();
+        assert_eq!(
+            implements_count, 0,
+            "unresolvable bases must yield no Implements edges"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Returns edges (function signatures)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn return_annotation_emits_returns_edge() {
+        let dir = make_tempdir();
+        write_requirements(&dir);
+        let code = "class User:\n    pass\n\ndef build_user() -> User:\n    return User()\n\ndef count_items() -> int:\n    return 0\n";
+        fs::write(dir.path().join("models.py"), code).unwrap();
+
+        let result = PythonExtractor.extract(dir.path(), "abc123");
+        assert!(
+            result.errors.is_empty(),
+            "unexpected errors: {:?}",
+            result.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+        assert!(
+            has_edge(&result, EdgeType::Returns, "build_user", "User"),
+            "def build_user() -> User must emit a Returns edge build_user -> User"
+        );
+        assert!(
+            !has_edge(&result, EdgeType::Returns, "count_items", "int"),
+            "primitive return type must yield no Returns edge"
+        );
+        let returns_count = result
+            .edges
+            .iter()
+            .filter(|e| e.edge_type == EdgeType::Returns)
+            .count();
+        assert_eq!(returns_count, 1, "exactly one Returns edge expected");
+    }
+
+    // -----------------------------------------------------------------------
+    // RoutesTo edges (framework patterns)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn flask_route_emits_endpoint_handler_and_routes_to_edge() {
+        let dir = make_tempdir();
+        write_requirements(&dir);
+        let code = r#"from flask import Flask
+app = Flask(__name__)
+
+@app.route("/api/users")
+def list_users():
+    return []
+"#;
+        fs::write(dir.path().join("app.py"), code).unwrap();
+
+        let result = PythonExtractor.extract(dir.path(), "abc123");
+        assert!(
+            result.errors.is_empty(),
+            "unexpected errors: {:?}",
+            result.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+
+        let endpoint = result
+            .nodes
+            .iter()
+            .find(|n| n.node_type == NodeType::Endpoint && n.name == "list_users")
+            .expect("route-decorated function must yield an Endpoint node");
+        let handler = result
+            .nodes
+            .iter()
+            .find(|n| n.node_type == NodeType::Function && n.name == "list_users")
+            .expect("route handler must also be emitted as a Function node");
+        assert_ne!(
+            endpoint.id, handler.id,
+            "endpoint and handler must be distinct nodes"
+        );
+        assert_ne!(
+            endpoint.qualified_name, handler.qualified_name,
+            "endpoint and handler must not share a qualified name (stable-ID remapping is qname-keyed)"
+        );
+
+        let routes_edge = result
+            .edges
+            .iter()
+            .find(|e| e.edge_type == EdgeType::RoutesTo && e.source_id == endpoint.id)
+            .expect("must emit a RoutesTo edge from the endpoint");
+        assert_eq!(
+            routes_edge.target_id, handler.id,
+            "RoutesTo edge must target the handler Function node"
+        );
+        let meta: serde_json::Value =
+            serde_json::from_str(routes_edge.metadata.as_deref().unwrap_or("{}"))
+                .expect("RoutesTo metadata must be valid JSON");
+        assert_eq!(
+            meta["path"], "/api/users",
+            "metadata must carry the route path"
+        );
+        assert_eq!(
+            meta["method"], "route",
+            "metadata must carry the HTTP method"
         );
     }
 }
