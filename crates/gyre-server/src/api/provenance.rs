@@ -227,14 +227,22 @@ pub async fn get_verification(
     };
 
     // ── Phase 3: Build CEL context from actual output ──
-    // Build agent context.
+    // Build agent context. Fail closed: an unresolvable workspace required
+    // meta-spec set must not evaluate §3.2 constraints against a fabricated
+    // empty agent SHA — the verification reports the error instead of
+    // silently passing an equality it could not evaluate.
     let agent_ctx = crate::constraint_check::build_agent_context(
         &state,
         &attestation.metadata.agent_id,
         &attestation.metadata.task_id,
         &Id::new(&attestation.metadata.workspace_id),
     )
-    .await;
+    .await
+    .map_err(|e| {
+        ApiError::Internal(anyhow::anyhow!(
+            "failed to resolve agent context (workspace meta-spec set): {e}"
+        ))
+    })?;
 
     // Collect all constraints.
     let all_constraints = gyre_domain::constraint_evaluator::collect_all_constraints(

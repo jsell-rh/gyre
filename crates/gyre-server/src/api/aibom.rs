@@ -1266,6 +1266,7 @@ mod tests {
         let sha = format!("{:040}", 7);
         let entry =
             |path: &str, status: gyre_domain::ApprovalStatus| gyre_domain::SpecLedgerEntry {
+                bindings_sha: String::new(),
                 path: path.to_string(),
                 title: format!("Spec {path}"),
                 owner: "owner-1".to_string(),
@@ -1768,6 +1769,7 @@ mod tests {
         state
             .spec_ledger
             .save(&gyre_domain::SpecLedgerEntry {
+                bindings_sha: String::new(),
                 path: "system/release-auth.md".to_string(),
                 title: "Release Auth".to_string(),
                 owner: "owner-1".to_string(),

@@ -32,7 +32,6 @@ pub mod merge_queue;
 pub mod merge_request;
 pub mod message;
 pub mod meta_spec;
-pub mod meta_spec_set;
 pub mod network_peer;
 pub mod notification;
 pub mod policy;
@@ -250,8 +249,6 @@ mod tests {
             "spec_approval_events",
             "tenants",
             "messages",
-            "meta_spec_sets",
-            "tenant_meta_spec_sets",
             "rollout_policies",
             "gate_traces",
             "trace_spans",

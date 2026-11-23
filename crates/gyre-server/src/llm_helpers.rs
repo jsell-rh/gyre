@@ -224,122 +224,52 @@ pub async fn resolve_prompt_template(
         sha: None,
     }
 }
-/// Render the workspace's meta-spec-set as the `{{meta_spec_context}}`
-/// prompt variable (ui-layout.md §2: templates are "Bound to the
-/// workspace's meta-spec-set — if the workspace has custom principles or
-/// standards, those are injected into the prompt context").
+/// Render the workspace's registry meta-spec set as the `{{meta_spec_context}}`
+/// prompt variable (ui-layout.md §2: templates are "Bound to the workspace's
+/// meta-spec-set — if the workspace has custom principles or standards, those
+/// are injected into the prompt context").
 ///
-/// Resolves each pinned entry (personas, principles, standards, process)
-/// by reading `path` from the repo's git tree. A pin that cannot be
-/// resolved (missing repo, missing blob) is reported by path so the prompt
-/// stays honest about what is bound, instead of silently dropping the
-/// workspace's governance rules. When the workspace has no meta-spec set,
+/// Registry model (meta-spec-reconciliation.md amendments row): the retired
+/// workspace meta-spec-set KV store is replaced by the registry's effective
+/// set — every required, approved meta-spec visible from the workspace
+/// (Global, the workspace's tenant, and the workspace itself), resolved via
+/// `reconciliation::resolve_effective_meta_spec_set`. Content comes from the
+/// registry records (not the repo git trees the retired `path@sha` pins
+/// read). Each meta-spec contributes its prompt, capped so one large
+/// meta-spec cannot crowd out the spec itself. When no meta-specs apply,
 /// returns a short note saying so (the template's "Active personas and
 /// standards" section still renders something meaningful rather than an
 /// empty code fence).
-pub async fn workspace_meta_spec_context(
-    state: &AppState,
-    workspace_id: &Id,
-    repo_hint: Option<&Id>,
-) -> String {
-    let json = match state.meta_spec_sets.get(workspace_id).await {
-        Ok(Some(json)) => json,
-        _ => return "No meta-spec set is bound to this workspace.".to_string(),
+pub async fn workspace_meta_spec_context(state: &AppState, workspace_id: &Id) -> String {
+    let ws = match state.workspaces.find_by_id(workspace_id).await {
+        Ok(Some(ws)) => ws,
+        _ => return "No meta-specs are required for this workspace.".to_string(),
     };
-    let set: serde_json::Value = match serde_json::from_str(&json) {
-        Ok(v) => v,
+    let specs = match crate::reconciliation::effective_required_meta_specs(state, &ws).await {
+        Ok(specs) => specs,
         Err(e) => {
-            tracing::warn!(workspace_id = %workspace_id, "corrupt meta_spec_set: {e}");
+            tracing::warn!(workspace_id = %workspace_id, "registry meta-spec resolution failed: {e}");
             return "Workspace meta-spec set could not be read.".to_string();
         }
     };
-
-    // Candidate repos whose git trees may carry the pinned meta-specs: the
-    // request's own repo first, else every repo in the workspace.
-    let repos: Vec<gyre_domain::Repository> = match repo_hint {
-        Some(rid) => state
-            .repos
-            .find_by_id(rid)
-            .await
-            .ok()
-            .flatten()
-            .into_iter()
-            .collect(),
-        None => state
-            .repos
-            .list_by_workspace(workspace_id)
-            .await
-            .unwrap_or_default(),
-    };
+    if specs.is_empty() {
+        return "No meta-specs are required for this workspace.".to_string();
+    }
 
     let mut lines: Vec<String> = Vec::new();
-    // Section order mirrors MetaSpecSet's field order (personas, principles,
-    // standards, process) so the rendered context is stable.
-    for (label, entries) in [
-        ("Personas", &set["personas"]),
-        ("Principles", &set["principles"]),
-        ("Standards", &set["standards"]),
-        ("Process", &set["process"]),
-    ] {
-        let arr: Vec<(String, String)> = match &entries {
-            serde_json::Value::Object(map) => map
-                .iter()
-                .map(|(k, v)| (k.clone(), v["sha"].as_str().unwrap_or_default().to_string()))
-                .collect(),
-            serde_json::Value::Array(items) => items
-                .iter()
-                .map(|v| {
-                    (
-                        v["path"].as_str().unwrap_or_default().to_string(),
-                        v["sha"].as_str().unwrap_or_default().to_string(),
-                    )
-                })
-                .collect(),
-            _ => continue,
-        };
-        if arr.is_empty() {
-            continue;
-        }
-        lines.push(format!("### {label}\n"));
-        for (path, _sha) in &arr {
-            lines.push(match resolve_pinned_content(state, &repos, path).await {
-                Some(content) => {
-                    // Each bound meta-spec contributes its content, capped
-                    // so one large pin cannot crowd out the spec itself.
-                    let capped: String = content.lines().take(80).collect::<Vec<&str>>().join("\n");
-                    format!("--- {path} ---\n{capped}\n")
-                }
-                None => format!("--- {path} ---\n(bound but unreadable in the repo git tree)\n"),
-            });
-        }
+    for ms in &specs {
+        // Each bound meta-spec contributes its content, capped so one large
+        // meta-spec cannot crowd out the spec itself.
+        let capped: String = ms.prompt.lines().take(80).collect::<Vec<&str>>().join("\n");
+        lines.push(format!(
+            "--- {} {} (scope: {}, v{}) ---\n{capped}\n",
+            ms.kind.as_str(),
+            ms.name,
+            ms.scope.as_str(),
+            ms.version
+        ));
     }
-
-    if lines.is_empty() {
-        "No meta-spec set is bound to this workspace.".to_string()
-    } else {
-        lines.join("")
-    }
-}
-
-/// Read a pinned meta-spec's content from the first repo whose git tree
-/// contains `path` on its default branch.
-async fn resolve_pinned_content(
-    state: &AppState,
-    repos: &[gyre_domain::Repository],
-    path: &str,
-) -> Option<String> {
-    for repo in repos {
-        if let Ok(Some(bytes)) = state
-            .git_ops
-            .read_file(&repo.path, &repo.default_branch, path)
-            .await
-        {
-            if let Ok(content) = String::from_utf8(bytes) {
-                return Some(content);
-            }
-        }
-    }
-    None
+    lines.join("")
 }
 
 /// Compact workspace graph summary for LLM grounding (node types and counts,
@@ -454,6 +384,118 @@ mod tests {
         // Values containing braces must not recursively expand.
         let out = substitute_template("{{x}}", &[("x", "{{x}}")]);
         assert_eq!(out, "{{x}}");
+    }
+
+    // ── workspace_meta_spec_context (registry effective set) ────────────
+
+    /// {{meta_spec_context}} resolves from the REGISTRY's effective set
+    /// (required + approved + visible meta-specs), not from any stored set
+    /// or git tree: required approved entries contribute their prompt,
+    /// optional and non-approved entries do not (meta-spec-reconciliation
+    /// amendments row — the retired KV set model's path@sha resolution is
+    /// gone). Killing test for the registry sourcing: point the resolution
+    /// back at any non-registry source and the assertions fail.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn meta_spec_context_resolves_from_registry_effective_set() {
+        let state = crate::mem::test_state();
+        let ws_id = Id::new("ws-ms-ctx");
+        state
+            .workspaces
+            .create(&gyre_domain::Workspace::new(
+                ws_id.clone(),
+                Id::new("default"),
+                "ms-ctx-ws",
+                "ms-ctx-ws",
+                0,
+            ))
+            .await
+            .unwrap();
+
+        let mk = |id: &str,
+                  name: &str,
+                  required: bool,
+                  approved: bool,
+                  prompt: &str|
+         -> gyre_domain::MetaSpec {
+            gyre_domain::MetaSpec {
+                id: Id::new(id),
+                kind: gyre_domain::meta_spec::MetaSpecKind::Principle,
+                name: name.to_string(),
+                scope: gyre_domain::meta_spec::MetaSpecScope::Workspace,
+                scope_id: Some(ws_id.to_string()),
+                prompt: prompt.to_string(),
+                version: 1,
+                content_hash: format!("hash-{id}"),
+                required,
+                approval_status: if approved {
+                    gyre_domain::meta_spec::MetaSpecApprovalStatus::Approved
+                } else {
+                    gyre_domain::meta_spec::MetaSpecApprovalStatus::Pending
+                },
+                approved_by: Some("admin".to_string()),
+                approved_at: Some(1),
+                approved_content_hash: Some(format!("hash-{id}")),
+                created_by: "admin".to_string(),
+                created_at: 1,
+                updated_at: 1,
+            }
+        };
+
+        // Required + approved: in the effective set, prompt injected.
+        state
+            .meta_specs
+            .create(&mk(
+                "ms-ctx-req",
+                "registry-principle",
+                true,
+                true,
+                "REGISTRY REQUIRED PROMPT",
+            ))
+            .await
+            .unwrap();
+        // Optional: never in the effective set (spec-level bindings own
+        // its injection, not the workspace context).
+        state
+            .meta_specs
+            .create(&mk(
+                "ms-ctx-opt",
+                "optional-principle",
+                false,
+                true,
+                "OPTIONAL PROMPT MUST NOT APPEAR",
+            ))
+            .await
+            .unwrap();
+        // Required but Pending: fail-closed exclusion.
+        state
+            .meta_specs
+            .create(&mk(
+                "ms-ctx-pend",
+                "pending-principle",
+                true,
+                false,
+                "PENDING PROMPT MUST NOT APPEAR",
+            ))
+            .await
+            .unwrap();
+
+        let ctx = workspace_meta_spec_context(&state, &ws_id).await;
+        assert!(
+            ctx.contains("REGISTRY REQUIRED PROMPT"),
+            "required approved meta-spec prompt must be in the context: {ctx}"
+        );
+        assert!(
+            ctx.contains("registry-principle"),
+            "the effective-set header names the meta-spec: {ctx}"
+        );
+        assert!(
+            !ctx.contains("OPTIONAL PROMPT MUST NOT APPEAR"),
+            "optional meta-specs are not part of the workspace context"
+        );
+        assert!(
+            !ctx.contains("PENDING PROMPT MUST NOT APPEAR"),
+            "non-approved required meta-specs are excluded (fail-closed)"
+        );
     }
 
     // ── max_tokens_for_function ──────────────────────────────────────────

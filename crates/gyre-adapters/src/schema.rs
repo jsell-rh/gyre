@@ -718,6 +718,7 @@ diesel::table! {
         updated_at -> BigInt,
         repo_id -> Nullable<Text>,
         workspace_id -> Nullable<Text>,
+        bindings_sha -> Text,
     }
 }
 
@@ -798,22 +799,6 @@ diesel::table! {
         key_id -> Nullable<Text>,
         acknowledged -> Integer,
         ack_reason -> Nullable<Text>,
-    }
-}
-
-diesel::table! {
-    meta_spec_sets (workspace_id) {
-        workspace_id -> Text,
-        json -> Text,
-        updated_at -> BigInt,
-    }
-}
-
-diesel::table! {
-    tenant_meta_spec_sets (tenant_id) {
-        tenant_id -> Text,
-        json -> Text,
-        updated_at -> BigInt,
     }
 }
 
@@ -932,8 +917,6 @@ diesel::allow_tables_to_appear_in_same_query!(
     spec_approval_events,
     tenants,
     messages,
-    meta_spec_sets,
-    tenant_meta_spec_sets,
     budget_call_records,
     user_workspace_state,
     gate_traces,

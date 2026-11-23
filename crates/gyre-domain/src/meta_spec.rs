@@ -6,6 +6,7 @@
 
 use gyre_common::Id;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::fmt;
 
 // ---------------------------------------------------------------------------
@@ -178,6 +179,47 @@ pub struct MetaSpecBinding {
     pub meta_spec_id: Id,
     pub pinned_version: u32,
     pub created_at: u64,
+}
+
+/// SHA-256 over the canonical serialization of a spec's meta-spec binding
+/// set: one `{meta_spec_id}\t{pinned_version}` line per binding, sorted.
+/// Stored as `SpecLedgerEntry::bindings_sha` — the binding set is spec
+/// registry metadata covered by the registry SHA in the approval ledger
+/// (agent-runtime.md §2 Spec-Level Binding). Empty input (no bindings)
+/// yields an empty string so unbound specs keep their bare content SHA as
+/// registry identity.
+pub fn canonical_bindings_sha(bindings: &[MetaSpecBinding]) -> String {
+    if bindings.is_empty() {
+        return String::new();
+    }
+    let mut lines: Vec<String> = bindings
+        .iter()
+        .map(|b| format!("{}\t{}", b.meta_spec_id.as_str(), b.pinned_version))
+        .collect();
+    lines.sort();
+    let mut hasher = Sha256::new();
+    hasher.update(lines.join("\n").as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+/// A registry-resolved snapshot of one meta-spec at a specific version,
+/// shaped `{meta_spec_id, kind, content_hash, version}` — the tuple shape
+/// the meta-spec-reconciliation.md amendments row specces for snapshot data
+/// exchanged on the merge-drift path (the retired set model's `path@sha`
+/// pin strings are gone).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MetaSpecSnapshot {
+    pub meta_spec_id: String,
+    pub kind: String,
+    pub content_hash: String,
+    pub version: u32,
+}
+
+impl MetaSpecSnapshot {
+    /// Compact display form used in drift warnings: `{kind}:{id}@v{version}`.
+    pub fn label(&self) -> String {
+        format!("{}:{}@v{}", self.kind, self.meta_spec_id, self.version)
+    }
 }
 
 // ---------------------------------------------------------------------------

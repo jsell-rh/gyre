@@ -997,6 +997,7 @@ mod tests {
 
     fn ledger_entry(path: &str, ws: Option<&str>) -> SpecLedgerEntry {
         SpecLedgerEntry {
+            bindings_sha: String::new(),
             path: path.into(),
             title: path.into(),
             owner: "owner".into(),
