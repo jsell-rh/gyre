@@ -69,18 +69,39 @@ pub mod worktree;
 
 pub(crate) const MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations");
 
-/// r2d2 connection customizer: enables WAL mode and foreign keys on every connection.
+/// r2d2 connection customizer: enables WAL mode, foreign keys, and a
+/// 5s busy timeout on every connection.
+///
+/// Each PRAGMA must be its OWN `sql_query` call: diesel's SQLite backend
+/// prepares statements with `sqlite3_prepare_v2`, which compiles only the
+/// FIRST statement of a multi-statement string — a batched
+/// `"PRAGMA a; PRAGMA b; PRAGMA c;"` silently drops `b` and `c`. That is
+/// not theoretical: the batched form shipped for a long stretch with
+/// `busy_timeout` effectively 0 (SQLite's default), so any two concurrent
+/// writers on the same file raced for the write lock and the loser got an
+/// immediate `SQLITE_BUSY` surfaced as an HTTP 500 — observed in CI as
+/// `scim_groups::mappings_and_groups_survive_restart` failing
+/// `assert_eq!(resp.status(), StatusCode::CREATED)` with 500: the
+/// fire-and-forget last-seen upsert spawned by an authenticated
+/// workspace-scoped request (middleware.rs `last_seen_middleware`)
+/// contended with the next handler's INSERT.
+/// `pooled_connections_have_wal_foreign_keys_and_busy_timeout` in the
+/// tests below is the regression guard.
 #[derive(Debug)]
 struct SqliteCustomizer;
 
 impl CustomizeConnection<SqliteConnection, R2d2Error> for SqliteCustomizer {
     fn on_acquire(&self, conn: &mut SqliteConnection) -> Result<(), R2d2Error> {
         use diesel::RunQueryDsl;
-        diesel::sql_query(
-            "PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;",
-        )
-        .execute(conn)
-        .map_err(R2d2Error::QueryError)?;
+        for pragma in [
+            "PRAGMA journal_mode=WAL",
+            "PRAGMA foreign_keys=ON",
+            "PRAGMA busy_timeout=5000",
+        ] {
+            diesel::sql_query(pragma)
+                .execute(conn)
+                .map_err(R2d2Error::QueryError)?;
+        }
         Ok(())
     }
 }
@@ -186,6 +207,102 @@ mod tests {
     use super::*;
     use tempfile::NamedTempFile;
 
+    /// `PRAGMA busy_timeout` result row (column `timeout`).
+    /// `QueryableByName` is implemented by hand: the derive expands to
+    /// `Self { timeout: timeout }`, which trips
+    /// `clippy::redundant_field_names` with a span on this file (CI's
+    /// clippy-diff gate fails on new-line warnings).
+    struct BusyTimeoutRow(i64);
+
+    impl diesel::deserialize::QueryableByName<diesel::sqlite::Sqlite> for BusyTimeoutRow {
+        fn build<'a>(
+            row: &impl diesel::row::NamedRow<'a, diesel::sqlite::Sqlite>,
+        ) -> diesel::deserialize::Result<Self> {
+            Ok(Self(diesel::row::NamedRow::get::<
+                diesel::sql_types::BigInt,
+                i64,
+            >(row, "timeout")?))
+        }
+    }
+
+    /// `PRAGMA foreign_keys` result row (column `foreign_keys`).
+    struct ForeignKeysRow(i64);
+
+    impl diesel::deserialize::QueryableByName<diesel::sqlite::Sqlite> for ForeignKeysRow {
+        fn build<'a>(
+            row: &impl diesel::row::NamedRow<'a, diesel::sqlite::Sqlite>,
+        ) -> diesel::deserialize::Result<Self> {
+            Ok(Self(diesel::row::NamedRow::get::<
+                diesel::sql_types::BigInt,
+                i64,
+            >(row, "foreign_keys")?))
+        }
+    }
+
+    /// `PRAGMA journal_mode` result row (column `journal_mode`).
+    struct JournalModeRow(String);
+
+    impl diesel::deserialize::QueryableByName<diesel::sqlite::Sqlite> for JournalModeRow {
+        fn build<'a>(
+            row: &impl diesel::row::NamedRow<'a, diesel::sqlite::Sqlite>,
+        ) -> diesel::deserialize::Result<Self> {
+            Ok(Self(diesel::row::NamedRow::get::<
+                diesel::sql_types::Text,
+                String,
+            >(row, "journal_mode")?))
+        }
+    }
+
+    fn read_pragmas(conn: &mut SqliteConnection) -> (i64, i64, String) {
+        use diesel::RunQueryDsl;
+        let timeout = diesel::sql_query("PRAGMA busy_timeout")
+            .load::<BusyTimeoutRow>(conn)
+            .unwrap()
+            .pop()
+            .expect("busy_timeout row")
+            .0;
+        let fk = diesel::sql_query("PRAGMA foreign_keys")
+            .load::<ForeignKeysRow>(conn)
+            .unwrap()
+            .pop()
+            .expect("foreign_keys row")
+            .0;
+        let mode = diesel::sql_query("PRAGMA journal_mode")
+            .load::<JournalModeRow>(conn)
+            .unwrap()
+            .pop()
+            .expect("journal_mode row")
+            .0;
+        (timeout, fk, mode)
+    }
+
+    #[test]
+    fn pooled_connections_have_wal_foreign_keys_and_busy_timeout() {
+        // Guard (CI repair, PR #921 run 45132923610): every pooled
+        // connection must actually carry the customizer's PRAGMAs.
+        // SQLite's sqlite3_prepare_v2 — diesel's statement path — only
+        // compiles the FIRST statement of a multi-statement string, so
+        // a batched "PRAGMA a; PRAGMA b; PRAGMA c;" silently drops b
+        // and c. With busy_timeout dropped (SQLite default 0), any two
+        // concurrent writers on the same file race: the loser gets an
+        // immediate SQLITE_BUSY surfaced as a 500 (the
+        // scim_groups::mappings_and_groups_survive_restart CI flake —
+        // the detached last-seen upsert spawned by an authenticated
+        // workspace-scoped call raced the next handler's INSERT).
+        // This test fails if any PRAGMA stops being applied.
+        let (_tmp, storage) = tmp_storage();
+        // Two connections: the customizer runs per acquired connection,
+        // so check more than one.
+        let mut conn1 = storage.pool.get().unwrap();
+        let mut conn2 = storage.pool.get().unwrap();
+        for (label, conn) in [("conn1", &mut conn1), ("conn2", &mut conn2)] {
+            let (timeout, fk, mode) = read_pragmas(conn);
+            assert_eq!(timeout, 5000, "{label}: busy_timeout must be 5000ms");
+            assert_eq!(fk, 1, "{label}: foreign_keys must be ON");
+            assert_eq!(mode, "wal", "{label}: journal_mode must be WAL");
+        }
+    }
+
     fn tmp_storage() -> (NamedTempFile, SqliteStorage) {
         let tmp = NamedTempFile::new().unwrap();
         let storage = SqliteStorage::new(tmp.path().to_str().unwrap()).unwrap();
@@ -203,6 +320,58 @@ mod tests {
         // Constructor runs all pending migrations, so a fresh DB must report 0.
         let (_tmp, storage) = tmp_storage();
         assert_eq!(storage.migrations_pending().await.unwrap(), 0);
+    }
+
+    #[test]
+    fn concurrent_writers_wait_on_busy_timeout_instead_of_failing() {
+        // The CI failure this guards against (PR #921, run 45132923610,
+        // scim_groups::mappings_and_groups_survive_restart — 500 instead
+        // of 201 on POST /scim/v2/Groups): two pooled connections writing
+        // the same SQLite file concurrently. With busy_timeout=0 (SQLite
+        // default — see the SqliteCustomizer comment) the writer that
+        // arrives second fails IMMEDIATELY with `database is locked`, and
+        // the handler surfaces that as an HTTP 500. With the customizer's
+        // busy_timeout=5000 actually applied, the second writer BLOCKS
+        // until the first commits and then succeeds — which is what every
+        // fire-and-forget writer (e.g. the detached last-seen upsert in
+        // `last_seen_middleware`) relies on.
+        use diesel::RunQueryDsl;
+        let (_tmp, storage) = tmp_storage();
+        let mut writer_a = storage.pool.get().unwrap();
+        let mut writer_b = storage.pool.get().unwrap();
+
+        // writer_a: BEGIN IMMEDIATE + INSERT → holds the SQLite write
+        // lock across the thread spawn below (autocommit would release
+        // it immediately and the race would not be constructed).
+        diesel::sql_query("BEGIN IMMEDIATE")
+            .execute(&mut writer_a)
+            .unwrap();
+        diesel::sql_query(
+            "INSERT INTO scim_groups (id, external_id, display_name, created_at, updated_at) \
+             VALUES ('busy-race-a', NULL, 'A', 1, 1)",
+        )
+        .execute(&mut writer_a)
+        .unwrap();
+
+        // writer_b: INSERT on a SECOND connection while A still holds the
+        // write lock. On the broken customizer (busy_timeout dropped) this
+        // fails instantly with `database is locked`; with busy_timeout it
+        // waits for A's COMMIT and succeeds.
+        let inserter = std::thread::spawn(move || {
+            diesel::sql_query(
+                "INSERT INTO scim_groups (id, external_id, display_name, created_at, updated_at) \
+                 VALUES ('busy-race-b', NULL, 'B', 1, 1)",
+            )
+            .execute(&mut writer_b)
+        });
+
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        diesel::sql_query("COMMIT").execute(&mut writer_a).unwrap();
+
+        let affected = inserter.join().expect("writer_b thread").expect(
+            "concurrent INSERT must wait on busy_timeout and succeed, not fail with `database is locked`",
+        );
+        assert_eq!(affected, 1);
     }
 
     #[test]
