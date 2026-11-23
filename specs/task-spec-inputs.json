@@ -2504,6 +2504,207 @@
         "Cross-Repo Dependency Graph",
         "Dependency Entity"
       ]
+    },
+    "backlog/234004cc5b4e4a3d78c95ccc": {
+      "file": "specs/system/authorization-provenance.md",
+      "heading": [
+        "Authorization Provenance",
+        "7 Integration with Existing Systems",
+        "7.1 Spec Approval (agent-gates.md)"
+      ]
+    },
+    "backlog/67eacb60171e6cedff82c482": {
+      "file": "specs/system/authorization-provenance.md",
+      "heading": [
+        "Authorization Provenance",
+        "8 Migration",
+        "Phase 1: Key Binding and Signed Input (non-enforcing)"
+      ]
+    },
+    "backlog/5bf9cf12933a9a01581e530f": {
+      "file": "specs/system/authorization-provenance.md",
+      "heading": [
+        "Authorization Provenance",
+        "4 Derived Input: Delegation Provenance",
+        "4.2 When a Derived Input Is Created"
+      ]
+    },
+    "backlog/dcf557ae5dbc627aab292307": {
+      "file": "specs/system/authorization-provenance.md",
+      "heading": [
+        "Authorization Provenance",
+        "2 Signed Input: The Authorization Root",
+        "2.3 Key Binding"
+      ]
+    },
+    "backlog/59873e07f74dcd542130bf41": {
+      "file": "specs/system/authorization-provenance.md",
+      "heading": [
+        "Authorization Provenance",
+        "7 Integration with Existing Systems",
+        "7.6 Human-System Interface (human-system-interface.md)"
+      ]
+    },
+    "backlog/0a001bfe1c6ccfa6bd7e4cb3": {
+      "file": "specs/system/authorization-provenance.md",
+      "heading": [
+        "Authorization Provenance",
+        "2 Signed Input: The Authorization Root",
+        "2.1 When a Signed Input Is Created"
+      ]
+    },
+    "backlog/c49cf3ba98e72736cfcb8bee": {
+      "file": "specs/system/authorization-provenance.md",
+      "heading": [
+        "Authorization Provenance",
+        "5 Attestation: The Complete Record",
+        "5.3 Storage"
+      ]
+    },
+    "backlog/1a1c2218815dfe88c38a9789": {
+      "file": "specs/system/authorization-provenance.md",
+      "heading": [
+        "Authorization Provenance",
+        "5 Attestation: The Complete Record",
+        "5.4 Attestation Port"
+      ]
+    },
+    "backlog/bb664ae221456d242e8ae921": {
+      "file": "specs/system/authorization-provenance.md",
+      "heading": [
+        "Authorization Provenance",
+        "6 Verification",
+        "6.3 Offline Verification"
+      ]
+    },
+    "backlog/acda07a63c3a25e9c32461e5": {
+      "file": "specs/system/authorization-provenance.md",
+      "heading": [
+        "Authorization Provenance",
+        "5 Attestation: The Complete Record",
+        "5.2 Relationship to Existing Merge Attestation"
+      ]
+    },
+    "backlog/80fa5d551228a894b5a85132": {
+      "file": "specs/system/authorization-provenance.md",
+      "heading": [
+        "Authorization Provenance",
+        "1 Trust Model",
+        "1.1 Trust Anchors"
+      ]
+    },
+    "backlog/74593d79542d482cc5567984": {
+      "file": "specs/system/authorization-provenance.md",
+      "heading": [
+        "Authorization Provenance",
+        "4 Derived Input: Delegation Provenance",
+        "4.4 Derivation Chain Verification"
+      ]
+    },
+    "backlog/7910f63c3be5b0641f51c47b": {
+      "file": "specs/system/authorization-provenance.md",
+      "heading": [
+        "Authorization Provenance",
+        "4 Derived Input: Delegation Provenance",
+        "4.5 Orchestrator Key Binding"
+      ]
+    },
+    "backlog/827a7cc2ad6eaf0f8e262900": {
+      "file": "specs/system/authorization-provenance.md",
+      "heading": [
+        "Authorization Provenance",
+        "4 Derived Input: Delegation Provenance",
+        "4.6 Depth Limits"
+      ]
+    },
+    "backlog/7298cfa0831c074e5e21aa9e": {
+      "file": "specs/system/authorization-provenance.md",
+      "heading": [
+        "Authorization Provenance",
+        "5 Attestation: The Complete Record",
+        "5.1 Structure"
+      ]
+    },
+    "backlog/3a1de6328a8b4ff8639ece89": {
+      "file": "specs/system/authorization-provenance.md",
+      "heading": [
+        "Authorization Provenance",
+        "3 Output Constraints",
+        "3.2 Constraint Sources",
+        "Source 3: Gate Constraints"
+      ]
+    },
+    "backlog/1f7628ebe440a75c8f32588b": {
+      "file": "specs/system/authorization-provenance.md",
+      "heading": [
+        "Authorization Provenance",
+        "8 Migration",
+        "Phase 4: Derived Input Chains"
+      ]
+    },
+    "backlog/290653a126dab6fc9fd71f53": {
+      "file": "specs/system/authorization-provenance.md",
+      "heading": [
+        "Authorization Provenance",
+        "7 Integration with Existing Systems",
+        "7.2 ABAC Policy Engine (abac-policy-engine.md)"
+      ]
+    },
+    "backlog/43f8e2cad645c41a4bcdc0a2": {
+      "file": "specs/system/authorization-provenance.md",
+      "heading": [
+        "Authorization Provenance",
+        "8 Migration",
+        "Phase 3: Enforcement"
+      ]
+    },
+    "backlog/4952c3bd11782374a70c9107": {
+      "file": "specs/system/authorization-provenance.md",
+      "heading": [
+        "Authorization Provenance",
+        "6 Verification",
+        "6.1 Verification Points"
+      ]
+    },
+    "backlog/29f20a71bb7c6f10151e3b87": {
+      "file": "specs/system/authorization-provenance.md",
+      "heading": [
+        "Authorization Provenance",
+        "6 Verification",
+        "6.2 Verification Algorithm"
+      ]
+    },
+    "backlog/f3d63f8ba82d318a407da9e3": {
+      "file": "specs/system/authorization-provenance.md",
+      "heading": [
+        "Authorization Provenance",
+        "6 Verification",
+        "6.4 Verification Result Storage"
+      ]
+    },
+    "backlog/c8e81723fe471db62eb85bbc": {
+      "file": "specs/system/authorization-provenance.md",
+      "heading": [
+        "Authorization Provenance",
+        "7 Integration with Existing Systems",
+        "7.7 Observability (observability.md)"
+      ]
+    },
+    "backlog/e5da488abf98ee7cd64ea91f": {
+      "file": "specs/system/authorization-provenance.md",
+      "heading": [
+        "Authorization Provenance",
+        "7 Integration with Existing Systems",
+        "7.4 Agent Runtime (agent-runtime.md)"
+      ]
+    },
+    "backlog/d181208ee20b618ef25389b3": {
+      "file": "specs/system/authorization-provenance.md",
+      "heading": [
+        "Authorization Provenance",
+        "7 Integration with Existing Systems",
+        "7.3 Supply Chain (supply-chain.md)"
+      ]
     }
   },
   "bindings": {
@@ -3432,6 +3633,47 @@
     ],
     "Spec gap spec-cab97078efffe0fbfb7339be / dep-edge-orphaned-on-target-archive-delete / ed9f34316476": [
       "backlog/4390a1b94a03e318854cbbec"
+    ],
+    "Spec gap spec-8493af123949c4d249a7ab8c / approval-signed-input-root / 1d3b1257654b": [
+      "backlog/234004cc5b4e4a3d78c95ccc",
+      "backlog/67eacb60171e6cedff82c482",
+      "backlog/5bf9cf12933a9a01581e530f",
+      "backlog/dcf557ae5dbc627aab292307",
+      "backlog/59873e07f74dcd542130bf41"
+    ],
+    "Spec gap spec-8493af123949c4d249a7ab8c / chain-task-commit-linkage / 1d3b1257654b": [
+      "backlog/0a001bfe1c6ccfa6bd7e4cb3",
+      "backlog/c49cf3ba98e72736cfcb8bee",
+      "backlog/1a1c2218815dfe88c38a9789",
+      "backlog/bb664ae221456d242e8ae921",
+      "backlog/acda07a63c3a25e9c32461e5"
+    ],
+    "Spec gap spec-8493af123949c4d249a7ab8c / chain-verification-trust / 1d3b1257654b": [
+      "backlog/80fa5d551228a894b5a85132",
+      "backlog/74593d79542d482cc5567984",
+      "backlog/7910f63c3be5b0641f51c47b",
+      "backlog/827a7cc2ad6eaf0f8e262900",
+      "backlog/7298cfa0831c074e5e21aa9e"
+    ],
+    "Spec gap spec-8493af123949c4d249a7ab8c / gate-constraint-emission / 1d3b1257654b": [
+      "backlog/3a1de6328a8b4ff8639ece89",
+      "backlog/1f7628ebe440a75c8f32588b"
+    ],
+    "Spec gap spec-8493af123949c4d249a7ab8c / boundary-enforcement / 1d3b1257654b": [
+      "backlog/290653a126dab6fc9fd71f53",
+      "backlog/43f8e2cad645c41a4bcdc0a2",
+      "backlog/4952c3bd11782374a70c9107",
+      "backlog/29f20a71bb7c6f10151e3b87"
+    ],
+    "Spec gap spec-8493af123949c4d249a7ab8c / verification-result-persistence / 1d3b1257654b": [
+      "backlog/f3d63f8ba82d318a407da9e3",
+      "backlog/c8e81723fe471db62eb85bbc"
+    ],
+    "Spec gap spec-8493af123949c4d249a7ab8c / agent-output-signing / 1d3b1257654b": [
+      "backlog/e5da488abf98ee7cd64ea91f"
+    ],
+    "Spec gap spec-8493af123949c4d249a7ab8c / stack-hash-constraint-unification / 1d3b1257654b": [
+      "backlog/d181208ee20b618ef25389b3"
     ]
   }
 }
