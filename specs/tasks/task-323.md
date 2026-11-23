@@ -2,7 +2,7 @@
 title: "Provision the Pass 2 toolchains in the server container image: rust-analyzer, typescript-language-server + typescript, and the ts-callgraph driver script"
 spec_ref: "Spec gap spec-b89674dbcb695eb34e8d5e15 / server-image-pass2-toolchains / d96599f10659"
 depends_on: []
-progress: ready-for-review
+progress: complete
 commits: []
 ---
 
