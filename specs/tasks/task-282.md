@@ -2,8 +2,8 @@
 title: "Serve the spec's literal /api/v1/deps/* API surface (all ten rows, ?workspace= graph scoping)"
 spec_ref: "Spec gap spec-cab97078efffe0fbfb7339be / deps-spec-route-paths / ed9f34316476"
 depends_on: [task-281]
-progress: not-started
-commits: []
+progress: complete
+commits: ["f84489d8364de87c2429e62fa11a859815a5b561", "2ae4dbed4e0ceddcd7ce59298671cc1359d0c18d", "f5703622638027ab45be016c909da3e5cbe02c8a", "53b8b41983bdf52dc96e9f5d72dd8c8621a8eca8", "88309116208775e04bc778364f335ae5afcb6688"]
 ---
 
 ## Required behavior
@@ -52,3 +52,92 @@ Canonical spec: `specs/system/dependency-graph.md`. Source: `678a8ac3e3bfeafeb66
     ]
   }
 ]
+
+## Shipped
+
+All ten spec-literal `/api/v1/deps/*` rows are served by real handler cores,
+as additions beside the existing routes (no rename — the CLI and UI consumers
+are untouched):
+
+### Routes (crates/gyre-server/src/api/mod.rs, task-282 block)
+
+- `GET /api/v1/deps/graph` — tenant-wide graph; the SAME path accepts
+  `?workspace={id}` for the workspace-scoped graph (`get_graph` gained a
+  `GraphQuery` extractor: absent/empty query means tenant-wide graph,
+  unchanged for the existing `/api/v1/dependencies/graph` consumers; unknown
+  workspace returns 404, not an empty graph).
+- `GET /api/v1/deps/repo/{id}/dependents|dependencies|impact` — same handler
+  cores as `/api/v1/repos/:id/dependents|dependencies|blast-radius`; impact
+  carries the full task-281 blast radius (per-dependent `test_status`, durable
+  `cascade_test_results`).
+- `GET /api/v1/deps/stale`, `GET /api/v1/deps/breaking` — same handlers as
+  the `/api/v1/dependencies/*` routes.
+- `POST /api/v1/deps/manual` (`add_manual_dependency`) — body carries only
+  repo identities and edge attributes (no tenant/workspace scoping fields,
+  check-forged-scope-fields clean); BOTH the source and target repos are
+  validated against the caller's tenant (`require_repo_tenant_containment`,
+  Forbidden on mismatch) and the source against repo/workspace-scoped token
+  claims.
+- `DELETE /api/v1/deps/{id}` (`delete_dependency_by_id`) — manual-only
+  removal: an auto-detected edge is refused with InvalidInput and survives;
+  per-handler tenant containment runs before any refusal detail is revealed.
+- `POST /api/v1/deps/breaking/{id}/acknowledge`
+  (`deps_acknowledge_breaking_change`) — same acknowledgment core as the
+  existing route, plus per-handler tenant containment against the change's
+  source repo; idempotent.
+
+All ten routes are registered in the ABAC resolver
+(crates/gyre-server/src/abac_middleware.rs — per-repo routes use the
+`:repo_id` param so the repo-to-workspace-to-tenant scope chain resolves;
+the flat write routes enforce per-handler containment).
+docs/api-reference.md documents all ten `/api/v1/deps/*` paths, and coverage
+row 15 of specs/coverage/system/dependency-graph.md is re-evidenced with the
+literal-path source locations.
+
+### Tenant containment of the `?workspace=` query form (f84489d8)
+
+The graph endpoint's query-parameter scope cannot be contained by the ABAC
+middleware (the scope rides the query string, which is never consulted for
+resource attributes — `resource.tenant_id` stays unset, the builtin
+tenant-isolation policy never fires, and the role bands allow the read), so
+`get_graph` enforces it in the handler: the caller is loaded
+(`AuthenticatedAgent` extractor), the named workspace is looked up, and its
+tenant is compared against the caller's — Forbidden on mismatch,
+fail-closed NotFound when the workspace does not exist. This covers both
+`/api/v1/deps/graph?workspace=` and `/api/v1/dependencies/graph?workspace=`
+(shared handler). Manual-edge declaration now runs containment on BOTH ends
+of the edge (source and target), so a caller cannot declare an edge into
+another tenant's repo.
+
+### Verification evidence
+
+- `cargo check -p gyre-server --lib` and `--tests` pass (build wrapper,
+  stage=implement); `cargo fmt` clean; check-abac-route-registry.sh,
+  check-abac-exempt-handlers.sh, check-forged-scope-fields.sh, and
+  check-arch.sh all pass with no new exemptions.
+- Probe tests in crates/gyre-server/src/api/dependencies.rs:
+  `deps_graph_endpoint_workspace_query_scopes_the_graph` (query form ≡
+  dedicated route, unknown workspace 404),
+  `deps_graph_workspace_query_is_tenant_contained` (cross-tenant query →
+  Forbidden, symmetric, own-tenant positive controls),
+  `deps_graph_workspace_query_cross_tenant_killed_at_router` (router-level
+  kill probe through require_auth → ABAC → handler: foreign workspace → 403
+  on both graph paths, own-tenant → 200),
+  `deps_manual_endpoint_declares_edge_and_enforces_caller_scope`,
+  `deps_manual_endpoint_refuses_cross_tenant_target` (cross-tenant target →
+  Forbidden, no edge stored either direction, same-tenant positive control),
+  `deps_delete_by_id_is_manual_only_and_tenant_contained`,
+  `deps_acknowledge_endpoint_is_tenant_contained_and_effective`.
+- gyre-server test execution is deferred to the independent verifier (4 GiB
+  build budget; the stage wrapper blocks `cargo test -p gyre-server`):
+  run `cargo test -p gyre-server --lib api::dependencies` and
+  `cargo test -p gyre-server --test task164_dependency_graph_detail`
+  (the latter now probes the tenant-wide graph through the real router,
+  since `get_graph`'s new extractor type is pub(crate)).
+- Prior verification round's single failing probe
+  (`deps_graph_endpoint_workspace_query_scopes_the_graph`) was repaired in
+  2ae4dbed: the ws-dg-x assertion contradicted the dedicated route's
+  committed semantics (edges where at least one endpoint is in the
+  workspace); the test now expects exactly those edges and additionally
+  asserts the query form equals the dedicated route's response on identical
+  fixtures.
