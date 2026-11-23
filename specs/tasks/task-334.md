@@ -3,7 +3,7 @@ title: "Manifest supersedes the [spec_lifecycle] config block for manifest repos
 spec_ref: "Spec gap spec-c08e139362b99830187a32b4 / manifest-supersedes-lifecycle-config / a458cd7cdf30"
 depends_on: []
 progress: ready-for-review
-commits: ["ef2e7c6af6571747495fc9e826cd823603ad3aaf", "e0e7e802e4ba96a3a0182389d702581a081ba22c"]
+commits: ["e0e7e802e4ba96a3a0182389d702581a081ba22c", "ef2e7c6af6571747495fc9e826cd823603ad3aaf"]
 ---
 
 ## Required behavior
