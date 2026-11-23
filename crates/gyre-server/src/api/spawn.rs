@@ -10159,6 +10159,10 @@ exit 1\n"
                 created_by: "system".to_string(),
                 created_at: 1,
                 updated_at: 1,
+                model: None,
+                temperature: None,
+                max_tokens: None,
+                budget: None,
             })
             .await
             .expect("seeding required meta-spec must succeed");
@@ -10486,6 +10490,10 @@ exit 1\n"
                 created_by: "system".to_string(),
                 created_at: 1,
                 updated_at: 1,
+                model: None,
+                temperature: None,
+                max_tokens: None,
+                budget: None,
             })
             .await
             .expect("seeding required meta-spec must succeed");

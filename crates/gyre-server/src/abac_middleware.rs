@@ -55,7 +55,6 @@ use serde_json::json;
 const REPOS_ID_ROUTE: &str = "/api/v1/repos/:id";
 const SPECS_ROUTE: &str = "/api/v1/specs";
 const SPECS_PATH_ROUTE: &str = "/api/v1/specs/:path";
-const PERSONAS_ID_ROUTE: &str = "/api/v1/personas/:id";
 const REPOS_GATES_ROUTE: &str = "/api/v1/repos/:id/gates";
 const REPOS_GATES_ID_ROUTE: &str = "/api/v1/repos/:id/gates/:gate_id";
 const REPOS_WORKTREES_ID_ROUTE: &str = "/api/v1/repos/:id/worktrees/:worktree_id";
@@ -200,6 +199,12 @@ impl ResourceResolver {
                 RouteResourceMapping::api("/api/v1/repos", "repo", None),
                 RouteResourceMapping::api("/api/v1/repos/mirror", "repo", Some("write")),
                 RouteResourceMapping::api(REPOS_ID_ROUTE, "repo", None),
+                // Repo archive/unarchive (agent-runtime.md amendments row:
+                // the `archive` action, added to the ABAC action vocabulary
+                // for these endpoints). Real policy evaluation — the routes
+                // were moved out of the frozen exemption file.
+                RouteResourceMapping::api("/api/v1/repos/:id/archive", "repo", Some("archive")),
+                RouteResourceMapping::api("/api/v1/repos/:id/unarchive", "repo", Some("archive")),
                 // Repo access overrides (user-management.md §Repo Access).
                 // PUT/DELETE on the override route evaluate as the repo
                 // "admin" action (override management is an admin
@@ -818,14 +823,10 @@ impl ResourceResolver {
                     None,
                 ),
                 // ── Personas ───────────────────────────────────────────────
-                RouteResourceMapping::api("/api/v1/personas", "persona", None),
-                RouteResourceMapping::api("/api/v1/personas/resolve", "persona", None),
-                RouteResourceMapping::api(PERSONAS_ID_ROUTE, "persona", None),
-                RouteResourceMapping::api(
-                    "/api/v1/personas/:id/approve",
-                    "persona",
-                    Some("approve"),
-                ),
+                // REMOVED (agent-runtime.md amendments row): the
+                // /api/v1/personas routes are gone — replaced entirely by
+                // /api/v1/meta-specs?kind=meta:persona. No persona routes
+                // remain to resolve.
                 // ── Policies ───────────────────────────────────────────────
                 RouteResourceMapping::api("/api/v1/policies", "policy", None),
                 RouteResourceMapping::api("/api/v1/policies/evaluate", "policy", Some("evaluate")),
@@ -1229,7 +1230,7 @@ async fn set_workspace_and_tenant_from_repo(
 /// membership-sourced subject attributes.
 ///
 /// `resource.visibility` and `resource.team` apply only to entities that
-/// carry those fields (none today: specs and personas carry `owner` +
+/// carry those fields (none today: specs carry `owner` +
 /// `approval_status`; scope-scoped entities carry their workspace/repo/tenant
 /// identity). When an entity type gains those fields, its arm here must set
 /// them.
@@ -1301,54 +1302,6 @@ async fn extract_entity_attributes(
                     spec_path = %spec_path,
                     err = %e,
                     "spec ledger lookup failed; entity attributes unset"
-                ),
-            }
-        }
-        // Persona: owner and approval lifecycle (§Attributes "Entity field").
-        "persona" => {
-            let Some(id) = resource_id else { return };
-            match state
-                .personas
-                .find_by_id(&gyre_common::Id::new(id.clone()))
-                .await
-            {
-                Ok(Some(p)) => {
-                    if let Some(owner) = &p.owner {
-                        ctx.set("resource.owner", owner.clone());
-                    }
-                    ctx.set(
-                        "resource.approval_status",
-                        match p.approval_status {
-                            gyre_domain::PersonaApprovalStatus::Pending => "pending",
-                            gyre_domain::PersonaApprovalStatus::Approved => "approved",
-                            gyre_domain::PersonaApprovalStatus::Deprecated => "deprecated",
-                        },
-                    );
-                    match &p.scope {
-                        gyre_domain::PersonaScope::Workspace(ws) => {
-                            if !ctx.has("resource.workspace_id") {
-                                ctx.set("resource.workspace_id", ws.to_string());
-                            }
-                            set_tenant_from_workspace(state, ctx, &ws.to_string()).await;
-                        }
-                        gyre_domain::PersonaScope::Tenant(t) => {
-                            if !ctx.has("resource.tenant_id") {
-                                ctx.set("resource.tenant_id", t.to_string());
-                            }
-                        }
-                        gyre_domain::PersonaScope::Repo(r) => {
-                            if !ctx.has("resource.repo_id") {
-                                ctx.set("resource.repo_id", r.to_string());
-                            }
-                            set_tenant_from_repo(state, ctx, &r.to_string()).await;
-                        }
-                    }
-                }
-                Ok(None) => {}
-                Err(e) => tracing::warn!(
-                    persona_id = %id,
-                    err = %e,
-                    "persona lookup failed; entity attributes unset"
                 ),
             }
         }
@@ -2809,11 +2762,9 @@ pub mod tests {
     // `/api/v1/...` string literals to detect dead duplicate resolver
     // entries, so repeated test URIs are spelled once here and reused;
     // route patterns shared with the resolver registry use the module-level
-    // consts above (SPECS_ROUTE, SPECS_PATH_ROUTE, REPOS_ID_ROUTE,
-    // PERSONAS_ID_ROUTE).
+    // consts above (SPECS_ROUTE, SPECS_PATH_ROUTE, REPOS_ID_ROUTE).
     const SPEC_DOC_URI: &str = "/api/v1/specs/system%2Fdesign.md";
     const REPO_HEALTH_URI: &str = "/api/v1/repos/repo-health";
-    const PERSONA_E_URI: &str = "/api/v1/personas/persona-e";
     const WS_TASKS_URI: &str = "/api/v1/workspaces/ws-1/tasks";
     const REPO_GATES_URI: &str = "/api/v1/repos/repo-1/gates";
     const REPO_WORKTREE_URI: &str = "/api/v1/repos/repo-1/worktrees/wt-42";
@@ -6504,6 +6455,104 @@ pub mod tests {
         );
     }
 
+    /// agent-runtime.md amendments row (abac-policy-engine.md action
+    /// attribute table): `archive` is in the ABAC action vocabulary and the
+    /// repo archive/unarchive routes get REAL policy evaluation through
+    /// the middleware resolver (they were moved out of the frozen
+    /// exemption file). A Deny policy with action `archive` on a repo
+    /// resource must block repo archive/unarchive for the affected
+    /// principal before any handler code runs.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn archive_action_deny_blocks_repo_archive_through_middleware() {
+        let state = test_state();
+
+        // Seed a repo in the caller's workspace so resource resolution
+        // addresses a real entity (tenant t-1 → ws-1 → repo-archive-1).
+        let repo = gyre_domain::Repository::new(
+            gyre_common::Id::new("repo-archive-1"),
+            gyre_common::Id::new("ws-1"),
+            "repo-archive-1".to_string(),
+            "/tmp/repo-archive-1".to_string(),
+            0,
+        );
+        state.repos.create(&repo).await.unwrap();
+
+        // Deny the archive action on repo resources for this principal,
+        // at a priority above the Developer write allow (800).
+        state
+            .policies
+            .create(&Policy {
+                id: gyre_common::Id::new("test-archive-deny"),
+                name: "archive-action-deny".to_string(),
+                description: String::new(),
+                scope: PolicyScope::Tenant,
+                scope_id: None,
+                priority: 810,
+                effect: PolicyEffect::Deny,
+                conditions: vec![Condition {
+                    attribute: "subject.id".to_string(),
+                    operator: ConditionOp::Equals,
+                    value: ConditionValue::String("member-user".to_string()),
+                }],
+                actions: vec!["archive".to_string()],
+                resource_types: vec!["repo".to_string()],
+                enabled: true,
+                built_in: false,
+                immutable: false,
+                created_by: Id::new("system"),
+                created_at: 0,
+                updated_at: 0,
+            })
+            .await
+            .unwrap();
+
+        init_resolver();
+        async fn ok_handler() -> StatusCode {
+            StatusCode::OK
+        }
+        let app = Router::new()
+            .route("/api/v1/repos/:id/archive", post(ok_handler))
+            .route("/api/v1/repos/:id/unarchive", post(ok_handler))
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                abac_middleware,
+            ))
+            .with_state(state.clone());
+
+        let token = member_jwt();
+        let req = |uri: &str| {
+            Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header("Authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap()
+        };
+
+        // Both routes resolve to the repo resource with the `archive`
+        // action → the Deny fires through the middleware (403 before any
+        // handler code).
+        let resp = app
+            .clone()
+            .oneshot(req("/api/v1/repos/repo-archive-1/archive"))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "archive Deny must fire through the middleware"
+        );
+        let resp = app
+            .oneshot(req("/api/v1/repos/repo-archive-1/unarchive"))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "unarchive Deny must fire through the middleware"
+        );
+    }
+
     // --- §Attributes: entity-lookup / entity-field resource attributes ---
 
     /// Seed the scope chain tenant `t-1` → workspace `ws-e` → repo `repo-e`,
@@ -7076,121 +7125,6 @@ pub mod tests {
             resp.status(),
             StatusCode::FORBIDDEN,
             "task → workspace → tenant lookup must surface resource.tenant_id == t-1"
-        );
-    }
-
-    /// Persona entity attributes: owner + approval status from the persona
-    /// record, workspace/tenant from its scope.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn persona_entity_attributes_reach_live_evaluation() {
-        use gyre_domain::{Persona, PersonaApprovalStatus, PersonaScope};
-
-        let state = setup_entity_state().await;
-
-        let mut persona = Persona::new(
-            Id::new("persona-e"),
-            "security",
-            "security",
-            PersonaScope::Workspace(Id::new("ws-e")),
-            "prompt",
-            0,
-        );
-        persona.owner = Some("user:alice".to_string());
-        persona.approval_status = PersonaApprovalStatus::Pending;
-        state.personas.create(&persona).await.unwrap();
-
-        // Deny persona reads while approval is pending and the caller is not
-        // the owner. member_jwt's subject is member-user; the owner is
-        // user:alice → deny must fire.
-        state
-            .policies
-            .create(&Policy {
-                id: gyre_common::Id::new("test-persona-deny"),
-                name: "pending-persona-owner-only".to_string(),
-                description: String::new(),
-                scope: PolicyScope::Tenant,
-                scope_id: None,
-                priority: 810,
-                effect: PolicyEffect::Deny,
-                conditions: vec![
-                    Condition {
-                        attribute: "resource.approval_status".to_string(),
-                        operator: ConditionOp::Equals,
-                        value: ConditionValue::String("pending".to_string()),
-                    },
-                    Condition {
-                        attribute: "resource.owner".to_string(),
-                        operator: ConditionOp::NotEquals,
-                        value: ConditionValue::String("member-user".to_string()),
-                    },
-                ],
-                actions: vec!["read".to_string()],
-                resource_types: vec!["persona".to_string()],
-                enabled: true,
-                built_in: false,
-                immutable: false,
-                created_by: Id::new("system"),
-                created_at: 0,
-                updated_at: 0,
-            })
-            .await
-            .unwrap();
-
-        init_resolver();
-        async fn ok_handler() -> StatusCode {
-            StatusCode::OK
-        }
-        let app = Router::new()
-            .route(PERSONAS_ID_ROUTE, get(ok_handler))
-            .layer(axum::middleware::from_fn_with_state(
-                state.clone(),
-                abac_middleware,
-            ))
-            .with_state(state.clone());
-
-        // TASK-129: the t-1 ws-e member caller — the persona lives in ws-e
-        // (tenant t-1), so the builtin tenant-isolation /
-        // workspace-membership-required policies stay out of this test's
-        // scope (it isolates owner + approval_status attributes). The
-        // caller's username ("entity-user") still differs from the owner
-        // ("user:alice"), so the pending+non-owner Deny fires as before.
-        let resp = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri(PERSONA_E_URI)
-                    .header("Authorization", format!("Bearer {}", entity_member_jwt()))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(
-            resp.status(),
-            StatusCode::FORBIDDEN,
-            "persona owner (user:alice) + pending approval must reach live evaluation"
-        );
-
-        // Approve the persona → the pending-only deny arm no longer matches
-        // → Developer read allow (800) grants.
-        let mut updated = persona;
-        updated.approval_status = PersonaApprovalStatus::Approved;
-        state.personas.update(&updated).await.unwrap();
-
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .uri(PERSONA_E_URI)
-                    .header("Authorization", format!("Bearer {}", entity_member_jwt()))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(
-            resp.status(),
-            StatusCode::OK,
-            "approved persona must not trip the pending-only deny"
         );
     }
 

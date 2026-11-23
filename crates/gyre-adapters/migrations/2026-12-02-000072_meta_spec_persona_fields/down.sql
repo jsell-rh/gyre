@@ -1,0 +1,3 @@
+-- SQLite does not support DROP COLUMN before 3.35; this migration is
+-- forward-only in the shared embedded dir (no down-migration machinery
+-- runs against it). Keep the file present for diesel convention.

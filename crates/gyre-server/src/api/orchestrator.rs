@@ -1486,6 +1486,10 @@ mod tests {
             created_by: "test".to_string(),
             created_at: 0,
             updated_at: 0,
+            model: None,
+            temperature: None,
+            max_tokens: None,
+            budget: None,
         };
         state.meta_specs.create(&ms).await.unwrap();
 

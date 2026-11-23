@@ -6,6 +6,8 @@
 
 use gyre_common::Id;
 use serde::{Deserialize, Serialize};
+
+use crate::BudgetConfig;
 use sha2::{Digest, Sha256};
 use std::fmt;
 
@@ -156,6 +158,22 @@ pub struct MetaSpec {
     pub created_by: String,
     pub created_at: u64,
     pub updated_at: u64,
+    /// Persona operational fields (agent-runtime.md amendments row: the
+    /// `/api/v1/personas` endpoints are removed — replaced entirely by the
+    /// meta-spec registry's `meta:persona` kind, which must carry the
+    /// Persona operational fields so they remain editable). Meaningful
+    /// only for `MetaSpecKind::Persona`; `None` for every other kind.
+    /// Mirrors the corresponding `Persona` entity fields and is synced into
+    /// the persona read model by the registry handlers.
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub temperature: Option<f64>,
+    #[serde(default)]
+    pub max_tokens: Option<u32>,
+    /// JSON-serialized `BudgetConfig` in the DB adapters.
+    #[serde(default)]
+    pub budget: Option<BudgetConfig>,
 }
 
 /// A snapshot of a meta-spec at a specific version.

@@ -600,23 +600,6 @@ fn tool_definitions() -> Value {
                     },
                     "required": ["parent_task_id", "subtasks"]
                 }
-            },
-            {
-                "name": "gyre_spawn_worker",
-                "description": "Spawn a worker agent for an implementation task in the caller's repo. Requires a repo-orchestrator JWT. Delegates to the standard agent spawn flow (worktree, scoped JWT, compute target resolution).",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "task_id": { "type": "string", "description": "Implementation task id to assign the worker to" },
-                        "name": { "type": "string", "description": "Worker agent name" },
-                        "branch": { "type": "string", "description": "Git branch for the worker's worktree" },
-                        "parent_id": { "type": "string", "description": "Optional parent agent id" },
-                        "compute_target_id": { "type": "string", "description": "Optional compute target id" },
-                        "persona": { "type": "string", "description": "Optional persona name the worker runs (e.g. 'security') — recorded as the agent's persona (spec-registry.md §16); must resolve to an Approved persona in the repo/workspace/tenant chain, else the spawn is rejected" },
-                        "persona_slug": { "type": "string", "description": "Optional persona slug to bind (resolved repo → workspace → tenant, must be approved); its system prompt is injected as GYRE_PROMPT_PERSONA" }
-                    },
-                    "required": ["task_id", "name", "branch"]
-                }
             }
         ]
     });
@@ -831,27 +814,6 @@ async fn validate_tool_scope(
                 }
             } else {
                 check_repo_read_target(state, auth, repo, tool_name).await
-            }
-        }
-        // Repo-tier spawning (repo orchestrator persona). A token carrying
-        // repo scopes must hold `repo:{target}:spawn` — a worker's
-        // write-only token is rejected here. A workspace-tier token carries
-        // no repo scopes; its tier mismatch is enforced by the handler
-        // ("requires a repo-orchestrator token"), the denial shape the
-        // task-093 contract pins.
-        "gyre_spawn_worker" => {
-            if has_repo_scopes(auth) {
-                let repo = args.get("repo_id").and_then(|v| v.as_str()).unwrap_or("");
-                if repo.is_empty() {
-                    // No explicit target: the handler spawns in the caller's
-                    // own repo (repo_orchestrator_scope) — validate the spawn
-                    // right on the token's single repo scope.
-                    check_repo_scope(auth, None, true, tool_name)
-                } else {
-                    check_repo_target_by_id(auth, repo, true, tool_name)
-                }
-            } else {
-                Ok(())
             }
         }
         // Workspace-tier spawning (workspace orchestrator persona): the
@@ -1697,74 +1659,6 @@ async fn handle_decompose_spec(state: &AppState, args: &Value, auth: &Authentica
         parent_id,
         created.join(", ")
     ))
-}
-
-/// gyre_spawn_worker (task-093): repo-orchestrator only. Delegates to the
-/// REST spawn core so worktree creation, JWT minting, and compute target
-/// resolution are identical to POST /api/v1/agents/spawn.
-async fn handle_spawn_worker(
-    state: &Arc<AppState>,
-    args: &Value,
-    auth: &AuthenticatedAgent,
-) -> Value {
-    let (caller_ws, repo_id) = match repo_orchestrator_scope(auth) {
-        Some(scope) => scope,
-        None => return tool_error("requires a repo-orchestrator token"),
-    };
-    let task_id = match require_str(args, "task_id") {
-        Ok(t) => t.to_string(),
-        Err(_) => return tool_error("missing required field: task_id"),
-    };
-    // Scope: the task must belong to the caller's repo.
-    let task = match state.tasks.find_by_id(&Id::new(&task_id)).await {
-        Ok(Some(t)) => t,
-        Ok(None) => return tool_error(format!("Task not found: {task_id}")),
-        Err(e) => return tool_error(format!("Error: {e}")),
-    };
-    if !task.repo_id.to_string().is_empty() {
-        if task.repo_id.to_string() != repo_id {
-            return tool_error(format!(
-                "PERMISSION_DENIED: task {task_id} belongs to a different repo"
-            ));
-        }
-    } else if task.workspace_id.to_string() != caller_ws {
-        return tool_error(format!(
-            "PERMISSION_DENIED: task {task_id} belongs to a different workspace"
-        ));
-    }
-    let name = match require_str(args, "name") {
-        Ok(n) => n.to_string(),
-        Err(_) => return tool_error("missing required field: name"),
-    };
-    let branch = match require_str(args, "branch") {
-        Ok(b) => b.to_string(),
-        Err(_) => return tool_error("missing required field: branch"),
-    };
-    let req = crate::api::spawn::SpawnAgentRequest {
-        name,
-        task_id,
-        repo_id,
-        branch,
-        parent_id: get_str(args, "parent_id").map(|s| s.to_string()),
-        agent_type: None,
-        compute_target_id: get_str(args, "compute_target_id").map(|s| s.to_string()),
-        disconnected_behavior: None,
-        loop_config: None,
-        conversation_sha: None,
-        persona: get_str(args, "persona").map(|s| s.to_string()),
-        persona_slug: get_str(args, "persona_slug").map(|s| s.to_string()),
-    };
-    match crate::api::spawn::spawn_agent_core(
-        state,
-        req,
-        auth,
-        "POST /mcp tools/call gyre_spawn_worker",
-    )
-    .await
-    {
-        Ok(resp) => tool_result(serde_json::to_string(&resp).unwrap_or_default()),
-        Err(e) => tool_error(format!("Failed to spawn worker: {e}")),
-    }
 }
 
 async fn handle_list_tasks(state: &AppState, args: &Value, auth: &AuthenticatedAgent) -> Value {
@@ -4078,9 +3972,11 @@ async fn collect_secret_metadata(
 
 /// The ABAC action vocabulary probed by `permissions://me` — the spec's
 /// action-attribute examples (§Attributes: read, write, delete, approve,
-/// spawn, push, merge, escalate, generate).
+/// spawn, push, merge, escalate, generate) plus `archive` (agent-runtime
+/// amendments row: used by the repo archive/unarchive endpoints).
 const PERMISSION_ACTIONS: &[&str] = &[
     "read", "write", "delete", "approve", "spawn", "push", "merge", "escalate", "generate",
+    "archive",
 ];
 
 /// Build the CALLING agent's ABAC attribute context for the `permissions://`
@@ -5329,7 +5225,6 @@ pub async fn mcp_handler(
                     | "gyre_spawn_repo_orchestrator"
                     | "gyre_cross_repo_task"
                     | "gyre_decompose_spec"
-                    | "gyre_spawn_worker"
             );
             if needs_write && !has_role_at_least(&auth.roles, UserRole::Agent) {
                 // observability.md §Audit Event Types: role check rejects
@@ -5353,10 +5248,9 @@ pub async fn mcp_handler(
             // gyre_message_send / gyre_message_ack are in the same class: a
             // preview agent injecting Directed-tier messages into production
             // inboxes (or acking around the exit hook's bulk-ack) leaves a
-            // durable footprint that outlives the throwaway run. The four
-            // orchestrator tools (gyre_spawn_worker,
-            // gyre_spawn_repo_orchestrator, gyre_cross_repo_task,
-            // gyre_decompose_spec) are in the same class too: they create tasks and spawn agents — ceremony a preview
+            // durable footprint that outlives the throwaway run. The three
+            // orchestrator tools (gyre_spawn_repo_orchestrator,
+            // gyre_cross_repo_task, gyre_decompose_spec) are in the same class too: they create tasks and spawn agents — ceremony a preview
             // run must skip. They are currently unreachable for a preview
             // caller only because preview JWTs carry no orchestrator claims
             // (validate_tool_scope's token-shape check); the preview registry
@@ -5372,7 +5266,6 @@ pub async fn mcp_handler(
                         | "conversation_upload"
                         | "gyre_message_send"
                         | "gyre_message_ack"
-                        | "gyre_spawn_worker"
                         | "gyre_spawn_repo_orchestrator"
                         | "gyre_cross_repo_task"
                         | "gyre_decompose_spec"
@@ -5494,7 +5387,6 @@ pub async fn mcp_handler(
                 }
                 "gyre_cross_repo_task" => handle_cross_repo_task(&state, &args, &auth).await,
                 "gyre_decompose_spec" => handle_decompose_spec(&state, &args, &auth).await,
-                "gyre_spawn_worker" => handle_spawn_worker(&state, &args, &auth).await,
                 "graph_summary" => handle_graph_summary(&state, &args).await,
                 "graph_query_dryrun" => handle_graph_query_dryrun(&state, &args).await,
                 "graph_nodes" => handle_graph_nodes(&state, &args).await,
@@ -11961,6 +11853,15 @@ concepts:
         })
     }
 
+    fn tools_list() -> Value {
+        json!({
+            "jsonrpc": "2.0",
+            "id": 201,
+            "method": "tools/list",
+            "params": {}
+        })
+    }
+
     #[tokio::test]
     async fn mcp_spawn_repo_orchestrator_happy_and_wrong_workspace() {
         let state = orch_state().await;
@@ -12158,10 +12059,6 @@ concepts:
             // skip. Defense-in-depth: a preview JWT carries no orchestrator
             // claims, so token shape would also refuse them; the preview
             // registry must refuse them on its own.
-            (
-                "gyre_spawn_worker",
-                json!({ "task_id": "t-1", "persona": "worker" }),
-            ),
             ("gyre_spawn_repo_orchestrator", json!({ "repo_id": "r-1" })),
             (
                 "gyre_cross_repo_task",
@@ -12434,12 +12331,31 @@ concepts:
     }
 
     #[tokio::test]
-    async fn mcp_spawn_worker_denies_workspace_tier() {
+    async fn mcp_spawn_worker_removed_from_catalog_and_dispatch() {
+        // agent-runtime.md §1 Phase 3 / amendments row (a): the repo
+        // orchestrator never spawns agents — the gyre_spawn_worker MCP tool
+        // is removed entirely (catalog, dispatch, scope validation). A
+        // repo-orchestrator JWT calling the retired name must get the
+        // unknown-tool error, the same shape as any other nonexistent tool.
         let state = orch_state().await;
         let (_id, token) =
-            register_orchestrator(&state, "ws-orch", "ws-1", None, "workspace_orchestrator").await;
-        let app = crate::build_router(state);
+            register_orchestrator(&state, "repo-orch", "r-1", None, "repo_orchestrator").await;
+        let app = crate::build_router(state.clone());
 
+        // tools/list must not advertise it.
+        let (_status, list) = mcp_post_with_token(app.clone(), tools_list(), &token).await;
+        let names: Vec<&str> = list["result"]["tools"]
+            .as_array()
+            .expect("tools array")
+            .iter()
+            .map(|t| t["name"].as_str().expect("tool name"))
+            .collect();
+        assert!(
+            !names.contains(&"gyre_spawn_worker"),
+            "catalog must not list gyre_spawn_worker: {names:?}"
+        );
+
+        // tools/call must refuse it.
         let (_status, json) = mcp_post_with_token(
             app,
             tool_call(
@@ -12451,7 +12367,7 @@ concepts:
         .await;
         assert!(json["result"]["isError"].as_bool().unwrap());
         let text = json["result"]["content"][0]["text"].as_str().unwrap();
-        assert!(text.contains("repo-orchestrator"), "got: {text}");
+        assert!(text.contains("Unknown tool"), "got: {text}");
     }
 
     // ── §1 Token Scoping: MCP validates scope on every tool call ─────────────
@@ -12874,28 +12790,6 @@ concepts:
             json["error"].is_object(),
             "foreign-agent record_activity must be a JSON-RPC error, got: {json}"
         );
-        let msg = json["error"]["message"].as_str().unwrap();
-        assert!(msg.contains("PERMISSION_DENIED"), "got: {msg}");
-    }
-
-    #[tokio::test]
-    async fn mcp_scope_worker_cannot_spawn_workers() {
-        let state = orch_state().await;
-        let (_id, token) = register_worker(&state, "w3", "r-1").await;
-        let app = crate::build_router(state);
-
-        // A worker token carries repo:...:write, not repo:...:spawn —
-        // spawning must be rejected even for its own repo.
-        let (_status, json) = mcp_post_with_token(
-            app,
-            tool_call(
-                "gyre_spawn_worker",
-                json!({ "task_id": "t-1", "repo_id": "r-1", "name": "w", "branch": "b" }),
-            ),
-            &token,
-        )
-        .await;
-        assert!(json["error"].is_object(), "got: {json}");
         let msg = json["error"]["message"].as_str().unwrap();
         assert!(msg.contains("PERMISSION_DENIED"), "got: {msg}");
     }

@@ -10734,6 +10734,10 @@ mod tests {
             created_by: "admin".to_string(),
             created_at: 1000,
             updated_at: 1000,
+            model: None,
+            temperature: None,
+            max_tokens: None,
+            budget: None,
         };
         state.meta_specs.create(&ms).await.unwrap();
         ms

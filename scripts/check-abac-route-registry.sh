@@ -32,7 +32,7 @@
 # below the old frozen 46): the four spec-graph query endpoints
 # (stale-links, conflicts, :path/dependents, :path/dependencies) moved
 # into the resolver with real policy evaluation.
-FROZEN_EXEMPTION_COUNT=38
+FROZEN_EXEMPTION_COUNT=36
 # Baseline is the REAL resolver duplicate count in the non-test region of
 # abac_middleware.rs (task-171 review: the whole-file grep counted test
 # route fixtures as resolver duplicates, tripping this guard on every run

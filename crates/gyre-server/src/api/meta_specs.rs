@@ -8073,6 +8073,15 @@ pub struct CreateMetaSpecRequest {
     pub scope_id: Option<String>,
     pub prompt: Option<String>,
     pub required: Option<bool>,
+    /// Persona operational fields (agent-runtime.md amendments row: the
+    /// `/api/v1/personas` endpoints are removed — replaced entirely by this
+    /// registry's `meta:persona` kind, which carries the Persona
+    /// operational fields so they remain editable). Valid only when
+    /// `kind == "meta:persona"`.
+    pub model: Option<String>,
+    pub temperature: Option<f64>,
+    pub max_tokens: Option<u32>,
+    pub budget: Option<gyre_domain::BudgetConfig>,
 }
 
 #[derive(Deserialize)]
@@ -8094,6 +8103,16 @@ pub struct UpdateMetaSpecRequest {
     /// preserved verbatim.
     #[serde(default)]
     pub force: Option<bool>,
+    /// Persona operational fields (agent-runtime.md amendments row — the
+    /// registry `meta:persona` kind carries the Persona operational
+    /// fields). Valid only when the addressed meta-spec's kind is
+    /// `meta:persona`. `Some` sets the value; the field is left unchanged
+    /// when absent (same update semantics as the retired
+    /// `PUT /api/v1/personas/:id`).
+    pub model: Option<String>,
+    pub temperature: Option<f64>,
+    pub max_tokens: Option<u32>,
+    pub budget: Option<gyre_domain::BudgetConfig>,
 }
 
 // ---------------------------------------------------------------------------
@@ -8109,6 +8128,200 @@ fn parse_kind(s: &str) -> Result<MetaSpecKind, ApiError> {
             "invalid kind '{s}'; must be one of: meta:persona, meta:principle, meta:standard, meta:process"
         ))
     })
+}
+
+/// Reject persona operational fields on a non-persona meta-spec kind.
+/// The fields are the Persona entity's operational parameters
+/// (agent-runtime.md amendments row); carrying them on a principle/
+/// standard/process entry would be dead data the prompt machinery never
+/// reads — fail loudly instead of storing it silently.
+fn reject_persona_fields_on_other_kinds(
+    kind: &MetaSpecKind,
+    model: &Option<String>,
+    temperature: &Option<f64>,
+    max_tokens: &Option<u32>,
+    budget: &Option<gyre_domain::BudgetConfig>,
+) -> Result<(), ApiError> {
+    if *kind != MetaSpecKind::Persona
+        && (model.is_some()
+            || temperature.is_some()
+            || max_tokens.is_some()
+            || budget.is_some())
+    {
+        return Err(ApiError::BadRequest(
+            "model/temperature/max_tokens/budget are persona operational fields; \
+             they are only valid for kind meta:persona"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Derive a persona slug from a meta-spec name — the same derivation the
+/// CLI bootstrap and the workspace slug logic use (lowercase,
+/// non-alphanumeric to hyphen, collapse). The registry `meta:persona`
+/// entry has no separate slug field: its name IS the persona identity,
+/// and the derived slug is what spawn-time `persona_slug` resolution
+/// matches (e.g. "Repo Orchestrator" → "repo-orchestrator", matching the
+/// built-in persona slugs).
+fn persona_slug_from_name(name: &str) -> String {
+    name.to_lowercase()
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '-' })
+        .collect::<String>()
+        .split('-')
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("-")
+}
+
+/// Sync a `meta:persona` registry entry into the Persona entity store —
+/// the read model spawn-time persona resolution/binding consumes
+/// (`resolve_persona_in_chain` → `state.personas`). The registry is the
+/// only HTTP write surface for personas (the `/api/v1/personas` routes
+/// are removed per the agent-runtime.md amendments row); this sync keeps
+/// the spawn machinery working against registry-backed persona data:
+///
+/// - Tenant/Workspace-scoped entries materialize a Persona entity with
+///   the SAME id as the meta-spec (so `Agent.persona_id` bindings resolve
+///   via `find_by_id`), or ADOPT a pre-existing persona with the same
+///   slug+scope (e.g. the startup-seeded built-ins) by updating it in
+///   place — the registry entry becomes the edit surface for it.
+/// - Global-scoped entries are NOT synced: the Persona entity has no
+///   Global tier (its scope chain is Repo > Workspace > Tenant), so a
+///   Global meta:persona acts through the meta-spec injection machinery
+///   only and cannot be spawn-bound.
+/// - Approval status is mirrored, so the fail-closed Approved-only spawn
+///   resolution follows the registry's approval lifecycle (editing
+///   content resets to Pending; approving restores spawn-bindability).
+/// - Deletion (see `delete_persona_synced_from_meta_spec`) removes the
+///   registry-created entity; an ADOPTED row (different id) is left in
+///   place, keeping its last synced content.
+async fn sync_persona_from_meta_spec(state: &AppState, ms: &MetaSpec) {
+    use gyre_domain::{Persona, PersonaApprovalStatus, PersonaScope};
+
+    if ms.kind != MetaSpecKind::Persona {
+        return;
+    }
+    let scope = match (&ms.scope, &ms.scope_id) {
+        (MetaSpecScope::Tenant, Some(tenant_id)) => PersonaScope::Tenant(Id::new(tenant_id)),
+        (MetaSpecScope::Workspace, Some(ws_id)) => PersonaScope::Workspace(Id::new(ws_id)),
+        (MetaSpecScope::Global, _) => return, // no Global persona tier (see doc comment)
+        (_, None) => {
+            // A scoped meta-spec with no scope_id is malformed for persona
+            // sync — never fabricate a scope identity (AGENTS.md). Skip and
+            // log; the entity lookup below would otherwise key on nothing.
+            tracing::warn!(
+                meta_spec_id = ms.id.as_str(),
+                "meta:persona sync skipped: scoped entry carries no scope_id"
+            );
+            return;
+        }
+    };
+    let slug = persona_slug_from_name(&ms.name);
+    let mirror_approval = |s: &MetaSpecApprovalStatus| match s {
+        MetaSpecApprovalStatus::Pending => PersonaApprovalStatus::Pending,
+        MetaSpecApprovalStatus::Approved => PersonaApprovalStatus::Approved,
+        MetaSpecApprovalStatus::Rejected => PersonaApprovalStatus::Deprecated,
+    };
+
+    // Registry-synced rows carry the meta-spec id; an adopted row is found
+    // by slug+scope. Lookup failures skip the sync and log — the registry
+    // write itself already succeeded; the persona read model catching up
+    // must never fail the HTTP request that drove it.
+    let existing = match state.personas.find_by_id(&ms.id).await {
+        Ok(Some(p)) => Some(p),
+        Ok(None) => match state.personas.find_by_slug_and_scope(&slug, &scope).await {
+            Ok(adopted) => adopted,
+            Err(e) => {
+                tracing::warn!("meta:persona sync lookup failed: {e}");
+                return;
+            }
+        },
+        Err(e) => {
+            tracing::warn!("meta:persona sync lookup failed: {e}");
+            return;
+        }
+    };
+
+    let now = now_secs();
+    match existing {
+        Some(mut persona) => {
+            persona.name = ms.name.clone();
+            persona.slug = slug;
+            persona.system_prompt = ms.prompt.clone();
+            persona.model = ms.model.clone();
+            persona.temperature = ms.temperature;
+            persona.max_tokens = ms.max_tokens;
+            persona.budget = ms.budget.clone();
+            persona.version = ms.version.max(1);
+            persona.approval_status = mirror_approval(&ms.approval_status);
+            persona.approved_by = ms.approved_by.clone();
+            persona.approved_at = ms.approved_at;
+            persona.updated_at = now;
+            persona.refresh_content_hash();
+            if let Err(e) = state.personas.update(&persona).await {
+                tracing::warn!("meta:persona sync update failed: {e}");
+                return;
+            }
+            crate::search_indexer::index(&state, crate::search_indexer::persona_document(&persona))
+                .await;
+        }
+        None => {
+            let mut persona = Persona::new(
+                ms.id.clone(),
+                ms.name.clone(),
+                slug,
+                scope,
+                ms.prompt.clone(),
+                now,
+            );
+            persona.model = ms.model.clone();
+            persona.temperature = ms.temperature;
+            persona.max_tokens = ms.max_tokens;
+            persona.budget = ms.budget.clone();
+            persona.version = ms.version.max(1);
+            persona.approval_status = mirror_approval(&ms.approval_status);
+            persona.approved_by = ms.approved_by.clone();
+            persona.approved_at = ms.approved_at;
+            persona.refresh_content_hash();
+            if let Err(e) = state.personas.create(&persona).await {
+                tracing::warn!("meta:persona sync create failed: {e}");
+                return;
+            }
+            crate::search_indexer::index(&state, crate::search_indexer::persona_document(&persona))
+                .await;
+            // Persona approval is requested at creation (same notification
+            // the retired POST /api/v1/personas issued): a Pending persona
+            // routes its approval request to the owner, or the workspace
+            // Admins/Owners fallback.
+            crate::notification_dispatcher::notify_persona_approval_requested(state, &persona)
+                .await;
+        }
+    }
+}
+
+/// Remove the Persona entity a `meta:persona` registry entry materialized
+/// when the meta-spec is deleted. Only the registry-CREATED row (same id
+/// as the meta-spec) is removed — an ADOPTED row (a pre-existing persona
+/// the sync updated in place, e.g. a startup-seeded built-in) keeps its
+/// last synced content: its existence never depended on the registry
+/// entry.
+async fn delete_persona_synced_from_meta_spec(state: &AppState, ms: &MetaSpec) {
+    if ms.kind != MetaSpecKind::Persona {
+        return;
+    }
+    match state.personas.find_by_id(&ms.id).await {
+        Ok(Some(_)) => {
+            if let Err(e) = state.personas.delete(&ms.id).await {
+                tracing::warn!("meta:persona sync delete failed: {e}");
+            } else {
+                crate::search_indexer::deindex(&state, "persona", ms.id.as_str()).await;
+            }
+        }
+        Ok(None) => {}
+        Err(e) => tracing::warn!("meta:persona sync delete lookup failed: {e}"),
+    }
 }
 
 fn parse_scope(s: &str) -> Result<MetaSpecScope, ApiError> {
@@ -8551,6 +8764,13 @@ pub async fn create_meta_spec_registry(
 ) -> Result<(StatusCode, Json<MetaSpec>), ApiError> {
     let kind = parse_kind(&req.kind)?;
     let scope = parse_scope(&req.scope)?;
+    reject_persona_fields_on_other_kinds(
+        &kind,
+        &req.model,
+        &req.temperature,
+        &req.max_tokens,
+        &req.budget,
+    )?;
     // Scope containment: `scope_id` is caller-supplied, so it is validated
     // against the caller's tenant, never trusted.
     require_registry_scope(&state, &auth, &scope, &req.scope_id).await?;
@@ -8585,6 +8805,10 @@ pub async fn create_meta_spec_registry(
         created_by: auth.agent_id.as_str().to_string(),
         created_at: now,
         updated_at: now,
+        model: req.model,
+        temperature: req.temperature,
+        max_tokens: req.max_tokens,
+        budget: req.budget,
     };
 
     state
@@ -8593,6 +8817,10 @@ pub async fn create_meta_spec_registry(
         .await
         .map_err(ApiError::Internal)?;
     record_meta_spec_publish(&state, &auth, &ms).await?;
+    // meta:persona entries materialize their Persona read model so
+    // spawn-time resolution/binding keeps working against registry-backed
+    // persona data (the /api/v1/personas routes are removed).
+    sync_persona_from_meta_spec(&state, &ms).await;
     Ok((StatusCode::CREATED, Json(ms)))
 }
 
@@ -8747,6 +8975,31 @@ pub async fn update_meta_spec_registry(
         }
         ms.approval_status = status;
     }
+    // Persona operational fields (agent-runtime.md amendments row): the
+    // registry meta:persona kind carries them so they remain editable
+    // after the /api/v1/personas routes are removed. `Some` sets the
+    // value; absent leaves it unchanged (the update semantics of the
+    // retired PUT /api/v1/personas/:id). Only valid on persona-kind
+    // entries — dead data on other kinds is rejected, not stored.
+    reject_persona_fields_on_other_kinds(
+        &ms.kind,
+        &req.model,
+        &req.temperature,
+        &req.max_tokens,
+        &req.budget,
+    )?;
+    if let Some(model) = req.model {
+        ms.model = Some(model);
+    }
+    if let Some(temperature) = req.temperature {
+        ms.temperature = Some(temperature);
+    }
+    if let Some(max_tokens) = req.max_tokens {
+        ms.max_tokens = Some(max_tokens);
+    }
+    if let Some(budget) = req.budget {
+        ms.budget = Some(budget);
+    }
 
     ms.updated_at = now;
 
@@ -8756,6 +9009,10 @@ pub async fn update_meta_spec_registry(
         .await
         .map_err(ApiError::Internal)?;
     record_meta_spec_publish(&state, &auth, &ms).await?;
+    // meta:persona edits propagate to the Persona read model so
+    // spawn-time resolution/binding keeps working against registry-backed
+    // persona data (the /api/v1/personas routes are removed).
+    sync_persona_from_meta_spec(&state, &ms).await;
 
     // §11 MetaSpecChanged: meta-spec content updated in the registry.
     if req.prompt.is_some() {
@@ -9069,8 +9326,11 @@ pub async fn delete_meta_spec_registry(
         .get_by_id(&rid)
         .await
         .map_err(ApiError::Internal)?;
-    match ms {
-        Some(ms) => authorize_meta_spec_delete(&state, &auth, &ms).await?,
+    let ms = match ms {
+        Some(ms) => {
+            authorize_meta_spec_delete(&state, &auth, &ms).await?;
+            ms
+        }
         None => {
             if !auth.roles.contains(&gyre_domain::UserRole::Admin) {
                 crate::rbac::record_rbac_denied(
@@ -9084,7 +9344,7 @@ pub async fn delete_meta_spec_registry(
             }
             return Err(ApiError::NotFound(format!("meta-spec '{id}' not found")));
         }
-    }
+    };
     let has_bindings = state
         .meta_spec_bindings
         .has_bindings_for(&rid)
@@ -9100,6 +9360,10 @@ pub async fn delete_meta_spec_registry(
         .delete(&rid)
         .await
         .map_err(ApiError::Internal)?;
+    // A deleted meta:persona entry takes its materialized Persona entity
+    // with it (adopted rows — different id — keep their last synced
+    // content; see delete_persona_synced_from_meta_spec).
+    delete_persona_synced_from_meta_spec(&state, &ms).await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -10744,6 +11008,10 @@ mod registry_tests {
                 created_by: "system".to_string(),
                 created_at: 1000,
                 updated_at: 1000,
+                model: None,
+                temperature: None,
+                max_tokens: None,
+                budget: None,
             }
         };
         state
@@ -11006,6 +11274,10 @@ mod registry_tests {
             created_by: "system".to_string(),
             created_at: 1000,
             updated_at: 1000,
+            model: None,
+            temperature: None,
+            max_tokens: None,
+            budget: None,
         };
         state.meta_specs.create(&ms).await.unwrap();
         state
@@ -11128,6 +11400,10 @@ mod registry_tests {
             created_by: "system".to_string(),
             created_at: 1000,
             updated_at: 1000,
+            model: None,
+            temperature: None,
+            max_tokens: None,
+            budget: None,
         };
         state.meta_specs.create(&ms).await.unwrap();
 

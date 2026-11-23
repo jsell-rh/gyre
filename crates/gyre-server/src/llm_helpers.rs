@@ -438,6 +438,10 @@ mod tests {
                 created_by: "admin".to_string(),
                 created_at: 1,
                 updated_at: 1,
+                model: None,
+                temperature: None,
+                max_tokens: None,
+                budget: None,
             }
         };
 

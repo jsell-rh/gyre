@@ -2205,6 +2205,10 @@ mod tests {
             created_by: "admin".to_string(),
             created_at: now(),
             updated_at: now(),
+            model: None,
+            temperature: None,
+            max_tokens: None,
+            budget: None,
         };
         state.meta_specs.create(&ms).await.unwrap();
         ms
@@ -2240,6 +2244,10 @@ mod tests {
             created_by: created_by.to_string(),
             created_at: now(),
             updated_at: now(),
+            model: None,
+            temperature: None,
+            max_tokens: None,
+            budget: None,
         };
         state.meta_specs.create(&ms).await.unwrap();
         ms
@@ -4569,6 +4577,10 @@ mod tests {
             created_by: "admin".to_string(),
             created_at: now(),
             updated_at: now(),
+            model: None,
+            temperature: None,
+            max_tokens: None,
+            budget: None,
         };
         state.meta_specs.create(&ms).await.unwrap();
 

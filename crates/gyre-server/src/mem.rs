@@ -7465,6 +7465,10 @@ mod meta_spec_binding_contract_tests {
             created_by: "system".to_string(),
             created_at: 1000,
             updated_at: 1000,
+            model: None,
+            temperature: None,
+            max_tokens: None,
+            budget: None,
         }
     }
 

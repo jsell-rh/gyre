@@ -52,7 +52,7 @@ Every access decision considers four categories of attributes:
 
 | Attribute | Example |
 |---|---|
-| `action` | `read`, `write`, `delete`, `approve`, `spawn`, `push`, `merge`, `escalate`, `generate` |
+| `action` | `read`, `write`, `delete`, `approve`, `spawn`, `push`, `merge`, `escalate`, `generate`, `archive` (repo archive/unarchive endpoints — agent-runtime.md amendments row) |
 
 **Environment attributes (context):**
 

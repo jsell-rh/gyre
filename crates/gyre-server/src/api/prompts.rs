@@ -177,7 +177,7 @@ Tool catalog with usage patterns (`tools/list` is the authoritative list with sc
 - `gyre_search` — search code and specs within your scope.
 - `gyre_record_activity` — record what you did; feeds the activity feed and analytics.
 - `gyre_analytics_query` / `gyre_analytics_decide` — query usage events; ask for a data-driven decision.
-- `gyre_spawn_worker` / `gyre_spawn_repo_orchestrator` / `gyre_list_repo_orchestrators` — orchestrator only: spawn scoped workers and repo orchestrators.
+- `gyre_spawn_repo_orchestrator` / `gyre_list_repo_orchestrators` — orchestrator only: spawn and list scoped repo orchestrators. Workers are never spawned by orchestrators: the mechanical scheduler spawns an agent for each new implementation task (agent-runtime.md §1 Phase 3).
 - `gyre_create_task` / `gyre_decompose_spec` / `gyre_cross_repo_task` — orchestrator only: create tasks, decompose specs, request cross-repo work.
 - Resources: `spec://<path>` serves spec content; the `system://` prompts serve your persona, this protocol, your context, and your constraints.
 
@@ -344,7 +344,7 @@ pub(crate) async fn trust_level_section(state: &AppState, workspace_id: &Id) -> 
 /// Containment (repo invariant): the loaded task must live inside the
 /// caller's scope — workspace mismatch always denies, and a repo mismatch
 /// denies when both the task and the caller carry a repo — mirroring
-/// `handle_spawn_worker`'s PERMISSION_DENIED check in mcp.rs. Without it,
+/// the spawn surface's PERMISSION_DENIED containment in mcp.rs. Without it,
 /// an explicit `task_id` argument would disclose any task's title,
 /// description, and acceptance criteria across workspace/tenant boundaries.
 pub async fn context_prompt_for_caller(

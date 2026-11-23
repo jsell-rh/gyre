@@ -357,11 +357,14 @@ pub async fn update_repo(
 ///
 /// By-effect task-scope surface (identity-security.md §Task-Scoped JWT
 /// Claims): archiving cancels every active task in the repo and revokes its
-/// agents' Task-scoped secrets. The route sits in the ABAC exemption file
-/// (no middleware policy runs), so the per-handler check is the only
-/// authorization: the caller must be contained in the repo's tenant, and a
-/// task-bound agent principal is denied outright — no task claim can cover
-/// a repo-wide destructive action.
+/// agents' Task-scoped secrets. The route is evaluated by the ABAC
+/// middleware (resolver mapping with the `archive` action —
+/// agent-runtime.md amendments row), so a Deny policy with action
+/// `archive` on the repo resource blocks the call before the handler. The
+/// per-handler checks below remain as defense-in-depth: the caller must
+/// be contained in the repo's tenant, and a task-bound agent principal is
+/// denied outright — no task claim can cover a repo-wide destructive
+/// action.
 pub async fn archive_repo(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,

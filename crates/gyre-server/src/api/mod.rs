@@ -36,7 +36,6 @@ pub mod meta_specs;
 pub mod mr_timeline;
 pub mod network;
 pub mod orchestrator;
-pub mod personas;
 pub mod policies;
 pub mod prompts;
 pub mod provenance;
@@ -1006,22 +1005,12 @@ pub fn api_router() -> Router<Arc<AppState>> {
             get(meta_specs::get_spec_meta_spec_bindings)
                 .put(meta_specs::put_spec_meta_spec_bindings),
         )
-        // Personas (M22.1, VISION-3)
-        .route(
-            "/api/v1/personas",
-            post(personas::create_persona).get(personas::list_personas),
-        )
-        .route("/api/v1/personas/resolve", get(personas::resolve_persona))
-        .route(
-            "/api/v1/personas/:id",
-            get(personas::get_persona)
-                .put(personas::update_persona)
-                .delete(personas::delete_persona),
-        )
-        .route(
-            "/api/v1/personas/:id/approve",
-            post(personas::approve_persona),
-        )
+        // Personas (M22.1, VISION-3): the /api/v1/personas routes are
+        // REMOVED (agent-runtime.md amendments row) — replaced entirely by
+        // /api/v1/meta-specs?kind=meta:persona. The registry's meta:persona
+        // kind carries the Persona operational fields and syncs the
+        // Persona read model spawn-time resolution consumes
+        // (api/meta_specs.rs sync_persona_from_meta_spec).
         // ABAC policy engine (M22.6)
         .route(
             "/api/v1/policies",

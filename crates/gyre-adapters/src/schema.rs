@@ -1084,6 +1084,10 @@ diesel::table! {
         created_by -> Text,
         created_at -> BigInt,
         updated_at -> BigInt,
+        model -> Nullable<Text>,
+        temperature -> Nullable<Double>,
+        max_tokens -> Nullable<Integer>,
+        budget -> Nullable<Text>,
     }
 }
 

@@ -2824,6 +2824,10 @@ pub async fn seed_builtin_meta_specs(state: &Arc<AppState>) {
             created_by: "system".to_string(),
             created_at: now,
             updated_at: now,
+            model: None,
+            temperature: None,
+            max_tokens: None,
+            budget: None,
         };
         if let Err(e) = state.meta_specs.create(&ms).await {
             tracing::warn!("failed to seed meta-spec '{}': {e}", name);

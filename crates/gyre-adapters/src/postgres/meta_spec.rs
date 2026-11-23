@@ -39,6 +39,10 @@ struct MetaSpecRow {
     created_by: String,
     created_at: i64,
     updated_at: i64,
+    model: Option<String>,
+    temperature: Option<f64>,
+    max_tokens: Option<i32>,
+    budget: Option<String>,
 }
 
 impl MetaSpecRow {
@@ -63,6 +67,15 @@ impl MetaSpecRow {
             created_by: self.created_by,
             created_at: self.created_at as u64,
             updated_at: self.updated_at as u64,
+            model: self.model,
+            temperature: self.temperature,
+            max_tokens: self.max_tokens.map(|t| t as u32),
+            budget: self
+                .budget
+                .as_deref()
+                .map(serde_json::from_str)
+                .transpose()
+                .context("deserialize meta_spec budget JSON")?,
         })
     }
 }
@@ -86,6 +99,10 @@ struct InsertMetaSpecRow<'a> {
     created_by: &'a str,
     created_at: i64,
     updated_at: i64,
+    model: Option<String>,
+    temperature: Option<f64>,
+    max_tokens: Option<i32>,
+    budget: Option<String>,
 }
 
 #[derive(Queryable, Selectable, Clone)]
@@ -188,6 +205,15 @@ impl MetaSpecRepository for PgStorage {
         let created_by = meta_spec.created_by.clone();
         let created_at = meta_spec.created_at as i64;
         let updated_at = meta_spec.updated_at as i64;
+        let model = meta_spec.model.clone();
+        let temperature = meta_spec.temperature;
+        let max_tokens = meta_spec.max_tokens.map(|t| t as i32);
+        let budget = meta_spec
+            .budget
+            .as_ref()
+            .map(|b| serde_json::to_string(b))
+            .transpose()
+            .context("serialize meta_spec budget JSON")?;
         tokio::task::spawn_blocking(move || -> Result<()> {
             let mut conn = pool.get().context("get db connection")?;
             let row = InsertMetaSpecRow {
@@ -207,6 +233,10 @@ impl MetaSpecRepository for PgStorage {
                 created_by: &created_by,
                 created_at,
                 updated_at,
+                model,
+                temperature,
+                max_tokens,
+                budget,
             };
             diesel::insert_into(meta_specs::table)
                 .values(&row)
@@ -277,6 +307,15 @@ impl MetaSpecRepository for PgStorage {
         let approved_at = meta_spec.approved_at.map(|t| t as i64);
         let approved_content_hash = meta_spec.approved_content_hash.clone();
         let updated_at = meta_spec.updated_at as i64;
+        let model = meta_spec.model.clone();
+        let temperature = meta_spec.temperature;
+        let max_tokens = meta_spec.max_tokens.map(|t| t as i32);
+        let budget = meta_spec
+            .budget
+            .as_ref()
+            .map(|b| serde_json::to_string(b))
+            .transpose()
+            .context("serialize meta_spec budget JSON")?;
         tokio::task::spawn_blocking(move || -> Result<()> {
             let mut conn = pool.get().context("get db connection")?;
             let now = now_secs();
@@ -325,6 +364,10 @@ impl MetaSpecRepository for PgStorage {
                     meta_specs::approved_at.eq(&approved_at),
                     meta_specs::approved_content_hash.eq(&approved_content_hash),
                     meta_specs::updated_at.eq(updated_at),
+                    meta_specs::model.eq(&model),
+                    meta_specs::temperature.eq(temperature),
+                    meta_specs::max_tokens.eq(max_tokens),
+                    meta_specs::budget.eq(&budget),
                 ))
                 .execute(&mut *conn)
                 .context("update meta_spec")?;
