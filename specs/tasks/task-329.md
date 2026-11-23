@@ -2,8 +2,8 @@
 title: "§9 MetaSpecPolicy in full: warn_on_drift/block_on_drift/drift_tolerance with per-meta-spec version-count reasoning, real server-side policy storage, and version-named drift warnings"
 spec_ref: "Spec gap spec-556a0b49e9f2803bf0e2ff3d / merge-gate-drift-policy / b288723d2f73"
 depends_on: [task-302]
-progress: ready-for-review
-commits: ["1d00568be42553a4f25433fb0e40f175d0b81dd6", "532681145499d676af92b79f405dec8c678591d8"]
+progress: not-started
+commits: []
 ---
 
 ## Required behavior
@@ -57,76 +57,3 @@ Canonical spec: `specs/system/meta-spec-reconciliation.md`. Source: `50575cf65e6
     ]
   }
 ]
-
-## Shipped
-
-The §9 merge-gate drift policy is the full specced `MetaSpecPolicy`, enforced
-on the task-302 versioned basis (per-meta-spec `meta_specs_used` versions).
-
-### Behavior
-
-- **Policy shape + storage** (`crates/gyre-server/src/merge_policy.rs`):
-  `MetaSpecPolicy {warn_on_drift: bool = true, block_on_drift: bool = false,
-  drift_tolerance: u32 = 1}` persisted per workspace through the port-backed
-  KV store (namespace `workspace_merge_policies`). Legacy documents holding
-  `require_current_meta_spec_set: true` map on read to `block_on_drift: true`
-  + `drift_tolerance: 0` — existing strict workspaces keep block-on-any-drift
-  behavior; new writes store the full shape only. `parse_drift_tolerance`
-  validates the JSON number as a `u32` (negative/fractional/out-of-range are
-  400-grade input errors, not serde 422s).
-- **Version-count reasoning + naming** (`reconciliation.rs`):
-  `mr_meta_spec_drift` now produces per-meta-spec `MetaSpecDriftTransition`s —
-  `versions_behind = current_version − recorded_version` — and the warning /
-  block reason name the transition: `[WARN] meta-spec-drift: persona
-  backend-developer v3 -> v4. Reconciliation may be needed.` Recorded usage
-  that cannot prove currency (no entry for a required spec, or a claimed
-  current version whose content hash disagrees) is `recorded_version: None` —
-  unverifiable, never fail-open: it exceeds any tolerance under
-  `block_on_drift`.
-- **Enforcement** (`merge_processor.rs`, `selection_meta_spec_drift_hold`):
-  under `block_on_drift`, the MR blocks only when some meta-spec is MORE than
-  `drift_tolerance` versions behind (or unverifiable); the entry requeues
-  starve-free with the drift reason naming the transitions and the tolerance.
-  Within tolerance → warn and proceed. `warn_on_drift: false` (non-strict)
-  suppresses the `[WARN]` gate result; in strict mode the warning is always
-  recorded alongside the block ("Always on in strict mode").
-- **Surfaces** (`api/workspaces.rs`, `api/merge_deps.rs`): `UpdateWorkspaceRequest`
-  gains `meta_spec_policy` (Admin-gated like the merge-policy endpoint;
-  tolerance validated ≥ 0 → 400 on invalid), persisted via the merge-policy
-  store and returned by GET workspace / list — the WorkspaceSettings form's
-  payload round-trips for real (no silent serde drop). The merge-policy
-  endpoint exposes the full shape plus the legacy `require_current_meta_spec_set`
-  view; the legacy PUT flag maps to tolerance-0 blocking. The queue-graph
-  drift warning now carries `transitions` (version-named labels).
-- **UI**: no web changes needed — `WorkspaceSettings.svelte` already sends
-  and reads the exact snake_case shape the server now persists and returns.
-
-### Test evidence
-
-Type-checked clean with `cargo check -p gyre-server --lib --tests` (exit 0;
-lib + all test code, after web build). Server test binaries exceed this
-sandbox's build budget (dep tree is check-only here; cgroup 6 GiB), so the
-following are recorded for the independent verifier (full list + commands in
-`/tmp/stage/review-evidence/task-329-probes.md`):
-
-- AC1 (round-trip + 400): `workspace_meta_spec_policy_roundtrip_via_update_workspace`,
-  `merge_policy_full_shape_and_tolerance_validation` (api/workspaces.rs).
-- AC2 (tolerance semantics): `meta_spec_drift_tolerance_one_warns_within_and_blocks_beyond`
-  — registry at v4: a v3-recorded MR merges with `[WARN] … v3 -> v4`, a
-  v2-recorded MR is blocked and requeued with the drift reason
-  (merge_processor.rs).
-- AC3 (legacy compat + default): `legacy_strict_flag_maps_to_block_with_tolerance_zero`,
-  `missing_policy_defaults_to_warn_only` (merge_policy.rs);
-  `meta_spec_drift_hard_blocks_under_strict_workspace_policy` (tolerance-0
-  block), `meta_spec_drift_records_warn_gate_result_and_merge_proceeds`
-  (default warn-and-merge).
-- AC4 (warn toggle): `warn_on_drift_false_suppresses_warning_except_in_strict_mode`
-  (merge_processor.rs).
-- Decision-logic units: `drift_check_two_versions_behind_exceeds_tolerance_one`,
-  `drift_check_unverifiable_recorded_version_never_fails_open`,
-  `drift_check_older_recorded_version_reports_drift`, format round-trip
-  (reconciliation.rs); policy storage/validation suite (merge_policy.rs).
-
-Coverage row 13 (§9 Merge Gate Behavior) in
-`specs/coverage/system/meta-spec-reconciliation.md` updated with the new
-source evidence and test names.
